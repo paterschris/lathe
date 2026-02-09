@@ -20,7 +20,7 @@ use settings::Settings;
 use theme::{ActiveTheme, ThemeSettings};
 use ui::{ListItem, ListItemSpacing, prelude::*};
 use util::ResultExt;
-use workspace::{DismissDecision, ModalView};
+use workspace::{DismissDecision, ModalView, Workspace};
 
 pub fn init(cx: &mut App) {
     cx.observe_new(OutlineView::register).detach();
@@ -41,16 +41,15 @@ pub fn toggle(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let outline = editor
-        .read(cx)
-        .buffer()
-        .read(cx)
-        .snapshot(cx)
-        .outline(Some(cx.theme().syntax()));
-
-    let workspace = editor.read(cx).workspace();
-
-    if let Some((workspace, outline)) = workspace.zip(outline) {
+    if let Some((workspace, outline)) = Workspace::for_window(window, cx).and_then(|workspace| {
+        editor
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .snapshot(cx)
+            .outline(Some(cx.theme().syntax()))
+            .map(|outline| (workspace, outline))
+    }) {
         workspace.update(cx, |workspace, cx| {
             workspace.toggle_modal(window, cx, |window, cx| {
                 OutlineView::new(outline, editor, window, cx)
@@ -397,7 +396,7 @@ mod tests {
     use project::{FakeFs, Project};
     use serde_json::json;
     use util::{path, rel_path::rel_path};
-    use workspace::{AppState, Workspace};
+    use workspace::{AppState, MultiWorkspace, Workspace};
 
     #[gpui::test]
     async fn test_outline_view_row_highlights(cx: &mut TestAppContext) {
@@ -425,7 +424,9 @@ mod tests {
         });
 
         let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+
+        let workspace = cx.read(|cx| workspace.read(cx).workspace().clone());
         let worktree_id = workspace.update(cx, |workspace, cx| {
             workspace.project().update(cx, |project, cx| {
                 project.worktrees(cx).next().unwrap().read(cx).id()
