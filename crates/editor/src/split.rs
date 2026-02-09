@@ -16,7 +16,7 @@ use multi_buffer::{
 use project::Project;
 use rope::Point;
 use settings::DiffViewStyle;
-use text::{BufferId, OffsetRangeExt as _, Patch, ToPoint as _};
+use text::{Bias, BufferId, OffsetRangeExt as _, Patch, ToPoint as _};
 use ui::{
     App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, Render,
     Styled as _, Window, div,
@@ -33,8 +33,7 @@ use workspace::{
 };
 
 use crate::{
-    Autoscroll, DisplayMap, Editor, EditorEvent, RenderDiffHunkControlsFn, ToggleCodeActions,
-    ToggleSoftWrap,
+    Autoscroll, DisplayMap, Editor, EditorEvent, RenderDiffHunkControlsFn, ToggleSoftWrap,
     actions::{DisableBreakpoint, EditLogBreakpoint, EnableBreakpoint, ToggleBreakpoint},
     display_map::Companion,
 };
@@ -325,25 +324,7 @@ impl FeatureFlag for SplitDiffFeatureFlag {
 
 #[derive(Clone, Copy, PartialEq, Eq, Action, Default)]
 #[action(namespace = editor)]
-pub struct SplitDiff;
-
-#[derive(Clone, Copy, PartialEq, Eq, Action, Default)]
-#[action(namespace = editor)]
-struct UnsplitDiff;
-
-#[derive(Clone, Copy, PartialEq, Eq, Action, Default)]
-#[action(namespace = editor)]
-pub struct ToggleSplitDiff;
-
-#[derive(Clone, Copy, PartialEq, Eq, Action, Default)]
-#[action(namespace = editor)]
-struct JumpToCorrespondingRow;
-
-/// When locked cursors mode is enabled, cursor movements in one editor will
-/// update the cursor position in the other editor to the corresponding row.
-#[derive(Clone, Copy, PartialEq, Eq, Action, Default)]
-#[action(namespace = editor)]
-pub struct ToggleLockedCursors;
+pub struct ToggleDiffView;
 
 pub struct SplittableEditor {
     rhs_multibuffer: Entity<MultiBuffer>,
@@ -351,7 +332,6 @@ pub struct SplittableEditor {
     lhs: Option<LhsEditor>,
     workspace: WeakEntity<Workspace>,
     split_state: Entity<SplitEditorState>,
-    locked_cursors: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -451,7 +431,7 @@ impl SplittableEditor {
                     .ok();
                 if style == DiffViewStyle::SideBySide {
                     this.update(cx, |this, cx| {
-                        this.split(&Default::default(), window, cx);
+                        this.split(window, cx);
                     })
                     .ok();
                 }
@@ -464,12 +444,11 @@ impl SplittableEditor {
             lhs: None,
             workspace: workspace.downgrade(),
             split_state,
-            locked_cursors: false,
             _subscriptions: subscriptions,
         }
     }
 
-    pub fn split(&mut self, _: &SplitDiff, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !cx.has_flag::<SplitDiffFeatureFlag>() {
             return;
         }
@@ -670,9 +649,7 @@ impl SplittableEditor {
                     let this = this.clone();
                     window.defer(cx, move |window, cx| {
                         this.update(cx, |this, cx| {
-                            if this.locked_cursors {
-                                this.sync_cursor_to_other_side(true, cursor_position, window, cx);
-                            }
+                            this.sync_cursor_to_other_side(true, cursor_position, window, cx);
                         })
                         .ok();
                     })
@@ -686,9 +663,7 @@ impl SplittableEditor {
                     let this = this.clone();
                     window.defer(cx, move |window, cx| {
                         this.update(cx, |this, cx| {
-                            if this.locked_cursors {
-                                this.sync_cursor_to_other_side(false, cursor_position, window, cx);
-                            }
+                            this.sync_cursor_to_other_side(false, cursor_position, window, cx);
                         })
                         .ok();
                     })
@@ -748,20 +723,6 @@ impl SplittableEditor {
         }
     }
 
-    fn toggle_locked_cursors(
-        &mut self,
-        _: &ToggleLockedCursors,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.locked_cursors = !self.locked_cursors;
-        cx.notify();
-    }
-
-    pub fn locked_cursors(&self) -> bool {
-        self.locked_cursors
-    }
-
     fn sync_cursor_to_other_side(
         &mut self,
         from_rhs: bool,
@@ -773,62 +734,35 @@ impl SplittableEditor {
             return;
         };
 
-        let target_editor = if from_rhs {
-            &lhs.editor
+        let (source_editor, target_editor) = if from_rhs {
+            (&self.rhs_editor, &lhs.editor)
         } else {
-            &self.rhs_editor
+            (&lhs.editor, &self.rhs_editor)
         };
 
-        let (source_multibuffer, target_multibuffer) = if from_rhs {
-            (&self.rhs_multibuffer, &lhs.multibuffer)
-        } else {
-            (&lhs.multibuffer, &self.rhs_multibuffer)
-        };
+        let source_snapshot = source_editor.update(cx, |editor, cx| editor.snapshot(window, cx));
+        let target_snapshot = target_editor.update(cx, |editor, cx| editor.snapshot(window, cx));
 
-        let source_snapshot = source_multibuffer.read(cx).snapshot(cx);
-        let target_snapshot = target_multibuffer.read(cx).snapshot(cx);
-
-        let target_range = target_editor.update(cx, |target_editor, cx| {
-            target_editor.display_map.update(cx, |display_map, cx| {
-                let display_map_id = cx.entity_id();
-                display_map.companion().unwrap().update(cx, |companion, _| {
-                    companion.convert_point_from_companion(
-                        display_map_id,
-                        &target_snapshot,
-                        &source_snapshot,
-                        source_point,
-                    )
-                })
-            })
-        });
+        let display_point = source_snapshot
+            .display_snapshot
+            .point_to_display_point(source_point, Bias::Right);
+        let display_point = target_snapshot.clip_point(display_point, Bias::Right);
+        let target_point = target_snapshot.display_point_to_point(display_point, Bias::Right);
 
         target_editor.update(cx, |editor, cx| {
             editor.set_suppress_selection_callback(true);
             editor.change_selections(crate::SelectionEffects::no_scroll(), window, cx, |s| {
-                s.select_ranges([target_range]);
+                s.select_ranges([target_point..target_point]);
             });
             editor.set_suppress_selection_callback(false);
         });
     }
 
-    fn toggle_split(&mut self, _: &ToggleSplitDiff, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_split(&mut self, _: &ToggleDiffView, window: &mut Window, cx: &mut Context<Self>) {
         if self.lhs.is_some() {
-            self.unsplit(&UnsplitDiff, window, cx);
+            self.unsplit(window, cx);
         } else {
-            self.split(&SplitDiff, window, cx);
-        }
-    }
-
-    fn intercept_toggle_code_actions(
-        &mut self,
-        _: &ToggleCodeActions,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.lhs.is_some() {
-            cx.stop_propagation();
-        } else {
-            cx.propagate();
+            self.split(window, cx);
         }
     }
 
@@ -949,7 +883,7 @@ impl SplittableEditor {
         }
     }
 
-    fn unsplit(&mut self, _: &UnsplitDiff, _: &mut Window, cx: &mut Context<Self>) {
+    fn unsplit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let Some(lhs) = self.lhs.take() else {
             return;
         };
@@ -1836,13 +1770,9 @@ impl Render for SplittableEditor {
         };
         div()
             .id("splittable-editor")
-            .on_action(cx.listener(Self::split))
-            .on_action(cx.listener(Self::unsplit))
             .on_action(cx.listener(Self::toggle_split))
             .on_action(cx.listener(Self::activate_pane_left))
             .on_action(cx.listener(Self::activate_pane_right))
-            .on_action(cx.listener(Self::toggle_locked_cursors))
-            .on_action(cx.listener(Self::intercept_toggle_code_actions))
             .on_action(cx.listener(Self::intercept_toggle_breakpoint))
             .on_action(cx.listener(Self::intercept_enable_breakpoint))
             .on_action(cx.listener(Self::intercept_disable_breakpoint))
@@ -2016,7 +1946,6 @@ mod tests {
 
     use crate::SplittableEditor;
     use crate::display_map::{BlockPlacement, BlockProperties, BlockStyle};
-    use crate::split::{SplitDiff, UnsplitDiff};
     use crate::test::{editor_content_with_blocks_and_width, set_block_content_for_tests};
 
     async fn init_test(
@@ -4392,13 +4321,13 @@ mod tests {
         );
 
         editor.update_in(cx, |splittable_editor, window, cx| {
-            splittable_editor.unsplit(&UnsplitDiff, window, cx);
+            splittable_editor.unsplit(window, cx);
         });
 
         cx.run_until_parked();
 
         editor.update_in(cx, |splittable_editor, window, cx| {
-            splittable_editor.split(&SplitDiff, window, cx);
+            splittable_editor.split(window, cx);
         });
 
         cx.run_until_parked();
@@ -4480,7 +4409,7 @@ mod tests {
         cx.run_until_parked();
 
         editor.update_in(cx, |splittable_editor, window, cx| {
-            splittable_editor.unsplit(&UnsplitDiff, window, cx);
+            splittable_editor.unsplit(window, cx);
         });
 
         cx.run_until_parked();
@@ -4542,7 +4471,7 @@ mod tests {
         );
 
         editor.update_in(cx, |splittable_editor, window, cx| {
-            splittable_editor.split(&SplitDiff, window, cx);
+            splittable_editor.split(window, cx);
         });
 
         cx.run_until_parked();
@@ -4625,13 +4554,13 @@ mod tests {
         );
 
         editor.update_in(cx, |splittable_editor, window, cx| {
-            splittable_editor.unsplit(&UnsplitDiff, window, cx);
+            splittable_editor.unsplit(window, cx);
         });
 
         cx.run_until_parked();
 
         editor.update_in(cx, |splittable_editor, window, cx| {
-            splittable_editor.split(&SplitDiff, window, cx);
+            splittable_editor.split(window, cx);
         });
 
         cx.run_until_parked();
@@ -4844,7 +4773,7 @@ mod tests {
         );
 
         editor.update_in(cx, |editor, window, cx| {
-            editor.split(&Default::default(), window, cx);
+            editor.split(window, cx);
         });
 
         cx.run_until_parked();
