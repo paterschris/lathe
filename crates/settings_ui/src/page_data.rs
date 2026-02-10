@@ -6870,31 +6870,9 @@ fn ai_page() -> SettingsPage {
         ]
     }
 
-    fn agent_configuration_section() -> [SettingsPageItem; 13] {
+    fn agent_configuration_section() -> [SettingsPageItem; 12] {
         [
             SettingsPageItem::SectionHeader("Agent Configuration"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Always Allow Tool Actions",
-                description: "When enabled, the agent can run potentially destructive actions without asking for your confirmation. This setting has no effect on external agents.",
-                field: Box::new(SettingField {
-                    json_path: Some("agent.always_allow_tool_actions"),
-                    pick: |settings_content| {
-                        settings_content
-                            .agent
-                            .as_ref()?
-                            .always_allow_tool_actions
-                            .as_ref()
-                    },
-                    write: |settings_content, value| {
-                        settings_content
-                            .agent
-                            .get_or_insert_default()
-                            .always_allow_tool_actions = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
             SettingsPageItem::SubPageLink(SubPageLink {
                 title: "Tool Permissions".into(),
                 r#type: Default::default(),
