@@ -110,3 +110,6 @@
   (command (_) @constant)
   (#match? @constant "^-")
 )
+
+(case_item value: (_) @string.regex)
+(special_variable_name) @variable.special
