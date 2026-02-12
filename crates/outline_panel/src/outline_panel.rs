@@ -8062,7 +8062,7 @@ outline: struct Foo  <==== selected
                 ),
                 indoc!(
                     "
-outline: Foo  <==== selected
+outline: struct Foo  <==== selected
   outline: bar
   outline: lsp_only_field"
                 ),
