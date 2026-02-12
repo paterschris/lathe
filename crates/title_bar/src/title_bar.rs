@@ -1,7 +1,6 @@
 mod application_menu;
 pub mod collab;
 mod onboarding_banner;
-mod project_dropdown;
 mod title_bar_settings;
 mod update_version;
 
@@ -25,13 +24,12 @@ use client::{Client, UserStore, zed_urls};
 use cloud_api_types::Plan;
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagAppExt};
 use gpui::{
-    Action, AnyElement, App, Context, Corner, Element, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, actions, div,
+    Action, AnyElement, App, Context, Corner, Element, Entity, Focusable, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Render, StatefulInteractiveElement, Styled,
+    Subscription, WeakEntity, Window, actions, div,
 };
 use onboarding_banner::OnboardingBanner;
 use project::{Project, git_store::GitStoreEvent, trusted_worktrees::TrustedWorktrees};
-use project_dropdown::ProjectDropdown;
 use remote::RemoteConnectionOptions;
 use settings::Settings;
 use settings::WorktreeId;
@@ -45,7 +43,7 @@ use ui::{
 use update_version::UpdateVersion;
 use util::ResultExt;
 use workspace::{
-    MultiWorkspace, SwitchProject, ToggleWorkspaceSidebar, ToggleWorktreeSecurity, Workspace,
+    MultiWorkspace, ToggleWorkspaceSidebar, ToggleWorktreeSecurity, Workspace,
     notifications::NotifyResultExt,
 };
 use zed_actions::OpenRemote;
@@ -90,19 +88,6 @@ pub fn init(cx: &mut App) {
             {
                 titlebar.update(cx, |titlebar, cx| {
                     titlebar.toggle_update_simulation(cx);
-                });
-            }
-        });
-
-        workspace.register_action(|workspace, _: &SwitchProject, window, cx| {
-            if let Some(titlebar) = workspace
-                .titlebar_item()
-                .and_then(|item| item.downcast::<TitleBar>().ok())
-            {
-                window.defer(cx, move |window, cx| {
-                    titlebar.update(cx, |titlebar, cx| {
-                        titlebar.show_project_dropdown(window, cx);
-                    })
                 });
             }
         });
@@ -167,7 +152,6 @@ pub struct TitleBar {
     banner: Entity<OnboardingBanner>,
     update_version: Entity<UpdateVersion>,
     screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
-    project_dropdown_handle: PopoverMenuHandle<ProjectDropdown>,
 }
 
 impl Render for TitleBar {
@@ -418,7 +402,6 @@ impl TitleBar {
             banner,
             update_version,
             screen_share_popover_handle: PopoverMenuHandle::default(),
-            project_dropdown_handle: PopoverMenuHandle::default(),
         }
     }
 
@@ -430,12 +413,6 @@ impl TitleBar {
         self.update_version
             .update(cx, |banner, cx| banner.update_simulation(cx));
         cx.notify();
-    }
-
-    pub fn show_project_dropdown(&self, window: &mut Window, cx: &mut App) {
-        if self.worktree_count(cx) > 1 {
-            self.project_dropdown_handle.show(window, cx);
-        }
     }
 
     /// Returns the worktree to display in the title bar.
@@ -757,24 +734,6 @@ impl TitleBar {
             .map(|w| w.read(cx).focus_handle(cx))
             .unwrap_or_else(|| cx.focus_handle());
 
-        if self.worktree_count(cx) > 1 {
-            self.render_multi_project_menu(display_name, is_project_selected, cx)
-                .into_any_element()
-        } else {
-            self.render_single_project_menu(display_name, is_project_selected, focus_handle, cx)
-                .into_any_element()
-        }
-    }
-
-    fn render_single_project_menu(
-        &self,
-        name: String,
-        is_project_selected: bool,
-        focus_handle: FocusHandle,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let workspace = self.workspace.clone();
-
         PopoverMenu::new("recent-projects-menu")
             .menu(move |window, cx| {
                 Some(recent_projects::RecentProjects::popover(
@@ -786,8 +745,13 @@ impl TitleBar {
                 ))
             })
             .trigger_with_tooltip(
-                Button::new("project_name_trigger", name)
+                Button::new("project_name_trigger", display_name)
                     .label_size(LabelSize::Small)
+                    .when(self.worktree_count(cx) > 1, |this| {
+                        this.icon(IconName::ChevronDown)
+                            .icon_color(Color::Muted)
+                            .icon_size(IconSize::XSmall)
+                    })
                     .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                     .when(!is_project_selected, |s| s.color(Color::Muted)),
                 move |_window, cx| {
@@ -801,55 +765,7 @@ impl TitleBar {
                 },
             )
             .anchor(gpui::Corner::TopLeft)
-    }
-
-    fn render_multi_project_menu(
-        &self,
-        name: String,
-        is_project_selected: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let project = self.project.clone();
-        let workspace = self.workspace.clone();
-        let initial_active_worktree_id = self
-            .effective_active_worktree(cx)
-            .map(|wt| wt.read(cx).id());
-
-        let focus_handle = workspace
-            .upgrade()
-            .map(|w| w.read(cx).focus_handle(cx))
-            .unwrap_or_else(|| cx.focus_handle());
-
-        PopoverMenu::new("project-dropdown-menu")
-            .with_handle(self.project_dropdown_handle.clone())
-            .menu(move |window, cx| {
-                let project = project.clone();
-                let workspace = workspace.clone();
-
-                Some(cx.new(|cx| {
-                    ProjectDropdown::new(
-                        project.clone(),
-                        workspace.clone(),
-                        initial_active_worktree_id,
-                        window,
-                        cx,
-                    )
-                }))
-            })
-            .trigger_with_tooltip(
-                Button::new("project_name_trigger", name)
-                    .label_size(LabelSize::Small)
-                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                    .icon(IconName::ChevronDown)
-                    .icon_position(IconPosition::End)
-                    .icon_size(IconSize::XSmall)
-                    .icon_color(Color::Muted)
-                    .when(!is_project_selected, |s| s.color(Color::Muted)),
-                move |_, cx| {
-                    Tooltip::for_action_in("Switch Project", &SwitchProject, &focus_handle, cx)
-                },
-            )
-            .anchor(gpui::Corner::TopLeft)
+            .into_any_element()
     }
 
     pub fn render_project_branch(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
