@@ -7668,9 +7668,10 @@ impl LspStore {
                                         source_worktree_id,
                                         path,
                                         kind: symbol_kind,
-                                        name: symbol_name,
+                                        name: collapse_newlines(&symbol_name, "↵ "),
                                         range: range_from_lsp(symbol_location.range),
-                                        container_name,
+                                        container_name: container_name
+                                            .map(|c| collapse_newlines(&c, "↵ ")),
                                     })
                                 },
                             )
@@ -14273,6 +14274,13 @@ async fn populate_labels_for_symbols(
             });
         }
     }
+}
+
+pub(crate) fn collapse_newlines(text: &str, separator: &str) -> String {
+    text.lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .join(separator)
 }
 
 fn include_text(server: &lsp::LanguageServer) -> Option<bool> {
