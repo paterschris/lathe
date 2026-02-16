@@ -1,6 +1,6 @@
 use crate::{
     AppState, Error, Result,
-    db::{self, AccessTokenId, Database, UserId},
+    db::{AccessTokenId, Database, UserId},
     rpc::Principal,
 };
 use anyhow::Context as _;
@@ -108,38 +108,11 @@ pub async fn validate_header<B>(mut req: Request<B>, next: Next<B>) -> impl Into
     ))
 }
 
-pub const MAX_ACCESS_TOKENS_TO_STORE: usize = 8;
-
 #[derive(Serialize, Deserialize)]
 pub struct AccessTokenJson {
     pub version: usize,
     pub id: AccessTokenId,
     pub token: String,
-}
-
-/// Creates a new access token to identify the given user. before returning it, you should
-/// encrypt it with the user's public key.
-pub async fn create_access_token(
-    db: &db::Database,
-    user_id: UserId,
-    impersonated_user_id: Option<UserId>,
-) -> Result<String> {
-    const VERSION: usize = 1;
-    let access_token = rpc::auth::random_token();
-    let access_token_hash = hash_access_token(&access_token);
-    let id = db
-        .create_access_token(
-            user_id,
-            impersonated_user_id,
-            &access_token_hash,
-            MAX_ACCESS_TOKENS_TO_STORE,
-        )
-        .await?;
-    Ok(serde_json::to_string(&AccessTokenJson {
-        version: VERSION,
-        id,
-        token: access_token,
-    })?)
 }
 
 /// Hashing prevents anyone with access to the database being able to login.
@@ -148,22 +121,6 @@ pub async fn create_access_token(
 pub fn hash_access_token(token: &str) -> String {
     let digest = sha2::Sha256::digest(token);
     format!("$sha256${}", BASE64_URL_SAFE.encode(digest))
-}
-
-/// Encrypts the given access token with the given public key to avoid leaking it on the way
-/// to the client.
-pub fn encrypt_access_token(access_token: &str, public_key: String) -> Result<String> {
-    use rpc::auth::EncryptionFormat;
-
-    /// The encryption format to use for the access token.
-    const ENCRYPTION_FORMAT: EncryptionFormat = EncryptionFormat::V1;
-
-    let native_app_public_key =
-        rpc::auth::PublicKey::try_from(public_key).context("failed to parse app public key")?;
-    let encrypted_access_token = native_app_public_key
-        .encrypt_string(access_token, ENCRYPTION_FORMAT)
-        .context("failed to encrypt access token with public key")?;
-    Ok(encrypted_access_token)
 }
 
 pub struct VerifyAccessTokenResult {
