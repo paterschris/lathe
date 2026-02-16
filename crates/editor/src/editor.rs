@@ -217,7 +217,7 @@ use workspace::{
     TabBarSettings, Toast, ViewId, Workspace, WorkspaceId, WorkspaceSettings,
     item::{BreadcrumbText, ItemBufferKind, ItemHandle, PreviewTabsSettings, SaveOptions},
     notifications::{DetachAndPromptErr, NotificationId, NotifyTaskExt},
-    searchable::{CollapseDirection, SearchEvent},
+    searchable::SearchEvent,
 };
 use zed_actions::editor::{MoveDown, MoveUp};
 
@@ -20046,9 +20046,6 @@ impl Editor {
                     .ok();
             });
         }
-        cx.emit(SearchEvent::ResultsCollapsedChanged(
-            CollapseDirection::Collapsed,
-        ));
     }
 
     pub fn fold_function_bodies(
@@ -20237,9 +20234,6 @@ impl Editor {
                     .ok();
             });
         }
-        cx.emit(SearchEvent::ResultsCollapsedChanged(
-            CollapseDirection::Expanded,
-        ));
     }
 
     pub fn fold_selected_ranges(
@@ -20348,6 +20342,13 @@ impl Editor {
 
     pub fn is_buffer_folded(&self, buffer: BufferId, cx: &App) -> bool {
         self.display_map.read(cx).is_buffer_folded(buffer)
+    }
+
+    pub fn has_any_buffer_folded(&self, cx: &App) -> bool {
+        if self.buffer().read(cx).is_singleton() {
+            return false;
+        }
+        !self.folded_buffers(cx).is_empty()
     }
 
     pub fn folded_buffers<'a>(&self, cx: &'a App) -> &'a HashSet<BufferId> {
