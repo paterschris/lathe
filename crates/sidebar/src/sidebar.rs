@@ -1,5 +1,6 @@
 use acp_thread::ThreadStatus;
 use agent_ui::{AgentPanel, AgentPanelEvent};
+use chrono::{Datelike, Local, NaiveDate, TimeDelta};
 use db::kvp::KEY_VALUE_STORE;
 use fs::Fs;
 use fuzzy::StringMatchCandidate;
@@ -10,6 +11,7 @@ use gpui::{
 use picker::{Picker, PickerDelegate};
 use project::Event as ProjectEvent;
 use recent_projects::{RecentProjectEntry, get_recent_projects};
+use std::fmt::Display;
 
 use std::collections::{HashMap, HashSet};
 
@@ -294,30 +296,87 @@ impl WorkspacePickerDelegate {
             .collect();
 
         if !recent.is_empty() {
-            self.entries
-                .push(SidebarEntry::Separator("Recent Projects".into()));
+            let today = Local::now().naive_local().date();
+            let mut current_bucket: Option<TimeBucket> = None;
+
             for project in recent {
+                let entry_date = project.timestamp.with_timezone(&Local).naive_local().date();
+                let bucket = TimeBucket::from_dates(today, entry_date);
+
+                if current_bucket != Some(bucket) {
+                    current_bucket = Some(bucket);
+                    self.entries
+                        .push(SidebarEntry::Separator(bucket.to_string().into()));
+                }
+
                 self.entries.push(SidebarEntry::RecentProject(project));
             }
         }
     }
+}
 
-    fn open_recent_project(paths: Vec<PathBuf>, window: &mut Window, cx: &mut App) {
-        let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() else {
-            return;
-        };
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimeBucket {
+    Today,
+    Yesterday,
+    ThisWeek,
+    PastWeek,
+    All,
+}
 
-        cx.defer(move |cx| {
-            if let Some(task) = handle
-                .update(cx, |multi_workspace, window, cx| {
-                    multi_workspace.open_project(paths, window, cx)
-                })
-                .log_err()
-            {
-                task.detach_and_log_err(cx);
-            }
-        });
+impl TimeBucket {
+    fn from_dates(reference: NaiveDate, date: NaiveDate) -> Self {
+        if date == reference {
+            return TimeBucket::Today;
+        }
+
+        if date == reference - TimeDelta::days(1) {
+            return TimeBucket::Yesterday;
+        }
+
+        let week = date.iso_week();
+
+        if reference.iso_week() == week {
+            return TimeBucket::ThisWeek;
+        }
+
+        let last_week = (reference - TimeDelta::days(7)).iso_week();
+
+        if week == last_week {
+            return TimeBucket::PastWeek;
+        }
+
+        TimeBucket::All
     }
+}
+
+impl Display for TimeBucket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeBucket::Today => write!(f, "Today"),
+            TimeBucket::Yesterday => write!(f, "Yesterday"),
+            TimeBucket::ThisWeek => write!(f, "This Week"),
+            TimeBucket::PastWeek => write!(f, "Past Week"),
+            TimeBucket::All => write!(f, "All"),
+        }
+    }
+}
+
+fn open_recent_project(paths: Vec<PathBuf>, window: &mut Window, cx: &mut App) {
+    let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() else {
+        return;
+    };
+
+    cx.defer(move |cx| {
+        if let Some(task) = handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.open_project(paths, window, cx)
+            })
+            .log_err()
+        {
+            task.detach_and_log_err(cx);
+        }
+    });
 }
 
 impl PickerDelegate for WorkspacePickerDelegate {
@@ -500,7 +559,7 @@ impl PickerDelegate for WorkspacePickerDelegate {
             }
             SidebarEntry::RecentProject(project_entry) => {
                 let paths = project_entry.paths.clone();
-                Self::open_recent_project(paths, window, cx);
+                open_recent_project(paths, window, cx);
             }
         }
     }
