@@ -5541,7 +5541,7 @@ impl Repository {
     pub fn create_worktree(
         &mut self,
         name: String,
-        path: PathBuf,
+        directory: PathBuf,
         commit: Option<String>,
     ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
@@ -5550,7 +5550,7 @@ impl Repository {
             move |repo, _cx| async move {
                 match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                        backend.create_worktree(name, path, commit).await
+                        backend.create_worktree(name, directory, commit).await
                     }
                     RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                         client
@@ -5558,7 +5558,7 @@ impl Repository {
                                 project_id: project_id.0,
                                 repository_id: id.to_proto(),
                                 name,
-                                directory: path.to_string_lossy().to_string(),
+                                directory: directory.to_string_lossy().to_string(),
                                 commit,
                             })
                             .await?;
