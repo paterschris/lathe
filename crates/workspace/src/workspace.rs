@@ -1244,6 +1244,7 @@ pub struct Workspace {
     _apply_leader_updates: Task<Result<()>>,
     _observe_current_user: Task<Result<()>>,
     _schedule_serialize_workspace: Option<Task<()>>,
+    _serialize_workspace_task: Option<Task<()>>,
     _schedule_serialize_ssh_paths: Option<Task<()>>,
     pane_history_timestamp: Arc<AtomicUsize>,
     bounds: Bounds<Pixels>,
@@ -1667,6 +1668,7 @@ impl Workspace {
             _observe_current_user,
             _apply_leader_updates,
             _schedule_serialize_workspace: None,
+            _serialize_workspace_task: None,
             _schedule_serialize_ssh_paths: None,
             leader_updates_tx,
             _subscriptions: subscriptions,
@@ -5823,8 +5825,22 @@ impl Workspace {
         self.database_id
     }
 
+    pub(crate) fn set_database_id(&mut self, id: WorkspaceId) {
+        self.database_id = Some(id);
+    }
+
     pub fn session_id(&self) -> Option<String> {
         self.session_id.clone()
+    }
+
+    /// Bypass the 200ms serialization throttle and write workspace state to
+    /// the DB immediately. Returns a task the caller can await to ensure the
+    /// write completes. Used by the quit handler so the most recent state
+    /// isn't lost to a pending throttle timer when the process exits.
+    pub fn flush_serialization(&mut self, window: &mut Window, cx: &mut App) -> Task<()> {
+        self._schedule_serialize_workspace.take();
+        self._serialize_workspace_task.take();
+        self.serialize_workspace_internal(window, cx)
     }
 
     pub fn root_paths(&self, cx: &App) -> Vec<Arc<Path>> {
@@ -5883,7 +5899,8 @@ impl Workspace {
                         .timer(SERIALIZATION_THROTTLE_TIME)
                         .await;
                     this.update_in(cx, |this, window, cx| {
-                        this.serialize_workspace_internal(window, cx).detach();
+                        this._serialize_workspace_task =
+                            Some(this.serialize_workspace_internal(window, cx));
                         this._schedule_serialize_workspace.take();
                     })
                     .log_err();
@@ -7906,11 +7923,16 @@ pub async fn last_session_workspace_locations(
         .log_err()
 }
 
+pub struct MultiWorkspaceRestoreResult {
+    pub window_handle: WindowHandle<MultiWorkspace>,
+    pub errors: Vec<anyhow::Error>,
+}
+
 pub async fn restore_multiworkspace(
     multi_workspace: SerializedMultiWorkspace,
     app_state: Arc<AppState>,
     cx: &mut AsyncApp,
-) -> anyhow::Result<WindowHandle<MultiWorkspace>> {
+) -> anyhow::Result<MultiWorkspaceRestoreResult> {
     let SerializedMultiWorkspace { workspaces, state } = multi_workspace;
     let mut group_iter = workspaces.into_iter();
     let first = group_iter
@@ -7936,8 +7958,10 @@ pub async fn restore_multiworkspace(
         window
     };
 
+    let mut errors = Vec::new();
+
     for session_workspace in group_iter {
-        if session_workspace.paths.is_empty() {
+        let error = if session_workspace.paths.is_empty() {
             cx.update(|cx| {
                 open_workspace_by_id(
                     session_workspace.workspace_id,
@@ -7946,7 +7970,8 @@ pub async fn restore_multiworkspace(
                     cx,
                 )
             })
-            .await?;
+            .await
+            .err()
         } else {
             cx.update(|cx| {
                 Workspace::new_local(
@@ -7958,7 +7983,12 @@ pub async fn restore_multiworkspace(
                     cx,
                 )
             })
-            .await?;
+            .await
+            .err()
+        };
+
+        if let Some(error) = error {
+            errors.push(error);
         }
     }
 
@@ -8000,7 +8030,10 @@ pub async fn restore_multiworkspace(
         })
         .ok();
 
-    Ok(window_handle)
+    Ok(MultiWorkspaceRestoreResult {
+        window_handle,
+        errors,
+    })
 }
 
 actions!(
