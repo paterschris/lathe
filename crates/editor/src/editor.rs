@@ -28233,7 +28233,7 @@ impl ui_input::ErasedEditor for ErasedEditorImpl {
             font_family: settings.ui_font.family.clone(),
             font_features: settings.ui_font.features.clone(),
             font_size: rems(0.875).into(),
-            font_weight: settings.buffer_font.weight,
+            font_weight: settings.ui_font.weight,
             font_style: FontStyle::Normal,
             line_height: relative(1.2),
             color: theme_color.text,
