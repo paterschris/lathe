@@ -23483,19 +23483,6 @@ impl Editor {
         cx.notify();
     }
 
-    pub fn highlight_background_key(
-        &mut self,
-        key: HighlightKey,
-        ranges: &[Range<Anchor>],
-        color_fetcher: impl Fn(&usize, &Theme) -> Hsla + Send + Sync + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        self.background_highlights
-            .insert(key, (Arc::new(color_fetcher), Arc::from(ranges)));
-        self.scrollbar_marker_state.dirty = true;
-        cx.notify();
-    }
-
     pub fn clear_background_highlights(
         &mut self,
         key: HighlightKey,
