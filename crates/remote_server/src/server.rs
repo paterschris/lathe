@@ -449,7 +449,7 @@ pub fn execute_run(
     init_paths()?;
 
     let startup_time = Instant::now();
-    let app = gpui::Application::headless();
+    let app = gpui_platform::headless();
     let pid = std::process::id();
     let id = pid.to_string();
     app.background_executor()
