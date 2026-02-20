@@ -40,7 +40,7 @@ use smol::future::yield_now;
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 use theme::ActiveTheme;
-use ui::{KeyBinding, Tooltip, prelude::*, vertical_divider};
+use ui::{DiffStat, Divider, KeyBinding, Tooltip, prelude::*, vertical_divider};
 use util::{ResultExt as _, rel_path::RelPath};
 use workspace::{
     CloseActiveItem, ItemNavHistory, SerializableItem, ToolbarItemEvent, ToolbarItemLocation,
@@ -549,6 +549,41 @@ impl ProjectDiff {
         }
     }
 
+    pub fn calculate_changed_lines(&self, cx: &App) -> (u32, u32) {
+        let snapshot = self.multibuffer.read(cx).snapshot(cx);
+        let mut total_additions = 0u32;
+        let mut total_deletions = 0u32;
+
+        let mut seen_buffers = HashSet::default();
+        for (_, buffer, _) in snapshot.excerpts() {
+            let buffer_id = buffer.remote_id();
+            if !seen_buffers.insert(buffer_id) {
+                continue;
+            }
+
+            let Some(diff) = snapshot.diff_for_buffer_id(buffer_id) else {
+                continue;
+            };
+
+            let base_text = diff.base_text();
+
+            for hunk in diff.hunks_intersecting_range(Anchor::MIN..Anchor::MAX, buffer) {
+                let added_rows = hunk.range.end.row.saturating_sub(hunk.range.start.row);
+                total_additions += added_rows;
+
+                let base_start = base_text
+                    .offset_to_point(hunk.diff_base_byte_range.start)
+                    .row;
+                let base_end = base_text.offset_to_point(hunk.diff_base_byte_range.end).row;
+                let deleted_rows = base_end.saturating_sub(base_start);
+
+                total_deletions += deleted_rows;
+            }
+        }
+
+        (total_additions, total_deletions)
+    }
+
     /// Returns the total count of review comments across all hunks/files.
     pub fn total_review_comment_count(&self) -> usize {
         self.review_comment_count
@@ -945,8 +980,11 @@ impl Item for ProjectDiff {
         })
     }
 
-    fn tab_tooltip_text(&self, _: &App) -> Option<SharedString> {
-        Some("Project Diff".into())
+    fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString> {
+        match self.diff_base(cx) {
+            DiffBase::Head => Some("Project Diff".into()),
+            DiffBase::Merge { .. } => Some("Branch Diff".into()),
+        }
     }
 
     fn tab_content(&self, params: TabContentParams, _window: &Window, cx: &App) -> AnyElement {
@@ -1625,6 +1663,7 @@ impl Render for BranchDiffToolbar {
         };
         let focus_handle = project_diff.focus_handle(cx);
         let review_count = project_diff.read(cx).total_review_comment_count();
+        let (additions, deletions) = project_diff.read(cx).calculate_changed_lines(cx);
 
         let is_multibuffer_empty = project_diff.read(cx).multibuffer.read(cx).is_empty();
         let is_ai_enabled = AgentSettings::get_global(cx).enabled(cx);
@@ -1637,9 +1676,17 @@ impl Render for BranchDiffToolbar {
             .items_center()
             .flex_wrap()
             .justify_end()
+            .gap_2()
+            .when(!is_multibuffer_empty, |this| {
+                this.child(DiffStat::new(
+                    "branch-diff-stat",
+                    additions as usize,
+                    deletions as usize,
+                ))
+            })
             .when(show_review_button, |this| {
                 let focus_handle = focus_handle.clone();
-                this.child(
+                this.child(Divider::vertical()).child(
                     Button::new("review-diff", "Review Diff")
                         .icon(IconName::ZedAssistant)
                         .icon_position(IconPosition::Start)
