@@ -83,12 +83,15 @@ pub fn init(cx: &mut App) {
             cx.defer_in(window, |editor, _window, cx| {
                 let project = editor.project().cloned();
 
-                let is_local_project = project
+                let is_valid_project = project
                     .as_ref()
-                    .map(|project| project.read(cx).is_local())
+                    .map(|project| {
+                        let p = project.read(cx);
+                        !p.is_via_collab()
+                    })
                     .unwrap_or(false);
 
-                if !is_local_project {
+                if !is_valid_project {
                     return;
                 }
 
