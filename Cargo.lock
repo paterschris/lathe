@@ -4997,8 +4997,11 @@ name = "docs_preprocessor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "collections",
+ "jsonschema",
  "mdbook",
  "regex",
+ "schemars",
  "serde",
  "serde_json",
  "settings",
