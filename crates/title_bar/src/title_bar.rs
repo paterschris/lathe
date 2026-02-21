@@ -969,8 +969,18 @@ impl TitleBar {
                     ContextMenu::build(window, cx, |mut menu, _window, cx| {
                         menu = menu.header("Organizations").separator();
 
+                        let current_organization = user_store.read(cx).current_organization();
+
                         for organization in user_store.read(cx).organizations() {
                             let organization = organization.clone();
+                            let plan = user_store.read(cx).plan_for_organization(&organization.id);
+
+                            let is_current =
+                                current_organization
+                                    .as_ref()
+                                    .is_some_and(|current_organization| {
+                                        current_organization.id == organization.id
+                                    });
 
                             menu = menu.custom_entry(
                                 {
@@ -978,8 +988,23 @@ impl TitleBar {
                                     move |_window, _cx| {
                                         h_flex()
                                             .w_full()
-                                            .justify_between()
-                                            .child(Label::new(&organization.name))
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .when(!is_current, |parent| parent.invisible())
+                                                    .child(Icon::new(IconName::Check)),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .w_full()
+                                                    .gap_3()
+                                                    .justify_between()
+                                                    .child(Label::new(&organization.name))
+                                                    .child(PlanChip::new(
+                                                        plan.unwrap_or(Plan::ZedFree),
+                                                    )),
+                                            )
                                             .into_any_element()
                                     }
                                 },
