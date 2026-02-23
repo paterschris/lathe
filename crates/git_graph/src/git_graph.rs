@@ -13,7 +13,7 @@ use gpui::{
     ScrollWheelEvent, SharedString, Styled, Subscription, Task, WeakEntity, Window, actions,
     anchored, deferred, point, px,
 };
-use menu::{SelectNext, SelectPrevious};
+use menu::{Cancel, SelectNext, SelectPrevious};
 use project::{
     Project,
     git_store::{CommitDataState, GitStoreEvent, Repository, RepositoryEvent, RepositoryId},
@@ -936,6 +936,12 @@ impl GitGraph {
             .collect()
     }
 
+    fn cancel(&mut self, _: &Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_entry_idx = None;
+        self.selected_commit_diff = None;
+        cx.notify();
+    }
+
     fn select_prev(&mut self, _: &SelectPrevious, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(selected_entry_idx) = &self.selected_entry_idx {
             self.select_entry(selected_entry_idx.saturating_sub(1), cx);
@@ -1804,6 +1810,7 @@ impl Render for GitGraph {
             .on_action(cx.listener(|this, _: &OpenCommitView, window, cx| {
                 this.open_selected_commit_view(window, cx);
             }))
+            .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::select_prev))
             .on_action(cx.listener(Self::select_next))
             .child(content)
