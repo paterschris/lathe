@@ -149,10 +149,9 @@ pub(crate) fn compare_versions() -> (Step<Run>, StepOutput, StepOutput) {
     let check_needs_bump = named::bash(formatdoc! {
     r#"
         CURRENT_VERSION="$({VERSION_CHECK})"
-        PR_PARENT_SHA="${{{{ github.event.pull_request.head.sha }}}}"
 
-        if [[ -n "$PR_PARENT_SHA" ]]; then
-            git checkout "$PR_PARENT_SHA"
+        if [[ -n "$PR_PARENT_REF" ]]; then
+            git checkout "$PR_PARENT_REF"
         elif BRANCH_PARENT_SHA="$(git merge-base origin/main origin/zed-zippy-autobump)"; then
             git checkout "$BRANCH_PARENT_SHA"
         else
@@ -168,6 +167,7 @@ pub(crate) fn compare_versions() -> (Step<Run>, StepOutput, StepOutput) {
         echo "current_version=${{CURRENT_VERSION}}" >> "$GITHUB_OUTPUT"
         "#
     })
+    .add_env(("PR_PARENT_REF", Context::github().head_ref()))
     .id("compare-versions-check");
 
     let version_changed = StepOutput::new(&check_needs_bump, "version_changed");
