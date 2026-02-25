@@ -915,6 +915,10 @@
       // Default: inherits editor scrollbar settings
       // "show": null
     },
+    // Whether to show the addition/deletion change count next to each file in the Git panel.
+    //
+    // Default: false
+    "diff_stats": false,
   },
   "message_editor": {
     // Whether to automatically replace emoji shortcodes with emoji characters.
