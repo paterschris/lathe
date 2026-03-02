@@ -2398,7 +2398,9 @@ impl Editor {
             diagnostics_max_severity,
             hard_wrap: None,
             completion_provider: project.clone().map(|project| Rc::new(project) as _),
-            semantics_provider: project.clone().map(|project| Rc::new(project) as _),
+            semantics_provider: project
+                .as_ref()
+                .map(|project| Rc::new(project.downgrade()) as _),
             collaboration_hub: project.clone().map(|project| Box::new(project) as _),
             project,
             blink_manager: blink_manager.clone(),
@@ -23944,7 +23946,7 @@ impl Editor {
     }
 
     pub fn refresh_inline_values(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.project.clone() else {
+        let Some(semantics) = self.semantics_provider.clone() else {
             return;
         };
 
@@ -23979,7 +23981,7 @@ impl Editor {
                     let range =
                         buffer.read(cx).anchor_before(0)..current_execution_position.text_anchor;
 
-                    project.inline_values(buffer, range, cx)
+                    semantics.inline_values(buffer, range, cx)
                 })
                 .ok()
                 .flatten()?
@@ -26808,7 +26810,7 @@ pub trait SemanticsProvider {
         buffer: Entity<Buffer>,
         refresh: Option<RefreshForServer>,
         cx: &mut App,
-    ) -> Shared<Task<std::result::Result<BufferSemanticTokens, Arc<anyhow::Error>>>>;
+    ) -> Option<Shared<Task<std::result::Result<BufferSemanticTokens, Arc<anyhow::Error>>>>>;
 
     fn supports_inlay_hints(&self, buffer: &Entity<Buffer>, cx: &mut App) -> bool;
 
@@ -27290,14 +27292,15 @@ impl CompletionProvider for Entity<Project> {
     }
 }
 
-impl SemanticsProvider for Entity<Project> {
+impl SemanticsProvider for WeakEntity<Project> {
     fn hover(
         &self,
         buffer: &Entity<Buffer>,
         position: text::Anchor,
         cx: &mut App,
     ) -> Option<Task<Option<Vec<project::Hover>>>> {
-        Some(self.update(cx, |project, cx| project.hover(buffer, position, cx)))
+        self.update(cx, |project, cx| project.hover(buffer, position, cx))
+            .ok()
     }
 
     fn document_highlights(
@@ -27306,9 +27309,10 @@ impl SemanticsProvider for Entity<Project> {
         position: text::Anchor,
         cx: &mut App,
     ) -> Option<Task<Result<Vec<DocumentHighlight>>>> {
-        Some(self.update(cx, |project, cx| {
+        self.update(cx, |project, cx| {
             project.document_highlights(buffer, position, cx)
-        }))
+        })
+        .ok()
     }
 
     fn definitions(
@@ -27318,12 +27322,13 @@ impl SemanticsProvider for Entity<Project> {
         kind: GotoDefinitionKind,
         cx: &mut App,
     ) -> Option<Task<Result<Option<Vec<LocationLink>>>>> {
-        Some(self.update(cx, |project, cx| match kind {
+        self.update(cx, |project, cx| match kind {
             GotoDefinitionKind::Symbol => project.definitions(buffer, position, cx),
             GotoDefinitionKind::Declaration => project.declarations(buffer, position, cx),
             GotoDefinitionKind::Type => project.type_definitions(buffer, position, cx),
             GotoDefinitionKind::Implementation => project.implementations(buffer, position, cx),
-        }))
+        })
+        .ok()
     }
 
     fn supports_inlay_hints(&self, buffer: &Entity<Buffer>, cx: &mut App) -> bool {
@@ -27339,6 +27344,7 @@ impl SemanticsProvider for Entity<Project> {
                 project.any_language_server_supports_inlay_hints(buffer, cx)
             })
         })
+        .unwrap_or(false)
     }
 
     fn supports_semantic_tokens(&self, buffer: &Entity<Buffer>, cx: &mut App) -> bool {
@@ -27347,6 +27353,7 @@ impl SemanticsProvider for Entity<Project> {
                 project.any_language_server_supports_semantic_tokens(buffer, cx)
             })
         })
+        .unwrap_or(false)
     }
 
     fn inline_values(
@@ -27360,6 +27367,8 @@ impl SemanticsProvider for Entity<Project> {
 
             Some(project.inline_values(session, active_stack_frame, buffer_handle, range, cx))
         })
+        .ok()
+        .flatten()
     }
 
     fn applicable_inlay_chunks(
@@ -27368,15 +27377,21 @@ impl SemanticsProvider for Entity<Project> {
         ranges: &[Range<text::Anchor>],
         cx: &mut App,
     ) -> Vec<Range<BufferRow>> {
-        self.read(cx).lsp_store().update(cx, |lsp_store, cx| {
-            lsp_store.applicable_inlay_chunks(buffer, ranges, cx)
+        self.update(cx, |project, cx| {
+            project.lsp_store().update(cx, |lsp_store, cx| {
+                lsp_store.applicable_inlay_chunks(buffer, ranges, cx)
+            })
         })
+        .unwrap_or_default()
     }
 
     fn invalidate_inlay_hints(&self, for_buffers: &HashSet<BufferId>, cx: &mut App) {
-        self.read(cx).lsp_store().update(cx, |lsp_store, _| {
-            lsp_store.invalidate_inlay_hints(for_buffers)
-        });
+        self.update(cx, |project, cx| {
+            project.lsp_store().update(cx, |lsp_store, _| {
+                lsp_store.invalidate_inlay_hints(for_buffers)
+            })
+        })
+        .ok();
     }
 
     fn inlay_hints(
@@ -27387,9 +27402,12 @@ impl SemanticsProvider for Entity<Project> {
         known_chunks: Option<(clock::Global, HashSet<Range<BufferRow>>)>,
         cx: &mut App,
     ) -> Option<HashMap<Range<BufferRow>, Task<Result<CacheInlayHints>>>> {
-        Some(self.read(cx).lsp_store().update(cx, |lsp_store, cx| {
-            lsp_store.inlay_hints(invalidate, buffer, ranges, known_chunks, cx)
-        }))
+        self.update(cx, |project, cx| {
+            project.lsp_store().update(cx, |lsp_store, cx| {
+                lsp_store.inlay_hints(invalidate, buffer, ranges, known_chunks, cx)
+            })
+        })
+        .ok()
     }
 
     fn semantic_tokens(
@@ -27397,10 +27415,13 @@ impl SemanticsProvider for Entity<Project> {
         buffer: Entity<Buffer>,
         refresh: Option<RefreshForServer>,
         cx: &mut App,
-    ) -> Shared<Task<std::result::Result<BufferSemanticTokens, Arc<anyhow::Error>>>> {
-        self.read(cx).lsp_store().update(cx, |lsp_store, cx| {
-            lsp_store.semantic_tokens(buffer, refresh, cx)
+    ) -> Option<Shared<Task<std::result::Result<BufferSemanticTokens, Arc<anyhow::Error>>>>> {
+        self.update(cx, |this, cx| {
+            this.lsp_store().update(cx, |lsp_store, cx| {
+                lsp_store.semantic_tokens(buffer, refresh, cx)
+            })
         })
+        .ok()
     }
 
     fn range_for_rename(
@@ -27409,7 +27430,7 @@ impl SemanticsProvider for Entity<Project> {
         position: text::Anchor,
         cx: &mut App,
     ) -> Option<Task<Result<Option<Range<text::Anchor>>>>> {
-        Some(self.update(cx, |project, cx| {
+        self.update(cx, |project, cx| {
             let buffer = buffer.clone();
             let task = project.prepare_rename(buffer.clone(), position, cx);
             cx.spawn(async move |_, cx| {
@@ -27432,7 +27453,8 @@ impl SemanticsProvider for Entity<Project> {
                     }
                 })
             })
-        }))
+        })
+        .ok()
     }
 
     fn perform_rename(
@@ -27442,9 +27464,10 @@ impl SemanticsProvider for Entity<Project> {
         new_name: String,
         cx: &mut App,
     ) -> Option<Task<Result<ProjectTransaction>>> {
-        Some(self.update(cx, |project, cx| {
+        self.update(cx, |project, cx| {
             project.perform_rename(buffer.clone(), position, new_name, cx)
-        }))
+        })
+        .ok()
     }
 }
 
