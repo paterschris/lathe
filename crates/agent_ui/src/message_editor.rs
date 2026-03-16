@@ -1680,7 +1680,7 @@ mod tests {
 
     use crate::completion_provider::{PromptCompletionProviderDelegate, PromptContextType};
     use crate::{
-        connection_view::tests::init_test,
+        conversation_view::tests::init_test,
         message_editor::{Mention, MessageEditor, parse_mention_links},
     };
 
