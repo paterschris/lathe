@@ -635,6 +635,11 @@ pub struct GitPanelSettingsContent {
     ///
     /// Default: true
     pub diff_stats: Option<bool>,
+
+    /// Whether to show a badge on the git panel icon with the count of uncommitted changes.
+    ///
+    /// Default: false
+    pub show_count_badge: Option<bool>,
 }
 
 #[derive(
@@ -682,6 +687,10 @@ pub struct NotificationPanelSettingsContent {
     /// Default: 300
     #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
     pub default_width: Option<f32>,
+    /// Whether to show a badge on the notification panel icon with the count of unread notifications.
+    ///
+    /// Default: false
+    pub show_count_badge: Option<bool>,
 }
 
 #[with_fallible_options]

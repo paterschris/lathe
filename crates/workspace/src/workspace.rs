@@ -7868,7 +7868,6 @@ impl Render for Workspace {
                                                 window,
                                                 cx,
                                             )),
-
                                         BottomDockLayout::RightAligned => div()
                                             .flex()
                                             .flex_row()
@@ -7927,7 +7926,6 @@ impl Render for Workspace {
                                                             .children(self.render_dock(DockPosition::Bottom, &self.bottom_dock, window, cx))
                                                     ),
                                             ),
-
                                         BottomDockLayout::Contained => div()
                                             .flex()
                                             .flex_row()
