@@ -28,6 +28,7 @@ pub struct GitPanelSettings {
     pub collapse_untracked_diff: bool,
     pub tree_view: bool,
     pub diff_stats: bool,
+    pub show_count_badge: bool,
 }
 
 impl ScrollbarVisibility for GitPanelSettings {
@@ -64,6 +65,7 @@ impl Settings for GitPanelSettings {
             collapse_untracked_diff: git_panel.collapse_untracked_diff.unwrap(),
             tree_view: git_panel.tree_view.unwrap(),
             diff_stats: git_panel.diff_stats.unwrap(),
+            show_count_badge: git_panel.show_count_badge.unwrap(),
         }
     }
 }
