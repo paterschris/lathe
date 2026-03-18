@@ -12,13 +12,16 @@ use editor::Editor;
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagViewExt as _};
 use gpui::{
     Action as _, AnyElement, App, Context, Entity, FocusHandle, Focusable, ListState, Pixels,
-    Render, SharedString, WeakEntity, Window, WindowHandle, actions, list, prelude::*, px,
+    Render, SharedString, WeakEntity, Window, WindowHandle, list, prelude::*, px,
 };
-use menu::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
+use menu::{
+    Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
+};
 use project::{AgentId, Event as ProjectEvent};
 use recent_projects::RecentProjects;
 use ui::utils::platform_title_bar_height;
 
+use settings::Settings as _;
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::path::Path;
@@ -39,15 +42,11 @@ use workspace::{
 use zed_actions::OpenRecent;
 use zed_actions::editor::{MoveDown, MoveUp};
 
-actions!(
+use zed_actions::agents_sidebar::FocusSidebarFilter;
+
+gpui::actions!(
     agents_sidebar,
     [
-        /// Collapses the selected entry in the workspace sidebar.
-        CollapseSelectedEntry,
-        /// Expands the selected entry in the workspace sidebar.
-        ExpandSelectedEntry,
-        /// Moves focus to the sidebar's search/filter editor.
-        FocusSidebarFilter,
         /// Creates a new thread in the currently selected or active project group.
         NewThreadInGroup,
     ]
@@ -264,6 +263,7 @@ impl Sidebar {
 
         let filter_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
+            editor.set_use_modal_editing(true);
             editor.set_placeholder_text("Search…", window, cx);
             editor
         });
@@ -1511,6 +1511,16 @@ impl Sidebar {
     ) {
         self.selection = None;
         self.filter_editor.focus_handle(cx).focus(window, cx);
+
+        // When vim mode is active, the editor defaults to normal mode which
+        // blocks text input. Switch to insert mode so the user can type
+        // immediately.
+        if vim_mode_setting::VimModeSetting::get_global(cx).0 {
+            if let Ok(action) = cx.build_action("vim::SwitchToInsertMode", None) {
+                window.dispatch_action(action, cx);
+            }
+        }
+
         cx.notify();
     }
 
@@ -1894,7 +1904,7 @@ impl Sidebar {
 
     fn expand_selected_entry(
         &mut self,
-        _: &ExpandSelectedEntry,
+        _: &SelectChild,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1918,7 +1928,7 @@ impl Sidebar {
 
     fn collapse_selected_entry(
         &mut self,
-        _: &CollapseSelectedEntry,
+        _: &SelectParent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1949,6 +1959,68 @@ impl Sidebar {
             }
             None => {}
         }
+    }
+
+    fn toggle_selected_fold(
+        &mut self,
+        _: &editor::actions::ToggleFold,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.selection else { return };
+
+        // Find the group header for the current selection.
+        let header_ix = match self.contents.entries.get(ix) {
+            Some(ListEntry::ProjectHeader { .. }) => Some(ix),
+            Some(
+                ListEntry::Thread(_) | ListEntry::ViewMore { .. } | ListEntry::NewThread { .. },
+            ) => (0..ix).rev().find(|&i| {
+                matches!(
+                    self.contents.entries.get(i),
+                    Some(ListEntry::ProjectHeader { .. })
+                )
+            }),
+            None => None,
+        };
+
+        if let Some(header_ix) = header_ix {
+            if let Some(ListEntry::ProjectHeader { path_list, .. }) =
+                self.contents.entries.get(header_ix)
+            {
+                let path_list = path_list.clone();
+                if self.collapsed_groups.contains(&path_list) {
+                    self.collapsed_groups.remove(&path_list);
+                } else {
+                    self.selection = Some(header_ix);
+                    self.collapsed_groups.insert(path_list);
+                }
+                self.update_entries(false, cx);
+            }
+        }
+    }
+
+    fn fold_all(
+        &mut self,
+        _: &editor::actions::FoldAll,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for entry in &self.contents.entries {
+            if let ListEntry::ProjectHeader { path_list, .. } = entry {
+                self.collapsed_groups.insert(path_list.clone());
+            }
+        }
+        self.update_entries(false, cx);
+    }
+
+    fn unfold_all(
+        &mut self,
+        _: &editor::actions::UnfoldAll,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.collapsed_groups.clear();
+        self.update_entries(false, cx);
     }
 
     fn stop_thread(&mut self, session_id: &acp::SessionId, cx: &mut Context<Self>) {
@@ -2670,6 +2742,9 @@ impl Render for Sidebar {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::expand_selected_entry))
             .on_action(cx.listener(Self::collapse_selected_entry))
+            .on_action(cx.listener(Self::toggle_selected_fold))
+            .on_action(cx.listener(Self::fold_all))
+            .on_action(cx.listener(Self::unfold_all))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::remove_selected_thread))
             .on_action(cx.listener(Self::new_thread_in_group))
@@ -3654,7 +3729,7 @@ mod tests {
             sidebar.selection = Some(0);
         });
 
-        cx.dispatch_action(CollapseSelectedEntry);
+        cx.dispatch_action(SelectParent);
         cx.run_until_parked();
 
         assert_eq!(
@@ -3663,7 +3738,7 @@ mod tests {
         );
 
         // Press right to expand
-        cx.dispatch_action(ExpandSelectedEntry);
+        cx.dispatch_action(SelectChild);
         cx.run_until_parked();
 
         assert_eq!(
@@ -3676,7 +3751,7 @@ mod tests {
         );
 
         // Press right again on already-expanded header moves selection down
-        cx.dispatch_action(ExpandSelectedEntry);
+        cx.dispatch_action(SelectChild);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
     }
 
@@ -3709,7 +3784,7 @@ mod tests {
         );
 
         // Pressing left on a child collapses the parent group and selects it
-        cx.dispatch_action(CollapseSelectedEntry);
+        cx.dispatch_action(SelectParent);
         cx.run_until_parked();
 
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
@@ -3773,7 +3848,7 @@ mod tests {
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(2));
 
         // Collapse the group, which removes the thread from the list
-        cx.dispatch_action(CollapseSelectedEntry);
+        cx.dispatch_action(SelectParent);
         cx.run_until_parked();
 
         // Selection should be clamped to the last valid index (0 = header)
@@ -4383,12 +4458,12 @@ mod tests {
         cx.run_until_parked();
 
         // User focuses the sidebar and collapses the group using keyboard:
-        // manually select the header, then press CollapseSelectedEntry to collapse.
+        // manually select the header, then press SelectParent to collapse.
         open_and_focus_sidebar(&sidebar, cx);
         sidebar.update_in(cx, |sidebar, _window, _cx| {
             sidebar.selection = Some(0);
         });
-        cx.dispatch_action(CollapseSelectedEntry);
+        cx.dispatch_action(SelectParent);
         cx.run_until_parked();
 
         assert_eq!(
