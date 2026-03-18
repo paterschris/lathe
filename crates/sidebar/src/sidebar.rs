@@ -23,8 +23,9 @@ use std::path::Path;
 use std::sync::Arc;
 use theme::ActiveTheme;
 use ui::{
-    AgentThreadStatus, ButtonStyle, HighlightedLabel, KeyBinding, ListItem, PopoverMenu,
-    PopoverMenuHandle, Tab, ThreadItem, TintColor, Tooltip, WithScrollbar, prelude::*,
+    AgentThreadStatus, ButtonStyle, CommonAnimationExt as _, HighlightedLabel, KeyBinding,
+    ListItem, PopoverMenu, PopoverMenuHandle, Tab, ThreadItem, TintColor, Tooltip, WithScrollbar,
+    prelude::*,
 };
 use util::ResultExt as _;
 use util::path_list::PathList;
@@ -117,6 +118,8 @@ enum ListEntry {
         label: SharedString,
         workspace: Entity<Workspace>,
         highlight_positions: Vec<usize>,
+        has_running_threads: bool,
+        waiting_thread_count: usize,
     },
     Thread(ThreadEntry),
     ViewMore {
@@ -717,6 +720,15 @@ impl Sidebar {
             let is_collapsed = self.collapsed_groups.contains(&path_list);
             let should_load_threads = !is_collapsed || !query.is_empty();
 
+            let live_infos = Self::all_thread_infos_for_workspace(workspace, cx);
+            let has_running_threads = live_infos
+                .iter()
+                .any(|info| info.status == AgentThreadStatus::Running);
+            let waiting_thread_count = live_infos
+                .iter()
+                .filter(|info| info.status == AgentThreadStatus::WaitingForConfirmation)
+                .count();
+
             let mut threads: Vec<ThreadEntry> = Vec::new();
 
             if should_load_threads {
@@ -846,8 +858,6 @@ impl Sidebar {
                     }
                 }
 
-                let live_infos = Self::all_thread_infos_for_workspace(workspace, cx);
-
                 if !live_infos.is_empty() {
                     let thread_index_by_session: HashMap<acp::SessionId, usize> = threads
                         .iter()
@@ -941,6 +951,8 @@ impl Sidebar {
                     label,
                     workspace: workspace.clone(),
                     highlight_positions: workspace_highlight_positions,
+                    has_running_threads,
+                    waiting_thread_count,
                 });
 
                 // Track session IDs and compute active_entry_index as we add
@@ -962,6 +974,8 @@ impl Sidebar {
                     label,
                     workspace: workspace.clone(),
                     highlight_positions: Vec::new(),
+                    has_running_threads,
+                    waiting_thread_count,
                 });
 
                 if is_collapsed {
@@ -1113,6 +1127,8 @@ impl Sidebar {
                 label,
                 workspace,
                 highlight_positions,
+                has_running_threads,
+                waiting_thread_count,
             } => self.render_project_header(
                 ix,
                 false,
@@ -1120,6 +1136,8 @@ impl Sidebar {
                 label,
                 workspace,
                 highlight_positions,
+                *has_running_threads,
+                *waiting_thread_count,
                 is_selected,
                 cx,
             ),
@@ -1162,6 +1180,8 @@ impl Sidebar {
         label: &SharedString,
         workspace: &Entity<Workspace>,
         highlight_positions: &[usize],
+        has_running_threads: bool,
+        waiting_thread_count: usize,
         is_selected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1213,7 +1233,32 @@ impl Sidebar {
                             .size(IconSize::Small)
                             .color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.6))),
                     )
-                    .child(label),
+                    .child(label)
+                    .when(is_collapsed && has_running_threads, |this| {
+                        this.child(
+                            Icon::new(IconName::LoadCircle)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted)
+                                .with_rotate_animation(2),
+                        )
+                    })
+                    .when(is_collapsed && waiting_thread_count > 0, |this| {
+                        let tooltip_text = if waiting_thread_count == 1 {
+                            "1 thread is waiting for confirmation".to_string()
+                        } else {
+                            format!("{waiting_thread_count} threads are waiting for confirmation",)
+                        };
+                        this.child(
+                            div()
+                                .id(format!("{id_prefix}waiting-indicator-{ix}"))
+                                .child(
+                                    Icon::new(IconName::Warning)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Warning),
+                                )
+                                .tooltip(Tooltip::text(tooltip_text)),
+                        )
+                    }),
             )
             .end_hover_gradient_overlay(true)
             .end_hover_slot(
@@ -1297,6 +1342,8 @@ impl Sidebar {
             label,
             workspace,
             highlight_positions,
+            has_running_threads,
+            waiting_thread_count,
         } = self.contents.entries.get(header_idx)?
         else {
             return None;
@@ -1312,6 +1359,8 @@ impl Sidebar {
             &label,
             &workspace,
             &highlight_positions,
+            *has_running_threads,
+            *waiting_thread_count,
             is_selected,
             cx,
         );
@@ -3095,6 +3144,8 @@ mod tests {
                     label: "expanded-project".into(),
                     workspace: workspace.clone(),
                     highlight_positions: Vec::new(),
+                    has_running_threads: false,
+                    waiting_thread_count: 0,
                 },
                 // Thread with default (Completed) status, not active
                 ListEntry::Thread(ThreadEntry {
@@ -3223,6 +3274,8 @@ mod tests {
                     label: "collapsed-project".into(),
                     workspace: workspace.clone(),
                     highlight_positions: Vec::new(),
+                    has_running_threads: false,
+                    waiting_thread_count: 0,
                 },
             ];
             // Select the Running thread (index 2)
