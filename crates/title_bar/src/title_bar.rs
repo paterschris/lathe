@@ -169,6 +169,28 @@ impl Render for TitleBar {
 
         let mut children = Vec::new();
 
+        let mut project_name = None;
+        let mut repository = None;
+        let mut linked_worktree_name = None;
+        if let Some(worktree) = self.effective_active_worktree(cx) {
+            project_name = worktree
+                .read(cx)
+                .root_name()
+                .file_name()
+                .map(|name| SharedString::from(name.to_string()));
+            repository = self.get_repository_for_worktree(&worktree, cx);
+            linked_worktree_name = repository.as_ref().and_then(|repo| {
+                let path = repo.read(cx).linked_worktree_path()?;
+                let directory_name = path.file_name()?.to_str()?;
+                let unique_worktree_name = if directory_name != project_name.as_ref()?.as_str() {
+                    directory_name.to_string()
+                } else {
+                    path.parent()?.file_name()?.to_str()?.to_string()
+                };
+                Some(SharedString::from(unique_worktree_name))
+            });
+        }
+
         children.push(
             h_flex()
                 .h_full()
@@ -192,11 +214,18 @@ impl Render for TitleBar {
                                 .when(title_bar_settings.show_project_items, |title_bar| {
                                     title_bar
                                         .children(self.render_project_host(cx))
-                                        .child(self.render_project_name(window, cx))
+                                        .child(self.render_project_name(project_name, window, cx))
                                 })
-                                .when(title_bar_settings.show_branch_name, |title_bar| {
-                                    title_bar.children(self.render_project_branch(cx))
-                                })
+                                .when_some(
+                                    repository.filter(|_| title_bar_settings.show_branch_name),
+                                    |title_bar, repository| {
+                                        title_bar.children(self.render_project_branch(
+                                            repository,
+                                            linked_worktree_name,
+                                            cx,
+                                        ))
+                                    },
+                                )
                         })
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -739,13 +768,13 @@ impl TitleBar {
         )
     }
 
-    pub fn render_project_name(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_project_name(
+        &self,
+        name: Option<SharedString>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let workspace = self.workspace.clone();
-
-        let name = self.effective_active_worktree(cx).map(|worktree| {
-            let worktree = worktree.read(cx);
-            SharedString::from(worktree.root_name().as_unix_str().to_string())
-        });
 
         let is_project_selected = name.is_some();
 
@@ -865,13 +894,17 @@ impl TitleBar {
             })
     }
 
-    pub fn render_project_branch(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let effective_worktree = self.effective_active_worktree(cx)?;
-        let repository = self.get_repository_for_worktree(&effective_worktree, cx)?;
+    fn render_project_branch(
+        &self,
+        repository: Entity<project::git_store::Repository>,
+        linked_worktree_name: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let workspace = self.workspace.upgrade()?;
 
         let (branch_name, icon_info) = {
             let repo = repository.read(cx);
+
             let branch_name = repo
                 .branch
                 .as_ref()
@@ -904,6 +937,13 @@ impl TitleBar {
             (branch_name, icon_info)
         };
 
+        let branch_name = branch_name?;
+        let button_text = if let Some(worktree_name) = linked_worktree_name {
+            format!("{}/{}", worktree_name, branch_name)
+        } else {
+            branch_name
+        };
+
         let settings = TitleBarSettings::get_global(cx);
 
         let effective_repository = Some(repository);
@@ -921,7 +961,7 @@ impl TitleBar {
                     ))
                 })
                 .trigger_with_tooltip(
-                    Button::new("project_branch_trigger", branch_name?)
+                    Button::new("project_branch_trigger", button_text)
                         .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                         .label_size(LabelSize::Small)
                         .color(Color::Muted)
