@@ -197,6 +197,8 @@ pub mod editor {
             MoveUp,
             /// Moves cursor down.
             MoveDown,
+            /// Reveals the current file in the system file manager.
+            RevealInFileManager,
         ]
     );
 }
