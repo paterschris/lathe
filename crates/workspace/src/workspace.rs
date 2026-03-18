@@ -82,7 +82,7 @@ pub use persistence::{
         DockStructure, ItemId, SerializedMultiWorkspace, SerializedWorkspaceLocation,
         SessionWorkspace,
     },
-    read_serialized_multi_workspaces,
+    read_serialized_multi_workspaces, resolve_worktree_workspaces,
 };
 use postage::stream::Stream;
 use project::{
