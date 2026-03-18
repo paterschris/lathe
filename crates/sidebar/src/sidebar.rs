@@ -43,6 +43,8 @@ actions!(
         CollapseSelectedEntry,
         /// Expands the selected entry in the workspace sidebar.
         ExpandSelectedEntry,
+        /// Moves focus to the sidebar's search/filter editor.
+        FocusSidebarFilter,
         /// Creates a new thread in the currently selected or active project group.
         NewThreadInGroup,
     ]
@@ -232,6 +234,7 @@ pub struct Sidebar {
     /// that should not reset the user's thread focus the way an explicit
     /// workspace switch does.
     pending_workspace_removal: bool,
+
     active_entry_index: Option<usize>,
     hovered_thread_index: Option<usize>,
     collapsed_groups: HashSet<PathList>,
@@ -1087,8 +1090,7 @@ impl Sidebar {
         let Some(entry) = self.contents.entries.get(ix) else {
             return div().into_any_element();
         };
-        let is_focused = self.focus_handle.is_focused(window)
-            || self.filter_editor.focus_handle(cx).is_focused(window);
+        let is_focused = self.focus_handle.is_focused(window);
         // is_selected means the keyboard selector is here.
         let is_selected = is_focused && self.selection == Some(ix);
 
@@ -1290,8 +1292,7 @@ impl Sidebar {
             return None;
         };
 
-        let is_focused = self.focus_handle.is_focused(window)
-            || self.filter_editor.focus_handle(cx).is_focused(window);
+        let is_focused = self.focus_handle.is_focused(window);
         let is_selected = is_focused && self.selection == Some(header_idx);
 
         let header_element = self.render_project_header(
@@ -1337,27 +1338,6 @@ impl Sidebar {
             .into_any_element();
 
         Some(element)
-    }
-
-    fn activate_workspace(
-        &mut self,
-        workspace: &Entity<Workspace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
-            return;
-        };
-
-        self.focused_thread = None;
-
-        multi_workspace.update(cx, |multi_workspace, cx| {
-            multi_workspace.activate(workspace.clone(), cx);
-        });
-
-        multi_workspace.update(cx, |multi_workspace, cx| {
-            multi_workspace.focus_active_workspace(window, cx);
-        });
     }
 
     fn prune_stale_worktree_workspaces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1442,14 +1422,31 @@ impl Sidebar {
         self.update_entries(false, cx);
     }
 
-    fn focus_in(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection.is_none() {
+            self.filter_editor.focus_handle(cx).focus(window, cx);
+        }
+    }
 
     fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         if self.reset_filter_editor_text(window, cx) {
             self.update_entries(false, cx);
         } else {
-            self.focus_handle.focus(window, cx);
+            self.selection = None;
+            self.filter_editor.focus_handle(cx).focus(window, cx);
+            cx.notify();
         }
+    }
+
+    fn focus_sidebar_filter(
+        &mut self,
+        _: &FocusSidebarFilter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selection = None;
+        self.filter_editor.focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
     fn reset_filter_editor_text(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -1469,15 +1466,31 @@ impl Sidebar {
 
     fn editor_move_down(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
         self.select_next(&SelectNext, window, cx);
+        if self.selection.is_some() {
+            self.focus_handle.focus(window, cx);
+        }
     }
 
     fn editor_move_up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
         self.select_previous(&SelectPrevious, window, cx);
+        if self.selection.is_some() {
+            self.focus_handle.focus(window, cx);
+        }
+    }
+
+    fn editor_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection.is_none() {
+            self.select_next(&SelectNext, window, cx);
+        }
+        if self.selection.is_some() {
+            self.focus_handle.focus(window, cx);
+        }
     }
 
     fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
         let next = match self.selection {
             Some(ix) if ix + 1 < self.contents.entries.len() => ix + 1,
+            Some(_) if !self.contents.entries.is_empty() => 0,
             None if !self.contents.entries.is_empty() => 0,
             _ => return,
         };
@@ -1486,20 +1499,26 @@ impl Sidebar {
         cx.notify();
     }
 
-    fn select_previous(
-        &mut self,
-        _: &SelectPrevious,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let prev = match self.selection {
-            Some(ix) if ix > 0 => ix - 1,
-            None if !self.contents.entries.is_empty() => self.contents.entries.len() - 1,
-            _ => return,
-        };
-        self.selection = Some(prev);
-        self.list_state.scroll_to_reveal_item(prev);
-        cx.notify();
+    fn select_previous(&mut self, _: &SelectPrevious, window: &mut Window, cx: &mut Context<Self>) {
+        match self.selection {
+            Some(0) => {
+                self.selection = None;
+                self.filter_editor.focus_handle(cx).focus(window, cx);
+                cx.notify();
+            }
+            Some(ix) => {
+                self.selection = Some(ix - 1);
+                self.list_state.scroll_to_reveal_item(ix - 1);
+                cx.notify();
+            }
+            None if !self.contents.entries.is_empty() => {
+                let last = self.contents.entries.len() - 1;
+                self.selection = Some(last);
+                self.list_state.scroll_to_reveal_item(last);
+                cx.notify();
+            }
+            None => {}
+        }
     }
 
     fn select_first(&mut self, _: &SelectFirst, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1525,9 +1544,9 @@ impl Sidebar {
         };
 
         match entry {
-            ListEntry::ProjectHeader { workspace, .. } => {
-                let workspace = workspace.clone();
-                self.activate_workspace(&workspace, window, cx);
+            ListEntry::ProjectHeader { path_list, .. } => {
+                let path_list = path_list.clone();
+                self.toggle_collapse(&path_list, window, cx);
             }
             ListEntry::Thread(thread) => {
                 let session_info = thread.session_info.clone();
@@ -2038,8 +2057,16 @@ impl Sidebar {
             .into_any_element()
     }
 
-    fn render_filter_input(&self) -> impl IntoElement {
-        self.filter_editor.clone()
+    fn render_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .min_w_0()
+            .flex_1()
+            .capture_action(
+                cx.listener(|this, _: &editor::actions::Newline, window, cx| {
+                    this.editor_confirm(window, cx);
+                }),
+            )
+            .child(self.filter_editor.clone())
     }
 
     fn render_recent_projects_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2269,18 +2296,25 @@ impl Sidebar {
                                 .color(Color::Muted),
                         ),
                     )
-                    .child(self.render_filter_input())
-                    .when(has_query, |this| {
-                        this.child(
-                            IconButton::new("clear_filter", IconName::Close)
-                                .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("Clear Search"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.reset_filter_editor_text(window, cx);
-                                    this.update_entries(false, cx);
-                                })),
-                        )
-                    }),
+                    .child(self.render_filter_input(cx))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .when(self.selection.is_some(), |this| {
+                                this.child(KeyBinding::for_action(&FocusSidebarFilter, cx))
+                            })
+                            .when(has_query, |this| {
+                                this.child(
+                                    IconButton::new("clear_filter", IconName::Close)
+                                        .icon_size(IconSize::Small)
+                                        .tooltip(Tooltip::text("Clear Search"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.reset_filter_editor_text(window, cx);
+                                            this.update_entries(false, cx);
+                                        })),
+                                )
+                            }),
+                    ),
             )
     }
 
@@ -2405,11 +2439,16 @@ impl WorkspaceSidebar for Sidebar {
     fn is_recent_projects_popover_deployed(&self) -> bool {
         self.recent_projects_popover_handle.is_deployed()
     }
+
+    fn prepare_for_focus(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.selection = None;
+        cx.notify();
+    }
 }
 
 impl Focusable for Sidebar {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.filter_editor.focus_handle(cx)
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
@@ -2440,6 +2479,7 @@ impl Render for Sidebar {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::remove_selected_thread))
             .on_action(cx.listener(Self::new_thread_in_group))
+            .on_action(cx.listener(Self::focus_sidebar_filter))
             .font(ui_font)
             .h_full()
             .w(self.width)
@@ -3225,12 +3265,21 @@ mod tests {
         cx.dispatch_action(SelectNext);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(4));
 
-        // At the end, selection stays on the last entry
+        // At the end, wraps back to first entry
+        cx.dispatch_action(SelectNext);
+        assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
+
+        // Navigate back to the end
+        cx.dispatch_action(SelectNext);
+        assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
+        cx.dispatch_action(SelectNext);
+        assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(2));
+        cx.dispatch_action(SelectNext);
+        assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(3));
         cx.dispatch_action(SelectNext);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(4));
 
         // Move back up
-
         cx.dispatch_action(SelectPrevious);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(3));
 
@@ -3243,9 +3292,9 @@ mod tests {
         cx.dispatch_action(SelectPrevious);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
 
-        // At the top, selection stays on the first entry
+        // At the top, selection clears (focus returns to editor)
         cx.dispatch_action(SelectPrevious);
-        assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
+        assert_eq!(sidebar.read_with(cx, |s, _| s.selection), None);
     }
 
     #[gpui::test]
@@ -3304,16 +3353,11 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_keyboard_confirm_on_project_header_activates_workspace(cx: &mut TestAppContext) {
+    async fn test_keyboard_confirm_on_project_header_toggles_collapse(cx: &mut TestAppContext) {
         let project = init_test_project("/my-project", cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let sidebar = setup_sidebar(&multi_workspace, cx);
-
-        multi_workspace.update_in(cx, |mw, window, cx| {
-            mw.create_workspace(window, cx);
-        });
-        cx.run_until_parked();
 
         let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
         save_n_test_threads(1, &path_list, cx).await;
@@ -3322,49 +3366,36 @@ mod tests {
 
         assert_eq!(
             visible_entries_as_strings(&sidebar, cx),
-            vec![
-                "v [my-project]",
-                "  [+ New Thread]",
-                "  Thread 1",
-                "v [Empty Workspace]",
-                "  [+ New Thread]",
-            ]
+            vec!["v [my-project]", "  [+ New Thread]", "  Thread 1"]
         );
 
-        // Switch to workspace 1 so we can verify confirm switches back.
-        multi_workspace.update_in(cx, |mw, window, cx| {
-            mw.activate_index(1, window, cx);
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            multi_workspace.read_with(cx, |mw, _| mw.active_workspace_index()),
-            1
-        );
-
-        // Focus the sidebar and manually select the header (index 0)
+        // Focus the sidebar and select the header (index 0)
         open_and_focus_sidebar(&sidebar, cx);
         sidebar.update_in(cx, |sidebar, _window, _cx| {
             sidebar.selection = Some(0);
         });
 
-        // Press confirm on project header (workspace 0) to activate it.
+        // Confirm on project header collapses the group
         cx.dispatch_action(Confirm);
         cx.run_until_parked();
 
         assert_eq!(
-            multi_workspace.read_with(cx, |mw, _| mw.active_workspace_index()),
-            0
+            visible_entries_as_strings(&sidebar, cx),
+            vec!["> [my-project]  <== selected"]
         );
 
-        // Focus should have moved out of the sidebar to the workspace center.
-        let workspace_0 = multi_workspace.read_with(cx, |mw, _cx| mw.workspaces()[0].clone());
-        workspace_0.update_in(cx, |workspace, window, cx| {
-            let pane_focus = workspace.active_pane().read(cx).focus_handle(cx);
-            assert!(
-                pane_focus.contains_focused(window, cx),
-                "Confirming a project header should focus the workspace center pane"
-            );
-        });
+        // Confirm again expands the group
+        cx.dispatch_action(Confirm);
+        cx.run_until_parked();
+
+        assert_eq!(
+            visible_entries_as_strings(&sidebar, cx),
+            vec![
+                "v [my-project]  <== selected",
+                "  [+ New Thread]",
+                "  Thread 1",
+            ]
+        );
     }
 
     #[gpui::test]
@@ -3515,13 +3546,13 @@ mod tests {
         cx.dispatch_action(SelectNext);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
 
-        // At the end, selection stays on the last entry
+        // At the end, wraps back to first entry
         cx.dispatch_action(SelectNext);
-        assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
-
-        // SelectPrevious goes back to the header
-        cx.dispatch_action(SelectPrevious);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
+
+        // SelectPrevious from first entry clears selection (returns to editor)
+        cx.dispatch_action(SelectPrevious);
+        assert_eq!(sidebar.read_with(cx, |s, _| s.selection), None);
     }
 
     #[gpui::test]
@@ -4605,15 +4636,19 @@ mod tests {
             );
         });
 
-        sidebar.update_in(cx, |sidebar, window, cx| {
-            sidebar.activate_workspace(&workspace_b, window, cx);
+        // Switching workspaces via the multi_workspace (simulates clicking
+        // a workspace header) should clear focused_thread.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            if let Some(index) = mw.workspaces().iter().position(|w| w == &workspace_b) {
+                mw.activate_index(index, window, cx);
+            }
         });
         cx.run_until_parked();
 
         sidebar.read_with(cx, |sidebar, _cx| {
             assert_eq!(
                 sidebar.focused_thread, None,
-                "Clicking a workspace header should clear focused_thread"
+                "Switching workspace should clear focused_thread"
             );
             assert_eq!(
                 sidebar.active_entry_index, None,
