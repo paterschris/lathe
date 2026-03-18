@@ -12,6 +12,7 @@ use gpui::{App, Task, Window};
 use icons::IconName;
 use livekit_client::ConnectionQuality;
 use project::WorktreeSettings;
+use remote_connection::RemoteConnectionModal;
 use rpc::proto::{self};
 use settings::{Settings as _, SettingsLocation};
 use theme::ActiveTheme;
@@ -342,7 +343,11 @@ impl TitleBar {
 
         let is_connecting_to_project = self
             .workspace
-            .update(cx, |workspace, cx| workspace.has_active_modal(window, cx))
+            .update(cx, |workspace, cx| {
+                workspace
+                    .active_modal::<RemoteConnectionModal>(cx)
+                    .is_some()
+            })
             .unwrap_or(false);
 
         let room = room.read(cx);
