@@ -785,7 +785,14 @@ impl TitleBar {
 
         let is_sidebar_open = self.platform_titlebar.read(cx).is_workspace_sidebar_open();
 
-        if is_sidebar_open {
+        let is_threads_list_view_active = self
+            .multi_workspace
+            .as_ref()
+            .and_then(|mw| mw.upgrade())
+            .map(|mw| mw.read(cx).is_threads_list_view_active(cx))
+            .unwrap_or(false);
+
+        if is_sidebar_open && is_threads_list_view_active {
             return self
                 .render_project_name_with_sidebar_popover(display_name, is_project_selected, cx)
                 .into_any_element();
@@ -796,7 +803,7 @@ impl TitleBar {
             .map(|w| w.read(cx).focus_handle(cx))
             .unwrap_or_else(|| cx.focus_handle());
 
-        let excluded_workspace_ids: HashSet<WorkspaceId> = self
+        let sibling_workspace_ids: HashSet<WorkspaceId> = self
             .multi_workspace
             .as_ref()
             .and_then(|mw| mw.upgrade())
@@ -813,7 +820,7 @@ impl TitleBar {
             .menu(move |window, cx| {
                 Some(recent_projects::RecentProjects::popover(
                     workspace.clone(),
-                    excluded_workspace_ids.clone(),
+                    sibling_workspace_ids.clone(),
                     false,
                     focus_handle.clone(),
                     window,
