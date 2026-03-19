@@ -19144,6 +19144,7 @@ dependencies = [
 name = "vim_mode_setting"
 version = "0.1.0"
 dependencies = [
+ "gpui",
  "settings",
 ]
 
@@ -21486,6 +21487,7 @@ dependencies = [
  "ui",
  "util",
  "uuid",
+ "vim_mode_setting",
  "windows 0.61.3",
  "zed_actions",
  "zlog",
