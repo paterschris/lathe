@@ -20,7 +20,7 @@ use ui::{App, Context, SharedString};
 use workspace::PathList;
 
 pub fn init(cx: &mut App) {
-    ThreadMetadataStore::init_global(cx);
+    SidebarThreadMetadataStore::init_global(cx);
 
     if cx.has_flag::<AgentV2FeatureFlag>() {
         migrate_thread_metadata(cx);
@@ -37,7 +37,7 @@ pub fn init(cx: &mut App) {
 ///
 /// TODO: Remove this after N weeks of shipping the sidebar
 fn migrate_thread_metadata(cx: &mut App) {
-    ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+    SidebarThreadMetadataStore::global(cx).update(cx, |store, cx| {
         let list = store.list(cx);
         cx.spawn(async move |this, cx| {
             let Ok(list) = list.await else {
@@ -68,7 +68,7 @@ fn migrate_thread_metadata(cx: &mut App) {
     });
 }
 
-struct GlobalThreadMetadataStore(Entity<ThreadMetadataStore>);
+struct GlobalThreadMetadataStore(Entity<SidebarThreadMetadataStore>);
 impl Global for GlobalThreadMetadataStore {}
 
 /// Lightweight metadata for any thread (native or ACP), enough to populate
@@ -140,12 +140,16 @@ impl ThreadMetadata {
     }
 }
 
-pub struct ThreadMetadataStore {
+/// The store holds all metadata needed to show threads in the sidebar.
+/// Effectively, all threads stored in here are "non-archived".
+///
+/// Automatically listens to AcpThread events and updates metadata if it has changed.
+pub struct SidebarThreadMetadataStore {
     db: ThreadMetadataDb,
     session_subscriptions: HashMap<acp::SessionId, Subscription>,
 }
 
-impl ThreadMetadataStore {
+impl SidebarThreadMetadataStore {
     #[cfg(not(any(test, feature = "test-support")))]
     pub fn init_global(cx: &mut App) {
         if cx.has_global::<Self>() {
@@ -290,7 +294,7 @@ impl ThreadMetadataStore {
     }
 }
 
-impl Global for ThreadMetadataStore {}
+impl Global for SidebarThreadMetadataStore {}
 
 struct ThreadMetadataDb(ThreadSafeConnection);
 
@@ -468,12 +472,12 @@ mod tests {
     async fn test_migrate_thread_metadata(cx: &mut TestAppContext) {
         cx.update(|cx| {
             ThreadStore::init_global(cx);
-            ThreadMetadataStore::init_global(cx);
+            SidebarThreadMetadataStore::init_global(cx);
         });
 
         // Verify the list is empty before migration
         let metadata_list = cx.update(|cx| {
-            let store = ThreadMetadataStore::global(cx);
+            let store = SidebarThreadMetadataStore::global(cx);
             store.read(cx).list(cx)
         });
 
@@ -520,7 +524,7 @@ mod tests {
 
         // Verify the metadata was migrated
         let metadata_list = cx.update(|cx| {
-            let store = ThreadMetadataStore::global(cx);
+            let store = SidebarThreadMetadataStore::global(cx);
             store.read(cx).list(cx)
         });
 
@@ -546,7 +550,7 @@ mod tests {
     async fn test_migrate_thread_metadata_skips_when_data_exists(cx: &mut TestAppContext) {
         cx.update(|cx| {
             ThreadStore::init_global(cx);
-            ThreadMetadataStore::init_global(cx);
+            SidebarThreadMetadataStore::init_global(cx);
         });
 
         // Pre-populate the metadata store with existing data
@@ -560,7 +564,7 @@ mod tests {
         };
 
         cx.update(|cx| {
-            let store = ThreadMetadataStore::global(cx);
+            let store = SidebarThreadMetadataStore::global(cx);
             store.update(cx, |store, cx| {
                 store.save(existing_metadata, cx).detach();
             });
@@ -592,7 +596,7 @@ mod tests {
 
         // Verify only the existing metadata is present (migration was skipped)
         let metadata_list = cx.update(|cx| {
-            let store = ThreadMetadataStore::global(cx);
+            let store = SidebarThreadMetadataStore::global(cx);
             store.read(cx).list(cx)
         });
 
@@ -608,7 +612,7 @@ mod tests {
             cx.set_global(settings_store);
             cx.update_flags(true, vec!["agent-v2".to_string()]);
             ThreadStore::init_global(cx);
-            ThreadMetadataStore::init_global(cx);
+            SidebarThreadMetadataStore::init_global(cx);
         });
 
         let fs = FakeFs::new(cx.executor());
@@ -666,7 +670,7 @@ mod tests {
 
         // List all metadata from the store.
         let metadata_list = cx.update(|cx| {
-            let store = ThreadMetadataStore::global(cx);
+            let store = SidebarThreadMetadataStore::global(cx);
             store.read(cx).list(cx)
         });
 
