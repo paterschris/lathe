@@ -1635,7 +1635,10 @@ async fn test_copy_paste_directory(cx: &mut gpui::TestAppContext) {
                     "four.txt": "",
                 }
             },
-            "b": {}
+            "b": {},
+            "d.1.20": {
+                "default.conf": "",
+            }
         }),
     )
     .await;
@@ -1688,6 +1691,7 @@ async fn test_copy_paste_directory(cx: &mut gpui::TestAppContext) {
             "                  three.txt",
             "              one.txt",
             "              two.txt",
+            "    > d.1.20",
         ]
     );
 
@@ -1709,7 +1713,8 @@ async fn test_copy_paste_directory(cx: &mut gpui::TestAppContext) {
             "                  four.txt",
             "                  three.txt",
             "              one.txt",
-            "              two.txt"
+            "              two.txt",
+            "    > d.1.20",
         ]
     );
 
@@ -1732,7 +1737,8 @@ async fn test_copy_paste_directory(cx: &mut gpui::TestAppContext) {
             "                  four.txt",
             "                  three.txt",
             "              one.txt",
-            "              two.txt"
+            "              two.txt",
+            "    > d.1.20",
         ]
     );
 
@@ -1760,7 +1766,39 @@ async fn test_copy_paste_directory(cx: &mut gpui::TestAppContext) {
             "        > inner_dir",
             "          one.txt",
             "          two.txt",
+            "    > d.1.20",
         ]
+    );
+
+    select_path(&panel, "root/d.1.20", cx);
+    panel.update_in(cx, |panel, window, cx| {
+        panel.copy(&Default::default(), window, cx);
+        panel.paste(&Default::default(), window, cx);
+    });
+    cx.executor().run_until_parked();
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..50, cx),
+        &[
+            //
+            "v root",
+            "    > a",
+            "    v b",
+            "        v a",
+            "            v inner_dir",
+            "                  four.txt",
+            "                  three.txt",
+            "              one.txt",
+            "              two.txt",
+            "    v c",
+            "        > a",
+            "        > inner_dir",
+            "          one.txt",
+            "          two.txt",
+            "    v d.1.20",
+            "          default.conf",
+            "    > [EDITOR: 'd.1.20 copy']  <== selected",
+        ],
+        "Dotted directory names should not be split at the dot when disambiguating"
     );
 }
 
