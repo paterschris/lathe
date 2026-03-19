@@ -9523,7 +9523,7 @@ impl EditorRequestLayoutState {
         }
     }
 
-    fn can_prepaint(&self) -> bool {
+    fn has_remaining_prepaint_depth(&self) -> bool {
         self.prepaint_depth.get() < Self::MAX_PREPAINT_DEPTH
     }
 }
@@ -10236,29 +10236,21 @@ impl Element for EditorElement {
                                 }
                             })
                     });
-                    if new_renderer_widths.is_some_and(|new_renderer_widths| {
-                        self.editor.update(cx, |editor, cx| {
-                            editor.update_renderer_widths(new_renderer_widths, cx)
-                        })
-                    }) {
-                        // If the fold widths have changed, we need to prepaint
-                        // the element again to account for any changes in
-                        // wrapping.
-                        if request_layout.can_prepaint() {
-                            return self.prepaint(
-                                None,
-                                _inspector_id,
-                                bounds,
-                                request_layout,
-                                window,
-                                cx,
-                            );
-                        } else {
-                            debug_panic!(concat!(
-                                "skipping recursive prepaint at max depth. ",
-                                "renderer widths may be stale."
-                            ));
-                        }
+                    let renderer_widths_changed = request_layout.has_remaining_prepaint_depth()
+                        && new_renderer_widths.is_some_and(|new_renderer_widths| {
+                            self.editor.update(cx, |editor, cx| {
+                                editor.update_renderer_widths(new_renderer_widths, cx)
+                            })
+                        });
+                    if renderer_widths_changed {
+                        return self.prepaint(
+                            None,
+                            _inspector_id,
+                            bounds,
+                            request_layout,
+                            window,
+                            cx,
+                        );
                     }
 
                     let longest_line_blame_width = self
@@ -10374,14 +10366,14 @@ impl Element for EditorElement {
                         resized_blocks,
                     } = blocks;
                     if let Some(resized_blocks) = resized_blocks {
-                        self.editor.update(cx, |editor, cx| {
-                            editor.resize_blocks(
-                                resized_blocks,
-                                autoscroll_request.map(|(autoscroll, _)| autoscroll),
-                                cx,
-                            )
-                        });
-                        if request_layout.can_prepaint() {
+                        if request_layout.has_remaining_prepaint_depth() {
+                            self.editor.update(cx, |editor, cx| {
+                                editor.resize_blocks(
+                                    resized_blocks,
+                                    autoscroll_request.map(|(autoscroll, _)| autoscroll),
+                                    cx,
+                                )
+                            });
                             return self.prepaint(
                                 None,
                                 _inspector_id,
@@ -10391,10 +10383,10 @@ impl Element for EditorElement {
                                 cx,
                             );
                         } else {
-                            debug_panic!(concat!(
-                                "skipping recursive prepaint at max depth. ",
-                                "block layout may be stale."
-                            ));
+                            debug_panic!(
+                                "dropping block resize because prepaint depth \
+                                 limit was reached"
+                            );
                         }
                     }
 
