@@ -841,14 +841,14 @@ async fn test_tool_authorization(cx: &mut TestAppContext) {
     // Approve the first - send "allow" option_id (UI transforms "once" to "allow")
     tool_call_auth_1
         .response
-        .send(acp::PermissionOptionId::new("allow"))
+        .send(acp::PermissionOptionId::new("allow").into())
         .unwrap();
     cx.run_until_parked();
 
     // Reject the second - send "deny" option_id directly since Deny is now a button
     tool_call_auth_2
         .response
-        .send(acp::PermissionOptionId::new("deny"))
+        .send(acp::PermissionOptionId::new("deny").into())
         .unwrap();
     cx.run_until_parked();
 
@@ -892,9 +892,7 @@ async fn test_tool_authorization(cx: &mut TestAppContext) {
     let tool_call_auth_3 = next_tool_call_authorization(&mut events).await;
     tool_call_auth_3
         .response
-        .send(acp::PermissionOptionId::new(
-            "always_allow:tool_requiring_permission",
-        ))
+        .send(acp::PermissionOptionId::new("always_allow:tool_requiring_permission").into())
         .unwrap();
     cx.run_until_parked();
     let completion = fake_model.pending_completions().pop().unwrap();
@@ -1183,32 +1181,88 @@ fn test_permission_option_ids_for_terminal() {
         panic!("Expected dropdown permission options");
     };
 
-    let allow_ids: Vec<String> = choices
-        .iter()
-        .map(|choice| choice.allow.option_id.0.to_string())
-        .collect();
-    let deny_ids: Vec<String> = choices
-        .iter()
-        .map(|choice| choice.deny.option_id.0.to_string())
-        .collect();
+    // Expect 3 choices: always-tool, always-pattern, once
+    assert_eq!(choices.len(), 3);
 
-    assert!(allow_ids.contains(&"always_allow:terminal".to_string()));
-    assert!(allow_ids.contains(&"allow".to_string()));
-    assert!(
-        allow_ids
-            .iter()
-            .any(|id| id.starts_with("always_allow_pattern:terminal\n")),
-        "Missing allow pattern option"
+    // First two choices both use the tool-level option IDs
+    assert_eq!(
+        choices[0].allow.option_id.0.as_ref(),
+        "always_allow:terminal"
     );
+    assert_eq!(choices[0].deny.option_id.0.as_ref(), "always_deny:terminal");
+    assert!(choices[0].sub_patterns.is_empty());
 
-    assert!(deny_ids.contains(&"always_deny:terminal".to_string()));
-    assert!(deny_ids.contains(&"deny".to_string()));
-    assert!(
-        deny_ids
-            .iter()
-            .any(|id| id.starts_with("always_deny_pattern:terminal\n")),
-        "Missing deny pattern option"
+    assert_eq!(
+        choices[1].allow.option_id.0.as_ref(),
+        "always_allow:terminal"
     );
+    assert_eq!(choices[1].deny.option_id.0.as_ref(), "always_deny:terminal");
+    assert_eq!(choices[1].sub_patterns, vec!["^cargo\\s+build(\\s|$)"]);
+
+    // Third choice is the one-time allow/deny
+    assert_eq!(choices[2].allow.option_id.0.as_ref(), "allow");
+    assert_eq!(choices[2].deny.option_id.0.as_ref(), "deny");
+    assert!(choices[2].sub_patterns.is_empty());
+}
+
+#[test]
+fn test_permission_options_terminal_pipeline_produces_dropdown_with_patterns() {
+    let permission_options = ToolPermissionContext::new(
+        TerminalTool::NAME,
+        vec!["cargo test 2>&1 | tail".to_string()],
+    )
+    .build_permission_options();
+
+    let PermissionOptions::DropdownWithPatterns {
+        choices,
+        patterns,
+        tool_name,
+    } = permission_options
+    else {
+        panic!("Expected DropdownWithPatterns permission options for pipeline command");
+    };
+
+    assert_eq!(tool_name, TerminalTool::NAME);
+
+    // Should have "Always for terminal" and "Only this time" choices
+    assert_eq!(choices.len(), 2);
+    let labels: Vec<&str> = choices
+        .iter()
+        .map(|choice| choice.allow.name.as_ref())
+        .collect();
+    assert!(labels.contains(&"Always for terminal"));
+    assert!(labels.contains(&"Only this time"));
+
+    // Should have per-command patterns for "cargo test" and "tail"
+    assert_eq!(patterns.len(), 2);
+    let pattern_names: Vec<&str> = patterns.iter().map(|cp| cp.display_name.as_str()).collect();
+    assert!(pattern_names.contains(&"cargo test"));
+    assert!(pattern_names.contains(&"tail"));
+
+    // Verify patterns are valid regex patterns
+    let regex_patterns: Vec<&str> = patterns.iter().map(|cp| cp.pattern.as_str()).collect();
+    assert!(regex_patterns.contains(&"^cargo\\s+test(\\s|$)"));
+    assert!(regex_patterns.contains(&"^tail\\b"));
+}
+
+#[test]
+fn test_permission_options_terminal_pipeline_with_chaining() {
+    let permission_options = ToolPermissionContext::new(
+        TerminalTool::NAME,
+        vec!["npm install && npm test | tail".to_string()],
+    )
+    .build_permission_options();
+
+    let PermissionOptions::DropdownWithPatterns { patterns, .. } = permission_options else {
+        panic!("Expected DropdownWithPatterns for chained pipeline command");
+    };
+
+    // With subcommand-aware patterns, "npm install" and "npm test" are distinct
+    assert_eq!(patterns.len(), 3);
+    let pattern_names: Vec<&str> = patterns.iter().map(|cp| cp.display_name.as_str()).collect();
+    assert!(pattern_names.contains(&"npm install"));
+    assert!(pattern_names.contains(&"npm test"));
+    assert!(pattern_names.contains(&"tail"));
 }
 
 #[gpui::test]
