@@ -10001,6 +10001,7 @@ dependencies = [
  "settings",
  "simplelog",
  "smallvec",
+ "tokio",
  "ui",
  "util",
  "zed-scap",
