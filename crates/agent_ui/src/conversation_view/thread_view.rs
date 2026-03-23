@@ -1580,12 +1580,11 @@ impl ThreadView {
         session_id: acp::SessionId,
         tool_call_id: acp::ToolCallId,
         outcome: SelectedPermissionOutcome,
-        option_kind: acp::PermissionOptionKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.conversation.update(cx, |conversation, cx| {
-            conversation.authorize_tool_call(session_id, tool_call_id, outcome, option_kind, cx);
+            conversation.authorize_tool_call(session_id, tool_call_id, outcome, cx);
         });
         if self.should_be_following {
             self.workspace
@@ -1648,8 +1647,7 @@ impl ThreadView {
         self.authorize_tool_call(
             self.id.clone(),
             tool_call_id,
-            option_id.into(),
-            option_kind,
+            SelectedPermissionOutcome::new(option_id, option_kind),
             window,
             cx,
         );
@@ -1740,16 +1738,9 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<()> {
-        let (choices, dropdown_with_patterns) = match options {
-            PermissionOptions::Dropdown(choices) => (choices.as_slice(), None),
-            PermissionOptions::DropdownWithPatterns {
-                choices,
-                patterns,
-                tool_name,
-            } => (
-                choices.as_slice(),
-                Some((patterns.as_slice(), tool_name.as_str())),
-            ),
+        let choices = match options {
+            PermissionOptions::Dropdown(choices) => choices.as_slice(),
+            PermissionOptions::DropdownWithPatterns { choices, .. } => choices.as_slice(),
             _ => {
                 let kind = if is_allow {
                     acp::PermissionOptionKind::AllowOnce
@@ -1763,34 +1754,9 @@ impl ThreadView {
         let selection = self.permission_selections.get(&tool_call_id);
 
         // When in per-command pattern mode, use the checked patterns.
-        if let Some(PermissionSelection::SelectedPatterns(checked)) = selection
-            && let Some((patterns, tool_name)) = dropdown_with_patterns
-        {
-            let checked_patterns: Vec<_> = patterns
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| checked.contains(index))
-                .map(|(_, cp)| cp.pattern.clone())
-                .collect();
-
-            if !checked_patterns.is_empty() {
-                let (option_id_str, kind) = if is_allow {
-                    (
-                        format!("always_allow:{}", tool_name),
-                        acp::PermissionOptionKind::AllowAlways,
-                    )
-                } else {
-                    (
-                        format!("always_deny:{}", tool_name),
-                        acp::PermissionOptionKind::RejectAlways,
-                    )
-                };
-                let outcome =
-                    SelectedPermissionOutcome::new(acp::PermissionOptionId::new(option_id_str))
-                        .params(Some(SelectedPermissionParams::Terminal {
-                            patterns: checked_patterns,
-                        }));
-                self.authorize_tool_call(session_id, tool_call_id, outcome, kind, window, cx);
+        if let Some(PermissionSelection::SelectedPatterns(checked)) = selection {
+            if let Some(outcome) = options.build_outcome_for_checked_patterns(checked, is_allow) {
+                self.authorize_tool_call(session_id, tool_call_id, outcome, window, cx);
                 return Some(());
             }
         }
@@ -1801,32 +1767,9 @@ impl ThreadView {
             .unwrap_or_else(|| choices.len().saturating_sub(1));
 
         let selected_choice = choices.get(selected_index).or(choices.last())?;
+        let outcome = selected_choice.build_outcome(is_allow);
 
-        let selected_option = if is_allow {
-            &selected_choice.allow
-        } else {
-            &selected_choice.deny
-        };
-
-        let params = if !selected_choice.sub_patterns.is_empty() {
-            Some(SelectedPermissionParams::Terminal {
-                patterns: selected_choice.sub_patterns.clone(),
-            })
-        } else {
-            None
-        };
-
-        let outcome =
-            SelectedPermissionOutcome::new(selected_option.option_id.clone()).params(params);
-
-        self.authorize_tool_call(
-            session_id,
-            tool_call_id,
-            outcome,
-            selected_option.kind,
-            window,
-            cx,
-        );
+        self.authorize_tool_call(session_id, tool_call_id, outcome, window, cx);
 
         Some(())
     }
@@ -6442,8 +6385,7 @@ impl ThreadView {
                             this.authorize_tool_call(
                                 session_id.clone(),
                                 tool_call_id.clone(),
-                                option_id.clone().into(),
-                                option_kind,
+                                SelectedPermissionOutcome::new(option_id.clone(), option_kind),
                                 window,
                                 cx,
                             );

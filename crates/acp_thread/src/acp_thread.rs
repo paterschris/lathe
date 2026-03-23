@@ -502,13 +502,15 @@ pub enum SelectedPermissionParams {
 #[derive(Debug)]
 pub struct SelectedPermissionOutcome {
     pub option_id: acp::PermissionOptionId,
+    pub option_kind: acp::PermissionOptionKind,
     pub params: Option<SelectedPermissionParams>,
 }
 
 impl SelectedPermissionOutcome {
-    pub fn new(option_id: acp::PermissionOptionId) -> Self {
+    pub fn new(option_id: acp::PermissionOptionId, option_kind: acp::PermissionOptionKind) -> Self {
         Self {
             option_id,
+            option_kind,
             params: None,
         }
     }
@@ -516,12 +518,6 @@ impl SelectedPermissionOutcome {
     pub fn params(mut self, params: Option<SelectedPermissionParams>) -> Self {
         self.params = params;
         self
-    }
-}
-
-impl From<acp::PermissionOptionId> for SelectedPermissionOutcome {
-    fn from(option_id: acp::PermissionOptionId) -> Self {
-        Self::new(option_id)
     }
 }
 
@@ -2013,14 +2009,13 @@ impl AcpThread {
         &mut self,
         id: acp::ToolCallId,
         outcome: SelectedPermissionOutcome,
-        option_kind: acp::PermissionOptionKind,
         cx: &mut Context<Self>,
     ) {
         let Some((ix, call)) = self.tool_call_mut(&id) else {
             return;
         };
 
-        let new_status = match option_kind {
+        let new_status = match outcome.option_kind {
             acp::PermissionOptionKind::RejectOnce | acp::PermissionOptionKind::RejectAlways => {
                 ToolCallStatus::Rejected
             }

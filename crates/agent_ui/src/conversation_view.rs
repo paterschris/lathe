@@ -1,9 +1,8 @@
 use acp_thread::{
     AcpThread, AcpThreadEvent, AgentSessionInfo, AgentThreadEntry, AssistantMessage,
     AssistantMessageChunk, AuthRequired, LoadError, MentionUri, PermissionOptionChoice,
-    PermissionOptions, PermissionPattern, RetryStatus, SelectedPermissionOutcome,
-    SelectedPermissionParams, ThreadStatus, ToolCall, ToolCallContent, ToolCallStatus,
-    UserMessageId,
+    PermissionOptions, PermissionPattern, RetryStatus, SelectedPermissionOutcome, ThreadStatus,
+    ToolCall, ToolCallContent, ToolCallStatus, UserMessageId,
 };
 use acp_thread::{AgentConnection, Plan};
 use action_log::{ActionLog, ActionLogTelemetry, DiffStats};
@@ -249,8 +248,7 @@ impl Conversation {
         self.authorize_tool_call(
             session_id.clone(),
             tool_call_id,
-            option.option_id.clone().into(),
-            option.kind,
+            SelectedPermissionOutcome::new(option.option_id.clone(), option.kind),
             cx,
         );
         Some(())
@@ -261,7 +259,6 @@ impl Conversation {
         session_id: acp::SessionId,
         tool_call_id: acp::ToolCallId,
         outcome: SelectedPermissionOutcome,
-        option_kind: acp::PermissionOptionKind,
         cx: &mut Context<Self>,
     ) {
         let Some(thread) = self.threads.get(&session_id) else {
@@ -273,11 +270,11 @@ impl Conversation {
             "Agent Tool Call Authorized",
             agent = agent_telemetry_id,
             session = session_id,
-            option = option_kind
+            option = outcome.option_kind
         );
 
         thread.update(cx, |thread, cx| {
-            thread.authorize_tool_call(tool_call_id, outcome, option_kind, cx);
+            thread.authorize_tool_call(tool_call_id, outcome, cx);
         });
         cx.notify();
     }
@@ -6276,8 +6273,10 @@ pub(crate) mod tests {
                 conversation.authorize_tool_call(
                     acp::SessionId::new("session-1"),
                     acp::ToolCallId::new("tc-1"),
-                    acp::PermissionOptionId::new("allow-1").into(),
-                    acp::PermissionOptionKind::AllowOnce,
+                    SelectedPermissionOutcome::new(
+                        acp::PermissionOptionId::new("allow-1"),
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
                     cx,
                 );
             });
@@ -6299,8 +6298,10 @@ pub(crate) mod tests {
                 conversation.authorize_tool_call(
                     acp::SessionId::new("session-1"),
                     acp::ToolCallId::new("tc-2"),
-                    acp::PermissionOptionId::new("allow-2").into(),
-                    acp::PermissionOptionKind::AllowOnce,
+                    SelectedPermissionOutcome::new(
+                        acp::PermissionOptionId::new("allow-2"),
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
                     cx,
                 );
             });
@@ -6438,8 +6439,10 @@ pub(crate) mod tests {
                 conversation.authorize_tool_call(
                     acp::SessionId::new("thread-a"),
                     acp::ToolCallId::new("tc-a"),
-                    acp::PermissionOptionId::new("allow-a").into(),
-                    acp::PermissionOptionKind::AllowOnce,
+                    SelectedPermissionOutcome::new(
+                        acp::PermissionOptionId::new("allow-a"),
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
                     cx,
                 );
             });
