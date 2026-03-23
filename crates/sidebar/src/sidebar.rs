@@ -1484,7 +1484,7 @@ impl Sidebar {
 
                     let workspace_for_add = workspace.clone();
                     let multi_workspace_for_add = multi_workspace.clone();
-                    menu.separator().entry(
+                    let menu = menu.separator().entry(
                         "Add Folder to Project",
                         Some(Box::new(AddFolderToProject)),
                         move |window, cx| {
@@ -1497,7 +1497,37 @@ impl Sidebar {
                                 workspace.add_folder_to_project(&AddFolderToProject, window, cx);
                             });
                         },
-                    )
+                    );
+
+                    let workspace_count = multi_workspace
+                        .upgrade()
+                        .map_or(0, |mw| mw.read(cx).workspaces().len());
+                    if workspace_count > 1 {
+                        let workspace_for_move = workspace.clone();
+                        let multi_workspace_for_move = multi_workspace.clone();
+                        menu.entry(
+                            "Move to New Window",
+                            Some(Box::new(
+                                zed_actions::agents_sidebar::MoveWorkspaceToNewWindow,
+                            )),
+                            move |window, cx| {
+                                if let Some(mw) = multi_workspace_for_move.upgrade() {
+                                    mw.update(cx, |multi_workspace, cx| {
+                                        if let Some(index) = multi_workspace
+                                            .workspaces()
+                                            .iter()
+                                            .position(|w| *w == workspace_for_move)
+                                        {
+                                            multi_workspace
+                                                .move_workspace_to_new_window(index, window, cx);
+                                        }
+                                    });
+                                }
+                            },
+                        )
+                    } else {
+                        menu
+                    }
                 });
 
                 let this = this.clone();
