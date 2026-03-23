@@ -841,14 +841,20 @@ async fn test_tool_authorization(cx: &mut TestAppContext) {
     // Approve the first - send "allow" option_id (UI transforms "once" to "allow")
     tool_call_auth_1
         .response
-        .send(acp::PermissionOptionId::new("allow").into())
+        .send(acp_thread::SelectedPermissionOutcome::new(
+            acp::PermissionOptionId::new("allow"),
+            acp::PermissionOptionKind::AllowOnce,
+        ))
         .unwrap();
     cx.run_until_parked();
 
     // Reject the second - send "deny" option_id directly since Deny is now a button
     tool_call_auth_2
         .response
-        .send(acp::PermissionOptionId::new("deny").into())
+        .send(acp_thread::SelectedPermissionOutcome::new(
+            acp::PermissionOptionId::new("deny"),
+            acp::PermissionOptionKind::RejectOnce,
+        ))
         .unwrap();
     cx.run_until_parked();
 
@@ -892,7 +898,10 @@ async fn test_tool_authorization(cx: &mut TestAppContext) {
     let tool_call_auth_3 = next_tool_call_authorization(&mut events).await;
     tool_call_auth_3
         .response
-        .send(acp::PermissionOptionId::new("always_allow:tool_requiring_permission").into())
+        .send(acp_thread::SelectedPermissionOutcome::new(
+            acp::PermissionOptionId::new("always_allow:tool_requiring_permission"),
+            acp::PermissionOptionKind::AllowAlways,
+        ))
         .unwrap();
     cx.run_until_parked();
     let completion = fake_model.pending_completions().pop().unwrap();
