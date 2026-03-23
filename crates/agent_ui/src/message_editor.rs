@@ -1366,7 +1366,12 @@ impl MessageEditor {
                         continue;
                     };
 
-                    images.push(gpui::Image::from_bytes(format, content));
+                    let name: gpui::SharedString = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| gpui::SharedString::from(s.to_owned()))
+                        .unwrap_or_else(|| "Image".into());
+                    images.push((gpui::Image::from_bytes(format, content), name));
                 }
 
                 crate::mention_set::insert_images_as_context(
