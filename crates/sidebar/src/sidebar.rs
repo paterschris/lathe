@@ -55,7 +55,7 @@ gpui::actions!(
     ]
 );
 
-const DEFAULT_WIDTH: Pixels = px(320.0);
+const DEFAULT_WIDTH: Pixels = px(300.0);
 const MIN_WIDTH: Pixels = px(200.0);
 const MAX_WIDTH: Pixels = px(800.0);
 const DEFAULT_THREADS_SHOWN: usize = 5;
@@ -125,6 +125,7 @@ enum ListEntry {
         highlight_positions: Vec<usize>,
         has_running_threads: bool,
         waiting_thread_count: usize,
+        is_active: bool,
     },
     Thread(ThreadEntry),
     ViewMore {
@@ -729,6 +730,13 @@ impl Sidebar {
             let is_collapsed = self.collapsed_groups.contains(&path_list);
             let should_load_threads = !is_collapsed || !query.is_empty();
 
+            let is_active = active_ws_index.is_some_and(|active_idx| {
+                active_idx == ws_index
+                    || absorbed
+                        .get(&active_idx)
+                        .is_some_and(|(main_idx, _)| *main_idx == ws_index)
+            });
+
             let mut live_infos = Self::all_thread_infos_for_workspace(workspace, cx);
 
             let mut threads: Vec<ThreadEntry> = Vec::new();
@@ -980,6 +988,7 @@ impl Sidebar {
                     highlight_positions: workspace_highlight_positions,
                     has_running_threads,
                     waiting_thread_count,
+                    is_active,
                 });
 
                 for thread in matched_threads {
@@ -991,12 +1000,7 @@ impl Sidebar {
                 let is_draft_for_workspace = self.agent_panel_visible
                     && self.active_thread_is_draft
                     && self.focused_thread.is_none()
-                    && active_ws_index.is_some_and(|active_idx| {
-                        active_idx == ws_index
-                            || absorbed
-                                .get(&active_idx)
-                                .is_some_and(|(main_idx, _)| *main_idx == ws_index)
-                    });
+                    && is_active;
 
                 let show_new_thread_entry = thread_count == 0 || is_draft_for_workspace;
 
@@ -1008,6 +1012,7 @@ impl Sidebar {
                     highlight_positions: Vec::new(),
                     has_running_threads,
                     waiting_thread_count,
+                    is_active,
                 });
 
                 if is_collapsed {
@@ -1148,6 +1153,7 @@ impl Sidebar {
                 highlight_positions,
                 has_running_threads,
                 waiting_thread_count,
+                is_active,
             } => self.render_project_header(
                 ix,
                 false,
@@ -1157,6 +1163,7 @@ impl Sidebar {
                 highlight_positions,
                 *has_running_threads,
                 *waiting_thread_count,
+                *is_active,
                 is_selected,
                 cx,
             ),
@@ -1196,6 +1203,7 @@ impl Sidebar {
         highlight_positions: &[usize],
         has_running_threads: bool,
         waiting_thread_count: usize,
+        is_active: bool,
         is_selected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1219,15 +1227,11 @@ impl Sidebar {
 
         let workspace_for_remove = workspace.clone();
         let workspace_for_menu = workspace.clone();
+        let workspace_for_open = workspace.clone();
 
         let path_list_for_toggle = path_list.clone();
         let path_list_for_collapse = path_list.clone();
         let view_more_expanded = self.expanded_groups.contains_key(path_list);
-
-        let multi_workspace = self.multi_workspace.upgrade();
-        let workspace_count = multi_workspace
-            .as_ref()
-            .map_or(0, |mw| mw.read(cx).workspaces().len());
 
         let label = if highlight_positions.is_empty() {
             Label::new(label.clone())
@@ -1249,7 +1253,8 @@ impl Sidebar {
             .group(&group_name)
             .h(Tab::content_height(cx))
             .w_full()
-            .px_1p5()
+            .pl_1p5()
+            .pr_1()
             .border_1()
             .map(|this| {
                 if is_selected {
@@ -1274,30 +1279,34 @@ impl Sidebar {
                         ),
                     )
                     .child(label)
-                    .when(is_collapsed && has_running_threads, |this| {
-                        this.child(
-                            Icon::new(IconName::LoadCircle)
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted)
-                                .with_rotate_animation(2),
-                        )
-                    })
-                    .when(is_collapsed && waiting_thread_count > 0, |this| {
-                        let tooltip_text = if waiting_thread_count == 1 {
-                            "1 thread is waiting for confirmation".to_string()
-                        } else {
-                            format!("{waiting_thread_count} threads are waiting for confirmation",)
-                        };
-                        this.child(
-                            div()
-                                .id(format!("{id_prefix}waiting-indicator-{ix}"))
-                                .child(
-                                    Icon::new(IconName::Warning)
-                                        .size(IconSize::XSmall)
-                                        .color(Color::Warning),
+                    .when(is_collapsed, |this| {
+                        this.when(has_running_threads, |this| {
+                            this.child(
+                                Icon::new(IconName::LoadCircle)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted)
+                                    .with_rotate_animation(2),
+                            )
+                        })
+                        .when(waiting_thread_count > 0, |this| {
+                            let tooltip_text = if waiting_thread_count == 1 {
+                                "1 thread is waiting for confirmation".to_string()
+                            } else {
+                                format!(
+                                    "{waiting_thread_count} threads are waiting for confirmation",
                                 )
-                                .tooltip(Tooltip::text(tooltip_text)),
-                        )
+                            };
+                            this.child(
+                                div()
+                                    .id(format!("{id_prefix}waiting-indicator-{ix}"))
+                                    .child(
+                                        Icon::new(IconName::Warning)
+                                            .size(IconSize::XSmall)
+                                            .color(Color::Warning),
+                                    )
+                                    .tooltip(Tooltip::text(tooltip_text)),
+                            )
+                        })
                     }),
             )
             .child({
@@ -1339,23 +1348,33 @@ impl Sidebar {
                             })),
                         )
                     })
-                    .when(workspace_count > 1, |this| {
-                        let workspace_for_remove_btn = workspace_for_remove.clone();
+                    .when(!is_active, |this| {
                         this.child(
                             IconButton::new(
                                 SharedString::from(format!(
-                                    "{id_prefix}project-header-remove-{ix}",
+                                    "{id_prefix}project-header-open-workspace-{ix}",
                                 )),
-                                IconName::Close,
+                                IconName::Focus,
                             )
                             .icon_size(IconSize::Small)
                             .icon_color(Color::Muted)
-                            .tooltip(Tooltip::text("Remove Project"))
-                            .on_click(cx.listener(
+                            .tooltip(Tooltip::text("Activate Workspace"))
+                            .on_click(cx.listener({
                                 move |this, _, window, cx| {
-                                    this.remove_workspace(&workspace_for_remove_btn, window, cx);
-                                },
-                            )),
+                                    this.focused_thread = None;
+                                    if let Some(multi_workspace) = this.multi_workspace.upgrade() {
+                                        multi_workspace.update(cx, |multi_workspace, cx| {
+                                            multi_workspace
+                                                .activate(workspace_for_open.clone(), cx);
+                                        });
+                                    }
+                                    if AgentPanel::is_visible(&workspace_for_open, cx) {
+                                        workspace_for_open.update(cx, |workspace, cx| {
+                                            workspace.focus_panel::<AgentPanel>(window, cx);
+                                        });
+                                    }
+                                }
+                            })),
                         )
                     })
                     .when(show_new_thread_button, |this| {
@@ -1387,11 +1406,6 @@ impl Sidebar {
                 this.selection = None;
                 this.toggle_collapse(&path_list_for_toggle, window, cx);
             }))
-            // TODO: Decide if we really want the header to be activating different workspaces
-            // .on_click(cx.listener(move |this, _, window, cx| {
-            //     this.selection = None;
-            //     this.activate_workspace(&workspace_for_activate, window, cx);
-            // }))
             .into_any_element()
     }
 
@@ -1502,7 +1516,7 @@ impl Sidebar {
                     let workspace_count = multi_workspace
                         .upgrade()
                         .map_or(0, |mw| mw.read(cx).workspaces().len());
-                    if workspace_count > 1 {
+                    let menu = if workspace_count > 1 {
                         let workspace_for_move = workspace.clone();
                         let multi_workspace_for_move = multi_workspace.clone();
                         menu.entry(
@@ -1527,7 +1541,23 @@ impl Sidebar {
                         )
                     } else {
                         menu
-                    }
+                    };
+
+                    let workspace_for_remove = workspace_for_remove.clone();
+                    let multi_workspace_for_remove = multi_workspace.clone();
+                    menu.separator()
+                        .entry("Remove Project", None, move |window, cx| {
+                            if let Some(mw) = multi_workspace_for_remove.upgrade() {
+                                let ws = workspace_for_remove.clone();
+                                mw.update(cx, |multi_workspace, cx| {
+                                    if let Some(index) =
+                                        multi_workspace.workspaces().iter().position(|w| *w == ws)
+                                    {
+                                        multi_workspace.remove_workspace(index, window, cx);
+                                    }
+                                });
+                            }
+                        })
                 });
 
                 let this = this.clone();
@@ -1587,6 +1617,7 @@ impl Sidebar {
             highlight_positions,
             has_running_threads,
             waiting_thread_count,
+            is_active,
         } = self.contents.entries.get(header_idx)?
         else {
             return None;
@@ -1604,6 +1635,7 @@ impl Sidebar {
             &highlight_positions,
             *has_running_threads,
             *waiting_thread_count,
+            *is_active,
             is_selected,
             cx,
         );
@@ -3114,7 +3146,6 @@ impl Render for Sidebar {
                     .child(
                         h_flex()
                             .gap_1()
-                            .child(self.render_recent_projects_button(cx))
                             .child(
                                 IconButton::new("archive", IconName::Archive)
                                     .icon_size(IconSize::Small)
@@ -3129,7 +3160,8 @@ impl Render for Sidebar {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.toggle_archive(&ToggleArchive, window, cx);
                                     })),
-                            ),
+                            )
+                            .child(self.render_recent_projects_button(cx)),
                     ),
             )
     }
@@ -3693,6 +3725,7 @@ mod tests {
                     highlight_positions: Vec::new(),
                     has_running_threads: false,
                     waiting_thread_count: 0,
+                    is_active: true,
                 },
                 ListEntry::Thread(ThreadEntry {
                     agent: Agent::NativeAgent,
@@ -3826,6 +3859,7 @@ mod tests {
                     highlight_positions: Vec::new(),
                     has_running_threads: false,
                     waiting_thread_count: 0,
+                    is_active: false,
                 },
             ];
 
