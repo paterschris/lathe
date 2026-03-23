@@ -432,7 +432,7 @@ impl Sidebar {
                 AgentPanelEvent::ActiveViewChanged => {
                     let is_new_draft = agent_panel
                         .read(cx)
-                        .active_conversation()
+                        .active_conversation_view()
                         .is_some_and(|cv| cv.read(cx).parent_id(cx).is_none());
                     if is_new_draft {
                         this.focused_thread = None;
@@ -483,7 +483,7 @@ impl Sidebar {
                 ws.read(cx).panel::<AgentPanel>(cx)
             })
             .and_then(|panel| {
-                let cv = panel.read(cx).active_conversation()?;
+                let cv = panel.read(cx).active_conversation_view()?;
                 let tv = cv.read(cx).active_thread()?;
                 Some(tv.read(cx).message_editor.clone())
             })
@@ -498,7 +498,7 @@ impl Sidebar {
         let mw = self.multi_workspace.upgrade()?;
         let workspace = mw.read(cx).workspace();
         let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
-        let conversation_view = panel.read(cx).active_conversation()?;
+        let conversation_view = panel.read(cx).active_conversation_view()?;
         let thread_view = conversation_view.read(cx).active_thread()?;
         let raw = thread_view.read(cx).message_editor.read(cx).text(cx);
         let cleaned = Self::clean_mention_links(&raw);
@@ -629,7 +629,7 @@ impl Sidebar {
             .and_then(|panel| {
                 panel
                     .read(cx)
-                    .active_conversation()
+                    .active_conversation_view()
                     .and_then(|cv| cv.read(cx).parent_id(cx))
             });
         if panel_focused.is_some() && !self.active_thread_is_draft {
