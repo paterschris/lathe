@@ -5158,7 +5158,9 @@ impl GitPanel {
                         }),
                 )
             })
-            .child(git_status_icon(status))
+            .when(status_style != StatusStyle::LabelColor, |el| {
+                el.child(git_status_icon(status))
+            })
             .map(|this| {
                 if tree_view {
                     this.pl(px(depth as f32 * TREE_INDENT)).child(
