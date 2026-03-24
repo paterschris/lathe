@@ -1152,6 +1152,9 @@ impl TitleBar {
         let has_organization = user_store_read.current_organization().is_some();
 
         let current_organization = user_store_read.current_organization();
+        let business_organization = current_organization
+            .as_ref()
+            .filter(|organization| !organization.is_personal);
         let organizations: Vec<_> = user_store_read
             .organizations()
             .iter()
@@ -1178,7 +1181,14 @@ impl TitleBar {
                 }
             });
 
-            ButtonLike::new("user-menu").children(avatar)
+            ButtonLike::new("user-menu").child(
+                h_flex()
+                    .when_some(business_organization, |this, organization| {
+                        this.gap_2()
+                            .child(Label::new(&organization.name).size(LabelSize::Small))
+                    })
+                    .children(avatar),
+            )
         } else {
             ButtonLike::new("user-menu")
                 .child(Icon::new(IconName::ChevronDown).size(IconSize::Small))
