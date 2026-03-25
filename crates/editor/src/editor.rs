@@ -19160,7 +19160,7 @@ impl Editor {
                                 move |cx: &mut BlockContext| {
                                     let mut text_style = cx.editor_style.text.clone();
                                     if let Some(highlight_style) = old_highlight_id
-                                        .and_then(|h| h.style(&cx.editor_style.syntax))
+                                        .and_then(|h| cx.editor_style.syntax.get(h).cloned())
                                     {
                                         text_style = text_style.highlight(highlight_style);
                                     }
@@ -25039,7 +25039,8 @@ impl Editor {
         for chunk in chunks {
             let highlight = chunk
                 .syntax_highlight_id
-                .and_then(|id| id.name(&style.syntax));
+                .and_then(|id| style.syntax.get_capture_name(id));
+
             let mut chunk_lines = chunk.text.split('\n').peekable();
             while let Some(text) = chunk_lines.next() {
                 let mut merged_with_last_token = false;
@@ -28863,7 +28864,7 @@ pub fn styled_runs_for_code_label<'a>(
                     background_color: Some(local_player.selection),
                     ..Default::default()
                 }
-            } else if let Some(style) = highlight_id.style(syntax_theme) {
+            } else if let Some(style) = syntax_theme.get(*highlight_id).cloned() {
                 style
             } else {
                 return Default::default();
