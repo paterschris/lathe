@@ -1125,6 +1125,8 @@ impl ExternalAgentServer for LocalExtensionArchiveAgent {
                     AssetKind::Zip
                 } else if archive_url.ends_with(".tar.gz") || archive_url.ends_with(".tgz") {
                     AssetKind::TarGz
+                } else if archive_url.ends_with(".tar.bz2") || archive_url.ends_with(".tbz2") {
+                    AssetKind::TarBz2
                 } else {
                     anyhow::bail!("unsupported archive type in URL: {}", archive_url);
                 };
@@ -1311,6 +1313,8 @@ impl ExternalAgentServer for LocalRegistryArchiveAgent {
                     AssetKind::Zip
                 } else if archive_url.ends_with(".tar.gz") || archive_url.ends_with(".tgz") {
                     AssetKind::TarGz
+                } else if archive_url.ends_with(".tar.bz2") || archive_url.ends_with(".tbz2") {
+                    AssetKind::TarBz2
                 } else {
                     anyhow::bail!("unsupported archive type in URL: {}", archive_url);
                 };
