@@ -291,7 +291,7 @@ fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
             .on_last_window_closed
             .is_quit_app()
             .then(|| {
-                cx.on_window_closed(|cx| {
+                cx.on_window_closed(|cx, _window_id| {
                     if cx.windows().is_empty() {
                         cx.quit();
                     }
@@ -300,7 +300,7 @@ fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Some(cx.on_window_closed(|cx| {
+        Some(cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {
                 cx.quit();
             }
@@ -371,6 +371,33 @@ pub fn initialize_workspace(
         let Some(window) = window else {
             return;
         };
+
+        #[cfg(feature = "track-project-leak")]
+        {
+            let multi_workspace_handle = cx.weak_entity();
+            let workspace_handle = _multi_workspace.workspace().downgrade();
+            let project_handle = _multi_workspace.workspace().read(cx).project().downgrade();
+            let window_id_2 = window.window_handle().window_id();
+            cx.on_window_closed(move |cx, window_id| {
+                let multi_workspace_handle = multi_workspace_handle.clone();
+                let workspace_handle = workspace_handle.clone();
+                let project_handle = project_handle.clone();
+                if window_id != window_id_2 {
+                    return;
+                }
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(1500))
+                        .await;
+
+                    multi_workspace_handle.assert_released();
+                    workspace_handle.assert_released();
+                    project_handle.assert_released();
+                })
+                .detach();
+            })
+            .detach();
+        }
 
         let multi_workspace_handle = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
