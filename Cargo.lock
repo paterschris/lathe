@@ -2972,6 +2972,7 @@ dependencies = [
  "cloud_llm_client",
  "collections",
  "credentials_provider",
+ "db",
  "derive_more",
  "feature_flags",
  "fs",
