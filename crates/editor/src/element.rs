@@ -3505,6 +3505,11 @@ impl EditorElement {
                         cx.theme().colors().editor_active_line_number
                     }
                 })
+                .or_else(|| {
+                    row_info.diff_status.map(|_| {
+                        cx.theme().colors().editor_active_line_number
+                    })
+                })
                 .unwrap_or_else(|| cx.theme().colors().editor_line_number);
             let shaped_line =
                 self.shape_line_number(SharedString::from(&line_number), color, window);
@@ -6217,6 +6222,68 @@ impl EditorElement {
         }
 
         let line_height = layout.position_map.line_height;
+
+        let scroll_position = layout.position_map.snapshot.scroll_position();
+        let scroll_top = scroll_position.y * ScrollPixelOffset::from(line_height);
+
+        window.paint_layer(layout.gutter_hitbox.bounds, |window| {
+            for (hunk, _hitbox) in &layout.display_hunks {
+                let bg_color = match hunk {
+                    DisplayDiffHunk::Unfolded {
+                        status,
+                        display_row_range,
+                        ..
+                    } if !display_row_range.is_empty() => {
+                        let color = match split_side {
+                            Some(SplitSide::Left) => {
+                                cx.theme().colors().gutter_deleted_background
+                            }
+                            Some(SplitSide::Right) => {
+                                cx.theme().colors().gutter_added_background
+                            }
+                            None => match status.kind {
+                                DiffHunkStatusKind::Added => {
+                                    cx.theme().colors().gutter_added_background
+                                }
+                                DiffHunkStatusKind::Modified => {
+                                    cx.theme().colors().gutter_modified_background
+                                }
+                                DiffHunkStatusKind::Deleted => {
+                                    cx.theme().colors().gutter_deleted_background
+                                }
+                            },
+                        };
+                        (color != transparent_black())
+                            .then(|| (color, display_row_range.clone()))
+                    }
+                    _ => None,
+                };
+
+                if let Some((color, display_row_range)) = bg_color {
+                    let start_y: Pixels = (display_row_range.start.as_f64()
+                        * ScrollPixelOffset::from(line_height)
+                        - scroll_top)
+                        .into();
+                    let end_y: Pixels = (display_row_range.end.as_f64()
+                        * ScrollPixelOffset::from(line_height)
+                        - scroll_top)
+                        .into();
+                    let bounds = Bounds::new(
+                        layout.gutter_hitbox.origin + point(px(0.), start_y),
+                        size(layout.gutter_hitbox.size.width, end_y - start_y),
+                    );
+                    window.paint_quad(quad(
+                        bounds,
+                        Corners::default(),
+                        color,
+                        Edges::default(),
+                        transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                }
+            }
+        });
+
         window.paint_layer(layout.gutter_hitbox.bounds, |window| {
             for (hunk, hitbox) in &layout.display_hunks {
                 let hunk_to_paint = match hunk {

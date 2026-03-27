@@ -672,6 +672,13 @@ impl Dock {
         self.panel_entries.len()
     }
 
+    pub fn panel_panes(&self, cx: &App) -> Vec<Entity<Pane>> {
+        self.panel_entries
+            .iter()
+            .filter_map(|entry| entry.panel.pane(cx))
+            .collect()
+    }
+
     pub fn activate_panel(&mut self, panel_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if Some(panel_ix) != self.active_panel_index {
             if let Some(active_panel) = self.active_panel_entry() {

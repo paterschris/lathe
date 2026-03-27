@@ -5342,8 +5342,30 @@ impl ProjectPanel {
             marked_selections: Arc::from(self.marked_entries.clone()),
         };
 
+        let git_bg = (|| {
+            let summary = &details.git_status;
+            let tracked = summary.index + summary.worktree;
+            let colors = cx.theme().colors();
+            let bg = if summary.conflict > 0 {
+                colors.panel_conflict_background
+            } else if tracked.deleted > 0 {
+                colors.panel_deleted_background
+            } else if tracked.modified > 0 {
+                colors.panel_modified_background
+            } else if tracked.added > 0 || summary.untracked > 0 {
+                colors.panel_created_background
+            } else {
+                return None;
+            };
+            (bg != gpui::transparent_black()).then_some(bg)
+        })();
+
         let bg_color = if is_marked {
             item_colors.marked
+        } else if details.is_selected {
+            item_colors.default
+        } else if let Some(git_bg) = git_bg {
+            git_bg
         } else {
             item_colors.default
         };
@@ -6223,7 +6245,7 @@ impl ProjectPanel {
             .copied();
 
         let filename_text_color =
-            entry_git_aware_label_color(git_status, entry.is_ignored, is_marked);
+            entry_git_aware_label_color(git_status, entry.is_ignored, is_marked, cx);
 
         let is_cut = self
             .clipboard

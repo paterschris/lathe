@@ -2710,20 +2710,96 @@ impl Pane {
             .map(|id| id == item.item_id())
             .unwrap_or(false);
 
+        let project_path = item.project_path(cx);
+
+        let tab_text_color_override = if ItemSettings::get_global(cx).git_status {
+            project_path
+                .as_ref()
+                .and_then(|project_path| {
+                    let project = self.project.upgrade()?;
+                    let project = project.read(cx);
+                    let (repo, repo_path) = project
+                        .git_store()
+                        .read(cx)
+                        .repository_and_path_for_project_path(project_path, cx)?;
+                    let summary = repo.read(cx).status_for_path(&repo_path)?.status.summary();
+                    let tracked = summary.index + summary.worktree;
+                    let colors = cx.theme().colors();
+                    if summary.conflict > 0 {
+                        Some(Color::Custom(colors.tab_conflict_foreground))
+                    } else if tracked.deleted > 0 {
+                        Some(Color::Custom(colors.tab_deleted_foreground))
+                    } else if tracked.modified > 0 {
+                        Some(Color::Custom(colors.tab_modified_foreground))
+                    } else if tracked.added > 0 || summary.untracked > 0 {
+                        Some(Color::Custom(colors.tab_created_foreground))
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+
         let label = item.tab_content(
             TabContentParams {
                 detail: Some(detail),
                 selected: is_active,
                 preview: is_preview,
                 deemphasized: !self.has_focus(window, cx),
+                text_color_override: tab_text_color_override,
             },
             window,
             cx,
         );
+        let item_diagnostic = project_path
+            .as_ref()
+            .and_then(|project_path| self.diagnostics.get(project_path));
 
-        let item_diagnostic = item
-            .project_path(cx)
-            .map_or(None, |project_path| self.diagnostics.get(&project_path));
+        let non_transparent =
+            |color| (color != gpui::transparent_black()).then_some(color);
+
+        let tab_bg_override = if ItemSettings::get_global(cx).git_status {
+            project_path
+                .as_ref()
+                .and_then(|project_path| {
+                    let project = self.project.upgrade()?;
+                    let project = project.read(cx);
+                    let (repo, repo_path) = project
+                        .git_store()
+                        .read(cx)
+                        .repository_and_path_for_project_path(project_path, cx)?;
+                    let summary = repo.read(cx).status_for_path(&repo_path)?.status.summary();
+                    let tracked = summary.index + summary.worktree;
+                    let colors = cx.theme().colors();
+                    let bg = if let Some(&DiagnosticSeverity::ERROR) = item_diagnostic {
+                        colors.tab_error_background
+                    } else if let Some(&DiagnosticSeverity::WARNING) = item_diagnostic {
+                        colors.tab_warning_background
+                    } else if summary.conflict > 0 {
+                        colors.tab_conflict_background
+                    } else if tracked.deleted > 0 {
+                        colors.tab_deleted_background
+                    } else if tracked.modified > 0 {
+                        colors.tab_modified_background
+                    } else if tracked.added > 0 || summary.untracked > 0 {
+                        colors.tab_created_background
+                    } else {
+                        return None;
+                    };
+                    non_transparent(bg)
+                })
+        } else {
+            None
+        };
+
+        let tab_bg_override = tab_bg_override.or_else(|| {
+            if item.is_dirty(cx) {
+                non_transparent(cx.theme().colors().tab_dirty_background)
+            } else {
+                None
+            }
+        });
 
         let decorated_icon = item_diagnostic.map_or(None, |diagnostic| {
             let icon = match item.tab_icon(window, cx) {
@@ -2731,11 +2807,13 @@ impl Pane {
                 None => return None,
             };
 
-            let knockout_item_color = if is_active {
-                cx.theme().colors().tab_active_background
-            } else {
-                cx.theme().colors().tab_bar_background
-            };
+            let knockout_item_color = tab_bg_override.unwrap_or_else(|| {
+                if is_active {
+                    cx.theme().colors().tab_active_background
+                } else {
+                    cx.theme().colors().tab_bar_background
+                }
+            });
 
             let (icon_decoration, icon_color) = if matches!(diagnostic, &DiagnosticSeverity::ERROR)
             {
@@ -2811,6 +2889,7 @@ impl Pane {
 
         let capability = item.capability(cx);
         let tab = Tab::new(ix)
+            .bg_override(tab_bg_override)
             .position(if is_first_item {
                 TabPosition::First
             } else if is_last_item {
@@ -4834,6 +4913,7 @@ impl Render for DraggedTab {
                 selected: false,
                 preview: false,
                 deemphasized: false,
+                text_color_override: None,
             },
             window,
             cx,

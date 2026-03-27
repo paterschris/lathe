@@ -452,11 +452,81 @@ pub fn theme_colors_refinement(
             .tab_active_background
             .as_ref()
             .and_then(|color| try_parse_color(color).ok()),
+        tab_modified_foreground: this
+            .tab_modified_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_modified_background: this
+            .tab_modified_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_created_foreground: this
+            .tab_created_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_created_background: this
+            .tab_created_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_deleted_foreground: this
+            .tab_deleted_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_deleted_background: this
+            .tab_deleted_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_conflict_foreground: this
+            .tab_conflict_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_conflict_background: this
+            .tab_conflict_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_error_foreground: this
+            .tab_error_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok())
+            .or(status_colors.error),
+        tab_error_background: this
+            .tab_error_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_warning_foreground: this
+            .tab_warning_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok())
+            .or(status_colors.warning),
+        tab_warning_background: this
+            .tab_warning_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_dirty_background: this
+            .tab_dirty_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
         search_match_background: search_match_background,
         search_active_match_background: search_active_match_background,
         panel_background,
         panel_focused_border: this
             .panel_focused_border
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        panel_modified_background: this
+            .panel_modified_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        panel_created_background: this
+            .panel_created_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        panel_deleted_background: this
+            .panel_deleted_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        panel_conflict_background: this
+            .panel_conflict_background
             .as_ref()
             .and_then(|color| try_parse_color(color).ok()),
         panel_indent_guide: this
@@ -771,6 +841,18 @@ pub fn theme_colors_refinement(
             .version_control_conflict_marker_theirs
             .as_ref()
             .or(this.version_control_conflict_theirs_background.as_ref())
+            .and_then(|color| try_parse_color(color).ok()),
+        gutter_added_background: this
+            .gutter_added_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        gutter_modified_background: this
+            .gutter_modified_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        gutter_deleted_background: this
+            .gutter_deleted_background
+            .as_ref()
             .and_then(|color| try_parse_color(color).ok()),
         vim_normal_background: this
             .vim_normal_background
