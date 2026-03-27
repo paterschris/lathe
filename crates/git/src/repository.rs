@@ -1046,7 +1046,6 @@ impl GitRepository for RealGitRepository {
                 let git = git_binary?;
                 let output = git
                     .build_command(&[
-                        "--no-optional-locks",
                         "show",
                         "--no-patch",
                         "--format=%H%x00%B%x00%at%x00%ae%x00%an%x00",
@@ -1084,7 +1083,6 @@ impl GitRepository for RealGitRepository {
             let git = git_binary?;
             let show_output = git
                 .build_command(&[
-                    "--no-optional-locks",
                     "show",
                     "--format=",
                     "-z",
@@ -1105,7 +1103,7 @@ impl GitRepository for RealGitRepository {
             let parent_sha = format!("{}^", commit);
 
             let mut cat_file_process = git
-                .build_command(&["--no-optional-locks", "cat-file", "--batch=%(objectsize)"])
+                .build_command(&["cat-file", "--batch=%(objectsize)"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1417,11 +1415,7 @@ impl GitRepository for RealGitRepository {
             .spawn(async move {
                 let git = git_binary?;
                 let mut process = git
-                    .build_command(&[
-                        "--no-optional-locks",
-                        "cat-file",
-                        "--batch-check=%(objectname)",
-                    ])
+                    .build_command(&["cat-file", "--batch-check=%(objectname)"])
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -1495,7 +1489,6 @@ impl GitRepository for RealGitRepository {
         };
 
         let mut args = vec![
-            OsString::from("--no-optional-locks"),
             OsString::from("diff-tree"),
             OsString::from("-r"),
             OsString::from("-z"),
@@ -1612,7 +1605,7 @@ impl GitRepository for RealGitRepository {
             .spawn(async move {
                 let git = git_binary?;
                 let output = git
-                    .build_command(&["--no-optional-locks", "worktree", "list", "--porcelain"])
+                    .build_command(&["worktree", "list", "--porcelain"])
                     .output()
                     .await?;
                 if output.status.success() {
@@ -1634,7 +1627,6 @@ impl GitRepository for RealGitRepository {
     ) -> BoxFuture<'_, Result<()>> {
         let git_binary = self.git_binary();
         let mut args = vec![
-            OsString::from("--no-optional-locks"),
             OsString::from("worktree"),
             OsString::from("add"),
             OsString::from("-b"),
@@ -1668,11 +1660,7 @@ impl GitRepository for RealGitRepository {
 
         self.executor
             .spawn(async move {
-                let mut args: Vec<OsString> = vec![
-                    "--no-optional-locks".into(),
-                    "worktree".into(),
-                    "remove".into(),
-                ];
+                let mut args: Vec<OsString> = vec!["worktree".into(), "remove".into()];
                 if force {
                     args.push("--force".into());
                 }
@@ -1690,7 +1678,6 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 let args: Vec<OsString> = vec![
-                    "--no-optional-locks".into(),
                     "worktree".into(),
                     "move".into(),
                     "--".into(),
@@ -1833,7 +1820,7 @@ impl GitRepository for RealGitRepository {
                     commit_delimiter
                 );
 
-                let mut args = vec!["--no-optional-locks", "log", "--follow", &format_string];
+                let mut args = vec!["log", "--follow", &format_string];
 
                 let skip_str;
                 let limit_str;
@@ -2741,7 +2728,7 @@ async fn run_commit_data_reader(
     request_rx: smol::channel::Receiver<CommitDataRequest>,
 ) -> Result<()> {
     let mut process = git
-        .build_command(&["--no-optional-locks", "cat-file", "--batch"])
+        .build_command(&["cat-file", "--batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2855,7 +2842,6 @@ fn parse_initial_graph_output<'a>(
 
 fn git_status_args(path_prefixes: &[RepoPath]) -> Vec<OsString> {
     let mut args = vec![
-        OsString::from("--no-optional-locks"),
         OsString::from("status"),
         OsString::from("--porcelain=v1"),
         OsString::from("--untracked-files=all"),
@@ -3039,6 +3025,7 @@ impl GitBinary {
         let mut command = new_command(&self.git_binary_path);
         command.current_dir(&self.working_directory);
         command.args(["-c", "core.fsmonitor=false"]);
+        command.arg("--no-optional-locks");
         command.arg("--no-pager");
 
         if !self.is_trusted {
