@@ -50,6 +50,10 @@ pub const REMOTE_CANCELLED_BY_USER: &str = "Operation cancelled by user";
 /// %x00 - Null byte separator, used to split up commit data
 static GRAPH_COMMIT_FORMAT: &str = "--format=%H%x00%P%x00%D";
 
+/// Used to get commits that match with a search
+/// %H - Full commit hash
+static SEARCH_COMMIT_FORMAT: &str = "--format=%H";
+
 /// Number of commits to load per chunk for the git graph.
 pub const GRAPH_CHUNK_SIZE: usize = 1000;
 
@@ -623,6 +627,11 @@ impl LogSource {
     }
 }
 
+pub struct SearchCommitArgs {
+    pub query: SharedString,
+    pub case_sensitive: bool,
+}
+
 pub trait GitRepository: Send + Sync {
     fn reload_index(&self);
 
@@ -873,6 +882,13 @@ pub trait GitRepository: Send + Sync {
         log_source: LogSource,
         log_order: LogOrder,
         request_tx: Sender<Vec<Arc<InitialGraphCommitData>>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    fn search_commits(
+        &self,
+        log_source: LogSource,
+        search_args: SearchCommitArgs,
+        request_tx: Sender<Oid>,
     ) -> BoxFuture<'_, Result<()>>;
 
     fn commit_data_reader(&self) -> Result<CommitDataReader>;
@@ -2687,6 +2703,61 @@ impl GitRepository for RealGitRepository {
                         break;
                     }
                     lines.clear();
+                }
+            }
+
+            child.status().await?;
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn search_commits(
+        &self,
+        log_source: LogSource,
+        search_args: SearchCommitArgs,
+        request_tx: Sender<Oid>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+
+        async move {
+            let git = git_binary?;
+
+            let mut args = vec!["log", SEARCH_COMMIT_FORMAT, log_source.get_arg()?];
+
+            args.push("--fixed-strings");
+
+            if !search_args.case_sensitive {
+                args.push("--regexp-ignore-case");
+            }
+
+            args.push("--grep");
+            args.push(search_args.query.as_str());
+
+            let mut command = git.build_command(&args);
+            command.stdout(Stdio::piped());
+            command.stderr(Stdio::null());
+
+            let mut child = command.spawn()?;
+            let stdout = child.stdout.take().context("failed to get stdout")?;
+            let mut reader = BufReader::new(stdout);
+
+            let mut line_buffer = String::new();
+
+            loop {
+                line_buffer.clear();
+                let bytes_read = reader.read_line(&mut line_buffer).await?;
+
+                if bytes_read == 0 {
+                    break;
+                }
+
+                let sha = line_buffer.trim_end_matches('\n');
+
+                if let Ok(oid) = Oid::from_str(sha)
+                    && request_tx.send(oid).await.is_err()
+                {
+                    break;
                 }
             }
 
