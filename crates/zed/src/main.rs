@@ -52,6 +52,7 @@ use std::{
     time::Instant,
 };
 use theme::{ActiveTheme, GlobalTheme, ThemeRegistry};
+use theme_settings::load_user_theme;
 use util::{ResultExt, TryFutureExt, maybe};
 use uuid::Uuid;
 use workspace::{
@@ -639,7 +640,7 @@ fn main() {
             cx,
         );
 
-        theme::init(theme::LoadThemes::All(Box::new(Assets)), cx);
+        theme_settings::init(theme::LoadThemes::All(Box::new(Assets)), cx);
         eager_load_active_theme_and_icon_theme(fs.clone(), cx);
         theme_extension::init(
             extension_host_proxy,
@@ -1796,10 +1797,10 @@ fn load_user_themes_in_background(fs: Arc<dyn fs::Fs>, cx: &mut App) {
                     continue;
                 };
 
-                theme_registry.load_user_theme(&bytes).log_err();
+                load_user_theme(&theme_registry, &bytes).log_err();
             }
 
-            cx.update(GlobalTheme::reload_theme);
+            cx.update(theme_settings::reload_theme);
             anyhow::Ok(())
         }
     })
@@ -1819,9 +1820,9 @@ fn watch_themes(fs: Arc<dyn fs::Fs>, cx: &mut App) {
                 if fs.metadata(&event.path).await.ok().flatten().is_some() {
                     let theme_registry = cx.update(|cx| ThemeRegistry::global(cx));
                     if let Some(bytes) = fs.load_bytes(&event.path).await.log_err()
-                        && theme_registry.load_user_theme(&bytes).log_err().is_some()
+                        && load_user_theme(&theme_registry, &bytes).log_err().is_some()
                     {
-                        cx.update(GlobalTheme::reload_theme);
+                        cx.update(theme_settings::reload_theme);
                     }
                 }
             }
