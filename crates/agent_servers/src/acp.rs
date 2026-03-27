@@ -956,12 +956,40 @@ impl AgentConnection for AcpConnection {
         }) as _)
     }
 
+    fn truncate(
+        &self,
+        session_id: &acp::SessionId,
+        _cx: &App,
+    ) -> Option<Rc<dyn acp_thread::AgentSessionTruncate>> {
+        if self.sessions.borrow().contains_key(session_id) {
+            Some(Rc::new(AcpSessionTruncate) as _)
+        } else {
+            None
+        }
+    }
+
     fn session_list(&self, _cx: &mut App) -> Option<Rc<dyn AgentSessionList>> {
         self.session_list.clone().map(|s| s as _)
     }
 
     fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
         self
+    }
+}
+
+/// Local-only truncate for ACP connections.
+///
+/// The ACP protocol does not yet have a truncate/rewind primitive, so this
+/// implementation only succeeds on the Zed side. The remote agent is unaware
+/// of the truncation — subsequent prompts will be sent as new turns, and the
+/// agent may still retain its own history. Git checkpoint restoration and
+/// local entry removal are handled by `AcpThread::rewind` / `restore_checkpoint`
+/// independently of this trait.
+struct AcpSessionTruncate;
+
+impl acp_thread::AgentSessionTruncate for AcpSessionTruncate {
+    fn run(&self, _message_id: acp_thread::UserMessageId, _cx: &mut App) -> Task<Result<()>> {
+        Task::ready(Ok(()))
     }
 }
 

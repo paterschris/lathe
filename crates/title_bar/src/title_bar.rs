@@ -225,6 +225,7 @@ impl Render for TitleBar {
                                         ))
                                     },
                                 )
+                                .children(self.render_awaiting_input_indicator(cx))
                         })
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -987,6 +988,24 @@ impl TitleBar {
                     },
                 )
                 .anchor(gpui::Corner::TopLeft),
+        )
+    }
+
+    fn render_awaiting_input_indicator(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let workspace = self.workspace.upgrade()?;
+        let awaiting = workspace.read(cx).any_item_awaiting_input(cx);
+        if !awaiting {
+            return None;
+        }
+        Some(
+            div()
+                .id("terminal-awaiting-input")
+                .child(
+                    Icon::new(IconName::Return)
+                        .size(IconSize::Small)
+                        .color(Color::Accent),
+                )
+                .tooltip(Tooltip::text("Terminal awaiting input")),
         )
     }
 

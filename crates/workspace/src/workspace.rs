@@ -5053,6 +5053,21 @@ impl Workspace {
         &self.panes
     }
 
+    pub fn any_item_awaiting_input(&self, cx: &App) -> bool {
+        let dock_panes = self
+            .all_docks()
+            .into_iter()
+            .flat_map(|dock| dock.read(cx).panel_panes(cx));
+        for pane in self.panes.iter().cloned().chain(dock_panes) {
+            for item in pane.read(cx).items() {
+                if item.is_awaiting_input(cx) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn active_pane(&self) -> &Entity<Pane> {
         &self.active_pane
     }

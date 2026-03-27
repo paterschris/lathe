@@ -396,6 +396,7 @@ impl TerminalBuilder {
             vi_mode_enabled: false,
             is_remote_terminal: false,
             last_mouse_move_time: Instant::now(),
+            last_output_at: Instant::now(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
             #[cfg(windows)]
@@ -629,6 +630,7 @@ impl TerminalBuilder {
                 vi_mode_enabled: false,
                 is_remote_terminal,
                 last_mouse_move_time: Instant::now(),
+                last_output_at: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
                 #[cfg(windows)]
@@ -864,6 +866,7 @@ pub struct Terminal {
     vi_mode_enabled: bool,
     is_remote_terminal: bool,
     last_mouse_move_time: Instant,
+    last_output_at: Instant,
     last_hyperlink_search_position: Option<Point<Pixels>>,
     mouse_down_hyperlink: Option<(String, bool, Match)>,
     #[cfg(windows)]
@@ -979,6 +982,7 @@ impl Terminal {
                 //NOOP, Handled in render
             }
             AlacTermEvent::Wakeup => {
+                self.last_output_at = Instant::now();
                 cx.emit(Event::Wakeup);
 
                 if let TerminalType::Pty { info, .. } = &self.terminal_type {
@@ -2203,8 +2207,78 @@ impl Terminal {
         }
     }
 
+    pub fn is_at_prompt(&self) -> bool {
+        match (&self.pid(), self.pid_getter()) {
+            (Some(foreground_pid), Some(pid_getter)) => {
+                *foreground_pid == pid_getter.fallback_pid()
+            }
+            _ => false,
+        }
+    }
+
     pub fn task(&self) -> Option<&TaskState> {
         self.task.as_ref()
+    }
+
+    pub fn last_output_at(&self) -> Instant {
+        self.last_output_at
+    }
+
+    pub fn is_alternate_screen(&self) -> bool {
+        self.last_content.mode.contains(TermMode::ALT_SCREEN)
+    }
+
+    pub fn child_exited(&self) -> Option<ExitStatus> {
+        self.child_exited
+    }
+
+    pub fn has_interactive_prompt(&self) -> bool {
+        let term = self.term.lock_unfair();
+        let cursor_line = term.grid().cursor.point.line;
+        let cursor_col = term.grid().cursor.point.column;
+        let columns = term.grid().columns();
+
+        let mut lines = Vec::new();
+        for line_offset in 0..20 {
+            let line_idx = Line(cursor_line.0 - line_offset as i32);
+            if line_idx.0 < term.topmost_line().0 {
+                break;
+            }
+            let mut text = String::new();
+            for col in 0..columns {
+                text.push(term.grid()[line_idx][Column(col)].c);
+            }
+            lines.push(text.trim_end().to_string());
+        }
+
+        let combined = lines.join("\n");
+
+        // Claude Code shows "›" on the input line when waiting for user input.
+        // The cursor sits right after "› " (column 2) or further if user typed.
+        let cursor_line_text = lines.first().map(|s| s.as_str()).unwrap_or("");
+        let has_claude_input_prompt = cursor_line_text.starts_with('›')
+            || cursor_line_text.starts_with('\u{203a}');
+
+        // Also detect when cursor is on an empty line right below the "›" prompt
+        let line_above_is_prompt = lines.get(1).map_or(false, |l| {
+            l.starts_with('›') || l.starts_with('\u{203a}')
+        }) && cursor_line_text.is_empty() && cursor_col == Column(0);
+
+        let has_numbered_options = lines.iter().any(|l| {
+            let trimmed = l.trim();
+            trimmed.starts_with("1.") || trimmed.starts_with("› 1.")
+        }) && lines.iter().any(|l| {
+            let trimmed = l.trim();
+            trimmed.starts_with("2.") || trimmed.starts_with("3.")
+        });
+        let has_proceed_prompt = combined.contains("Would you like to proceed")
+            || combined.contains("Shall I proceed")
+            || combined.contains("Do you want to proceed");
+        let has_yn_prompt = combined.contains("[y/n]")
+            || combined.contains("[Y/n]")
+            || combined.contains("[yes/no]");
+
+        has_claude_input_prompt || line_above_is_prompt || has_numbered_options || has_proceed_prompt || has_yn_prompt
     }
 
     pub fn wait_for_completed_task(&self, cx: &App) -> Task<Option<ExitStatus>> {

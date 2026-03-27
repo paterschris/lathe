@@ -14,6 +14,68 @@
 
 (shorthand_field_identifier) @property
 
+; Alternating chain colors for field access chains (e.g. a.b.c.d)
+; The innermost field in a chain gets chain_1
+(field_expression
+  value: (field_expression
+    field: (field_identifier) @property.chain_1))
+
+; Fields whose value is a field_expression get chain_2
+(field_expression
+  value: (field_expression)
+  field: (field_identifier) @property.chain_2)
+
+; Depth 2: override back to chain_1
+(field_expression
+  value: (field_expression
+    value: (field_expression))
+  field: (field_identifier) @property.chain_1)
+
+; Depth 3: override back to chain_2
+(field_expression
+  value: (field_expression
+    value: (field_expression
+      value: (field_expression)))
+  field: (field_identifier) @property.chain_2)
+
+; Depth 4: override back to chain_1
+(field_expression
+  value: (field_expression
+    value: (field_expression
+      value: (field_expression
+        value: (field_expression))))
+  field: (field_identifier) @property.chain_1)
+
+; Depth 5: override back to chain_2
+(field_expression
+  value: (field_expression
+    value: (field_expression
+      value: (field_expression
+        value: (field_expression
+          value: (field_expression)))))
+  field: (field_identifier) @property.chain_2)
+
+; Depth 6: override back to chain_1
+(field_expression
+  value: (field_expression
+    value: (field_expression
+      value: (field_expression
+        value: (field_expression
+          value: (field_expression
+            value: (field_expression))))))
+  field: (field_identifier) @property.chain_1)
+
+; Depth 7: override back to chain_2
+(field_expression
+  value: (field_expression
+    value: (field_expression
+      value: (field_expression
+        value: (field_expression
+          value: (field_expression
+            value: (field_expression
+              value: (field_expression)))))))
+  field: (field_identifier) @property.chain_2)
+
 (trait_item
   name: (type_identifier) @type.interface)
 
@@ -46,6 +108,53 @@
     (field_expression
       field: (field_identifier) @function.method)
   ])
+
+; Chained method calls - inner method of a chain gets chain_1
+(call_expression
+  function: (field_expression
+    value: (call_expression
+      function: (field_expression
+        field: (field_identifier) @function.method.chain_1))))
+
+; Method whose value is a chained call → chain_2
+(call_expression
+  function: (field_expression
+    value: (call_expression
+      function: (field_expression))
+    field: (field_identifier) @function.method.chain_2))
+
+; Depth 2: override back to chain_1
+(call_expression
+  function: (field_expression
+    value: (call_expression
+      function: (field_expression
+        value: (call_expression
+          function: (field_expression))))
+    field: (field_identifier) @function.method.chain_1))
+
+; Depth 3: override back to chain_2
+(call_expression
+  function: (field_expression
+    value: (call_expression
+      function: (field_expression
+        value: (call_expression
+          function: (field_expression
+            value: (call_expression
+              function: (field_expression))))))
+    field: (field_identifier) @function.method.chain_2))
+
+; Depth 4: override back to chain_1
+(call_expression
+  function: (field_expression
+    value: (call_expression
+      function: (field_expression
+        value: (call_expression
+          function: (field_expression
+            value: (call_expression
+              function: (field_expression
+                value: (call_expression
+                  function: (field_expression))))))))
+    field: (field_identifier) @function.method.chain_1))
 
 (function_item
   name: (identifier) @function.definition)
@@ -228,6 +337,26 @@ operator: "/" @operator
 
 (parameter
   (identifier) @variable.parameter)
+
+; Alternating parameter position colors
+(parameter
+  (identifier) @variable.parameter.chain_1
+  (#sibling-index-is-even? @variable.parameter.chain_1))
+
+(parameter
+  (identifier) @variable.parameter.chain_2
+  (#sibling-index-is-odd? @variable.parameter.chain_2))
+
+; Nested closure depth coloring
+(closure_expression
+  (closure_parameters
+    "|" @function.closure.depth_1)
+  (#ancestor-count-is-odd? @function.closure.depth_1))
+
+(closure_expression
+  (closure_parameters
+    "|" @function.closure.depth_2)
+  (#ancestor-count-is-even? @function.closure.depth_2))
 
 (attribute_item
   (attribute

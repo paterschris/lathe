@@ -131,6 +131,8 @@ pub struct TabContentParams {
     pub preview: bool,
     /// Tab content should be deemphasized when active pane does not have focus.
     pub deemphasized: bool,
+    /// Override for the tab text color, set by the pane based on git status.
+    pub text_color_override: Option<Color>,
 }
 
 impl TabContentParams {
@@ -253,6 +255,9 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
         unimplemented!("clone_on_split() must be implemented if can_split() returns true")
     }
     fn is_dirty(&self, _: &App) -> bool {
+        false
+    }
+    fn is_awaiting_input(&self, _: &App) -> bool {
         false
     }
     fn capability(&self, _: &App) -> Capability {
@@ -504,6 +509,7 @@ pub trait ItemHandle: 'static + Send {
     fn item_id(&self) -> EntityId;
     fn to_any_view(&self) -> AnyView;
     fn is_dirty(&self, cx: &App) -> bool;
+    fn is_awaiting_input(&self, cx: &App) -> bool;
     fn capability(&self, cx: &App) -> Capability;
     fn toggle_read_only(&self, window: &mut Window, cx: &mut App);
     fn has_deleted_file(&self, cx: &App) -> bool;
@@ -1001,6 +1007,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn is_dirty(&self, cx: &App) -> bool {
         self.read(cx).is_dirty(cx)
+    }
+
+    fn is_awaiting_input(&self, cx: &App) -> bool {
+        self.read(cx).is_awaiting_input(cx)
     }
 
     fn capability(&self, cx: &App) -> Capability {
