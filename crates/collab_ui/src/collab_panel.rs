@@ -2749,7 +2749,7 @@ impl CollabPanel {
                                 .tooltip(Tooltip::text(if self.filter_active_channels {
                                     "Show All Channels"
                                 } else {
-                                    "Show Active Channels"
+                                    "Show Occupied Channels"
                                 })),
                         )
                         .child(
