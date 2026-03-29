@@ -7,7 +7,16 @@ A custom code editor forked from [Zed](https://zed.dev), with enhancements for o
 - **Custom theme and syntax highlighting** — tuned for our codebase
 - **Terminal awaiting-input indicator** — shows a return icon in the terminal tab and title bar when Claude Code (or other interactive prompts) are waiting for your input
 
-## Prerequisites
+## Install (pre-built)
+
+Download the latest `.zip` for your Mac from [Releases](https://github.com/paterschris/lathe/releases), unzip, and drag **Lathe Dev.app** to `/Applications`.
+
+- **Apple Silicon** — download the `aarch64` zip
+- **Intel Mac** — download the `x86_64` zip
+
+## Build from source
+
+### Prerequisites
 
 - **macOS** (Apple Silicon or Intel)
 - **Rust** — install via [rustup](https://rustup.rs):
@@ -19,7 +28,7 @@ A custom code editor forked from [Zed](https://zed.dev), with enhancements for o
   xcode-select --install
   ```
 
-## Build and install
+### Build and install
 
 ```sh
 # Clone the repo

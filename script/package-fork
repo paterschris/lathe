@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Determine architecture
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+
+channel=$(<crates/zed/RELEASE_CHANNEL)
+
+# Resolve app name from channel
+case "$channel" in
+    stable) app_name="Lathe.app" ;;
+    preview) app_name="Lathe Preview.app" ;;
+    nightly) app_name="Lathe Nightly.app" ;;
+    dev) app_name="Lathe Dev.app" ;;
+    *) app_name="Lathe Dev.app" ;;
+esac
+
+# Find the bundle
+bundle_dir="target/${target_triple}/release/bundle/osx"
+app_path="${bundle_dir}/${app_name}"
+
+if [ ! -d "$app_path" ]; then
+    bundle_dir="target/release/bundle/osx"
+    app_path="${bundle_dir}/${app_name}"
+fi
+
+if [ ! -d "$app_path" ]; then
+    echo "Error: App bundle not found. Run 'script/build-fork' first."
+    exit 1
+fi
+
+# Get version from Cargo.toml
+version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+# Determine arch label
+case "$target_triple" in
+    aarch64-*) arch="aarch64" ;;
+    x86_64-*) arch="x86_64" ;;
+    *) arch="$target_triple" ;;
+esac
+
+zip_name="Lathe-${version}-${arch}-macos.zip"
+out_dir="target/release"
+
+echo "=== Packaging ${app_name} ==="
+echo "  Version: ${version}"
+echo "  Arch: ${arch}"
+
+# Create zip using ditto (preserves macOS metadata and code signatures)
+ditto -c -k --keepParent "$app_path" "${out_dir}/${zip_name}"
+
+echo ""
+echo "=== Package created ==="
+echo "  ${out_dir}/${zip_name}"
+echo ""
+echo "To create a GitHub release:"
+echo "  gh release create v${version} \"${out_dir}/${zip_name}\" --title \"Lathe v${version}\" --notes \"Release v${version}\""
