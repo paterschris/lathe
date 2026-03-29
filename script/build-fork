@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+echo "=== Building Lathe ==="
+
+# Ensure cargo-bundle is installed (Zed's fork of cargo-bundle)
+cargo_bundle_version=$(cargo -q bundle --help 2>&1 | head -n 1 || echo "")
+if [ "$cargo_bundle_version" != "cargo-bundle v0.6.1-zed" ]; then
+    echo "Installing cargo-bundle..."
+    cargo install cargo-bundle --git https://github.com/zed-industries/cargo-bundle.git --branch zed-deploy
+fi
+
+# Ensure Rust toolchain is available
+if ! command -v rustc &>/dev/null; then
+    echo "Error: Rust is not installed. Install via https://rustup.rs"
+    exit 1
+fi
+
+# Deal with versions of macOS that don't include libstdc++ headers
+export CXXFLAGS="-stdlib=libc++"
+
+# Determine architecture
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+
+echo "Target: $target_triple"
+echo "Building release binary..."
+
+cargo build --release --package zed --target "$target_triple"
+
+echo "Creating application bundle..."
+channel=$(<crates/zed/RELEASE_CHANNEL)
+
+pushd crates/zed > /dev/null
+cp Cargo.toml Cargo.toml.backup
+sed -i.bak "s/package.metadata.bundle-${channel}/package.metadata.bundle/" Cargo.toml
+
+export ZED_BUNDLE=true
+export CARGO_BUNDLE_SKIP_BUILD=true
+app_path=$(cargo bundle --release --target "$target_triple" --select-workspace-root | xargs)
+
+mv Cargo.toml.backup Cargo.toml
+rm -f Cargo.toml.bak
+popd > /dev/null
+
+echo ""
+echo "=== Bundle created ==="
+echo "  $app_path"
+echo ""
+echo "To install to /Applications:"
+echo "  script/install-fork"
+echo ""
+echo "To run directly:"
+echo "  open \"$app_path\""

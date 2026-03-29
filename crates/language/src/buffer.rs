@@ -5715,25 +5715,6 @@ impl<'a> Iterator for BufferChunks<'a> {
             {
                 chunk_end = chunk_end.min(*parent_capture_end);
                 highlight_id = Some(*parent_highlight_id);
-                // Debug: log when a "variable" highlight wins over what should be a chain
-                if highlights.stack.len() > 1 {
-                    let has_chain = highlights.stack.iter().any(|(_, id)| {
-                        // Check if any stack entry is a chain capture (non-default, non-variable)
-                        id.0 != parent_highlight_id.0 && !id.is_default()
-                    });
-                    if has_chain {
-                        use std::sync::atomic::{AtomicUsize, Ordering};
-                        static LOG_COUNT2: AtomicUsize = AtomicUsize::new(0);
-                        let count = LOG_COUNT2.fetch_add(1, Ordering::Relaxed);
-                        if count < 50 {
-                            let stack_ids: Vec<u32> = highlights.stack.iter().map(|(_, id)| id.0).collect();
-                            eprintln!(
-                                "[STACK-RESULT] winner_id={} stack={:?} chunk={}..{}",
-                                parent_highlight_id.0, stack_ids, chunk_start, chunk_end
-                            );
-                        }
-                    }
-                }
             }
             let bit_start = chunk_start - self.chunks.offset();
             let bit_end = chunk_end - self.chunks.offset();
