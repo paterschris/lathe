@@ -63,6 +63,16 @@ After building, you can run the binary directly:
 open "target/release/bundle/osx/Lathe Dev.app"
 ```
 
+## Releasing
+
+To build, package, and publish a GitHub release in one step:
+
+```sh
+script/release-fork
+```
+
+Requires the [GitHub CLI](https://cli.github.com/) (`brew install gh`). If a release for the current version already exists, the new build is uploaded alongside the existing assets.
+
 ## Notes
 
 - First builds take significantly longer than incremental rebuilds
