@@ -1,46 +1,61 @@
-# Zed
+# Lathe
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+A custom code editor forked from [Zed](https://zed.dev), with enhancements for our team’s workflow.
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+## Changes from upstream Zed
 
----
+- **Custom theme and syntax highlighting** — tuned for our codebase
+- **Terminal awaiting-input indicator** — shows a return icon in the terminal tab and title bar when Claude Code (or other interactive prompts) are waiting for your input
 
-### Installation
+## Prerequisites
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+- **macOS** (Apple Silicon or Intel)
+- **Rust** — install via [rustup](https://rustup.rs):
+  ```sh
+  curl --proto ‘=https’ --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+- **Xcode Command Line Tools**:
+  ```sh
+  xcode-select --install
+  ```
 
-Other platforms are not yet available:
+## Build and install
 
-- Web ([tracking issue](https://github.com/zed-industries/zed/issues/5396))
+```sh
+# Clone the repo
+git clone git@github.com:paterschris/lathe.git
+cd lathe
 
-### Developing Zed
+# Build the app bundle (takes ~10-15 min on first build)
+script/build-fork
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+# Install to /Applications
+script/install-fork
+```
 
-### Contributing
+The fork installs as **"Lathe Dev.app"** and runs alongside stock Zed without conflicts.
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+## Updating
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+```sh
+git pull
+script/build-fork
+script/install-fork
+```
 
-### Licensing
+## Running without installing
 
-License information for third party dependencies must be correctly provided for CI to pass.
+After building, you can run the binary directly:
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+```sh
+./target/release/zed
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
+# Or open the app bundle
+open "target/release/bundle/osx/Lathe Dev.app"
+```
 
-## Sponsorship
+## Notes
 
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
-
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+- First builds take significantly longer than incremental rebuilds
+- The app shares settings and extensions with stock Zed (same `~/Library/Application Support/Zed` directory)
+- The `cargo-bundle` tool is installed automatically on first build from Zed’s fork at [zed-industries/cargo-bundle](https://github.com/zed-industries/cargo-bundle)

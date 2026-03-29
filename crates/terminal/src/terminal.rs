@@ -2253,20 +2253,24 @@ impl Terminal {
 
         let combined = lines.join("\n");
 
-        // Claude Code shows "›" on the input line when waiting for user input.
-        // The cursor sits right after "› " (column 2) or further if user typed.
+        // Claude Code shows "❯" (U+2771) on the input line when waiting for user input.
+        // Older versions may use "›" (U+203A). Check for both.
         let cursor_line_text = lines.first().map(|s| s.as_str()).unwrap_or("");
-        let has_claude_input_prompt = cursor_line_text.starts_with('›')
-            || cursor_line_text.starts_with('\u{203a}');
+        let is_prompt_char = |l: &str| {
+            let trimmed = l.trim();
+            trimmed.starts_with('❯') || trimmed.starts_with('\u{2771}')
+                || trimmed.starts_with('›') || trimmed.starts_with('\u{203a}')
+        };
+        let has_claude_input_prompt = is_prompt_char(cursor_line_text);
 
-        // Also detect when cursor is on an empty line right below the "›" prompt
-        let line_above_is_prompt = lines.get(1).map_or(false, |l| {
-            l.starts_with('›') || l.starts_with('\u{203a}')
-        }) && cursor_line_text.is_empty() && cursor_col == Column(0);
+        // Detect when cursor is on or near a line below the prompt.
+        // Claude Code may insert status lines (e.g. "⏵⏵ bypass permissions on")
+        // between the prompt and the cursor, so scan a few lines up.
+        let has_nearby_prompt = lines.iter().take(5).any(|l| is_prompt_char(l));
 
         let has_numbered_options = lines.iter().any(|l| {
             let trimmed = l.trim();
-            trimmed.starts_with("1.") || trimmed.starts_with("› 1.")
+            trimmed.starts_with("1.") || trimmed.starts_with("› 1.") || trimmed.starts_with("❯ 1.")
         }) && lines.iter().any(|l| {
             let trimmed = l.trim();
             trimmed.starts_with("2.") || trimmed.starts_with("3.")
@@ -2278,7 +2282,7 @@ impl Terminal {
             || combined.contains("[Y/n]")
             || combined.contains("[yes/no]");
 
-        has_claude_input_prompt || line_above_is_prompt || has_numbered_options || has_proceed_prompt || has_yn_prompt
+        has_claude_input_prompt || has_nearby_prompt || has_numbered_options || has_proceed_prompt || has_yn_prompt
     }
 
     pub fn wait_for_completed_task(&self, cx: &App) -> Task<Option<ExitStatus>> {
