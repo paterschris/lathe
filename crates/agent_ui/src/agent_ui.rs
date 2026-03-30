@@ -33,6 +33,7 @@ mod text_thread_editor;
 mod text_thread_history;
 mod thread_history;
 mod thread_history_view;
+mod thread_import;
 pub mod thread_metadata_store;
 pub mod threads_archive_view;
 mod ui;
@@ -250,6 +251,16 @@ pub enum Agent {
         #[serde(rename = "name")]
         id: AgentId,
     },
+}
+
+impl From<AgentId> for Agent {
+    fn from(id: AgentId) -> Self {
+        if id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
+            Self::NativeAgent
+        } else {
+            Self::Custom { id }
+        }
+    }
 }
 
 impl Agent {
