@@ -15,12 +15,12 @@ use picker::{Picker, PickerDelegate};
 use platform_title_bar::PlatformTitleBar;
 use release_channel::ReleaseChannel;
 use rope::Rope;
-use settings::Settings;
+use settings::{ActionSequence, Settings};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
-use theme::ThemeSettings;
+use theme_settings::ThemeSettings;
 use ui::{Divider, ListItem, ListItemSpacing, ListSubHeader, Tooltip, prelude::*};
 use ui_input::ErasedEditor;
 use util::{ResultExt, TryFutureExt};
@@ -1392,13 +1392,20 @@ impl RulesLibrary {
 
 impl Render for RulesLibrary {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let ui_font = theme::setup_ui_font(window, cx);
+        let ui_font = theme_settings::setup_ui_font(window, cx);
         let theme = cx.theme().clone();
 
         client_side_decorations(
             v_flex()
                 .id("rules-library")
                 .key_context("RulesLibrary")
+                .on_action(
+                    |action_sequence: &ActionSequence, window: &mut Window, cx: &mut App| {
+                        for action in &action_sequence.0 {
+                            window.dispatch_action(action.boxed_clone(), cx);
+                        }
+                    },
+                )
                 .on_action(cx.listener(|this, &NewRule, window, cx| this.new_rule(window, cx)))
                 .on_action(
                     cx.listener(|this, &DeleteRule, window, cx| {

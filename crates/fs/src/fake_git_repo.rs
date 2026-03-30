@@ -8,7 +8,7 @@ use git::{
     repository::{
         AskPassDelegate, Branch, CommitDataReader, CommitDetails, CommitOptions, FetchOptions,
         GRAPH_CHUNK_SIZE, GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder,
-        LogSource, PushOptions, Remote, RepoPath, ResetMode, Worktree,
+        LogSource, PushOptions, Remote, RepoPath, ResetMode, SearchCommitArgs, Worktree,
     },
     status::{
         DiffTreeType, FileStatus, GitStatus, StatusCode, TrackedStatus, TreeDiff, TreeDiffStatus,
@@ -427,7 +427,7 @@ impl GitRepository for FakeGitRepository {
                 .unwrap_or_else(|| "refs/heads/main".to_string());
             let main_worktree = Worktree {
                 path: work_dir,
-                ref_name: branch_ref.into(),
+                ref_name: Some(branch_ref.into()),
                 sha: head_sha.into(),
             };
             let mut all = vec![main_worktree];
@@ -468,7 +468,7 @@ impl GitRepository for FakeGitRepository {
                     state.refs.insert(ref_name.clone(), sha.clone());
                     state.worktrees.push(Worktree {
                         path,
-                        ref_name: ref_name.into(),
+                        ref_name: Some(ref_name.into()),
                         sha: sha.into(),
                     });
                     state.branches.insert(branch_name);
@@ -1015,6 +1015,15 @@ impl GitRepository for FakeGitRepository {
             Ok(())
         }
         .boxed()
+    }
+
+    fn search_commits(
+        &self,
+        _log_source: LogSource,
+        _search_args: SearchCommitArgs,
+        _request_tx: Sender<Oid>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { bail!("search_commits not supported for FakeGitRepository") }.boxed()
     }
 
     fn commit_data_reader(&self) -> Result<CommitDataReader> {
