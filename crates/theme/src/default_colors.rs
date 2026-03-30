@@ -8,29 +8,11 @@ pub(crate) fn neutral() -> ColorScaleSet {
     sand()
 }
 
-const ADDED_COLOR: Hsla = Hsla {
-    h: 134. / 360.,
-    s: 0.55,
-    l: 0.40,
-    a: 1.0,
-};
 const WORD_ADDED_COLOR: Hsla = Hsla {
     h: 134. / 360.,
     s: 0.55,
     l: 0.40,
     a: 0.35,
-};
-const MODIFIED_COLOR: Hsla = Hsla {
-    h: 48. / 360.,
-    s: 0.76,
-    l: 0.47,
-    a: 1.0,
-};
-const REMOVED_COLOR: Hsla = Hsla {
-    h: 350. / 360.,
-    s: 0.88,
-    l: 0.25,
-    a: 1.0,
 };
 const WORD_DELETED_COLOR: Hsla = Hsla {
     h: 350. / 360.,
