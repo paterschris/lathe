@@ -5,9 +5,9 @@ use gpui::{FontStyle, FontWeight, HighlightStyle, Hsla};
 use palette::FromColor;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-pub use settings_content::{
+use settings_content::{
     FontStyleContent, FontWeightContent, HighlightStyleContent, StatusColorsContent,
-    ThemeColorsContent, ThemeStyleContent, WindowBackgroundContent,
+    ThemeColorsContent, ThemeStyleContent,
 };
 
 /// The appearance of a theme in serialized content.

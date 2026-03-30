@@ -72,29 +72,11 @@ pub(crate) fn zed_default_dark() -> Theme {
     let teal = hsla(187. / 360., 47. / 100., 55. / 100., 1.0);
     let yellow = hsla(39. / 360., 67. / 100., 69. / 100., 1.0);
 
-    const ADDED_COLOR: Hsla = Hsla {
-        h: 134. / 360.,
-        s: 0.55,
-        l: 0.40,
-        a: 1.0,
-    };
     const WORD_ADDED_COLOR: Hsla = Hsla {
         h: 134. / 360.,
         s: 0.55,
         l: 0.40,
         a: 0.35,
-    };
-    const MODIFIED_COLOR: Hsla = Hsla {
-        h: 48. / 360.,
-        s: 0.76,
-        l: 0.47,
-        a: 1.0,
-    };
-    const REMOVED_COLOR: Hsla = Hsla {
-        h: 350. / 360.,
-        s: 0.88,
-        l: 0.25,
-        a: 1.0,
     };
     const WORD_DELETED_COLOR: Hsla = Hsla {
         h: 350. / 360.,
