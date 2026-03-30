@@ -15,19 +15,9 @@ Currently only **Apple Silicon** builds are provided.
 
 ## Build from source
 
-### Prerequisites
-
-- **macOS** (Apple Silicon or Intel)
-- **Rust** — install via [rustup](https://rustup.rs):
-  ```sh
-  curl --proto ‘=https’ --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
-- **Xcode Command Line Tools**:
-  ```sh
-  xcode-select --install
-  ```
-
 ### Build and install
+
+The build script automatically installs all prerequisites (Xcode Command Line Tools, Rust via rustup, and cargo-bundle).
 
 ```sh
 # Clone the repo
