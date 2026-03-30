@@ -9,7 +9,7 @@ use channel::{Channel, ChannelEvent, ChannelStore};
 use client::{ChannelId, Client, Contact, User, UserStore};
 use collections::{HashMap, HashSet};
 use contact_finder::ContactFinder;
-use db::kvp::KeyValueStore;
+use db::kvp::{GlobalKeyValueStore, KeyValueStore};
 use editor::{Editor, EditorElement, EditorStyle};
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
@@ -259,7 +259,6 @@ pub struct CollabPanel {
     subscriptions: Vec<Subscription>,
     collapsed_sections: Vec<Section>,
     collapsed_channels: Vec<ChannelId>,
-    favorite_channels: Vec<ChannelId>,
     filter_active_channels: bool,
     workspace: WeakEntity<Workspace>,
 }
@@ -267,8 +266,6 @@ pub struct CollabPanel {
 #[derive(Serialize, Deserialize)]
 struct SerializedCollabPanel {
     collapsed_channels: Option<Vec<u64>>,
-    #[serde(default)]
-    favorite_channels: Option<Vec<u64>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
@@ -394,7 +391,6 @@ impl CollabPanel {
                 match_candidates: Vec::default(),
                 collapsed_sections: vec![Section::Offline],
                 collapsed_channels: Vec::default(),
-                favorite_channels: Vec::default(),
                 filter_active_channels: false,
                 workspace: workspace.weak_handle(),
                 client: workspace.app_state().client.clone(),
@@ -472,15 +468,28 @@ impl CollabPanel {
                         .iter()
                         .map(|cid| ChannelId(*cid))
                         .collect();
-                    panel.favorite_channels = serialized_panel
-                        .favorite_channels
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|cid| ChannelId(*cid))
-                        .collect();
                     cx.notify();
                 });
             }
+
+            let favorites: Vec<ChannelId> = GlobalKeyValueStore::global()
+                .read_kvp("favorite_channels")
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str::<Vec<u64>>(&json).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(ChannelId)
+                .collect();
+
+            if !favorites.is_empty() {
+                panel.update(cx, |panel, cx| {
+                    panel.channel_store.update(cx, |store, cx| {
+                        store.set_favorite_channel_ids(favorites, cx);
+                    });
+                });
+            }
+
             panel
         })
     }
@@ -508,21 +517,12 @@ impl CollabPanel {
             Some(self.collapsed_channels.iter().map(|id| id.0).collect())
         };
 
-        let favorite_channels = if self.favorite_channels.is_empty() {
-            None
-        } else {
-            Some(self.favorite_channels.iter().map(|id| id.0).collect())
-        };
-
         let kvp = KeyValueStore::global(cx);
         self.pending_serialization = cx.background_spawn(
             async move {
                 kvp.write_kvp(
                     serialization_key,
-                    serde_json::to_string(&SerializedCollabPanel {
-                        collapsed_channels,
-                        favorite_channels,
-                    })?,
+                    serde_json::to_string(&SerializedCollabPanel { collapsed_channels })?,
                 )
                 .await?;
                 anyhow::Ok(())
@@ -684,21 +684,12 @@ impl CollabPanel {
 
         let mut request_entries = Vec::new();
 
-        if self.channel_store.read(cx).channel_count() > 0 {
-            let previous_len = self.favorite_channels.len();
-            self.favorite_channels
-                .retain(|id| self.channel_store.read(cx).channel_for_id(*id).is_some());
-            if self.favorite_channels.len() != previous_len {
-                self.serialize(cx);
-            }
-        }
-
         let channel_store = self.channel_store.read(cx);
         let user_store = self.user_store.read(cx);
 
-        if !self.favorite_channels.is_empty() {
-            let favorite_channels: Vec<_> = self
-                .favorite_channels
+        let favorite_ids = channel_store.favorite_channel_ids();
+        if !favorite_ids.is_empty() {
+            let favorite_channels: Vec<_> = favorite_ids
                 .iter()
                 .filter_map(|id| channel_store.channel_for_id(*id))
                 .collect();
@@ -1442,7 +1433,7 @@ impl CollabPanel {
                 )
                 .separator()
                 .entry(
-                    if self.is_channel_favorited(channel_id) {
+                    if self.is_channel_favorited(channel_id, cx) {
                         "Remove from Favorites"
                     } else {
                         "Add to Favorites"
@@ -1932,21 +1923,34 @@ impl CollabPanel {
     }
 
     fn toggle_favorite_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
-        match self.favorite_channels.binary_search(&channel_id) {
-            Ok(ix) => {
-                self.favorite_channels.remove(ix);
-            }
-            Err(ix) => {
-                self.favorite_channels.insert(ix, channel_id);
-            }
-        };
-        self.serialize(cx);
-        self.update_entries(true, cx);
-        cx.notify();
+        self.channel_store.update(cx, |store, cx| {
+            store.toggle_favorite_channel(channel_id, cx);
+        });
+        self.persist_favorites(cx);
     }
 
-    fn is_channel_favorited(&self, channel_id: ChannelId) -> bool {
-        self.favorite_channels.binary_search(&channel_id).is_ok()
+    fn is_channel_favorited(&self, channel_id: ChannelId, cx: &App) -> bool {
+        self.channel_store.read(cx).is_channel_favorited(channel_id)
+    }
+
+    fn persist_favorites(&mut self, cx: &mut Context<Self>) {
+        let favorite_ids: Vec<u64> = self
+            .channel_store
+            .read(cx)
+            .favorite_channel_ids()
+            .iter()
+            .map(|id| id.0)
+            .collect();
+        self.pending_serialization = cx.background_spawn(
+            async move {
+                let json = serde_json::to_string(&favorite_ids)?;
+                GlobalKeyValueStore::global()
+                    .write_kvp("favorite_channels".to_string(), json)
+                    .await?;
+                anyhow::Ok(())
+            }
+            .log_err(),
+        );
     }
 
     fn leave_call(window: &mut Window, cx: &mut App) {
@@ -3058,7 +3062,7 @@ impl CollabPanel {
             .unwrap_or(px(240.));
         let root_id = channel.root_id();
 
-        let is_favorited = self.is_channel_favorited(channel_id);
+        let is_favorited = self.is_channel_favorited(channel_id, cx);
         let (favorite_icon, favorite_color, favorite_tooltip) = if is_favorited {
             (IconName::StarFilled, Color::Accent, "Remove from Favorites")
         } else {
@@ -3066,7 +3070,7 @@ impl CollabPanel {
         };
 
         h_flex()
-            .id(channel_id.0 as usize)
+            .id(ix)
             .group("")
             .h_6()
             .w_full()
@@ -3096,7 +3100,7 @@ impl CollabPanel {
                 }),
             )
             .child(
-                ListItem::new(channel_id.0 as usize)
+                ListItem::new(ix)
                     // Add one level of depth for the disclosure arrow.
                     .height(px(26.))
                     .indent_level(depth + 1)
