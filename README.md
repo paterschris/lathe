@@ -9,10 +9,9 @@ A custom code editor forked from [Zed](https://zed.dev), with enhancements for o
 
 ## Install (pre-built)
 
-Download the latest `.zip` for your Mac from [Releases](https://github.com/paterschris/lathe/releases), unzip, and drag **Lathe Dev.app** to `/Applications`.
+Download the latest `.zip` for your Mac from [Releases](https://github.com/paterschris/lathe/releases), unzip, and drag **Lathe.app** to `/Applications`.
 
-- **Apple Silicon** — download the `aarch64` zip
-- **Intel Mac** — download the `x86_64` zip
+Currently only **Apple Silicon** builds are provided.
 
 ## Build from source
 
@@ -42,7 +41,7 @@ script/build-fork
 script/install-fork
 ```
 
-The fork installs as **"Lathe Dev.app"** and runs alongside stock Zed without conflicts.
+The fork installs as **"Lathe.app"** and runs alongside stock Zed without conflicts.
 
 ## Updating
 
@@ -54,13 +53,10 @@ script/install-fork
 
 ## Running without installing
 
-After building, you can run the binary directly:
+After building, you can open the app bundle directly without copying to `/Applications`:
 
 ```sh
-./target/release/zed
-
-# Or open the app bundle
-open "target/release/bundle/osx/Lathe Dev.app"
+open "$(find target -name 'Lathe.app' -path '*/bundle/osx/*' | head -1)"
 ```
 
 ## Releasing
