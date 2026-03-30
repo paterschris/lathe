@@ -4,7 +4,7 @@ use acp_thread::ThreadStatus;
 use action_log::DiffStats;
 use agent_client_protocol::{self as acp};
 use agent_settings::AgentSettings;
-use agent_ui::thread_metadata_store::{SidebarThreadMetadataStore, ThreadMetadata};
+use agent_ui::thread_metadata_store::ThreadMetadataStore;
 use agent_ui::threads_archive_view::{
     ThreadsArchiveView, ThreadsArchiveViewEvent, format_history_entry_timestamp,
 };
@@ -21,7 +21,7 @@ use gpui::{
 use menu::{
     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
 };
-use project::{Event as ProjectEvent, linked_worktree_short_name};
+use project::{AgentId, AgentRegistryStore, Event as ProjectEvent, linked_worktree_short_name};
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
 use ui::utils::platform_title_bar_height;
 
@@ -383,12 +383,9 @@ impl Sidebar {
         })
         .detach();
 
-        cx.observe(
-            &SidebarThreadMetadataStore::global(cx),
-            |this, _store, cx| {
-                this.update_entries(cx);
-            },
-        )
+        cx.observe(&ThreadMetadataStore::global(cx), |this, _store, cx| {
+            this.update_entries(cx);
+        })
         .detach();
 
         cx.observe_flag::<AgentV2FeatureFlag, _>(window, |_is_enabled, this, _window, cx| {
@@ -712,20 +709,16 @@ impl Sidebar {
             .iter()
             .any(|ws| !workspace_path_list(ws, cx).paths().is_empty());
 
-        let resolve_agent = |row: &ThreadMetadata| -> (Agent, IconName, Option<SharedString>) {
-            match &row.agent_id {
-                None => (Agent::NativeAgent, IconName::ZedAgent, None),
-                Some(id) => {
-                    let custom_icon = agent_server_store
-                        .as_ref()
-                        .and_then(|store| store.read(cx).agent_icon(id));
-                    (
-                        Agent::Custom { id: id.clone() },
-                        IconName::Terminal,
-                        custom_icon,
-                    )
-                }
-            }
+        let resolve_agent = |agent_id: &AgentId| -> (Agent, IconName, Option<SharedString>) {
+            let agent = Agent::from(agent_id.clone());
+            let icon = match agent {
+                Agent::NativeAgent => IconName::ZedAgent,
+                Agent::Custom { .. } => IconName::Terminal,
+            };
+            let icon_from_external_svg = agent_server_store
+                .as_ref()
+                .and_then(|store| store.read(cx).agent_icon(&agent_id));
+            (agent, icon, icon_from_external_svg)
         };
 
         for (group_name, group) in project_groups.groups() {
@@ -764,7 +757,7 @@ impl Sidebar {
 
             if should_load_threads {
                 let mut seen_session_ids: HashSet<acp::SessionId> = HashSet::new();
-                let thread_store = SidebarThreadMetadataStore::global(cx);
+                let thread_store = ThreadMetadataStore::global(cx);
 
                 // Load threads from each workspace in the group.
                 for workspace in &group.workspaces {
@@ -774,7 +767,7 @@ impl Sidebar {
                         if !seen_session_ids.insert(row.session_id.clone()) {
                             continue;
                         }
-                        let (agent, icon, icon_from_external_svg) = resolve_agent(&row);
+                        let (agent, icon, icon_from_external_svg) = resolve_agent(&row.agent_id);
                         let worktrees =
                             worktree_info_from_thread_paths(&row.folder_paths, &project_groups);
                         threads.push(ThreadEntry {
@@ -824,7 +817,7 @@ impl Sidebar {
                         if !seen_session_ids.insert(row.session_id.clone()) {
                             continue;
                         }
-                        let (agent, icon, icon_from_external_svg) = resolve_agent(&row);
+                        let (agent, icon, icon_from_external_svg) = resolve_agent(&row.agent_id);
                         let worktrees =
                             worktree_info_from_thread_paths(&row.folder_paths, &project_groups);
                         threads.push(ThreadEntry {
@@ -2092,12 +2085,8 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Eagerly save thread metadata so that the sidebar is updated immediately
-        SidebarThreadMetadataStore::global(cx).update(cx, |store, cx| {
-            store.save(
-                ThreadMetadata::from_session_info(agent.id(), &session_info),
-                cx,
-            )
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.unarchive(&session_info.session_id, cx)
         });
 
         if let Some(path_list) = &session_info.work_dirs {
@@ -2276,6 +2265,8 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.archive(session_id, cx));
+
         // If we're archiving the currently focused thread, move focus to the
         // nearest thread within the same project group. We never cross group
         // boundaries — if the group has no other threads, clear focus and open
@@ -2376,9 +2367,6 @@ impl Sidebar {
                 }
             }
         }
-
-        SidebarThreadMetadataStore::global(cx)
-            .update(cx, |store, cx| store.delete(session_id.clone(), cx));
     }
 
     fn remove_selected_thread(
@@ -2393,11 +2381,13 @@ impl Sidebar {
         let Some(ListEntry::Thread(thread)) = self.contents.entries.get(ix) else {
             return;
         };
-        if thread.agent != Agent::NativeAgent {
-            return;
+        match thread.status {
+            AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation => return,
+            AgentThreadStatus::Completed | AgentThreadStatus::Error => {}
         }
+
         let session_id = thread.session_info.session_id.clone();
-        self.archive_thread(&session_id, window, cx);
+        self.archive_thread(&session_id, window, cx)
     }
 
     fn record_thread_access(&mut self, session_id: &acp::SessionId) {
@@ -3273,31 +3263,34 @@ impl Sidebar {
         }) else {
             return;
         };
-
         let Some(agent_panel) = active_workspace.read(cx).panel::<AgentPanel>(cx) else {
             return;
         };
+        let Some(agent_registry_store) = AgentRegistryStore::try_global(cx) else {
+            return;
+        };
 
-        let thread_store = agent_panel.read(cx).thread_store().clone();
-        let fs = active_workspace.read(cx).project().read(cx).fs().clone();
-        let agent_connection_store = agent_panel.read(cx).connection_store().clone();
         let agent_server_store = active_workspace
             .read(cx)
             .project()
             .read(cx)
             .agent_server_store()
-            .clone();
+            .downgrade();
+
+        let agent_connection_store = agent_panel.read(cx).connection_store().downgrade();
 
         let archive_view = cx.new(|cx| {
             ThreadsArchiveView::new(
-                agent_connection_store,
-                agent_server_store,
-                thread_store,
-                fs,
+                agent_connection_store.clone(),
+                agent_server_store.clone(),
+                agent_registry_store.downgrade(),
+                active_workspace.downgrade(),
+                self.multi_workspace.clone(),
                 window,
                 cx,
             )
         });
+
         let subscription = cx.subscribe_in(
             &archive_view,
             window,
@@ -3305,12 +3298,20 @@ impl Sidebar {
                 ThreadsArchiveViewEvent::Close => {
                     this.show_thread_list(window, cx);
                 }
-                ThreadsArchiveViewEvent::Unarchive {
-                    agent,
-                    session_info,
-                } => {
+                ThreadsArchiveViewEvent::Unarchive { thread } => {
                     this.show_thread_list(window, cx);
-                    this.activate_archived_thread(agent.clone(), session_info.clone(), window, cx);
+
+                    let agent = Agent::from(thread.agent_id.clone());
+                    let session_info = acp_thread::AgentSessionInfo {
+                        session_id: thread.session_id.clone(),
+                        work_dirs: Some(thread.folder_paths.clone()),
+                        title: Some(thread.title.clone()),
+                        updated_at: Some(thread.updated_at),
+                        created_at: thread.created_at,
+                        meta: None,
+                    };
+
+                    this.activate_archived_thread(agent, session_info, window, cx);
                 }
             },
         );

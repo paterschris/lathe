@@ -1,7 +1,10 @@
 use super::*;
 use acp_thread::StubAgentConnection;
 use agent::ThreadStore;
-use agent_ui::test_support::{active_session_id, open_thread_with_connection, send_message};
+use agent_ui::{
+    test_support::{active_session_id, open_thread_with_connection, send_message},
+    thread_metadata_store::ThreadMetadata,
+};
 use assistant_text_thread::TextThreadStore;
 use chrono::DateTime;
 use feature_flags::FeatureFlagAppExt as _;
@@ -20,7 +23,7 @@ fn init_test(cx: &mut TestAppContext) {
         editor::init(cx);
         cx.update_flags(false, vec!["agent-v2".into()]);
         ThreadStore::init_global(cx);
-        SidebarThreadMetadataStore::init_global(cx);
+        ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
         prompt_store::init(cx);
     });
@@ -113,14 +116,15 @@ async fn save_thread_metadata(
 ) {
     let metadata = ThreadMetadata {
         session_id,
-        agent_id: None,
+        agent_id: agent::ZED_AGENT_ID.clone(),
         title,
         updated_at,
         created_at: None,
         folder_paths: path_list,
+        archived: false,
     };
     cx.update(|cx| {
-        SidebarThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
     });
     cx.run_until_parked();
 }
@@ -1076,7 +1080,7 @@ async fn init_test_project_with_agent_panel(
     cx.update(|cx| {
         cx.update_flags(false, vec!["agent-v2".into()]);
         ThreadStore::init_global(cx);
-        SidebarThreadMetadataStore::init_global(cx);
+        ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
         prompt_store::init(cx);
     });
@@ -2249,7 +2253,7 @@ async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestApp
     cx.update(|cx| {
         cx.update_flags(false, vec!["agent-v2".into()]);
         ThreadStore::init_global(cx);
-        SidebarThreadMetadataStore::init_global(cx);
+        ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
         prompt_store::init(cx);
     });
@@ -2816,7 +2820,7 @@ async fn test_absorbed_worktree_running_thread_shows_live_status(cx: &mut TestAp
     cx.update(|cx| {
         cx.update_flags(false, vec!["agent-v2".into()]);
         ThreadStore::init_global(cx);
-        SidebarThreadMetadataStore::init_global(cx);
+        ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
         prompt_store::init(cx);
     });
@@ -2928,7 +2932,7 @@ async fn test_absorbed_worktree_completion_triggers_notification(cx: &mut TestAp
     cx.update(|cx| {
         cx.update_flags(false, vec!["agent-v2".into()]);
         ThreadStore::init_global(cx);
-        SidebarThreadMetadataStore::init_global(cx);
+        ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
         prompt_store::init(cx);
     });
@@ -3874,7 +3878,7 @@ async fn test_archive_thread_uses_next_threads_own_workspace(cx: &mut TestAppCon
     cx.update(|cx| {
         cx.update_flags(false, vec!["agent-v2".into()]);
         ThreadStore::init_global(cx);
-        SidebarThreadMetadataStore::init_global(cx);
+        ThreadMetadataStore::init_global(cx);
         language_model::LanguageModelRegistry::test(cx);
         prompt_store::init(cx);
     });
@@ -4178,11 +4182,11 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     send_message(&panel, cx);
     let session_id_c = active_session_id(&panel, cx);
     cx.update(|_, cx| {
-        SidebarThreadMetadataStore::global(cx).update(cx, |store, cx| {
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
             store.save(
                 ThreadMetadata {
                     session_id: session_id_c.clone(),
-                    agent_id: None,
+                    agent_id: agent::ZED_AGENT_ID.clone(),
                     title: "Thread C".into(),
                     updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0)
                         .unwrap(),
@@ -4190,6 +4194,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
                         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
                     ),
                     folder_paths: path_list.clone(),
+                    archived: false,
                 },
                 cx,
             )
@@ -4205,11 +4210,11 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     send_message(&panel, cx);
     let session_id_b = active_session_id(&panel, cx);
     cx.update(|_, cx| {
-        SidebarThreadMetadataStore::global(cx).update(cx, |store, cx| {
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
             store.save(
                 ThreadMetadata {
                     session_id: session_id_b.clone(),
-                    agent_id: None,
+                    agent_id: agent::ZED_AGENT_ID.clone(),
                     title: "Thread B".into(),
                     updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0)
                         .unwrap(),
@@ -4217,6 +4222,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
                         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap(),
                     ),
                     folder_paths: path_list.clone(),
+                    archived: false,
                 },
                 cx,
             )
@@ -4232,11 +4238,11 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     send_message(&panel, cx);
     let session_id_a = active_session_id(&panel, cx);
     cx.update(|_, cx| {
-        SidebarThreadMetadataStore::global(cx).update(cx, |store, cx| {
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
             store.save(
                 ThreadMetadata {
                     session_id: session_id_a.clone(),
-                    agent_id: None,
+                    agent_id: agent::ZED_AGENT_ID.clone(),
                     title: "Thread A".into(),
                     updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0)
                         .unwrap(),
@@ -4244,6 +4250,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
                         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0).unwrap(),
                     ),
                     folder_paths: path_list.clone(),
+                    archived: false,
                 },
                 cx,
             )
@@ -4343,11 +4350,11 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
     // ── 3. Add a historical thread (no last_accessed_at, no message sent) ──
     // This thread was never opened in a panel — it only exists in metadata.
     cx.update(|_, cx| {
-        SidebarThreadMetadataStore::global(cx).update(cx, |store, cx| {
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
             store.save(
                 ThreadMetadata {
                     session_id: acp::SessionId::new(Arc::from("thread-historical")),
-                    agent_id: None,
+                    agent_id: agent::ZED_AGENT_ID.clone(),
                     title: "Historical Thread".into(),
                     updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 6, 1, 0, 0, 0)
                         .unwrap(),
@@ -4355,6 +4362,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
                         chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 6, 1, 0, 0, 0).unwrap(),
                     ),
                     folder_paths: path_list.clone(),
+                    archived: false,
                 },
                 cx,
             )
@@ -4394,11 +4402,11 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
 
     // ── 4. Add another historical thread with older created_at ─────────
     cx.update(|_, cx| {
-        SidebarThreadMetadataStore::global(cx).update(cx, |store, cx| {
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
             store.save(
                 ThreadMetadata {
                     session_id: acp::SessionId::new(Arc::from("thread-old-historical")),
-                    agent_id: None,
+                    agent_id: agent::ZED_AGENT_ID.clone(),
                     title: "Old Historical Thread".into(),
                     updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2023, 6, 1, 0, 0, 0)
                         .unwrap(),
@@ -4406,6 +4414,7 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
                         chrono::TimeZone::with_ymd_and_hms(&Utc, 2023, 6, 1, 0, 0, 0).unwrap(),
                     ),
                     folder_paths: path_list.clone(),
+                    archived: false,
                 },
                 cx,
             )
@@ -4437,6 +4446,119 @@ async fn test_thread_switcher_ordering(cx: &mut TestAppContext) {
         sidebar.dismiss_thread_switcher(cx);
     });
     cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn test_archive_thread_keeps_metadata_but_hides_from_sidebar(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
+
+    save_thread_metadata(
+        acp::SessionId::new(Arc::from("thread-to-archive")),
+        "Thread To Archive".into(),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+        path_list.clone(),
+        cx,
+    )
+    .await;
+    cx.run_until_parked();
+
+    multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
+    cx.run_until_parked();
+
+    let entries = visible_entries_as_strings(&sidebar, cx);
+    assert!(
+        entries.iter().any(|e| e.contains("Thread To Archive")),
+        "expected thread to be visible before archiving, got: {entries:?}"
+    );
+
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.archive_thread(
+            &acp::SessionId::new(Arc::from("thread-to-archive")),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    let entries = visible_entries_as_strings(&sidebar, cx);
+    assert!(
+        !entries.iter().any(|e| e.contains("Thread To Archive")),
+        "expected thread to be hidden after archiving, got: {entries:?}"
+    );
+
+    cx.update(|_, cx| {
+        let store = ThreadMetadataStore::global(cx);
+        let archived: Vec<_> = store.read(cx).archived_entries().collect();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].session_id.0.as_ref(), "thread-to-archive");
+        assert!(archived[0].archived);
+    });
+}
+
+#[gpui::test]
+async fn test_archived_threads_excluded_from_sidebar_entries(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
+
+    save_thread_metadata(
+        acp::SessionId::new(Arc::from("visible-thread")),
+        "Visible Thread".into(),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap(),
+        path_list.clone(),
+        cx,
+    )
+    .await;
+
+    cx.update(|_, cx| {
+        let metadata = ThreadMetadata {
+            session_id: acp::SessionId::new(Arc::from("archived-thread")),
+            agent_id: agent::ZED_AGENT_ID.clone(),
+            title: "Archived Thread".into(),
+            updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+            created_at: None,
+            folder_paths: path_list.clone(),
+            archived: true,
+        };
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
+    });
+    cx.run_until_parked();
+
+    multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
+    cx.run_until_parked();
+
+    let entries = visible_entries_as_strings(&sidebar, cx);
+    assert!(
+        entries.iter().any(|e| e.contains("Visible Thread")),
+        "expected visible thread in sidebar, got: {entries:?}"
+    );
+    assert!(
+        !entries.iter().any(|e| e.contains("Archived Thread")),
+        "expected archived thread to be hidden from sidebar, got: {entries:?}"
+    );
+
+    cx.update(|_, cx| {
+        let store = ThreadMetadataStore::global(cx);
+        let all: Vec<_> = store.read(cx).entries().collect();
+        assert_eq!(
+            all.len(),
+            2,
+            "expected 2 total entries in the store, got: {}",
+            all.len()
+        );
+
+        let archived: Vec<_> = store.read(cx).archived_entries().collect();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].session_id.0.as_ref(), "archived-thread");
+    });
 }
 
 mod property_test {
@@ -4581,14 +4703,15 @@ mod property_test {
             + chrono::Duration::seconds(state.thread_counter as i64);
         let metadata = ThreadMetadata {
             session_id,
-            agent_id: None,
+            agent_id: agent::ZED_AGENT_ID.clone(),
             title,
             updated_at,
             created_at: None,
             folder_paths: path_list,
+            archived: false,
         };
         cx.update(|_, cx| {
-            SidebarThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
         });
     }
 
@@ -4615,7 +4738,7 @@ mod property_test {
             Operation::DeleteThread { index } => {
                 let session_id = state.remove_thread(index);
                 cx.update(|_, cx| {
-                    SidebarThreadMetadataStore::global(cx)
+                    ThreadMetadataStore::global(cx)
                         .update(cx, |store, cx| store.delete(session_id, cx));
                 });
             }
@@ -4868,7 +4991,7 @@ mod property_test {
             anyhow::bail!("sidebar should still have an associated multi-workspace");
         };
         let workspaces = multi_workspace.read(cx).workspaces().to_vec();
-        let thread_store = SidebarThreadMetadataStore::global(cx);
+        let thread_store = ThreadMetadataStore::global(cx);
 
         let sidebar_thread_ids: HashSet<acp::SessionId> = sidebar
             .contents
@@ -4963,7 +5086,7 @@ mod property_test {
         cx.update(|cx| {
             cx.update_flags(false, vec!["agent-v2".into()]);
             ThreadStore::init_global(cx);
-            SidebarThreadMetadataStore::init_global(cx);
+            ThreadMetadataStore::init_global(cx);
             language_model::LanguageModelRegistry::test(cx);
             prompt_store::init(cx);
         });
