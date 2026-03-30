@@ -1124,7 +1124,7 @@ impl<'a> SyntaxMapCaptures<'a> {
             let grammar_index = result
                 .grammars
                 .iter()
-                .position(|g| g.id == grammar.id())
+                .position(|g| g.id() == grammar.id())
                 .unwrap_or_else(|| {
                     result.grammars.push(grammar);
                     result.grammars.len() - 1
@@ -1270,7 +1270,7 @@ impl<'a> SyntaxMapMatches<'a> {
             let grammar_index = result
                 .grammars
                 .iter()
-                .position(|g| g.id == grammar.id())
+                .position(|g| g.id() == grammar.id())
                 .unwrap_or_else(|| {
                     result.grammars.push(grammar);
                     result.grammars.len() - 1

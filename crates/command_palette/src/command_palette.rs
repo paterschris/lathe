@@ -33,7 +33,11 @@ pub fn init(cx: &mut App) {
     cx.observe_new(CommandPalette::register).detach();
 }
 
-impl ModalView for CommandPalette {}
+impl ModalView for CommandPalette {
+    fn is_command_palette(&self) -> bool {
+        true
+    }
+}
 
 pub struct CommandPalette {
     picker: Entity<Picker<CommandPaletteDelegate>>,
@@ -927,7 +931,7 @@ mod tests {
     fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {
         cx.update(|cx| {
             let app_state = AppState::test(cx);
-            theme::init(theme::LoadThemes::JustBase, cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
             editor::init(cx);
             menu::init();
             go_to_line::init(cx);

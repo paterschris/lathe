@@ -1,30 +1,16 @@
 #![allow(missing_docs)]
 
-use gpui::{HighlightStyle, Hsla};
+use crate::styles::{StatusColorsRefinement, ThemeColorsRefinement};
+use gpui::{FontStyle, FontWeight, HighlightStyle, Hsla};
 use palette::FromColor;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use settings::IntoGpui;
-pub use settings::{FontWeightContent, WindowBackgroundContent};
+pub use settings_content::{
+    FontStyleContent, FontWeightContent, HighlightStyleContent, StatusColorsContent,
+    ThemeColorsContent, ThemeStyleContent, WindowBackgroundContent,
+};
 
-use crate::{StatusColorsRefinement, ThemeColorsRefinement};
-
-fn ensure_non_opaque(color: Hsla) -> Hsla {
-    const MAXIMUM_OPACITY: f32 = 0.7;
-    if color.a <= MAXIMUM_OPACITY {
-        color
-    } else {
-        Hsla {
-            a: MAXIMUM_OPACITY,
-            ..color
-        }
-    }
-}
-
-fn ensure_opaque(color: Hsla) -> Hsla {
-    Hsla { a: 1.0, ..color }
-}
-
+/// The appearance of a theme in serialized content.
 #[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AppearanceContent {
@@ -45,11 +31,11 @@ pub struct ThemeFamilyContent {
 pub struct ThemeContent {
     pub name: String,
     pub appearance: AppearanceContent,
-    pub style: settings::ThemeStyleContent,
+    pub style: ThemeStyleContent,
 }
 
 /// Returns the syntax style overrides in the [`ThemeContent`].
-pub fn syntax_overrides(this: &settings::ThemeStyleContent) -> Vec<(String, HighlightStyle)> {
+pub fn syntax_overrides(this: &ThemeStyleContent) -> Vec<(String, HighlightStyle)> {
     this.syntax
         .iter()
         .map(|(key, style)| {
@@ -64,8 +50,14 @@ pub fn syntax_overrides(this: &settings::ThemeStyleContent) -> Vec<(String, High
                         .background_color
                         .as_ref()
                         .and_then(|color| try_parse_color(color).ok()),
-                    font_style: style.font_style.map(|s| s.into_gpui()),
-                    font_weight: style.font_weight.map(|w| w.into_gpui()),
+                    font_style: style.font_style.map(|s| match s {
+                        FontStyleContent::Normal => FontStyle::Normal,
+                        FontStyleContent::Italic => FontStyle::Italic,
+                        FontStyleContent::Oblique => FontStyle::Oblique,
+                    }),
+                    font_weight: style
+                        .font_weight
+                        .map(|w| FontWeight(w.0.clamp(100., 950.))),
                     ..Default::default()
                 },
             )
@@ -73,7 +65,7 @@ pub fn syntax_overrides(this: &settings::ThemeStyleContent) -> Vec<(String, High
         .collect()
 }
 
-pub fn status_colors_refinement(colors: &settings::StatusColorsContent) -> StatusColorsRefinement {
+pub fn status_colors_refinement(colors: &StatusColorsContent) -> StatusColorsRefinement {
     StatusColorsRefinement {
         conflict: colors
             .conflict
@@ -247,7 +239,7 @@ pub fn status_colors_refinement(colors: &settings::StatusColorsContent) -> Statu
 }
 
 pub fn theme_colors_refinement(
-    this: &settings::ThemeColorsContent,
+    this: &ThemeColorsContent,
     status_colors: &StatusColorsRefinement,
 ) -> ThemeColorsRefinement {
     let border = this
@@ -926,7 +918,24 @@ pub fn theme_colors_refinement(
     }
 }
 
-pub(crate) fn try_parse_color(color: &str) -> anyhow::Result<Hsla> {
+fn ensure_non_opaque(color: Hsla) -> Hsla {
+    const MAXIMUM_OPACITY: f32 = 0.7;
+    if color.a <= MAXIMUM_OPACITY {
+        color
+    } else {
+        Hsla {
+            a: MAXIMUM_OPACITY,
+            ..color
+        }
+    }
+}
+
+fn ensure_opaque(color: Hsla) -> Hsla {
+    Hsla { a: 1.0, ..color }
+}
+
+/// Parses a color string into an [`Hsla`] value.
+pub fn try_parse_color(color: &str) -> anyhow::Result<Hsla> {
     let rgba = gpui::Rgba::try_from(color)?;
     let rgba = palette::rgb::Srgba::from_components((rgba.r, rgba.g, rgba.b, rgba.a));
     let hsla = palette::Hsla::from_color(rgba);

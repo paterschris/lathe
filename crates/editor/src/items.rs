@@ -1000,7 +1000,9 @@ impl Item for Editor {
     // In a non-singleton case, the breadcrumbs are actually shown on sticky file headers of the multibuffer.
     fn breadcrumbs(&self, cx: &App) -> Option<(Vec<HighlightedText>, Option<Font>)> {
         if self.buffer.read(cx).is_singleton() {
-            let font = theme::ThemeSettings::get_global(cx).buffer_font.clone();
+            let font = theme_settings::ThemeSettings::get_global(cx)
+                .buffer_font
+                .clone();
             Some((self.breadcrumbs_inner(cx)?, Some(font)))
         } else {
             None
@@ -1665,14 +1667,9 @@ impl SearchableItem for Editor {
         match setting {
             SeedQuerySetting::Never => String::new(),
             SeedQuerySetting::Selection | SeedQuerySetting::Always if !selection.is_empty() => {
-                let text: String = buffer_snapshot
+                buffer_snapshot
                     .text_for_range(selection.start..selection.end)
-                    .collect();
-                if text.contains('\n') {
-                    String::new()
-                } else {
-                    text
-                }
+                    .collect()
             }
             SeedQuerySetting::Selection => String::new(),
             SeedQuerySetting::Always => {
