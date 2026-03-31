@@ -26,6 +26,7 @@ use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
 use remote::RemoteConnectionOptions;
 use ui::utils::platform_title_bar_height;
 
+use serde::{Deserialize, Serialize};
 use settings::Settings as _;
 use std::collections::{HashMap, HashSet};
 use std::mem;
@@ -37,7 +38,7 @@ use ui::{
     WithScrollbar, prelude::*,
 };
 use util::ResultExt as _;
-use util::path_list::PathList;
+use util::path_list::{PathList, SerializedPathList};
 use workspace::{
     AddFolderToProject, CloseWindow, FocusWorkspaceSidebar, MultiWorkspace, MultiWorkspaceEvent,
     Open, Sidebar as WorkspaceSidebar, SidebarSide, ToggleWorkspaceSidebar, Workspace, WorkspaceId,
@@ -80,6 +81,25 @@ const DEFAULT_WIDTH: Pixels = px(300.0);
 const MIN_WIDTH: Pixels = px(200.0);
 const MAX_WIDTH: Pixels = px(800.0);
 const DEFAULT_THREADS_SHOWN: usize = 5;
+
+#[derive(Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum SerializedSidebarView {
+    #[default]
+    ThreadList,
+    Archive,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct SerializedSidebar {
+    #[serde(default)]
+    width: Option<f32>,
+    #[serde(default)]
+    collapsed_groups: Vec<SerializedPathList>,
+    #[serde(default)]
+    expanded_groups: Vec<(SerializedPathList, usize)>,
+    #[serde(default)]
+    active_view: SerializedSidebarView,
+}
 
 #[derive(Debug, Default)]
 enum SidebarView {
@@ -417,6 +437,10 @@ impl Sidebar {
             _subscriptions: Vec::new(),
             _draft_observation: None,
         }
+    }
+
+    fn serialize(&mut self, cx: &mut Context<Self>) {
+        cx.emit(workspace::SidebarEvent::SerializeNeeded);
     }
 
     fn is_active_workspace(&self, workspace: &Entity<Workspace>, cx: &App) -> bool {
@@ -1348,6 +1372,7 @@ impl Sidebar {
                                 move |this, _, _window, cx| {
                                     this.selection = None;
                                     this.expanded_groups.remove(&path_list_for_collapse);
+                                    this.serialize(cx);
                                     this.update_entries(cx);
                                 }
                             })),
@@ -1680,6 +1705,7 @@ impl Sidebar {
         } else {
             self.collapsed_groups.insert(path_list.clone());
         }
+        self.serialize(cx);
         self.update_entries(cx);
     }
 
@@ -1879,6 +1905,7 @@ impl Sidebar {
                     let current = self.expanded_groups.get(&path_list).copied().unwrap_or(0);
                     self.expanded_groups.insert(path_list, current + 1);
                 }
+                self.serialize(cx);
                 self.update_entries(cx);
             }
             ListEntry::NewThread { workspace, .. } => {
@@ -2867,6 +2894,7 @@ impl Sidebar {
                     let current = this.expanded_groups.get(&path_list).copied().unwrap_or(0);
                     this.expanded_groups.insert(path_list.clone(), current + 1);
                 }
+                this.serialize(cx);
                 this.update_entries(cx);
             }))
             .into_any_element()
@@ -3292,6 +3320,7 @@ impl Sidebar {
         self._subscriptions.push(subscription);
         self.view = SidebarView::Archive(archive_view.clone());
         archive_view.update(cx, |view, cx| view.focus_filter_editor(window, cx));
+        self.serialize(cx);
         cx.notify();
     }
 
@@ -3300,6 +3329,7 @@ impl Sidebar {
         self._subscriptions.clear();
         let handle = self.filter_editor.read(cx).focus_handle(cx);
         handle.focus(window, cx);
+        self.serialize(cx);
         cx.notify();
     }
 }
@@ -3339,7 +3369,57 @@ impl WorkspaceSidebar for Sidebar {
     ) {
         self.toggle_thread_switcher_impl(select_last, window, cx);
     }
+
+    fn serialized_state(&self, _cx: &App) -> Option<String> {
+        let serialized = SerializedSidebar {
+            width: Some(f32::from(self.width)),
+            collapsed_groups: self
+                .collapsed_groups
+                .iter()
+                .map(|pl| pl.serialize())
+                .collect(),
+            expanded_groups: self
+                .expanded_groups
+                .iter()
+                .map(|(pl, count)| (pl.serialize(), *count))
+                .collect(),
+            active_view: match self.view {
+                SidebarView::ThreadList => SerializedSidebarView::ThreadList,
+                SidebarView::Archive(_) => SerializedSidebarView::Archive,
+            },
+        };
+        serde_json::to_string(&serialized).ok()
+    }
+
+    fn restore_serialized_state(
+        &mut self,
+        state: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(serialized) = serde_json::from_str::<SerializedSidebar>(state).log_err() {
+            if let Some(width) = serialized.width {
+                self.width = px(width).clamp(MIN_WIDTH, MAX_WIDTH);
+            }
+            self.collapsed_groups = serialized
+                .collapsed_groups
+                .into_iter()
+                .map(|s| PathList::deserialize(&s))
+                .collect();
+            self.expanded_groups = serialized
+                .expanded_groups
+                .into_iter()
+                .map(|(s, count)| (PathList::deserialize(&s), count))
+                .collect();
+            if serialized.active_view == SerializedSidebarView::Archive {
+                self.show_archive(window, cx);
+            }
+        }
+        cx.notify();
+    }
 }
+
+impl gpui::EventEmitter<workspace::SidebarEvent> for Sidebar {}
 
 impl Focusable for Sidebar {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
