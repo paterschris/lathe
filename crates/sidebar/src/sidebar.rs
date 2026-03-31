@@ -8,6 +8,7 @@ use agent_ui::thread_metadata_store::{ThreadMetadata, ThreadMetadataStore};
 use agent_ui::threads_archive_view::{
     ThreadsArchiveView, ThreadsArchiveViewEvent, format_history_entry_timestamp,
 };
+use agent_ui::{AcpThreadImportOnboarding, ThreadImportModal};
 use agent_ui::{
     Agent, AgentPanel, AgentPanelEvent, DEFAULT_THREAD_TITLE, NewThread, RemoveSelectedThread,
 };
@@ -16,7 +17,8 @@ use editor::Editor;
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagViewExt as _};
 use gpui::{
     Action as _, AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyContext, ListState,
-    Pixels, Render, SharedString, WeakEntity, Window, WindowHandle, list, prelude::*, px,
+    Pixels, Render, SharedString, WeakEntity, Window, WindowHandle, linear_color_stop,
+    linear_gradient, list, prelude::*, px,
 };
 use menu::{
     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
@@ -3134,9 +3136,9 @@ impl Sidebar {
                 h_flex()
                     .w_1_2()
                     .gap_2()
-                    .child(Divider::horizontal())
+                    .child(Divider::horizontal().color(ui::DividerColor::Border))
                     .child(Label::new("or").size(LabelSize::XSmall).color(Color::Muted))
-                    .child(Divider::horizontal()),
+                    .child(Divider::horizontal().color(ui::DividerColor::Border)),
             )
             .child(
                 Button::new("clone_repo", "Clone Repository")
@@ -3323,6 +3325,112 @@ impl Sidebar {
         } else {
             bar.child(toggle_button).child(action_buttons)
         }
+    }
+
+    fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
+        self.multi_workspace.upgrade().and_then(|w| {
+            w.read(cx)
+                .workspaces()
+                .get(w.read(cx).active_workspace_index())
+                .cloned()
+        })
+    }
+
+    fn show_thread_import_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active_workspace) = self.active_workspace(cx) else {
+            return;
+        };
+
+        let Some(agent_registry_store) = AgentRegistryStore::try_global(cx) else {
+            return;
+        };
+
+        let agent_server_store = active_workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .agent_server_store()
+            .clone();
+
+        let workspace_handle = active_workspace.downgrade();
+        let multi_workspace = self.multi_workspace.clone();
+
+        active_workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, |window, cx| {
+                ThreadImportModal::new(
+                    agent_server_store,
+                    agent_registry_store,
+                    workspace_handle.clone(),
+                    multi_workspace.clone(),
+                    window,
+                    cx,
+                )
+            });
+        });
+    }
+
+    fn should_render_acp_import_onboarding(&self, cx: &App) -> bool {
+        let has_external_agents = self
+            .active_workspace(cx)
+            .map(|ws| {
+                ws.read(cx)
+                    .project()
+                    .read(cx)
+                    .agent_server_store()
+                    .read(cx)
+                    .has_external_agents()
+            })
+            .unwrap_or(false);
+
+        has_external_agents && !AcpThreadImportOnboarding::dismissed(cx)
+    }
+
+    fn render_acp_import_onboarding(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let description =
+            "Import threads from your ACP agents — whether started in Zed or another client.";
+
+        let bg = cx.theme().colors().text_accent;
+
+        v_flex()
+            .min_w_0()
+            .w_full()
+            .p_1p5()
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .bg(linear_gradient(
+                360.,
+                linear_color_stop(bg.opacity(0.06), 1.),
+                linear_color_stop(bg.opacity(0.), 0.),
+            ))
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .w_full()
+                    .gap_1()
+                    .justify_between()
+                    .child(Label::new("Looking for ACP threads?"))
+                    .child(
+                        IconButton::new("close-onboarding", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .on_click(|_, _window, cx| AcpThreadImportOnboarding::dismiss(cx)),
+                    ),
+            )
+            .child(Label::new(description).color(Color::Muted).mb_2())
+            .child(
+                Button::new("import-acp", "Import ACP Threads")
+                    .full_width()
+                    .style(ButtonStyle::OutlinedCustom(cx.theme().colors().border))
+                    .label_size(LabelSize::Small)
+                    .start_icon(
+                        Icon::new(IconName::ArrowDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_archive(window, cx);
+                        this.show_thread_import_modal(window, cx);
+                    })),
+            )
     }
 
     fn toggle_archive(&mut self, _: &ToggleArchive, window: &mut Window, cx: &mut Context<Self>) {
@@ -3568,6 +3676,9 @@ impl Render for Sidebar {
                         }
                     }),
                 SidebarView::Archive(archive_view) => this.child(archive_view.clone()),
+            })
+            .when(self.should_render_acp_import_onboarding(cx), |this| {
+                this.child(self.render_acp_import_onboarding(cx))
             })
             .child(self.render_sidebar_bottom_bar(cx))
     }
