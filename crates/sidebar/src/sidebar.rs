@@ -158,6 +158,7 @@ enum ListEntry {
         path_list: PathList,
         workspace: Entity<Workspace>,
         is_active_draft: bool,
+        worktrees: Vec<WorktreeInfo>,
     },
 }
 
@@ -739,6 +740,7 @@ impl Sidebar {
                 .collect();
 
             let mut threads: Vec<ThreadEntry> = Vec::new();
+            let mut threadless_workspaces: Vec<(Entity<Workspace>, Vec<WorktreeInfo>)> = Vec::new();
             let mut has_running_threads = false;
             let mut waiting_thread_count: usize = 0;
 
@@ -749,8 +751,16 @@ impl Sidebar {
                 // Load threads from each workspace in the group.
                 for workspace in &group.workspaces {
                     let ws_path_list = workspace_path_list(workspace, cx);
-
-                    for row in thread_store.read(cx).entries_for_path(&ws_path_list) {
+                    let mut workspace_rows = thread_store
+                        .read(cx)
+                        .entries_for_path(&ws_path_list)
+                        .peekable();
+                    if workspace_rows.peek().is_none() {
+                        let worktrees =
+                            worktree_info_from_thread_paths(&ws_path_list, &project_groups);
+                        threadless_workspaces.push((workspace.clone(), worktrees));
+                    }
+                    for row in workspace_rows {
                         if !seen_session_ids.insert(row.session_id.clone()) {
                             continue;
                         }
@@ -773,7 +783,7 @@ impl Sidebar {
                     }
                 }
 
-                // Load threads from linked git worktrees
+                // Load threads from linked git worktrees whose
                 // canonical paths belong to this group.
                 let linked_worktree_queries = group
                     .workspaces
@@ -929,13 +939,10 @@ impl Sidebar {
                     entries.push(thread.into());
                 }
             } else {
-                let thread_count = threads.len();
                 let is_draft_for_workspace = self.agent_panel_visible
                     && self.active_thread_is_draft
                     && self.focused_thread.is_none()
                     && is_active;
-
-                let show_new_thread_entry = thread_count == 0 || is_draft_for_workspace;
 
                 project_header_indices.push(entries.len());
                 entries.push(ListEntry::ProjectHeader {
@@ -952,11 +959,29 @@ impl Sidebar {
                     continue;
                 }
 
-                if show_new_thread_entry {
+                // Emit "New Thread" entries for threadless workspaces
+                // and active drafts, right after the header.
+                for (workspace, worktrees) in &threadless_workspaces {
+                    let is_draft = is_draft_for_workspace && workspace == representative_workspace;
+                    entries.push(ListEntry::NewThread {
+                        path_list: path_list.clone(),
+                        workspace: workspace.clone(),
+                        is_active_draft: is_draft,
+                        worktrees: worktrees.clone(),
+                    });
+                }
+                if is_draft_for_workspace
+                    && !threadless_workspaces
+                        .iter()
+                        .any(|(ws, _)| ws == representative_workspace)
+                {
+                    let ws_path_list = workspace_path_list(representative_workspace, cx);
+                    let worktrees = worktree_info_from_thread_paths(&ws_path_list, &project_groups);
                     entries.push(ListEntry::NewThread {
                         path_list: path_list.clone(),
                         workspace: representative_workspace.clone(),
-                        is_active_draft: is_draft_for_workspace,
+                        is_active_draft: true,
+                        worktrees,
                     });
                 }
 
@@ -1114,9 +1139,16 @@ impl Sidebar {
                 path_list,
                 workspace,
                 is_active_draft,
-            } => {
-                self.render_new_thread(ix, path_list, workspace, *is_active_draft, is_selected, cx)
-            }
+                worktrees,
+            } => self.render_new_thread(
+                ix,
+                path_list,
+                workspace,
+                *is_active_draft,
+                worktrees,
+                is_selected,
+                cx,
+            ),
         };
 
         if is_group_header_after_first {
@@ -2906,6 +2938,7 @@ impl Sidebar {
         _path_list: &PathList,
         workspace: &Entity<Workspace>,
         is_active_draft: bool,
+        worktrees: &[WorktreeInfo],
         is_selected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2924,6 +2957,16 @@ impl Sidebar {
         let thread_item = ThreadItem::new(id, label)
             .icon(IconName::Plus)
             .icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.8)))
+            .worktrees(
+                worktrees
+                    .iter()
+                    .map(|wt| ThreadItemWorktreeInfo {
+                        name: wt.name.clone(),
+                        full_path: wt.full_path.clone(),
+                        highlight_positions: wt.highlight_positions.clone(),
+                    })
+                    .collect(),
+            )
             .selected(is_active)
             .focused(is_selected)
             .when(!is_active, |this| {
