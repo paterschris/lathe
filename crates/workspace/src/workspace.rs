@@ -7083,7 +7083,7 @@ impl Workspace {
             ))
             .on_action(cx.listener(Workspace::toggle_centered_layout))
             .on_action(cx.listener(
-                |workspace: &mut Workspace, _action: &pane::ActivateNextItem, window, cx| {
+                |workspace: &mut Workspace, action: &pane::ActivateNextItem, window, cx| {
                     if let Some(active_dock) = workspace.active_dock(window, cx) {
                         let dock = active_dock.read(cx);
                         if let Some(active_panel) = dock.active_panel() {
@@ -7101,14 +7101,17 @@ impl Workspace {
                                 }
 
                                 if let Some(pane) = recent_pane {
+                                    let wrap_around = action.wrap_around;
                                     pane.update(cx, |pane, cx| {
                                         let current_index = pane.active_item_index();
                                         let items_len = pane.items_len();
                                         if items_len > 0 {
                                             let next_index = if current_index + 1 < items_len {
                                                 current_index + 1
-                                            } else {
+                                            } else if wrap_around {
                                                 0
+                                            } else {
+                                                return;
                                             };
                                             pane.activate_item(
                                                 next_index, false, false, window, cx,
@@ -7124,7 +7127,7 @@ impl Workspace {
                 },
             ))
             .on_action(cx.listener(
-                |workspace: &mut Workspace, _action: &pane::ActivatePreviousItem, window, cx| {
+                |workspace: &mut Workspace, action: &pane::ActivatePreviousItem, window, cx| {
                     if let Some(active_dock) = workspace.active_dock(window, cx) {
                         let dock = active_dock.read(cx);
                         if let Some(active_panel) = dock.active_panel() {
@@ -7142,14 +7145,17 @@ impl Workspace {
                                 }
 
                                 if let Some(pane) = recent_pane {
+                                    let wrap_around = action.wrap_around;
                                     pane.update(cx, |pane, cx| {
                                         let current_index = pane.active_item_index();
                                         let items_len = pane.items_len();
                                         if items_len > 0 {
                                             let prev_index = if current_index > 0 {
                                                 current_index - 1
-                                            } else {
+                                            } else if wrap_around {
                                                 items_len.saturating_sub(1)
+                                            } else {
+                                                return;
                                             };
                                             pane.activate_item(
                                                 prev_index, false, false, window, cx,
