@@ -917,7 +917,8 @@ impl Dock {
         {
             let size = size.map(|size| size.max(RESIZE_HANDLE_SIZE).round());
 
-            let use_flex = entry.panel.has_flexible_size(window, cx);
+            let use_flex = self.position.axis() == Axis::Horizontal
+                && entry.panel.has_flexible_size(window, cx);
             if use_flex {
                 entry.size_state.flex = flex;
             } else {
@@ -950,7 +951,8 @@ impl Dock {
 
         for entry in &mut self.panel_entries {
             let size = size.map(|size| size.max(RESIZE_HANDLE_SIZE).round());
-            let use_flex = entry.panel.has_flexible_size(window, cx);
+            let use_flex = self.position.axis() == Axis::Horizontal
+                && entry.panel.has_flexible_size(window, cx);
             if use_flex {
                 entry.size_state.flex = flex;
             } else {
