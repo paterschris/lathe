@@ -41,9 +41,9 @@ use theme::AccentColors;
 use theme_settings::ThemeSettings;
 use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
 use ui::{
-    ButtonLike, Chip, CommonAnimationExt as _, ContextMenu, DiffStat, Divider, HighlightedLabel,
-    ScrollableHandle, Table, TableColumnWidths, TableInteractionState, TableResizeBehavior,
-    Tooltip, WithScrollbar, prelude::*,
+    ButtonLike, Chip, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, DiffStat, Divider,
+    HighlightedLabel, RedistributableColumnsState, ScrollableHandle, Table, TableInteractionState,
+    TableResizeBehavior, Tooltip, WithScrollbar, prelude::*,
 };
 use workspace::{
     Workspace,
@@ -901,7 +901,7 @@ pub struct GitGraph {
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     row_height: Pixels,
     table_interaction_state: Entity<TableInteractionState>,
-    table_column_widths: Entity<TableColumnWidths>,
+    table_column_widths: Entity<RedistributableColumnsState>,
     horizontal_scroll_offset: Pixels,
     graph_viewport_width: Pixels,
     selected_entry_idx: Option<usize>,
@@ -972,7 +972,23 @@ impl GitGraph {
         });
 
         let table_interaction_state = cx.new(|cx| TableInteractionState::new(cx));
-        let table_column_widths = cx.new(|cx| TableColumnWidths::new(4, cx));
+        let table_column_widths = cx.new(|_cx| {
+            RedistributableColumnsState::new(
+                4,
+                vec![
+                    DefiniteLength::Fraction(0.72),
+                    DefiniteLength::Fraction(0.12),
+                    DefiniteLength::Fraction(0.10),
+                    DefiniteLength::Fraction(0.06),
+                ],
+                vec![
+                    TableResizeBehavior::Resizable,
+                    TableResizeBehavior::Resizable,
+                    TableResizeBehavior::Resizable,
+                    TableResizeBehavior::Resizable,
+                ],
+            )
+        });
         let mut row_height = Self::row_height(cx);
 
         cx.observe_global_in::<settings::SettingsStore>(window, move |this, _window, cx| {
@@ -2459,11 +2475,6 @@ impl Render for GitGraph {
             self.search_state.state = QueryState::Empty;
             self.search(query, cx);
         }
-        let description_width_fraction = 0.72;
-        let date_width_fraction = 0.12;
-        let author_width_fraction = 0.10;
-        let commit_width_fraction = 0.06;
-
         let (commit_count, is_loading) = match self.graph_data.max_commit_count {
             AllCommitCount::Loaded(count) => (count, true),
             AllCommitCount::NotLoaded => {
@@ -2523,7 +2534,10 @@ impl Render for GitGraph {
                         .flex_col()
                         .child(
                             div()
-                                .p_2()
+                                .flex()
+                                .items_center()
+                                .px_1()
+                                .py_0p5()
                                 .border_b_1()
                                 .whitespace_nowrap()
                                 .border_color(cx.theme().colors().border)
@@ -2565,25 +2579,9 @@ impl Render for GitGraph {
                                 Label::new("Author").color(Color::Muted).into_any_element(),
                                 Label::new("Commit").color(Color::Muted).into_any_element(),
                             ])
-                            .column_widths(
-                                [
-                                    DefiniteLength::Fraction(description_width_fraction),
-                                    DefiniteLength::Fraction(date_width_fraction),
-                                    DefiniteLength::Fraction(author_width_fraction),
-                                    DefiniteLength::Fraction(commit_width_fraction),
-                                ]
-                                .to_vec(),
-                            )
-                            .resizable_columns(
-                                vec![
-                                    TableResizeBehavior::Resizable,
-                                    TableResizeBehavior::Resizable,
-                                    TableResizeBehavior::Resizable,
-                                    TableResizeBehavior::Resizable,
-                                ],
-                                &self.table_column_widths,
-                                cx,
-                            )
+                            .width_config(ColumnWidthConfig::redistributable(
+                                self.table_column_widths.clone(),
+                            ))
                             .map_row(move |(index, row), window, cx| {
                                 let is_selected = selected_entry_idx == Some(index);
                                 let is_hovered = hovered_entry_idx == Some(index);
