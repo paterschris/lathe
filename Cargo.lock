@@ -9334,7 +9334,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "settings",
  "smol",
  "thiserror 2.0.17",
  "util",
