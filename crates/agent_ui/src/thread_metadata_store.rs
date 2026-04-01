@@ -517,7 +517,13 @@ impl ThreadMetadataStore {
                     PathList::new(&paths)
                 };
 
-                let archived = existing_thread.map(|t| t.archived).unwrap_or(false);
+                // Threads without a folder path (e.g. started in an empty
+                // window) are archived by default so they don't get lost,
+                // because they won't show up in the sidebar. Users can reload
+                // them from the archive.
+                let archived = existing_thread
+                    .map(|t| t.archived)
+                    .unwrap_or(folder_paths.is_empty());
 
                 let metadata = ThreadMetadata {
                     session_id,
@@ -1284,6 +1290,84 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(metadata_ids, vec![session_id]);
+    }
+
+    #[gpui::test]
+    async fn test_threads_without_project_association_are_archived_by_default(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project_without_worktree = Project::test(fs.clone(), None::<&Path>, cx).await;
+        let project_with_worktree = Project::test(fs, [Path::new("/project-a")], cx).await;
+        let connection = Rc::new(StubAgentConnection::new());
+
+        let thread_without_worktree = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project_without_worktree.clone(),
+                    PathList::default(),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let session_without_worktree =
+            cx.read(|cx| thread_without_worktree.read(cx).session_id().clone());
+
+        cx.update(|cx| {
+            thread_without_worktree.update(cx, |thread, cx| {
+                thread.set_title("No Project Thread".into(), cx).detach();
+            });
+        });
+        cx.run_until_parked();
+
+        let thread_with_worktree = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project_with_worktree.clone(),
+                    PathList::default(),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let session_with_worktree =
+            cx.read(|cx| thread_with_worktree.read(cx).session_id().clone());
+
+        cx.update(|cx| {
+            thread_with_worktree.update(cx, |thread, cx| {
+                thread.set_title("Project Thread".into(), cx).detach();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let store = ThreadMetadataStore::global(cx);
+            let store = store.read(cx);
+
+            let without_worktree = store
+                .entry(&session_without_worktree)
+                .expect("missing metadata for thread without project association");
+            assert!(without_worktree.folder_paths.is_empty());
+            assert!(
+                without_worktree.archived,
+                "expected thread without project association to be archived"
+            );
+
+            let with_worktree = store
+                .entry(&session_with_worktree)
+                .expect("missing metadata for thread with project association");
+            assert_eq!(
+                with_worktree.folder_paths,
+                PathList::new(&[Path::new("/project-a")])
+            );
+            assert!(
+                !with_worktree.archived,
+                "expected thread with project association to remain unarchived"
+            );
+        });
     }
 
     #[gpui::test]
