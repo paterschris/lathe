@@ -27,8 +27,8 @@ use editor::RowExt;
 use editor::SelectionEffects;
 use editor::scroll::ScrollOffset;
 use editor::{
-    Anchor, AnchorRangeExt, CodeActionProvider, Editor, EditorEvent, ExcerptId, HighlightKey,
-    MultiBuffer, MultiBufferSnapshot, ToOffset as _, ToPoint,
+    Anchor, AnchorRangeExt, CodeActionProvider, Editor, EditorEvent, HighlightKey, MultiBuffer,
+    MultiBufferSnapshot, ToOffset as _, ToPoint,
     actions::SelectAll,
     display_map::{
         BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId, EditorMargins,
@@ -443,15 +443,17 @@ impl InlineAssistant {
         let newest_selection = newest_selection.unwrap();
 
         let mut codegen_ranges = Vec::new();
-        for (buffer, buffer_range, excerpt_id) in
-            snapshot.ranges_to_buffer_ranges(selections.iter().map(|selection| {
-                snapshot.anchor_before(selection.start)..snapshot.anchor_after(selection.end)
-            }))
+        for (buffer, buffer_range, _) in selections
+            .iter()
+            .flat_map(|selection| snapshot.range_to_buffer_ranges(selection.start..selection.end))
         {
-            let anchor_range = Anchor::range_in_buffer(
-                excerpt_id,
-                buffer.anchor_before(buffer_range.start)..buffer.anchor_after(buffer_range.end),
-            );
+            let (Some(start), Some(end)) = (
+                snapshot.anchor_in_buffer(buffer.anchor_before(buffer_range.start)),
+                snapshot.anchor_in_buffer(buffer.anchor_after(buffer_range.end)),
+            ) else {
+                continue;
+            };
+            let anchor_range = start..end;
 
             codegen_ranges.push(anchor_range);
 
@@ -982,8 +984,7 @@ impl InlineAssistant {
         match event {
             EditorEvent::Edited { transaction_id } => {
                 let buffer = editor.read(cx).buffer().read(cx);
-                let edited_ranges =
-                    buffer.edited_ranges_for_transaction::<MultiBufferOffset>(*transaction_id, cx);
+                let edited_ranges = buffer.edited_ranges_for_transaction(*transaction_id, cx);
                 let snapshot = buffer.snapshot(cx);
 
                 for assist_id in editor_assists.assist_ids.clone() {
@@ -1089,7 +1090,7 @@ impl InlineAssistant {
                     let multibuffer = editor.read(cx).buffer().read(cx);
                     let snapshot = multibuffer.snapshot(cx);
                     let ranges =
-                        snapshot.range_to_buffer_ranges(assist.range.start..=assist.range.end);
+                        snapshot.range_to_buffer_ranges(assist.range.start..assist.range.end);
                     ranges
                         .first()
                         .and_then(|(buffer, _, _)| buffer.language())
@@ -1496,10 +1497,10 @@ impl InlineAssistant {
 
             let mut new_blocks = Vec::new();
             for (new_row, old_row_range) in deleted_row_ranges {
-                let (_, start, _) = old_snapshot
+                let (_, start) = old_snapshot
                     .point_to_buffer_point(Point::new(*old_row_range.start(), 0))
                     .unwrap();
-                let (_, end, _) = old_snapshot
+                let (_, end) = old_snapshot
                     .point_to_buffer_point(Point::new(
                         *old_row_range.end(),
                         old_snapshot.line_len(MultiBufferRow(*old_row_range.end())),
@@ -1530,7 +1531,7 @@ impl InlineAssistant {
                     editor.set_read_only(true);
                     editor.set_show_edit_predictions(Some(false), window, cx);
                     editor.highlight_rows::<DeletedLines>(
-                        Anchor::min()..Anchor::max(),
+                        Anchor::Min..Anchor::Max,
                         cx.theme().status().deleted_background,
                         Default::default(),
                         cx,
@@ -1938,9 +1939,8 @@ impl CodeActionProvider for AssistantCodeActionProvider {
 
     fn apply_code_action(
         &self,
-        buffer: Entity<Buffer>,
+        _buffer: Entity<Buffer>,
         action: CodeAction,
-        excerpt_id: ExcerptId,
         _push_to_history: bool,
         window: &mut Window,
         cx: &mut App,
@@ -1970,31 +1970,8 @@ impl CodeActionProvider for AssistantCodeActionProvider {
             let range = editor
                 .update(cx, |editor, cx| {
                     editor.buffer().update(cx, |multibuffer, cx| {
-                        let buffer = buffer.read(cx);
                         let multibuffer_snapshot = multibuffer.read(cx);
-
-                        let old_context_range =
-                            multibuffer_snapshot.context_range_for_excerpt(excerpt_id)?;
-                        let mut new_context_range = old_context_range.clone();
-                        if action
-                            .range
-                            .start
-                            .cmp(&old_context_range.start, buffer)
-                            .is_lt()
-                        {
-                            new_context_range.start = action.range.start;
-                        }
-                        if action.range.end.cmp(&old_context_range.end, buffer).is_gt() {
-                            new_context_range.end = action.range.end;
-                        }
-                        drop(multibuffer_snapshot);
-
-                        if new_context_range != old_context_range {
-                            multibuffer.resize_excerpt(excerpt_id, new_context_range, cx);
-                        }
-
-                        let multibuffer_snapshot = multibuffer.read(cx);
-                        multibuffer_snapshot.anchor_range_in_excerpt(excerpt_id, action.range)
+                        multibuffer_snapshot.buffer_anchor_range_to_anchor_range(action.range)
                     })
                 })
                 .context("invalid range")?;
