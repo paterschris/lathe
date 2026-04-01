@@ -55,7 +55,7 @@ fn migrate_thread_metadata(cx: &mut App) {
                 .read(cx)
                 .entries()
                 .filter_map(|entry| {
-                    if existing_entries.contains(&entry.id.0) || entry.folder_paths.is_empty() {
+                    if existing_entries.contains(&entry.id.0) {
                         return None;
                     }
 
@@ -81,6 +81,9 @@ fn migrate_thread_metadata(cx: &mut App) {
         if is_first_migration {
             let mut per_project: HashMap<PathList, Vec<&mut ThreadMetadata>> = HashMap::default();
             for entry in &mut to_migrate {
+                if entry.folder_paths.is_empty() {
+                    continue;
+                }
                 per_project
                     .entry(entry.folder_paths.clone())
                     .or_default()
@@ -314,6 +317,25 @@ impl ThreadMetadataStore {
         self.pending_thread_ops_tx
             .try_send(DbOperation::Upsert(metadata))
             .log_err();
+    }
+
+    pub fn update_working_directories(
+        &mut self,
+        session_id: &acp::SessionId,
+        work_dirs: PathList,
+        cx: &mut Context<Self>,
+    ) {
+        if !cx.has_flag::<AgentV2FeatureFlag>() {
+            return;
+        }
+
+        if let Some(thread) = self.threads.get(session_id) {
+            self.save_internal(ThreadMetadata {
+                folder_paths: work_dirs,
+                ..thread.clone()
+            });
+            cx.notify();
+        }
     }
 
     pub fn archive(&mut self, session_id: &acp::SessionId, cx: &mut Context<Self>) {
@@ -994,7 +1016,7 @@ mod tests {
             store.read(cx).entries().cloned().collect::<Vec<_>>()
         });
 
-        assert_eq!(list.len(), 3);
+        assert_eq!(list.len(), 4);
         assert!(
             list.iter()
                 .all(|metadata| metadata.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref())
@@ -1013,17 +1035,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(migrated_session_ids.contains(&"a-session-1"));
         assert!(migrated_session_ids.contains(&"b-session-0"));
-        assert!(!migrated_session_ids.contains(&"projectless"));
+        assert!(migrated_session_ids.contains(&"projectless"));
 
         let migrated_entries = list
             .iter()
             .filter(|metadata| metadata.session_id.0.as_ref() != "a-session-0")
             .collect::<Vec<_>>();
-        assert!(
-            migrated_entries
-                .iter()
-                .all(|metadata| !metadata.folder_paths.is_empty())
-        );
         assert!(migrated_entries.iter().all(|metadata| metadata.archived));
     }
 
