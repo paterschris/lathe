@@ -7126,17 +7126,10 @@ impl ThreadView {
                 };
 
                 active_editor.update_in(cx, |editor, window, cx| {
-                    let singleton = editor
-                        .buffer()
-                        .read(cx)
-                        .read(cx)
-                        .as_singleton()
-                        .map(|(a, b, _)| (a, b));
-                    if let Some((excerpt_id, buffer_id)) = singleton
-                        && let Some(agent_buffer) = agent_location.buffer.upgrade()
-                        && agent_buffer.read(cx).remote_id() == buffer_id
+                    let snapshot = editor.buffer().read(cx).snapshot(cx);
+                    if snapshot.as_singleton().is_some()
+                        && let Some(anchor) = snapshot.anchor_in_excerpt(agent_location.position)
                     {
-                        let anchor = editor::Anchor::in_buffer(excerpt_id, agent_location.position);
                         editor.change_selections(Default::default(), window, cx, |selections| {
                             selections.select_anchor_ranges([anchor..anchor]);
                         })
