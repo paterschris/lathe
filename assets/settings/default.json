@@ -1102,11 +1102,14 @@
     // "all_screens" - Show these notifications on all screens
     // "never" - Never show these notifications
     "notify_when_agent_waiting": "primary_screen",
-    // Whether to play a sound when the agent has either completed
+    // When to play a sound when the agent has either completed
     // its response, or needs user input.
-
-    // Default: false
-    "play_sound_when_agent_done": false,
+    // "never" - Never play the sound
+    // "when_hidden" - Only play the sound when the agent panel is not visible
+    // "always" - Always play the sound
+    //
+    // Default: never
+    "play_sound_when_agent_done": "never",
     // Whether to have edit cards in the agent panel expanded, showing a preview of the full diff.
     //
     // Default: true
