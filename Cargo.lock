@@ -17500,6 +17500,7 @@ dependencies = [
  "anyhow",
  "assistant_slash_command",
  "async-recursion",
+ "audio",
  "breadcrumbs",
  "collections",
  "db",

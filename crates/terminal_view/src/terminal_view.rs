@@ -11,10 +11,10 @@ use editor::{
     ui_scrollbar_settings_from_raw,
 };
 use gpui::{
-    Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, ScrollWheelEvent, Styled, Subscription, Task, WeakEntity, actions,
-    anchored, deferred, div,
+    Action, Animation, AnimationExt, AnyElement, App, ClipboardEntry, DismissEvent, Entity,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Styled, Subscription,
+    Task, WeakEntity, actions, anchored, deferred, div, pulsating_between,
 };
 use itertools::Itertools;
 use menu;
@@ -34,9 +34,9 @@ use std::{
 };
 use task::TaskId;
 use terminal::{
-    Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Paste, ScrollLineDown, ScrollLineUp,
-    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, ShowCharacterPalette, TaskState,
-    TaskStatus, Terminal, TerminalBounds, ToggleViMode,
+    Clear, Copy, Event, HoveredWord, InteractivePromptKind, MaybeNavigationTarget, Paste,
+    ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
+    ShowCharacterPalette, TaskState, TaskStatus, Terminal, TerminalBounds, ToggleViMode,
     alacritty_terminal::{
         index::Point as AlacPoint,
         term::{TermMode, point_to_viewport, search::RegexSearch},
@@ -132,7 +132,7 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     //Currently using iTerm bell, show bell emoji in tab until input is received
     has_bell: bool,
-    awaiting_input: bool,
+    awaiting_input: Option<InteractivePromptKind>,
     has_had_input: bool,
     idle_timer: Task<()>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
@@ -280,7 +280,7 @@ impl TerminalView {
             workspace: workspace_handle,
             project,
             has_bell: false,
-            awaiting_input: false,
+            awaiting_input: None,
             has_had_input: false,
             idle_timer: Task::ready(()),
             focus_handle,
@@ -497,13 +497,18 @@ impl TerminalView {
         cx.emit(Event::Wakeup);
     }
 
-    const IDLE_THRESHOLD: Duration = Duration::from_secs(5);
-
     fn start_idle_timer(&mut self, cx: &mut Context<Self>) {
+        let threshold_secs =
+            TerminalSettings::get_global(cx).awaiting_input_idle_threshold_secs;
+        if threshold_secs == 0 {
+            return;
+        }
+        let threshold = Duration::from_secs(threshold_secs);
+        let awaiting_sound = awaiting_input_sound(
+            TerminalSettings::get_global(cx).sound_on_awaiting_input,
+        );
         self.idle_timer = cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(TerminalView::IDLE_THRESHOLD)
-                .await;
+            cx.background_executor().timer(threshold).await;
             this.update(cx, |this, cx| {
                 if !this.has_had_input {
                     return;
@@ -512,12 +517,16 @@ impl TerminalView {
                 let is_alternate_screen = terminal.is_alternate_screen();
                 let child_exited = terminal.child_exited().is_some();
                 let at_prompt = terminal.is_at_prompt();
-                let has_prompt = terminal.has_interactive_prompt();
+                let prompt_kind = terminal.interactive_prompt_kind();
 
-                if has_prompt && !at_prompt && !is_alternate_screen && !child_exited {
-                    this.awaiting_input = true;
+                if prompt_kind.is_some() && !at_prompt && !is_alternate_screen && !child_exited {
+                    this.awaiting_input = prompt_kind;
                     cx.emit(ItemEvent::UpdateTab);
                     cx.notify();
+
+                    if let Some(sound) = awaiting_sound {
+                        audio::Audio::play_sound(sound, cx);
+                    }
                 }
             })
             .ok();
@@ -525,8 +534,8 @@ impl TerminalView {
     }
 
     fn clear_awaiting_input(&mut self, cx: &mut Context<Self>) {
-        if self.awaiting_input {
-            self.awaiting_input = false;
+        if self.awaiting_input.is_some() {
+            self.awaiting_input = None;
             cx.emit(ItemEvent::UpdateTab);
             cx.notify();
             self.workspace.update(cx, |_, cx| cx.notify()).ok();
@@ -999,7 +1008,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<TerminalView>,
     ) {
-        self.awaiting_input = false;
+        self.awaiting_input = None;
         self.has_had_input = false;
         self.idle_timer = Task::ready(());
         self._terminal_subscriptions =
@@ -1036,6 +1045,21 @@ fn terminal_rerun_override(task: &TaskId) -> zed_actions::Rerun {
     }
 }
 
+fn awaiting_input_sound(setting: settings::AwaitingInputSound) -> Option<audio::Sound> {
+    use settings::AwaitingInputSound;
+    match setting {
+        AwaitingInputSound::Off => None,
+        AwaitingInputSound::AgentDone => Some(audio::Sound::AgentDone),
+        AwaitingInputSound::Mute => Some(audio::Sound::Mute),
+        AwaitingInputSound::Unmute => Some(audio::Sound::Unmute),
+        AwaitingInputSound::JoinedCall => Some(audio::Sound::Joined),
+        AwaitingInputSound::GuestJoinedCall => Some(audio::Sound::GuestJoined),
+        AwaitingInputSound::LeaveCall => Some(audio::Sound::Leave),
+        AwaitingInputSound::StartScreenshare => Some(audio::Sound::StartScreenshare),
+        AwaitingInputSound::StopScreenshare => Some(audio::Sound::StopScreenshare),
+    }
+}
+
 fn subscribe_for_terminal_events(
     terminal: &Entity<Terminal>,
     workspace: WeakEntity<Workspace>,
@@ -1056,9 +1080,9 @@ fn subscribe_for_terminal_events(
 
             match event {
                 Event::Wakeup => {
-                    if terminal_view.awaiting_input {
-                        let has_prompt = terminal.read(cx).has_interactive_prompt();
-                        if !has_prompt {
+                    if terminal_view.awaiting_input.is_some() {
+                        let prompt_kind = terminal.read(cx).interactive_prompt_kind();
+                        if prompt_kind.is_none() {
                             terminal_view.clear_awaiting_input(cx);
                         }
                     } else {
@@ -1386,10 +1410,11 @@ impl Item for TerminalView {
             .unwrap_or_else(|| terminal.title(true));
 
         let awaiting_input = self.awaiting_input;
+        let is_awaiting = awaiting_input.is_some();
         let (icon, icon_color, rerun_button) = match terminal.task() {
             Some(terminal_task) => match &terminal_task.status {
                 TaskStatus::Running => {
-                    let (icon, color) = if awaiting_input {
+                    let (icon, color) = if is_awaiting {
                         (IconName::Return, Color::Accent)
                     } else {
                         (IconName::PlayFilled, Color::Disabled)
@@ -1412,7 +1437,7 @@ impl Item for TerminalView {
                 }
             },
             None => {
-                if awaiting_input {
+                if is_awaiting {
                     (IconName::Return, Color::Accent, None)
                 } else {
                     (IconName::Terminal, Color::Muted, None)
@@ -1434,11 +1459,26 @@ impl Item for TerminalView {
                 h_flex()
                     .group("term-tab-icon")
                     .child(
-                        div()
-                            .when(rerun_button.is_some(), |this| {
-                                this.hover(|style| style.invisible().w_0())
-                            })
-                            .child(Icon::new(icon).color(icon_color)),
+                        {
+                            let icon_div = div()
+                                .when(rerun_button.is_some(), |this| {
+                                    this.hover(|style| style.invisible().w_0())
+                                })
+                                .child(Icon::new(icon).color(icon_color));
+                            if is_awaiting {
+                                icon_div
+                                    .with_animation(
+                                        "tab-awaiting-pulse",
+                                        Animation::new(Duration::from_secs(2))
+                                            .repeat()
+                                            .with_easing(pulsating_between(0.4, 1.0)),
+                                        |element, delta| element.opacity(delta),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                icon_div.into_any_element()
+                            }
+                        },
                     )
                     .when_some(rerun_button, |this, rerun_button| {
                         this.child(
@@ -1703,12 +1743,18 @@ impl Item for TerminalView {
     fn is_dirty(&self, cx: &App) -> bool {
         match self.terminal.read(cx).task() {
             Some(task) => task.status == TaskStatus::Running,
-            None => self.has_bell() || self.awaiting_input,
+            None => self.has_bell() || self.awaiting_input.is_some(),
         }
     }
 
     fn is_awaiting_input(&self, _cx: &App) -> bool {
+        self.awaiting_input.is_some()
+    }
+
+    fn awaiting_input_tooltip(&self, _cx: &App) -> &'static str {
         self.awaiting_input
+            .map(|kind| kind.tooltip_text())
+            .unwrap_or("Terminal awaiting input")
     }
 
     fn has_conflict(&self, _cx: &App) -> bool {

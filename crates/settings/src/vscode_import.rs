@@ -882,6 +882,8 @@ impl VsCodeSettings {
             toolbar: None,
             show_count_badge: None,
             flexible: None,
+            awaiting_input_idle_threshold_secs: None,
+            sound_on_awaiting_input: None,
         })
     }
 

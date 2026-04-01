@@ -27,9 +27,10 @@ use client::{Client, UserStore, zed_urls};
 use cloud_api_types::Plan;
 
 use gpui::{
-    Action, AnyElement, App, Context, Corner, Element, Entity, Focusable, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Render, StatefulInteractiveElement, Styled,
-    Subscription, WeakEntity, Window, actions, div,
+    Action, Animation, AnimationExt, AnyElement, App, Context, Corner, Element, Entity, Focusable,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, actions, div,
+    pulsating_between,
 };
 use onboarding_banner::OnboardingBanner;
 use project::{Project, git_store::GitStoreEvent, trusted_worktrees::TrustedWorktrees};
@@ -38,11 +39,12 @@ use settings::Settings;
 use settings::WorktreeId;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
 use ui::{
-    Avatar, ButtonLike, ContextMenu, IconWithIndicator, Indicator, PopoverMenu, PopoverMenuHandle,
-    TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
+    Avatar, ButtonLike, ContextMenu, CountBadge, IconWithIndicator, Indicator, PopoverMenu,
+    PopoverMenuHandle, TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
 };
 use update_version::UpdateVersion;
 use util::ResultExt;
@@ -961,21 +963,49 @@ impl TitleBar {
         )
     }
 
-    fn render_awaiting_input_indicator(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn render_awaiting_input_indicator(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let workspace = self.workspace.upgrade()?;
-        let awaiting = workspace.read(cx).any_item_awaiting_input(cx);
-        if !awaiting {
+        let count = workspace.read(cx).awaiting_input_count(cx);
+        if count == 0 {
             return None;
         }
+        let workspace_handle = self.workspace.clone();
+        let tooltip = workspace.read(cx).first_awaiting_input_tooltip(cx);
+        let tooltip_text = if count > 1 {
+            format!("{count} terminals awaiting input — click to focus")
+        } else {
+            format!("{tooltip} — click to focus")
+        };
         Some(
             div()
                 .id("terminal-awaiting-input")
+                .cursor_pointer()
+                .relative()
+                .on_click(move |_, window, cx| {
+                    if let Some(workspace) = workspace_handle.upgrade() {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.focus_first_awaiting_input(window, cx);
+                        });
+                    }
+                })
+                .tooltip(Tooltip::text(tooltip_text))
                 .child(
                     Icon::new(IconName::Return)
                         .size(IconSize::Small)
                         .color(Color::Accent),
                 )
-                .tooltip(Tooltip::text("Terminal awaiting input")),
+                .when(count > 1, |this| this.child(CountBadge::new(count)))
+                .with_animation(
+                    "titlebar-awaiting-pulse",
+                    Animation::new(Duration::from_secs(2))
+                        .repeat()
+                        .with_easing(pulsating_between(0.4, 1.0)),
+                    |element, delta| element.opacity(delta),
+                )
+                .into_any_element(),
         )
     }
 
