@@ -907,6 +907,23 @@ pub struct TaskState {
     pub spawned_task: SpawnInTerminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractivePromptKind {
+    GeneralInput,
+    Confirmation,
+    ChooseOption,
+}
+
+impl InteractivePromptKind {
+    pub fn tooltip_text(&self) -> &'static str {
+        match self {
+            Self::GeneralInput => "Terminal awaiting input",
+            Self::Confirmation => "Terminal awaiting confirmation",
+            Self::ChooseOption => "Terminal awaiting selection",
+        }
+    }
+}
+
 /// A status of the current terminal tab's task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
@@ -2241,10 +2258,9 @@ impl Terminal {
         self.child_exited
     }
 
-    pub fn has_interactive_prompt(&self) -> bool {
+    pub fn interactive_prompt_kind(&self) -> Option<InteractivePromptKind> {
         let term = self.term.lock_unfair();
         let cursor_line = term.grid().cursor.point.line;
-        let cursor_col = term.grid().cursor.point.column;
         let columns = term.grid().columns();
 
         let mut lines = Vec::new();
@@ -2262,20 +2278,11 @@ impl Terminal {
 
         let combined = lines.join("\n");
 
-        // Claude Code shows "❯" (U+2771) on the input line when waiting for user input.
-        // Older versions may use "›" (U+203A). Check for both.
-        let cursor_line_text = lines.first().map(|s| s.as_str()).unwrap_or("");
         let is_prompt_char = |l: &str| {
             let trimmed = l.trim();
             trimmed.starts_with('❯') || trimmed.starts_with('\u{2771}')
                 || trimmed.starts_with('›') || trimmed.starts_with('\u{203a}')
         };
-        let has_claude_input_prompt = is_prompt_char(cursor_line_text);
-
-        // Detect when cursor is on or near a line below the prompt.
-        // Claude Code may insert status lines (e.g. "⏵⏵ bypass permissions on")
-        // between the prompt and the cursor, so scan a few lines up.
-        let has_nearby_prompt = lines.iter().take(5).any(|l| is_prompt_char(l));
 
         let has_numbered_options = lines.iter().any(|l| {
             let trimmed = l.trim();
@@ -2284,14 +2291,48 @@ impl Terminal {
             let trimmed = l.trim();
             trimmed.starts_with("2.") || trimmed.starts_with("3.")
         });
-        let has_proceed_prompt = combined.contains("Would you like to proceed")
-            || combined.contains("Shall I proceed")
-            || combined.contains("Do you want to proceed");
+        if has_numbered_options {
+            return Some(InteractivePromptKind::ChooseOption);
+        }
+
         let has_yn_prompt = combined.contains("[y/n]")
             || combined.contains("[Y/n]")
             || combined.contains("[yes/no]");
+        if has_yn_prompt {
+            return Some(InteractivePromptKind::Confirmation);
+        }
 
-        has_claude_input_prompt || has_nearby_prompt || has_numbered_options || has_proceed_prompt || has_yn_prompt
+        let has_proceed_prompt = combined.contains("Would you like to proceed")
+            || combined.contains("Shall I proceed")
+            || combined.contains("Do you want to proceed");
+        if has_proceed_prompt {
+            return Some(InteractivePromptKind::Confirmation);
+        }
+
+        // Claude Code shows "❯" (U+2771) or "›" (U+203A) on the input line.
+        // Check cursor line and a few lines up (status lines like "⏵⏵ bypass
+        // permissions on" can appear between the prompt char and the cursor).
+        let cursor_line_text = lines.first().map(|s| s.as_str()).unwrap_or("");
+        let has_claude_prompt = is_prompt_char(cursor_line_text)
+            || lines.iter().take(5).any(|l| is_prompt_char(l));
+
+        if has_claude_prompt {
+            // Filter out the initial Claude Code startup screen: the version
+            // banner (e.g. "Claude Code v2.1.89") appears near the prompt
+            // before any conversation has happened. This is not an actionable
+            // "awaiting input" state — it's just the app having launched.
+            let is_startup_screen = combined.contains("Claude Code v");
+            if is_startup_screen {
+                return None;
+            }
+            return Some(InteractivePromptKind::GeneralInput);
+        }
+
+        None
+    }
+
+    pub fn has_interactive_prompt(&self) -> bool {
+        self.interactive_prompt_kind().is_some()
     }
 
     pub fn wait_for_completed_task(&self, cx: &App) -> Task<Option<ExitStatus>> {

@@ -5328,6 +5328,62 @@ impl Workspace {
         false
     }
 
+    pub fn awaiting_input_count(&self, cx: &App) -> usize {
+        let dock_panes = self
+            .all_docks()
+            .into_iter()
+            .flat_map(|dock| dock.read(cx).panel_panes(cx));
+        let mut count = 0;
+        for pane in self.panes.iter().cloned().chain(dock_panes) {
+            for item in pane.read(cx).items() {
+                if item.is_awaiting_input(cx) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    pub fn first_awaiting_input_tooltip(&self, cx: &App) -> &'static str {
+        let dock_panes = self
+            .all_docks()
+            .into_iter()
+            .flat_map(|dock| dock.read(cx).panel_panes(cx));
+        for pane in self.panes.iter().cloned().chain(dock_panes) {
+            for item in pane.read(cx).items() {
+                if item.is_awaiting_input(cx) {
+                    return item.awaiting_input_tooltip(cx);
+                }
+            }
+        }
+        "Terminal awaiting input"
+    }
+
+    pub fn focus_first_awaiting_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let dock_panes: Vec<_> = self
+            .all_docks()
+            .into_iter()
+            .flat_map(|dock| dock.read(cx).panel_panes(cx))
+            .collect();
+        for pane in self.panes.iter().cloned().chain(dock_panes) {
+            let awaiting_index = pane
+                .read(cx)
+                .items()
+                .position(|item| item.is_awaiting_input(cx));
+            if let Some(index) = awaiting_index {
+                pane.update(cx, |pane, cx| {
+                    pane.activate_item(index, true, true, window, cx);
+                });
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn active_pane(&self) -> &Entity<Pane> {
         &self.active_pane
     }
