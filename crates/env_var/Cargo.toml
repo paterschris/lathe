@@ -1,5 +1,5 @@
 [package]
-name = "zed_env_vars"
+name = "env_var"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
@@ -9,10 +9,7 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [lib]
-path = "src/zed_env_vars.rs"
-
-[features]
-default = []
+path = "src/env_var.rs"
 
 [dependencies]
-env_var.workspace = true
+gpui.workspace = true
