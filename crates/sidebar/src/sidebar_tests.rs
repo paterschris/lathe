@@ -149,6 +149,7 @@ fn save_thread_metadata(
         updated_at,
         created_at,
         folder_paths: path_list,
+        main_worktree_paths: PathList::default(),
         archived: false,
     };
     cx.update(|cx| {
@@ -697,6 +698,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     session_id: acp::SessionId::new(Arc::from("t-1")),
                     agent_id: AgentId::new("zed-agent"),
                     folder_paths: PathList::default(),
+                    main_worktree_paths: PathList::default(),
                     title: "Completed thread".into(),
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
@@ -719,6 +721,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     session_id: acp::SessionId::new(Arc::from("t-2")),
                     agent_id: AgentId::new("zed-agent"),
                     folder_paths: PathList::default(),
+                    main_worktree_paths: PathList::default(),
                     title: "Running thread".into(),
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
@@ -741,6 +744,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     session_id: acp::SessionId::new(Arc::from("t-3")),
                     agent_id: AgentId::new("zed-agent"),
                     folder_paths: PathList::default(),
+                    main_worktree_paths: PathList::default(),
                     title: "Error thread".into(),
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
@@ -763,6 +767,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     session_id: acp::SessionId::new(Arc::from("t-4")),
                     agent_id: AgentId::new("zed-agent"),
                     folder_paths: PathList::default(),
+                    main_worktree_paths: PathList::default(),
                     title: "Waiting thread".into(),
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
@@ -785,6 +790,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     session_id: acp::SessionId::new(Arc::from("t-5")),
                     agent_id: AgentId::new("zed-agent"),
                     folder_paths: PathList::default(),
+                    main_worktree_paths: PathList::default(),
                     title: "Notified thread".into(),
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
@@ -2052,6 +2058,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::default(),
+                main_worktree_paths: PathList::default(),
                 archived: false,
             },
             &workspace_a,
@@ -2107,6 +2114,7 @@ async fn test_focused_thread_tracks_user_intent(cx: &mut TestAppContext) {
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::default(),
+                main_worktree_paths: PathList::default(),
                 archived: false,
             },
             &workspace_b,
@@ -3571,6 +3579,7 @@ async fn test_activate_archived_thread_with_saved_paths_activates_matching_works
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::new(&[PathBuf::from("/project-b")]),
+                main_worktree_paths: PathList::default(),
                 archived: false,
             },
             window,
@@ -3633,6 +3642,7 @@ async fn test_activate_archived_thread_cwd_fallback_with_matching_workspace(
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::new(&[std::path::PathBuf::from("/project-b")]),
+                main_worktree_paths: PathList::default(),
                 archived: false,
             },
             window,
@@ -3695,6 +3705,7 @@ async fn test_activate_archived_thread_no_paths_no_cwd_uses_active_workspace(
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::default(),
+                main_worktree_paths: PathList::default(),
                 archived: false,
             },
             window,
@@ -3749,6 +3760,7 @@ async fn test_activate_archived_thread_saved_paths_opens_new_workspace(cx: &mut 
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: path_list_b,
+                main_worktree_paths: PathList::default(),
                 archived: false,
             },
             window,
@@ -3798,6 +3810,7 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::new(&[PathBuf::from("/project-b")]),
+                main_worktree_paths: PathList::default(),
                 archived: false,
             },
             window,
@@ -3874,6 +3887,7 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::new(&[PathBuf::from("/project-b")]),
+                main_worktree_paths: PathList::default(),
                 archived: false,
             },
             window,
@@ -3949,6 +3963,7 @@ async fn test_activate_archived_thread_prefers_current_window_for_matching_paths
                 updated_at: Utc::now(),
                 created_at: None,
                 folder_paths: PathList::new(&[PathBuf::from("/project-a")]),
+                main_worktree_paths: PathList::default(),
                 archived: false,
             },
             window,
@@ -4688,12 +4703,96 @@ async fn test_archived_threads_excluded_from_sidebar_entries(cx: &mut TestAppCon
     });
 }
 
+#[gpui::test]
+async fn test_linked_worktree_workspace_shows_main_worktree_threads(cx: &mut TestAppContext) {
+    // When only a linked worktree workspace is open (not the main repo),
+    // threads saved against the main repo should still appear in the sidebar.
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+
+    // Create the main repo with a linked worktree.
+    fs.insert_tree(
+        "/project",
+        serde_json::json!({
+            ".git": {
+                "worktrees": {
+                    "feature-a": {
+                        "commondir": "../../",
+                        "HEAD": "ref: refs/heads/feature-a",
+                    },
+                },
+            },
+            "src": {},
+        }),
+    )
+    .await;
+
+    fs.insert_tree(
+        "/wt-feature-a",
+        serde_json::json!({
+            ".git": "gitdir: /project/.git/worktrees/feature-a",
+            "src": {},
+        }),
+    )
+    .await;
+
+    fs.add_linked_worktree_for_repo(
+        std::path::Path::new("/project/.git"),
+        false,
+        git::repository::Worktree {
+            path: std::path::PathBuf::from("/wt-feature-a"),
+            ref_name: Some("refs/heads/feature-a".into()),
+            sha: "abc".into(),
+            is_main: false,
+        },
+    )
+    .await;
+
+    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+
+    // Only open the linked worktree as a workspace — NOT the main repo.
+    let worktree_project = project::Project::test(fs.clone(), ["/wt-feature-a".as_ref()], cx).await;
+    worktree_project
+        .update(cx, |p, cx| p.git_scans_complete(cx))
+        .await;
+
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+        MultiWorkspace::test_new(worktree_project.clone(), window, cx)
+    });
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    // Save a thread against the MAIN repo path.
+    let main_paths = PathList::new(&[std::path::PathBuf::from("/project")]);
+    save_named_thread_metadata("main-thread", "Main Repo Thread", &main_paths, cx).await;
+
+    // Save a thread against the linked worktree path.
+    let wt_paths = PathList::new(&[std::path::PathBuf::from("/wt-feature-a")]);
+    save_named_thread_metadata("wt-thread", "Worktree Thread", &wt_paths, cx).await;
+
+    multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
+    cx.run_until_parked();
+
+    // Both threads should be visible: the worktree thread by direct lookup,
+    // and the main repo thread because the workspace is a linked worktree
+    // and we also query the main repo path.
+    let entries = visible_entries_as_strings(&sidebar, cx);
+    assert!(
+        entries.iter().any(|e| e.contains("Main Repo Thread")),
+        "expected main repo thread to be visible in linked worktree workspace, got: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(|e| e.contains("Worktree Thread")),
+        "expected worktree thread to be visible, got: {entries:?}"
+    );
+}
+
 mod property_test {
     use super::*;
     use gpui::EntityId;
 
     struct UnopenedWorktree {
         path: String,
+        main_workspace_path: String,
     }
 
     struct TestState {
@@ -4834,6 +4933,34 @@ mod property_test {
         save_thread_metadata(session_id, title, updated_at, None, path_list, cx);
     }
 
+    fn save_thread_to_path_with_main(
+        state: &mut TestState,
+        path_list: PathList,
+        main_worktree_paths: PathList,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        let session_id = state.next_thread_id();
+        let title: SharedString = format!("Thread {}", session_id).into();
+        let updated_at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 1, 1, 0, 0, 0)
+            .unwrap()
+            + chrono::Duration::seconds(state.thread_counter as i64);
+        let metadata = ThreadMetadata {
+            session_id,
+            agent_id: agent::ZED_AGENT_ID.clone(),
+            title,
+            updated_at,
+            created_at: None,
+            folder_paths: path_list,
+            main_worktree_paths,
+            archived: false,
+        };
+        cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx)
+                .update(cx, |store, cx| store.save_manually(metadata, cx))
+        });
+        cx.run_until_parked();
+    }
+
     async fn perform_operation(
         operation: Operation,
         state: &mut TestState,
@@ -4852,7 +4979,9 @@ mod property_test {
             Operation::SaveWorktreeThread { worktree_index } => {
                 let worktree = &state.unopened_worktrees[worktree_index];
                 let path_list = PathList::new(&[std::path::PathBuf::from(&worktree.path)]);
-                save_thread_to_path(state, path_list, cx);
+                let main_worktree_paths =
+                    PathList::new(&[std::path::PathBuf::from(&worktree.main_workspace_path)]);
+                save_thread_to_path_with_main(state, path_list, main_worktree_paths, cx);
             }
             Operation::DeleteThread { index } => {
                 let session_id = state.remove_thread(index);
@@ -5004,6 +5133,7 @@ mod property_test {
 
                 state.unopened_worktrees.push(UnopenedWorktree {
                     path: worktree_path,
+                    main_workspace_path: main_path.clone(),
                 });
             }
         }
@@ -5105,6 +5235,19 @@ mod property_test {
                     let worktree_path_list =
                         PathList::new(std::slice::from_ref(&linked_worktree.path));
                     for metadata in thread_store.read(cx).entries_for_path(&worktree_path_list) {
+                        metadata_thread_ids.insert(metadata.session_id.clone());
+                    }
+                }
+                if snapshot.is_linked_worktree() {
+                    let main_path_list =
+                        PathList::new(std::slice::from_ref(&snapshot.original_repo_abs_path));
+                    for metadata in thread_store.read(cx).entries_for_path(&main_path_list) {
+                        metadata_thread_ids.insert(metadata.session_id.clone());
+                    }
+                    for metadata in thread_store
+                        .read(cx)
+                        .entries_for_main_worktree_path(&main_path_list)
+                    {
                         metadata_thread_ids.insert(metadata.session_id.clone());
                     }
                 }
