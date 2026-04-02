@@ -1,5 +1,5 @@
 [package]
-name = "credentials_provider"
+name = "zed_credentials_provider"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
@@ -9,9 +9,14 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [lib]
-path = "src/credentials_provider.rs"
+path = "src/zed_credentials_provider.rs"
 
 [dependencies]
 anyhow.workspace = true
+credentials_provider.workspace = true
+futures.workspace = true
 gpui.workspace = true
+paths.workspace = true
+release_channel.workspace = true
 serde.workspace = true
+serde_json.workspace = true
