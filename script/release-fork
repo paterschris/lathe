@@ -33,21 +33,24 @@ esac
 
 zip_path="target/release/Lathe-${version}-${arch}-macos.zip"
 tag="v${version}"
+repo="paterschris/lathe"
 
 echo ""
 echo "=== Step 3: Release ==="
 
 # Check if release already exists
-if gh release view "$tag" &>/dev/null; then
+if gh release view "$tag" --repo "$repo" &>/dev/null; then
     echo "Release ${tag} already exists. Uploading asset to it..."
-    gh release upload "$tag" "$zip_path" --clobber
+    gh release upload "$tag" "$zip_path" --clobber --repo "$repo"
 else
     echo "Creating release ${tag}..."
     gh release create "$tag" "$zip_path" \
         --title "Lathe ${tag}" \
-        --notes "Lathe ${tag} for macOS (${arch})"
+        --notes "Lathe ${tag} for macOS (${arch})" \
+        --target main \
+        --repo "$repo"
 fi
 
 echo ""
 echo "=== Done ==="
-echo "  https://github.com/paterschris/lathe/releases/tag/${tag}"
+echo "  https://github.com/$repo/releases/tag/${tag}"
