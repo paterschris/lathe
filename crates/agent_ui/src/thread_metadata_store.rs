@@ -447,14 +447,9 @@ impl ThreadMetadataStore {
                 let weak_store = weak_store.clone();
                 move |thread, cx| {
                     weak_store
-                        .update(cx, |store, cx| {
+                        .update(cx, |store, _cx| {
                             let session_id = thread.session_id().clone();
                             store.session_subscriptions.remove(&session_id);
-                            if thread.entries().is_empty() {
-                                // Empty threads can be unloaded without ever being
-                                // durably persisted by the underlying agent.
-                                store.delete(session_id, cx);
-                            }
                         })
                         .ok();
                 }
@@ -545,6 +540,10 @@ impl ThreadMetadataStore {
             | AcpThreadEvent::Refusal
             | AcpThreadEvent::WorkingDirectoriesUpdated => {
                 let thread_ref = thread.read(cx);
+                if thread_ref.entries().is_empty() {
+                    return;
+                }
+
                 let existing_thread = self.threads.get(thread_ref.session_id());
                 let session_id = thread_ref.session_id().clone();
                 let title = thread_ref
@@ -1293,7 +1292,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_empty_thread_metadata_deleted_when_thread_released(cx: &mut TestAppContext) {
+    async fn test_empty_thread_events_do_not_create_metadata(cx: &mut TestAppContext) {
         init_test(cx);
 
         let fs = FakeFs::new(cx.executor());
@@ -1323,11 +1322,16 @@ mod tests {
                 .entry_ids()
                 .collect::<Vec<_>>()
         });
-        assert_eq!(metadata_ids, vec![session_id]);
+        assert!(
+            metadata_ids.is_empty(),
+            "expected empty draft thread title updates to be ignored"
+        );
 
-        drop(thread);
-        cx.update(|_| {});
-        cx.run_until_parked();
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.push_user_content_block(None, "Hello".into(), cx);
+            });
+        });
         cx.run_until_parked();
 
         let metadata_ids = cx.update(|cx| {
@@ -1336,10 +1340,7 @@ mod tests {
                 .entry_ids()
                 .collect::<Vec<_>>()
         });
-        assert!(
-            metadata_ids.is_empty(),
-            "expected empty draft thread metadata to be deleted on release"
-        );
+        assert_eq!(metadata_ids, vec![session_id]);
     }
 
     #[gpui::test]
@@ -1414,6 +1415,7 @@ mod tests {
 
         cx.update(|cx| {
             thread_without_worktree.update(cx, |thread, cx| {
+                thread.push_user_content_block(None, "content".into(), cx);
                 thread.set_title("No Project Thread".into(), cx).detach();
             });
         });
@@ -1434,6 +1436,7 @@ mod tests {
 
         cx.update(|cx| {
             thread_with_worktree.update(cx, |thread, cx| {
+                thread.push_user_content_block(None, "content".into(), cx);
                 thread.set_title("Project Thread".into(), cx).detach();
             });
         });
@@ -1489,6 +1492,7 @@ mod tests {
         // Set a title on the regular thread to trigger a save via handle_thread_update.
         cx.update(|cx| {
             regular_thread.update(cx, |thread, cx| {
+                thread.push_user_content_block(None, "content".into(), cx);
                 thread.set_title("Regular Thread".into(), cx).detach();
             });
         });
