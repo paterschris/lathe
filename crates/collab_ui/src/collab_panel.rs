@@ -13,12 +13,13 @@ use db::kvp::KeyValueStore;
 use editor::{Editor, EditorElement, EditorStyle};
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
-    AnyElement, App, AsyncWindowContext, Bounds, ClickEvent, ClipboardItem, Context, DismissEvent,
-    Div, Entity, EventEmitter, FocusHandle, Focusable, FontStyle, InteractiveElement, IntoElement,
-    KeyContext, ListOffset, ListState, MouseDownEvent, ParentElement, Pixels, Point, PromptLevel,
-    Render, SharedString, Styled, Subscription, Task, TextStyle, WeakEntity, Window, actions,
-    anchored, canvas, deferred, div, fill, list, point, prelude::*, px,
+    AnyElement, App, AsyncWindowContext, Bounds, ClickEvent, ClipboardItem, DismissEvent, Div,
+    Empty, Entity, EventEmitter, FocusHandle, Focusable, FontStyle, KeyContext, ListOffset,
+    ListState, MouseDownEvent, Pixels, Point, PromptLevel, SharedString, Subscription, Task,
+    TextStyle, WeakEntity, Window, actions, anchored, canvas, deferred, div, fill, list, point,
+    prelude::*, px,
 };
+
 use menu::{Cancel, Confirm, SecondaryConfirm, SelectNext, SelectPrevious};
 use project::{Fs, Project};
 use rpc::{
@@ -1091,27 +1092,30 @@ impl CollabPanel {
             room.read(cx).local_participant().role == proto::ChannelRole::Admin
         });
 
+        let end_slot = if is_pending {
+            Label::new("Calling").color(Color::Muted).into_any_element()
+        } else if is_current_user {
+            IconButton::new("leave-call", IconName::Exit)
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("Leave Call"))
+                .on_click(move |_, window, cx| Self::leave_call(window, cx))
+                .into_any_element()
+        } else if role == proto::ChannelRole::Guest {
+            Label::new("Guest").color(Color::Muted).into_any_element()
+        } else if role == proto::ChannelRole::Talker {
+            Label::new("Mic only")
+                .color(Color::Muted)
+                .into_any_element()
+        } else {
+            Empty.into_any_element()
+        };
+
         ListItem::new(user.github_login.clone())
             .start_slot(Avatar::new(user.avatar_uri.clone()))
             .child(render_participant_name_and_handle(user))
             .toggle_state(is_selected)
-            .end_slot(if is_pending {
-                Label::new("Calling").color(Color::Muted).into_any_element()
-            } else if is_current_user {
-                IconButton::new("leave-call", IconName::Exit)
-                    .style(ButtonStyle::Subtle)
-                    .on_click(move |_, window, cx| Self::leave_call(window, cx))
-                    .tooltip(Tooltip::text("Leave Call"))
-                    .into_any_element()
-            } else if role == proto::ChannelRole::Guest {
-                Label::new("Guest").color(Color::Muted).into_any_element()
-            } else if role == proto::ChannelRole::Talker {
-                Label::new("Mic only")
-                    .color(Color::Muted)
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            })
+            .end_slot(end_slot)
+            .tooltip(Tooltip::text("Click to Follow"))
             .when_some(peer_id, |el, peer_id| {
                 if role == proto::ChannelRole::Guest {
                     return el;
@@ -1156,6 +1160,7 @@ impl CollabPanel {
         .into();
 
         ListItem::new(project_id as usize)
+            .height(px(24.))
             .toggle_state(is_selected)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.workspace
@@ -1173,9 +1178,13 @@ impl CollabPanel {
             }))
             .start_slot(
                 h_flex()
-                    .gap_1()
+                    .gap_1p5()
                     .child(render_tree_branch(is_last, false, window, cx))
-                    .child(IconButton::new(0, IconName::Folder)),
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    ),
             )
             .child(Label::new(project_name.clone()))
             .tooltip(Tooltip::text(format!("Open {}", project_name)))
@@ -1192,12 +1201,17 @@ impl CollabPanel {
         let id = peer_id.map_or(usize::MAX, |id| id.as_u64() as usize);
 
         ListItem::new(("screen", id))
+            .height(px(24.))
             .toggle_state(is_selected)
             .start_slot(
                 h_flex()
-                    .gap_1()
+                    .gap_1p5()
                     .child(render_tree_branch(is_last, false, window, cx))
-                    .child(IconButton::new(0, IconName::Screen)),
+                    .child(
+                        Icon::new(IconName::Screen)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    ),
             )
             .child(Label::new("Screen"))
             .when_some(peer_id, |this, _| {
@@ -1208,7 +1222,7 @@ impl CollabPanel {
                         })
                         .ok();
                 }))
-                .tooltip(Tooltip::text("Open shared screen"))
+                .tooltip(Tooltip::text("Open Shared Screen"))
             })
     }
 
@@ -1232,7 +1246,9 @@ impl CollabPanel {
     ) -> impl IntoElement {
         let channel_store = self.channel_store.read(cx);
         let has_channel_buffer_changed = channel_store.has_channel_buffer_changed(channel_id);
+
         ListItem::new("channel-notes")
+            .height(px(24.))
             .toggle_state(is_selected)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_channel_notes(channel_id, window, cx);
@@ -1240,17 +1256,25 @@ impl CollabPanel {
             .start_slot(
                 h_flex()
                     .relative()
-                    .gap_1()
+                    .gap_1p5()
                     .child(render_tree_branch(false, true, window, cx))
-                    .child(IconButton::new(0, IconName::File))
-                    .children(has_channel_buffer_changed.then(|| {
-                        div()
-                            .w_1p5()
-                            .absolute()
-                            .right(px(2.))
-                            .top(px(2.))
-                            .child(Indicator::dot().color(Color::Info))
-                    })),
+                    .child(
+                        h_flex()
+                            .child(
+                                Icon::new(IconName::Reader)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .when(has_channel_buffer_changed, |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .top_neg_0p5()
+                                        .right_0()
+                                        .child(Indicator::dot().color(Color::Info)),
+                                )
+                            }),
+                    ),
             )
             .child(Label::new("notes"))
             .tooltip(Tooltip::text("Open Channel Notes"))
@@ -3144,10 +3168,14 @@ impl CollabPanel {
             (IconName::Star, Color::Default, "Add to Favorites")
         };
 
+        let height = px(24.);
+
         h_flex()
             .id(ix)
             .group("")
+            .h(height)
             .w_full()
+            .overflow_hidden()
             .when(!channel.is_root_channel(), |el| {
                 el.on_drag(channel.clone(), move |channel, _, _, cx| {
                     cx.new(|_| DraggedChannelView {
@@ -3175,6 +3203,7 @@ impl CollabPanel {
             )
             .child(
                 ListItem::new(ix)
+                    .height(height)
                     // Add one level of depth for the disclosure arrow.
                     .indent_level(depth + 1)
                     .indent_step_size(px(20.))
@@ -3256,12 +3285,13 @@ impl CollabPanel {
             .child(
                 h_flex()
                     .visible_on_hover("")
+                    .h_full()
                     .absolute()
                     .right_0()
                     .px_1()
                     .gap_px()
-                    .bg(cx.theme().colors().background)
                     .rounded_l_md()
+                    .bg(cx.theme().colors().background)
                     .child({
                         let focus_handle = self.focus_handle.clone();
                         IconButton::new("channel_favorite", favorite_icon)
@@ -3335,9 +3365,8 @@ fn render_tree_branch(
 ) -> impl IntoElement {
     let rem_size = window.rem_size();
     let line_height = window.text_style().line_height_in_pixels(rem_size);
-    let width = rem_size * 1.5;
     let thickness = px(1.);
-    let color = cx.theme().colors().text;
+    let color = cx.theme().colors().icon_disabled;
 
     canvas(
         |_, _, _| {},
@@ -3367,8 +3396,8 @@ fn render_tree_branch(
             ));
         },
     )
-    .w(width)
-    .h(line_height)
+    .w(rem_size)
+    .h(line_height - px(2.))
 }
 
 fn render_participant_name_and_handle(user: &User) -> impl IntoElement {
