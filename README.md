@@ -1,39 +1,65 @@
 # Lathe
 
-A custom code editor forked from [Zed](https://zed.dev), with enhancements for our team’s workflow.
+A customized code editor forked from [Zed](https://zed.dev), focused on better terminal workflows, visual git integration, and deep theme customization.
 
-## Changes from upstream Zed
+![Theme Customizer](assets/screenshots/theme-customizer.png)
 
-- **Custom theme and syntax highlighting** — tuned for our codebase
-- **Terminal awaiting-input indicator** — shows a return icon in the terminal tab and title bar when Claude Code (or other interactive prompts) are waiting for your input
+## Features (beyond upstream Zed)
 
-## Install (pre-built)
+### Terminal awaiting-input indicator
+Shows a return icon in the terminal tab and title bar when Claude Code or other interactive prompts are waiting for input.
 
-Download the latest `.zip` for your Mac from [Releases](https://github.com/paterschris/lathe/releases), unzip, and drag **Lathe.app** to `/Applications`.
+![Awaiting Input Indicator](assets/screenshots/awaiting-input.png)
 
-Currently only **Apple Silicon** builds are provided.
+### Git-aware tab and panel styling
+Tabs and project panel entries are color-coded by git status — modified, created, deleted, conflict, error, and warning states each get distinct colors.
 
-## Build from source
+![Git Tab Styling](assets/screenshots/git-tabs.png)
 
-### Build and install
+### Theme Customizer
+A built-in panel for editing all 135+ theme colors with HSLA sliders and live preview. Includes category filters, Lathe-specific color badges, and per-color reset. Open via the command palette: `theme customizer: Open`.
 
-The build script automatically installs all prerequisites (Xcode Command Line Tools, Rust via rustup, and cargo-bundle).
+![Theme Customizer Panel](assets/screenshots/theme-customizer-panel.png)
+
+### Other enhancements
+- **Active terminal tab tint** — Terminal tabs get a subtle green background when active
+- **Terminal focus fix** — Ctrl+tab to a terminal tab properly activates the cursor
+- **Custom theme and syntax highlighting** — Tuned color palette
+
+## Install
+
+### Homebrew (recommended)
 
 ```sh
-# Clone the repo
-git clone git@github.com:paterschris/lathe.git
-cd lathe
-
-# Build the app bundle (takes ~10-15 min on first build)
-script/build-fork
-
-# Install to /Applications
-script/install-fork
+brew install --cask --no-quarantine paterschris/lathe/lathe
 ```
 
-The fork installs as **"Lathe.app"** and runs alongside stock Zed without conflicts.
+### Manual download
+
+Download the latest `.zip` from [Releases](https://github.com/paterschris/lathe/releases), unzip, and drag **Lathe.app** to `/Applications`.
+
+Currently only **Apple Silicon (aarch64)** macOS builds are provided.
+
+### Build from source
+
+```sh
+git clone git@github.com:paterschris/lathe.git
+cd lathe
+script/build-fork      # ~10-15 min first time
+script/install-fork    # copies to /Applications
+```
+
+Installs as **Lathe.app** and runs alongside stock Zed without conflicts.
 
 ## Updating
+
+### Homebrew
+
+```sh
+brew upgrade lathe
+```
+
+### Manual / source
 
 ```sh
 git pull
@@ -41,26 +67,20 @@ script/build-fork
 script/install-fork
 ```
 
-## Running without installing
+## Relationship to Zed
 
-After building, you can open the app bundle directly without copying to `/Applications`:
-
-```sh
-open "$(find target -name 'Lathe.app' -path '*/bundle/osx/*' | head -1)"
-```
+Lathe periodically merges from [upstream Zed](https://github.com/zed-industries/zed) to stay current with new features and fixes. Custom changes are kept in separate commits to make merges straightforward.
 
 ## Releasing
-
-To build, package, and publish a GitHub release in one step:
 
 ```sh
 script/release-fork
 ```
 
-Requires the [GitHub CLI](https://cli.github.com/) (`brew install gh`). If a release for the current version already exists, the new build is uploaded alongside the existing assets.
+Builds, packages, and publishes a GitHub release. Requires the [GitHub CLI](https://cli.github.com/).
 
 ## Notes
 
 - First builds take significantly longer than incremental rebuilds
-- The app shares settings and extensions with stock Zed (same `~/Library/Application Support/Zed` directory)
-- The `cargo-bundle` tool is installed automatically on first build from Zed’s fork at [zed-industries/cargo-bundle](https://github.com/zed-industries/cargo-bundle)
+- The app shares settings and extensions with stock Zed (`~/Library/Application Support/Zed`)
+- `cargo-bundle` is installed automatically from [zed-industries/cargo-bundle](https://github.com/zed-industries/cargo-bundle)
