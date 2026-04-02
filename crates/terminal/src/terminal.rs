@@ -2321,8 +2321,12 @@ impl Terminal {
             // banner (e.g. "Claude Code v2.1.89") appears near the prompt
             // before any conversation has happened. This is not an actionable
             // "awaiting input" state — it's just the app having launched.
-            let is_startup_screen = combined.contains("Claude Code v");
-            if is_startup_screen {
+            // The version string also appears in the status bar during active
+            // sessions, so we require that most lines are empty (characteristic
+            // of the sparse startup splash, not a conversation in progress).
+            let has_version_banner = combined.contains("Claude Code v");
+            let non_empty_lines = lines.iter().filter(|l| !l.is_empty()).count();
+            if has_version_banner && non_empty_lines <= 5 {
                 return None;
             }
             return Some(InteractivePromptKind::GeneralInput);

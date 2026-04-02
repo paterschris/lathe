@@ -528,7 +528,10 @@ impl ThemeColorField {
         let name = self.as_ref();
         if name.starts_with("border") {
             ColorCategory::Border
-        } else if name.starts_with("element") || name.starts_with("ghost_element") || name.starts_with("drop_target") {
+        } else if name.starts_with("element")
+            || name.starts_with("ghost_element")
+            || name.starts_with("drop_target")
+        {
             ColorCategory::Element
         } else if name.starts_with("text") {
             ColorCategory::Text
@@ -743,9 +746,7 @@ impl ThemeColors {
             ThemeColorField::BorderSelected => self.border_selected = value,
             ThemeColorField::BorderTransparent => self.border_transparent = value,
             ThemeColorField::BorderDisabled => self.border_disabled = value,
-            ThemeColorField::ElevatedSurfaceBackground => {
-                self.elevated_surface_background = value
-            }
+            ThemeColorField::ElevatedSurfaceBackground => self.elevated_surface_background = value,
             ThemeColorField::SurfaceBackground => self.surface_background = value,
             ThemeColorField::Background => self.background = value,
             ThemeColorField::ElementBackground => self.element_background = value,
@@ -830,9 +831,7 @@ impl ThemeColors {
             ThemeColorField::EditorForeground => self.editor_foreground = value,
             ThemeColorField::EditorBackground => self.editor_background = value,
             ThemeColorField::EditorGutterBackground => self.editor_gutter_background = value,
-            ThemeColorField::EditorSubheaderBackground => {
-                self.editor_subheader_background = value
-            }
+            ThemeColorField::EditorSubheaderBackground => self.editor_subheader_background = value,
             ThemeColorField::EditorActiveLineBackground => {
                 self.editor_active_line_background = value
             }
@@ -870,17 +869,13 @@ impl ThemeColors {
             ThemeColorField::TerminalAnsiBrightGreen => self.terminal_ansi_bright_green = value,
             ThemeColorField::TerminalAnsiDimGreen => self.terminal_ansi_dim_green = value,
             ThemeColorField::TerminalAnsiYellow => self.terminal_ansi_yellow = value,
-            ThemeColorField::TerminalAnsiBrightYellow => {
-                self.terminal_ansi_bright_yellow = value
-            }
+            ThemeColorField::TerminalAnsiBrightYellow => self.terminal_ansi_bright_yellow = value,
             ThemeColorField::TerminalAnsiDimYellow => self.terminal_ansi_dim_yellow = value,
             ThemeColorField::TerminalAnsiBlue => self.terminal_ansi_blue = value,
             ThemeColorField::TerminalAnsiBrightBlue => self.terminal_ansi_bright_blue = value,
             ThemeColorField::TerminalAnsiDimBlue => self.terminal_ansi_dim_blue = value,
             ThemeColorField::TerminalAnsiMagenta => self.terminal_ansi_magenta = value,
-            ThemeColorField::TerminalAnsiBrightMagenta => {
-                self.terminal_ansi_bright_magenta = value
-            }
+            ThemeColorField::TerminalAnsiBrightMagenta => self.terminal_ansi_bright_magenta = value,
             ThemeColorField::TerminalAnsiDimMagenta => self.terminal_ansi_dim_magenta = value,
             ThemeColorField::TerminalAnsiCyan => self.terminal_ansi_cyan = value,
             ThemeColorField::TerminalAnsiBrightCyan => self.terminal_ansi_bright_cyan = value,
