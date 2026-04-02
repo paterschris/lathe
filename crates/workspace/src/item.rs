@@ -12,7 +12,7 @@ use client::{Client, proto};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
     Action, AnyElement, AnyEntity, AnyView, App, AppContext, Context, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, Font, Pixels, Point, Render, SharedString, Task,
+    EventEmitter, FocusHandle, Focusable, Font, Hsla, Pixels, Point, Render, SharedString, Task,
     WeakEntity, Window,
 };
 use language::Capability;
@@ -192,6 +192,11 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
         None
     }
 
+    /// Returns an optional background color override for this item's tab.
+    fn tab_bg_override(&self, _is_active: bool, _cx: &App) -> Option<Hsla> {
+        None
+    }
+
     /// Returns the tab tooltip text.
     ///
     /// Use this if you don't need to customize the tab tooltip content.
@@ -209,6 +214,7 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
 
     fn to_item_events(_event: &Self::Event, _f: &mut dyn FnMut(ItemEvent)) {}
 
+    fn activated(&mut self, _window: &mut Window, _: &mut Context<Self>) {}
     fn deactivated(&mut self, _window: &mut Window, _: &mut Context<Self>) {}
     fn discarded(&self, _project: Entity<Project>, _window: &mut Window, _cx: &mut Context<Self>) {}
     fn on_removed(&self, _cx: &mut Context<Self>) {}
@@ -471,6 +477,7 @@ pub trait ItemHandle: 'static + Send {
     fn tab_content_text(&self, detail: usize, cx: &App) -> SharedString;
     fn suggested_filename(&self, cx: &App) -> SharedString;
     fn tab_icon(&self, window: &Window, cx: &App) -> Option<Icon>;
+    fn tab_bg_override(&self, is_active: bool, cx: &App) -> Option<Hsla>;
     fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString>;
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent>;
     fn telemetry_event_text(&self, cx: &App) -> Option<&'static str>;
@@ -505,6 +512,7 @@ pub trait ItemHandle: 'static + Send {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     );
+    fn activated(&self, window: &mut Window, cx: &mut App);
     fn deactivated(&self, window: &mut Window, cx: &mut App);
     fn on_removed(&self, cx: &mut App);
     fn workspace_deactivated(&self, window: &mut Window, cx: &mut App);
@@ -627,6 +635,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn tab_icon(&self, window: &Window, cx: &App) -> Option<Icon> {
         self.read(cx).tab_icon(window, cx)
+    }
+
+    fn tab_bg_override(&self, is_active: bool, cx: &App) -> Option<Hsla> {
+        self.read(cx).tab_bg_override(is_active, cx)
     }
 
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent> {
@@ -997,6 +1009,10 @@ impl<T: Item> ItemHandle for Entity<T> {
         cx.defer_in(window, |workspace, window, cx| {
             workspace.serialize_workspace(window, cx);
         });
+    }
+
+    fn activated(&self, window: &mut Window, cx: &mut App) {
+        self.update(cx, |this, cx| this.activated(window, cx));
     }
 
     fn deactivated(&self, window: &mut Window, cx: &mut App) {

@@ -1444,6 +1444,10 @@ impl Pane {
                 self.focus_active_item(window, cx);
             }
 
+            if let Some(active_item) = self.active_item() {
+                active_item.activated(window, cx);
+            }
+
             cx.emit(Event::ActivateItem {
                 local: activate_pane,
                 focus_changed: focus_item,
@@ -2803,6 +2807,8 @@ impl Pane {
                 None
             }
         });
+
+        let tab_bg_override = tab_bg_override.or_else(|| item.tab_bg_override(is_active, cx));
 
         let decorated_icon = item_diagnostic.map_or(None, |diagnostic| {
             let icon = match item.tab_icon(window, cx) {
