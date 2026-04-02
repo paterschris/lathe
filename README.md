@@ -2,36 +2,36 @@
 
 A customized code editor forked from [Zed](https://zed.dev), focused on better terminal workflows, visual git integration, and deep theme customization.
 
-![Theme Customizer](assets/screenshots/theme-customizer.png)
+![Theme Customizer](assets/screenshots/theme-customizer.gif)
 
-## Features (beyond upstream Zed)
+## Features
 
 ### Terminal awaiting-input indicator
 Shows a return icon in the terminal tab and title bar when Claude Code or other interactive prompts are waiting for input.
 
-![Awaiting Input Indicator](assets/screenshots/awaiting-input.png)
+![Awaiting Input Indicator](assets/screenshots/awaiting-input-indicator.gif)
 
 ### Git-aware tab and panel styling
 Tabs and project panel entries are color-coded by git status — modified, created, deleted, conflict, error, and warning states each get distinct colors.
 
-![Git Tab Styling](assets/screenshots/git-tabs.png)
+![Git Tab Styling](assets/screenshots/git-aware-editor-tabs.png)
 
 ### Theme Customizer
 A built-in panel for editing all 135+ theme colors with HSLA sliders and live preview. Includes category filters, Lathe-specific color badges, and per-color reset. Open via the command palette: `theme customizer: Open`.
 
-![Theme Customizer Panel](assets/screenshots/theme-customizer-panel.png)
+### Active terminal tab tint
+Terminal tabs get a subtle green background when active, making them easy to spot among editor tabs.
 
-### Other enhancements
-- **Active terminal tab tint** — Terminal tabs get a subtle green background when active
-- **Terminal focus fix** — Ctrl+tab to a terminal tab properly activates the cursor
-- **Custom theme and syntax highlighting** — Tuned color palette
+### Terminal focus fix
+Switching to a terminal tab via ctrl+tab properly activates the cursor without needing to click into the terminal.
 
 ## Install
 
 ### Homebrew (recommended)
 
 ```sh
-brew install --cask --no-quarantine paterschris/lathe/lathe
+brew tap paterschris/tap
+brew install --cask --no-quarantine lathe
 ```
 
 ### Manual download
