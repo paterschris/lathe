@@ -17,6 +17,8 @@ Tabs and project panel entries are color-coded by git status — modified, creat
 ### Theme Customizer
 A built-in panel for editing all 135+ theme colors with HSLA sliders and live preview. Includes category filters, Lathe-specific color badges, and per-color reset. Open via the command palette: `theme customizer: Open`.
 
+![Command Palette](assets/screenshots/theme-customizer-command-pallette.png)
+
 ![Theme Customizer](assets/screenshots/theme-customizer.gif)
 
 ### Active terminal tab tint
