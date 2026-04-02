@@ -19,6 +19,7 @@ use db::smol::future::yield_now;
 pub use shared_screen::SharedScreen;
 mod status_bar;
 pub mod tasks;
+mod theme_customizer;
 mod theme_preview;
 mod toast_layer;
 mod toolbar;
@@ -734,6 +735,7 @@ pub fn prompt_for_open_path_and_open(
 
 pub fn init(app_state: Arc<AppState>, cx: &mut App) {
     component::init();
+    theme_customizer::init(cx);
     theme_preview::init(cx);
     toast_layer::init(cx);
     history_manager::init(app_state.fs.clone(), cx);

@@ -12,9 +12,9 @@ use editor::{
 };
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, ClipboardEntry, DismissEvent, Entity,
-    EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Styled, Subscription,
-    Task, WeakEntity, actions, anchored, deferred, div, pulsating_between,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, Hsla, KeyContext, KeyDownEvent,
+    Keystroke, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Styled,
+    Subscription, Task, WeakEntity, actions, anchored, deferred, div, hsla, pulsating_between,
 };
 use itertools::Itertools;
 use menu;
@@ -1379,6 +1379,12 @@ impl Render for TerminalView {
 impl Item for TerminalView {
     type Event = ItemEvent;
 
+    fn activated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.is_focused(window) {
+            self.focus_in(window, cx);
+        }
+    }
+
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent> {
         Some(TabTooltipContent::Custom(Box::new(Tooltip::element({
             let terminal = self.terminal().read(cx);
@@ -1744,6 +1750,15 @@ impl Item for TerminalView {
         match self.terminal.read(cx).task() {
             Some(task) => task.status == TaskStatus::Running,
             None => self.has_bell() || self.awaiting_input.is_some(),
+        }
+    }
+
+    fn tab_bg_override(&self, is_active: bool, _cx: &App) -> Option<Hsla> {
+        if is_active {
+            // Green background with low alpha to subtly distinguish active terminal tabs
+            Some(hsla(0.38, 0.7, 0.45, 0.15))
+        } else {
+            None
         }
     }
 
