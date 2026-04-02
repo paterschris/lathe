@@ -974,21 +974,21 @@ impl Sidebar {
 
                     let session_id = &thread.metadata.session_id;
 
-                    let is_thread_workspace_active = match &thread.workspace {
-                        ThreadEntryWorkspace::Open(thread_workspace) => active_workspace
-                            .as_ref()
-                            .is_some_and(|active| active == thread_workspace),
-                        ThreadEntryWorkspace::Closed(_) => false,
-                    };
+                    let is_active_thread = self.active_entry.as_ref().is_some_and(|entry| {
+                        entry.is_active_thread(session_id)
+                            && active_workspace
+                                .as_ref()
+                                .is_some_and(|active| active == entry.workspace())
+                    });
 
                     if thread.status == AgentThreadStatus::Completed
-                        && !is_thread_workspace_active
+                        && !is_active_thread
                         && old_statuses.get(session_id) == Some(&AgentThreadStatus::Running)
                     {
                         notified_threads.insert(session_id.clone());
                     }
 
-                    if is_thread_workspace_active && !thread.is_background {
+                    if is_active_thread && !thread.is_background {
                         notified_threads.remove(session_id);
                     }
                 }
@@ -1280,7 +1280,7 @@ impl Sidebar {
             v_flex()
                 .w_full()
                 .border_t_1()
-                .border_color(cx.theme().colors().border.opacity(0.5))
+                .border_color(cx.theme().colors().border)
                 .child(rendered)
                 .into_any_element()
         } else {
@@ -1327,7 +1327,7 @@ impl Sidebar {
         has_running_threads: bool,
         waiting_thread_count: usize,
         is_active: bool,
-        is_selected: bool,
+        is_focused: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id_prefix = if is_sticky { "sticky-" } else { "" };
@@ -1359,11 +1359,11 @@ impl Sidebar {
 
         let label = if highlight_positions.is_empty() {
             Label::new(label.clone())
-                .color(Color::Muted)
+                .when(!is_active, |this| this.color(Color::Muted))
                 .into_any_element()
         } else {
             HighlightedLabel::new(label.clone(), highlight_positions.to_vec())
-                .color(Color::Muted)
+                .when(!is_active, |this| this.color(Color::Muted))
                 .into_any_element()
         };
 
@@ -1381,14 +1381,13 @@ impl Sidebar {
             .pr_1p5()
             .border_1()
             .map(|this| {
-                if is_selected {
+                if is_focused {
                     this.border_color(color.border_focused)
                 } else {
                     this.border_color(gpui::transparent_black())
                 }
             })
             .justify_between()
-            .hover(|s| s.bg(hover_color))
             .child(
                 h_flex()
                     .when(!is_active, |this| this.cursor_pointer())
@@ -1469,7 +1468,6 @@ impl Sidebar {
                                 IconName::ListCollapse,
                             )
                             .icon_size(IconSize::Small)
-                            .icon_color(Color::Muted)
                             .tooltip(Tooltip::text("Collapse Displayed Threads"))
                             .on_click(cx.listener({
                                 let path_list_for_collapse = path_list_for_collapse.clone();
@@ -1491,7 +1489,6 @@ impl Sidebar {
                                 IconName::Plus,
                             )
                             .icon_size(IconSize::Small)
-                            .icon_color(Color::Muted)
                             .tooltip(Tooltip::text("New Thread"))
                             .on_click(cx.listener({
                                 let workspace_for_new_thread = workspace_for_new_thread.clone();
@@ -1508,7 +1505,9 @@ impl Sidebar {
                     })
             })
             .when(!is_active, |this| {
-                this.tooltip(Tooltip::text("Activate Workspace"))
+                this.cursor_pointer()
+                    .hover(|s| s.bg(hover_color))
+                    .tooltip(Tooltip::text("Activate Workspace"))
                     .on_click(cx.listener({
                         move |this, _, window, cx| {
                             this.active_entry =
@@ -1690,8 +1689,7 @@ impl Sidebar {
                     IconName::Ellipsis,
                 )
                 .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                .icon_size(IconSize::Small)
-                .icon_color(Color::Muted),
+                .icon_size(IconSize::Small),
             )
             .anchor(gpui::Corner::TopRight)
             .offset(gpui::Point {
@@ -2825,7 +2823,7 @@ impl Sidebar {
         let color = cx.theme().colors();
         let sidebar_bg = color
             .title_bar_background
-            .blend(color.panel_background.opacity(0.32));
+            .blend(color.panel_background.opacity(0.25));
 
         let timestamp = format_history_entry_timestamp(
             self.thread_last_message_sent_or_queued
@@ -3682,7 +3680,7 @@ impl Render for Sidebar {
         let color = cx.theme().colors();
         let bg = color
             .title_bar_background
-            .blend(color.panel_background.opacity(0.32));
+            .blend(color.panel_background.opacity(0.25));
 
         let no_open_projects = !self.contents.has_open_projects;
         let no_search_results = self.contents.entries.is_empty();
