@@ -2,8 +2,6 @@
 
 A customized code editor forked from [Zed](https://zed.dev), focused on better terminal workflows, visual git integration, and deep theme customization.
 
-![Theme Customizer](assets/screenshots/theme-customizer.gif)
-
 ## Features
 
 ### Terminal awaiting-input indicator
@@ -18,6 +16,8 @@ Tabs and project panel entries are color-coded by git status — modified, creat
 
 ### Theme Customizer
 A built-in panel for editing all 135+ theme colors with HSLA sliders and live preview. Includes category filters, Lathe-specific color badges, and per-color reset. Open via the command palette: `theme customizer: Open`.
+
+![Theme Customizer](assets/screenshots/theme-customizer.gif)
 
 ### Active terminal tab tint
 Terminal tabs get a subtle green background when active, making them easy to spot among editor tabs.
