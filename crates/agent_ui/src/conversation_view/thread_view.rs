@@ -8819,7 +8819,7 @@ pub(crate) fn open_link(
                     .open_path(path, None, true, window, cx)
                     .detach_and_log_err(cx);
             }
-            MentionUri::PastedImage => {}
+            MentionUri::PastedImage { .. } => {}
             MentionUri::Directory { abs_path } => {
                 let project = workspace.project();
                 let Some(entry_id) = project.update(cx, |project, cx| {
