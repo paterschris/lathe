@@ -883,7 +883,13 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${{PATH:-\3}}/g' /etc/profile || true
                         labels: None,
                         build: Some(DockerComposeServiceBuild {
                             context: Some(
-                                features_build_info.empty_context_dir.display().to_string(),
+                                main_service
+                                    .build
+                                    .as_ref()
+                                    .and_then(|b| b.context.clone())
+                                    .unwrap_or_else(|| {
+                                        features_build_info.empty_context_dir.display().to_string()
+                                    }),
                             ),
                             dockerfile: Some(dockerfile_path.display().to_string()),
                             args: Some(build_args),
@@ -3544,6 +3550,27 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${PATH:-\3}/g' /etc/profile || true
 
 ENV DOCKER_BUILDKIT=1
 "#
+        );
+
+        let build_override = files
+            .iter()
+            .find(|f| {
+                f.file_name()
+                    .is_some_and(|s| s.display().to_string() == "docker_compose_build.json")
+            })
+            .expect("to be found");
+        let build_override = test_dependencies.fs.load(build_override).await.unwrap();
+        let build_config: DockerComposeConfig =
+            serde_json_lenient::from_str(&build_override).unwrap();
+        let build_context = build_config
+            .services
+            .get("app")
+            .and_then(|s| s.build.as_ref())
+            .and_then(|b| b.context.clone())
+            .expect("build override should have a context");
+        assert_eq!(
+            build_context, ".",
+            "build override should preserve the original build context from docker-compose.yml"
         );
 
         let runtime_override = files
