@@ -141,6 +141,7 @@ pub(crate) struct DockerComposeService {
     pub(crate) build: Option<DockerComposeServiceBuild>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) privileged: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) volumes: Vec<MountDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) env_file: Option<Vec<String>>,
@@ -1042,7 +1043,7 @@ mod test {
                         ),
                         volumes: vec![MountDefinition {
                             mount_type: Some("bind".to_string()),
-                            source: "/path/to".to_string(),
+                            source: Some("/path/to".to_string()),
                             target: "/workspaces".to_string(),
                         }],
                         network_mode: Some("service:db".to_string()),
@@ -1072,7 +1073,7 @@ mod test {
                         image: Some("postgres:14.1".to_string()),
                         volumes: vec![MountDefinition {
                             mount_type: Some("volume".to_string()),
-                            source: "postgres-data".to_string(),
+                            source: Some("postgres-data".to_string()),
                             target: "/var/lib/postgresql/data".to_string(),
                         }],
                         ..Default::default()
@@ -1162,6 +1163,51 @@ mod test {
 
         let config: DockerComposeConfig = serde_json_lenient::from_str(given_config).unwrap();
         assert!(config.volumes.is_empty());
+    }
+
+    #[test]
+    fn should_deserialize_compose_with_missing_volumes_field() {
+        let given_config = r#"
+        {
+            "name": "devcontainer",
+            "services": {
+                "sidecar": {
+                    "image": "ubuntu:24.04"
+                }
+            }
+        }
+        "#;
+
+        let config: DockerComposeConfig = serde_json_lenient::from_str(given_config).unwrap();
+        let service = config.services.get("sidecar").unwrap();
+        assert!(service.volumes.is_empty());
+    }
+
+    #[test]
+    fn should_deserialize_compose_volume_without_source() {
+        let given_config = r#"
+        {
+            "name": "devcontainer",
+            "services": {
+                "app": {
+                    "image": "ubuntu:24.04",
+                    "volumes": [
+                        {
+                            "type": "tmpfs",
+                            "target": "/tmp"
+                        }
+                    ]
+                }
+            }
+        }
+        "#;
+
+        let config: DockerComposeConfig = serde_json_lenient::from_str(given_config).unwrap();
+        let service = config.services.get("app").unwrap();
+        assert_eq!(service.volumes.len(), 1);
+        assert_eq!(service.volumes[0].source, None);
+        assert_eq!(service.volumes[0].target, "/tmp");
+        assert_eq!(service.volumes[0].mount_type, Some("tmpfs".to_string()));
     }
 
     #[test]
