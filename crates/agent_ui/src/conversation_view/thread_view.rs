@@ -869,7 +869,10 @@ impl ThreadView {
                 .upgrade()
                 .and_then(|workspace| workspace.read(cx).panel::<AgentPanel>(cx))
                 .is_some_and(|panel| {
-                    panel.read(cx).start_thread_in() == &StartThreadIn::NewWorktree
+                    !matches!(
+                        panel.read(cx).start_thread_in(),
+                        StartThreadIn::LocalProject
+                    )
                 });
 
         if intercept_first_send {
