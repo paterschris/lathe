@@ -16,7 +16,7 @@ use std::sync::Arc;
 use ui::prelude::*;
 use util::ResultExt;
 use util::path_list::PathList;
-use zed_actions::agents_sidebar::{MoveWorkspaceToNewWindow, ToggleThreadSwitcher};
+use zed_actions::agents_sidebar::ToggleThreadSwitcher;
 
 use agent_settings::AgentSettings;
 use settings::SidebarDockPosition;
@@ -40,7 +40,22 @@ actions!(
         CloseWorkspaceSidebar,
         /// Moves focus to or from the workspace sidebar without closing it.
         FocusWorkspaceSidebar,
-        //TODO: Restore next/previous workspace
+        /// Activates the next project group in the sidebar.
+        NextProjectGroup,
+        /// Activates the previous project group in the sidebar.
+        PreviousProjectGroup,
+        /// Activates the next thread in sidebar order.
+        NextThread,
+        /// Activates the previous thread in sidebar order.
+        PreviousThread,
+        /// Expands the thread list for the current project to show more threads.
+        ShowMoreThreads,
+        /// Collapses the thread list for the current project to show fewer threads.
+        ShowFewerThreads,
+        /// Creates a new thread in the current workspace.
+        NewThread,
+        /// Moves the current workspace's project group to a new window.
+        MoveWorkspaceToNewWindow,
     ]
 );
 
@@ -114,6 +129,21 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
     ) {
     }
 
+    /// Activates the next or previous project group.
+    fn cycle_project_group(
+        &mut self,
+        _forward: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
+    /// Activates the next or previous thread in sidebar order.
+    fn cycle_thread(&mut self, _forward: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
+
+    /// Moves the active workspace's project group to a new window.
+    fn move_workspace_to_new_window(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+
     /// Return an opaque JSON blob of sidebar-specific state to persist.
     fn serialized_state(&self, _cx: &App) -> Option<String> {
         None
@@ -139,6 +169,9 @@ pub trait SidebarHandle: 'static + Send + Sync {
     fn to_any(&self) -> AnyView;
     fn entity_id(&self) -> EntityId;
     fn toggle_thread_switcher(&self, select_last: bool, window: &mut Window, cx: &mut App);
+    fn cycle_project_group(&self, forward: bool, window: &mut Window, cx: &mut App);
+    fn cycle_thread(&self, forward: bool, window: &mut Window, cx: &mut App);
+    fn move_workspace_to_new_window(&self, window: &mut Window, cx: &mut App);
 
     fn is_threads_list_view_active(&self, cx: &App) -> bool;
 
@@ -195,6 +228,33 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
         window.defer(cx, move |window, cx| {
             entity.update(cx, |this, cx| {
                 this.toggle_thread_switcher(select_last, window, cx);
+            });
+        });
+    }
+
+    fn cycle_project_group(&self, forward: bool, window: &mut Window, cx: &mut App) {
+        let entity = self.clone();
+        window.defer(cx, move |window, cx| {
+            entity.update(cx, |this, cx| {
+                this.cycle_project_group(forward, window, cx);
+            });
+        });
+    }
+
+    fn cycle_thread(&self, forward: bool, window: &mut Window, cx: &mut App) {
+        let entity = self.clone();
+        window.defer(cx, move |window, cx| {
+            entity.update(cx, |this, cx| {
+                this.cycle_thread(forward, window, cx);
+            });
+        });
+    }
+
+    fn move_workspace_to_new_window(&self, window: &mut Window, cx: &mut App) {
+        let entity = self.clone();
+        window.defer(cx, move |window, cx| {
+            entity.update(cx, |this, cx| {
+                this.move_workspace_to_new_window(window, cx);
             });
         });
     }
@@ -826,6 +886,19 @@ impl MultiWorkspace {
         cx.notify();
     }
 
+    /// Promotes the currently active workspace to persistent if it is
+    /// transient, so it is retained across workspace switches even when
+    /// the sidebar is closed. No-op if the workspace is already persistent.
+    pub fn retain_active_workspace(&mut self, cx: &mut Context<Self>) {
+        if let ActiveWorkspace::Transient(workspace) = &self.active_workspace {
+            let workspace = workspace.clone();
+            let index = self.promote_transient(workspace, cx);
+            self.active_workspace = ActiveWorkspace::Persistent(index);
+            self.serialize(cx);
+            cx.notify();
+        }
+    }
+
     /// Promotes a former transient workspace into the persistent list.
     /// Returns the index of the newly inserted workspace.
     fn promote_transient(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) -> usize {
@@ -1300,16 +1373,6 @@ impl MultiWorkspace {
         });
     }
 
-    fn move_active_workspace_to_new_window(
-        &mut self,
-        _: &MoveWorkspaceToNewWindow,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let workspace = self.workspace().clone();
-        self.move_workspace_to_new_window(&workspace, window, cx);
-    }
-
     pub fn open_project(
         &mut self,
         paths: Vec<PathBuf>,
@@ -1443,11 +1506,43 @@ impl Render for MultiWorkspace {
                             this.focus_sidebar(window, cx);
                         },
                     ))
-                    .on_action(cx.listener(Self::move_active_workspace_to_new_window))
                     .on_action(cx.listener(
                         |this: &mut Self, action: &ToggleThreadSwitcher, window, cx| {
                             if let Some(sidebar) = &this.sidebar {
                                 sidebar.toggle_thread_switcher(action.select_last, window, cx);
+                            }
+                        },
+                    ))
+                    .on_action(
+                        cx.listener(|this: &mut Self, _: &NextProjectGroup, window, cx| {
+                            if let Some(sidebar) = &this.sidebar {
+                                sidebar.cycle_project_group(true, window, cx);
+                            }
+                        }),
+                    )
+                    .on_action(cx.listener(
+                        |this: &mut Self, _: &PreviousProjectGroup, window, cx| {
+                            if let Some(sidebar) = &this.sidebar {
+                                sidebar.cycle_project_group(false, window, cx);
+                            }
+                        },
+                    ))
+                    .on_action(cx.listener(|this: &mut Self, _: &NextThread, window, cx| {
+                        if let Some(sidebar) = &this.sidebar {
+                            sidebar.cycle_thread(true, window, cx);
+                        }
+                    }))
+                    .on_action(
+                        cx.listener(|this: &mut Self, _: &PreviousThread, window, cx| {
+                            if let Some(sidebar) = &this.sidebar {
+                                sidebar.cycle_thread(false, window, cx);
+                            }
+                        }),
+                    )
+                    .on_action(cx.listener(
+                        |this: &mut Self, _: &MoveWorkspaceToNewWindow, window, cx| {
+                            if let Some(sidebar) = &this.sidebar {
+                                sidebar.move_workspace_to_new_window(window, cx);
                             }
                         },
                     ))
