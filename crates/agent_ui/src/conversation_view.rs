@@ -54,8 +54,8 @@ use theme_settings::AgentFontSize;
 use ui::{
     Callout, CircularProgress, CommonAnimationExt, ContextMenu, ContextMenuEntry, CopyButton,
     DecoratedIcon, DiffStat, Disclosure, Divider, DividerColor, IconDecoration, IconDecorationKind,
-    KeyBinding, PopoverMenu, PopoverMenuHandle, SpinnerLabel, TintColor, Tooltip, WithScrollbar,
-    prelude::*, right_click_menu,
+    KeyBinding, PopoverMenu, PopoverMenuHandle, TintColor, Tooltip, WithScrollbar, prelude::*,
+    right_click_menu,
 };
 use util::{ResultExt, size::format_file_size, time::duration_alt_display};
 use util::{debug_panic, defer};
