@@ -31,7 +31,6 @@ pub struct PanelLayout {
     pub(crate) outline_panel_dock: Option<DockSide>,
     pub(crate) collaboration_panel_dock: Option<DockPosition>,
     pub(crate) git_panel_dock: Option<DockPosition>,
-    pub(crate) notification_panel_button: Option<bool>,
 }
 
 impl PanelLayout {
@@ -41,7 +40,6 @@ impl PanelLayout {
         outline_panel_dock: Some(DockSide::Right),
         collaboration_panel_dock: Some(DockPosition::Right),
         git_panel_dock: Some(DockPosition::Right),
-        notification_panel_button: Some(false),
     };
 
     const EDITOR: Self = Self {
@@ -50,7 +48,6 @@ impl PanelLayout {
         outline_panel_dock: Some(DockSide::Left),
         collaboration_panel_dock: Some(DockPosition::Left),
         git_panel_dock: Some(DockPosition::Left),
-        notification_panel_button: Some(true),
     };
 
     pub fn is_agent_layout(&self) -> bool {
@@ -68,7 +65,6 @@ impl PanelLayout {
             outline_panel_dock: content.outline_panel.as_ref().and_then(|p| p.dock),
             collaboration_panel_dock: content.collaboration_panel.as_ref().and_then(|p| p.dock),
             git_panel_dock: content.git_panel.as_ref().and_then(|p| p.dock),
-            notification_panel_button: content.notification_panel.as_ref().and_then(|p| p.button),
         }
     }
 
@@ -78,7 +74,6 @@ impl PanelLayout {
         settings.outline_panel.get_or_insert_default().dock = self.outline_panel_dock;
         settings.collaboration_panel.get_or_insert_default().dock = self.collaboration_panel_dock;
         settings.git_panel.get_or_insert_default().dock = self.git_panel_dock;
-        settings.notification_panel.get_or_insert_default().button = self.notification_panel_button;
     }
 
     fn write_diff_to(&self, current_merged: &PanelLayout, settings: &mut SettingsContent) {
@@ -98,10 +93,6 @@ impl PanelLayout {
         if self.git_panel_dock != current_merged.git_panel_dock {
             settings.git_panel.get_or_insert_default().dock = self.git_panel_dock;
         }
-        if self.notification_panel_button != current_merged.notification_panel_button {
-            settings.notification_panel.get_or_insert_default().button =
-                self.notification_panel_button;
-        }
     }
 
     fn backfill_to(&self, user_layout: &PanelLayout, settings: &mut SettingsContent) {
@@ -120,10 +111,6 @@ impl PanelLayout {
         }
         if user_layout.git_panel_dock.is_none() {
             settings.git_panel.get_or_insert_default().dock = self.git_panel_dock;
-        }
-        if user_layout.notification_panel_button.is_none() {
-            settings.notification_panel.get_or_insert_default().button =
-                self.notification_panel_button;
         }
     }
 }
@@ -1257,7 +1244,6 @@ mod tests {
         assert_eq!(user_layout.outline_panel_dock, None);
         assert_eq!(user_layout.collaboration_panel_dock, None);
         assert_eq!(user_layout.git_panel_dock, None);
-        assert_eq!(user_layout.notification_panel_button, None);
 
         // User sets a combination that doesn't match either preset:
         // agent on the left but project panel also on the left.
@@ -1480,7 +1466,6 @@ mod tests {
                 Some(DockPosition::Left)
             );
             assert_eq!(user_layout.git_panel_dock, Some(DockPosition::Left));
-            assert_eq!(user_layout.notification_panel_button, Some(true));
 
             // Now switch defaults to agent V2.
             set_agent_v2_defaults(cx);
