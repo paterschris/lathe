@@ -629,13 +629,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "collections",
  "futures 0.3.32",
  "http_client",
+ "language_model_core",
+ "log",
  "schemars",
  "serde",
  "serde_json",
  "strum 0.27.2",
  "thiserror 2.0.17",
+ "tiktoken-rs",
 ]
 
 [[package]]
@@ -2903,7 +2907,6 @@ dependencies = [
  "http_client",
  "http_client_tls",
  "httparse",
- "language_model",
  "log",
  "objc2-foundation",
  "parking_lot",
@@ -2959,6 +2962,7 @@ dependencies = [
  "http_client",
  "parking_lot",
  "serde_json",
+ "smol",
  "thiserror 2.0.17",
  "yawc",
 ]
@@ -5162,6 +5166,7 @@ dependencies = [
  "buffer_diff",
  "client",
  "clock",
+ "cloud_api_client",
  "cloud_api_types",
  "cloud_llm_client",
  "collections",
@@ -5641,7 +5646,7 @@ dependencies = [
 name = "env_var"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui_shared_string",
 ]
 
 [[package]]
@@ -7468,11 +7473,13 @@ dependencies = [
  "anyhow",
  "futures 0.3.32",
  "http_client",
+ "language_model_core",
+ "log",
  "schemars",
  "serde",
  "serde_json",
- "settings",
  "strum 0.27.2",
+ "tiktoken-rs",
 ]
 
 [[package]]
@@ -7541,6 +7548,7 @@ dependencies = [
  "getrandom 0.3.4",
  "gpui_macros",
  "gpui_platform",
+ "gpui_shared_string",
  "gpui_util",
  "gpui_web",
  "http_client",
@@ -7708,6 +7716,16 @@ dependencies = [
  "gpui_macos",
  "gpui_web",
  "gpui_windows",
+]
+
+[[package]]
+name = "gpui_shared_string"
+version = "0.1.0"
+dependencies = [
+ "derive_more",
+ "gpui_util",
+ "schemars",
+ "serde",
 ]
 
 [[package]]
@@ -9358,7 +9376,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "collections",
- "gpui",
+ "gpui_shared_string",
  "log",
  "lsp",
  "parking_lot",
@@ -9397,12 +9415,8 @@ dependencies = [
 name = "language_model"
 version = "0.1.0"
 dependencies = [
- "anthropic",
  "anyhow",
  "base64 0.22.1",
- "cloud_api_client",
- "cloud_api_types",
- "cloud_llm_client",
  "collections",
  "credentials_provider",
  "env_var",
@@ -9411,16 +9425,31 @@ dependencies = [
  "http_client",
  "icons",
  "image",
+ "language_model_core",
  "log",
- "open_ai",
- "open_router",
  "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "util",
+]
+
+[[package]]
+name = "language_model_core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cloud_llm_client",
+ "futures 0.3.32",
+ "gpui_shared_string",
+ "http_client",
+ "partial-json-fixer",
  "schemars",
  "serde",
  "serde_json",
  "smol",
+ "strum 0.27.2",
  "thiserror 2.0.17",
- "util",
 ]
 
 [[package]]
@@ -9436,8 +9465,8 @@ dependencies = [
  "base64 0.22.1",
  "bedrock",
  "client",
+ "cloud_api_client",
  "cloud_api_types",
- "cloud_llm_client",
  "collections",
  "component",
  "convert_case 0.8.0",
@@ -9456,6 +9485,7 @@ dependencies = [
  "http_client",
  "language",
  "language_model",
+ "language_models_cloud",
  "lmstudio",
  "log",
  "menu",
@@ -9464,23 +9494,42 @@ dependencies = [
  "open_ai",
  "open_router",
  "opencode",
- "partial-json-fixer",
  "pretty_assertions",
  "release_channel",
  "schemars",
- "semver",
  "serde",
  "serde_json",
  "settings",
  "smol",
  "strum 0.27.2",
- "thiserror 2.0.17",
  "tiktoken-rs",
  "tokio",
  "ui",
  "ui_input",
  "util",
  "vercel",
+ "x_ai",
+]
+
+[[package]]
+name = "language_models_cloud"
+version = "0.1.0"
+dependencies = [
+ "anthropic",
+ "anyhow",
+ "cloud_llm_client",
+ "futures 0.3.32",
+ "google_ai",
+ "gpui",
+ "http_client",
+ "language_model",
+ "open_ai",
+ "schemars",
+ "semver",
+ "serde",
+ "serde_json",
+ "smol",
+ "thiserror 2.0.17",
  "x_ai",
 ]
 
@@ -11631,16 +11680,19 @@ name = "open_ai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "collections",
  "futures 0.3.32",
  "http_client",
+ "language_model_core",
  "log",
+ "pretty_assertions",
  "rand 0.9.2",
  "schemars",
  "serde",
  "serde_json",
- "settings",
  "strum 0.27.2",
  "thiserror 2.0.17",
+ "tiktoken-rs",
 ]
 
 [[package]]
@@ -11672,6 +11724,7 @@ dependencies = [
  "anyhow",
  "futures 0.3.32",
  "http_client",
+ "language_model_core",
  "schemars",
  "serde",
  "serde_json",
@@ -15801,6 +15854,7 @@ dependencies = [
  "collections",
  "derive_more",
  "gpui",
+ "language_model_core",
  "log",
  "schemars",
  "serde",
@@ -20180,6 +20234,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
+ "cloud_api_client",
  "cloud_api_types",
  "cloud_llm_client",
  "futures 0.3.32",
@@ -21783,9 +21838,11 @@ name = "x_ai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "language_model_core",
  "schemars",
  "serde",
  "strum 0.27.2",
+ "tiktoken-rs",
 ]
 
 [[package]]
