@@ -44,7 +44,7 @@ use crate::{DEFAULT_THREAD_TITLE, ui::AcpOnboardingModal};
 use crate::{ExpandMessageEditor, ThreadHistoryView};
 use crate::{ManageProfiles, ThreadHistoryViewEvent};
 use crate::{ThreadHistory, agent_connection_store::AgentConnectionStore};
-use agent_settings::AgentSettings;
+use agent_settings::{AgentSettings, WindowLayout};
 use ai_onboarding::AgentPanelOnboarding;
 use anyhow::{Context as _, Result, anyhow};
 use client::UserStore;
@@ -279,7 +279,7 @@ pub fn init(cx: &mut App) {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, _| {
                             panel
-                                .on_boarding_upsell_dismissed
+                                .new_user_onboarding_upsell_dismissed
                                 .store(false, Ordering::Release);
                         });
                     }
@@ -797,7 +797,10 @@ pub struct AgentPanel {
     _project_subscription: Subscription,
     zoomed: bool,
     pending_serialization: Option<Task<Result<()>>>,
-    onboarding: Entity<AgentPanelOnboarding>,
+    new_user_onboarding: Entity<AgentPanelOnboarding>,
+    new_user_onboarding_upsell_dismissed: AtomicBool,
+    agent_layout_onboarding: Entity<ai_onboarding::AgentLayoutOnboarding>,
+    agent_layout_onboarding_dismissed: AtomicBool,
     selected_agent: Agent,
     start_thread_in: StartThreadIn,
     worktree_creation_status: Option<WorktreeCreationStatus>,
@@ -805,7 +808,6 @@ pub struct AgentPanel {
     _active_thread_focus_subscription: Option<Subscription>,
     _worktree_creation_task: Option<Task<()>>,
     show_trust_workspace_message: bool,
-    on_boarding_upsell_dismissed: AtomicBool,
     _active_view_observation: Option<Subscription>,
 }
 
@@ -1039,16 +1041,53 @@ impl AgentPanel {
                 client,
                 move |_window, cx| {
                     weak_panel
-                        .update(cx, |panel, _| {
-                            panel
-                                .on_boarding_upsell_dismissed
-                                .store(true, Ordering::Release);
+                        .update(cx, |panel, cx| {
+                            panel.dismiss_ai_onboarding(cx);
                         })
                         .ok();
-                    OnboardingUpsell::set_dismissed(true, cx);
                 },
                 cx,
             )
+        });
+
+        let weak_panel = cx.entity().downgrade();
+
+        let layout = AgentSettings::get_layout(cx);
+        let is_agent_layout = matches!(layout, WindowLayout::Agent(_));
+
+        let agent_layout_onboarding = cx.new(|_cx| ai_onboarding::AgentLayoutOnboarding {
+            use_agent_layout: Arc::new({
+                let fs = fs.clone();
+                let weak_panel = weak_panel.clone();
+                move |_window, cx| {
+                    AgentSettings::set_layout(WindowLayout::Agent(None), fs.clone(), cx);
+                    weak_panel
+                        .update(cx, |panel, cx| {
+                            panel.dismiss_agent_layout_onboarding(cx);
+                        })
+                        .ok();
+                }
+            }),
+            revert_to_editor_layout: Arc::new({
+                let fs = fs.clone();
+                let weak_panel = weak_panel.clone();
+                move |_window, cx| {
+                    AgentSettings::set_layout(WindowLayout::Editor(None), fs.clone(), cx);
+                    weak_panel
+                        .update(cx, |panel, cx| {
+                            panel.dismiss_agent_layout_onboarding(cx);
+                        })
+                        .ok();
+                }
+            }),
+            dismissed: Arc::new(move |_window, cx| {
+                weak_panel
+                    .update(cx, |panel, cx| {
+                        panel.dismiss_agent_layout_onboarding(cx);
+                    })
+                    .ok();
+            }),
+            is_agent_layout,
         });
 
         // Subscribe to extension events to sync agent servers when extensions change
@@ -1115,7 +1154,8 @@ impl AgentPanel {
             _project_subscription,
             zoomed: false,
             pending_serialization: None,
-            onboarding,
+            new_user_onboarding: onboarding,
+            agent_layout_onboarding,
             thread_store,
             selected_agent: Agent::default(),
             start_thread_in: StartThreadIn::default(),
@@ -1124,7 +1164,10 @@ impl AgentPanel {
             _active_thread_focus_subscription: None,
             _worktree_creation_task: None,
             show_trust_workspace_message: false,
-            on_boarding_upsell_dismissed: AtomicBool::new(OnboardingUpsell::dismissed(cx)),
+            new_user_onboarding_upsell_dismissed: AtomicBool::new(OnboardingUpsell::dismissed(cx)),
+            agent_layout_onboarding_dismissed: AtomicBool::new(AgentLayoutOnboarding::dismissed(
+                cx,
+            )),
             _active_view_observation: None,
         };
 
@@ -3973,8 +4016,66 @@ impl AgentPanel {
         plan.is_some_and(|plan| plan == Plan::ZedFree) && has_previous_trial
     }
 
-    fn should_render_onboarding(&self, cx: &mut Context<Self>) -> bool {
-        if self.on_boarding_upsell_dismissed.load(Ordering::Acquire) {
+    fn should_render_agent_layout_onboarding(&self, cx: &mut Context<Self>) -> bool {
+        // We only want to show this for existing users: those who
+        // have used the agent panel before the sidebar was introduced.
+        // We can infer that state by users having seen the onboarding
+        // at one point, but not the agent layout onboarding.
+
+        let has_messages = self.active_thread_has_messages(cx);
+        let is_dismissed = self
+            .agent_layout_onboarding_dismissed
+            .load(Ordering::Acquire);
+
+        if is_dismissed || has_messages {
+            return false;
+        }
+
+        match &self.active_view {
+            ActiveView::Uninitialized | ActiveView::History { .. } | ActiveView::Configuration => {
+                false
+            }
+            ActiveView::AgentThread { .. } => {
+                let existing_user = self
+                    .new_user_onboarding_upsell_dismissed
+                    .load(Ordering::Acquire);
+                existing_user
+            }
+        }
+    }
+
+    fn render_agent_layout_onboarding(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if !self.should_render_agent_layout_onboarding(cx) {
+            return None;
+        }
+
+        Some(div().child(self.agent_layout_onboarding.clone()))
+    }
+
+    fn dismiss_agent_layout_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.agent_layout_onboarding_dismissed
+            .store(true, Ordering::Release);
+        AgentLayoutOnboarding::set_dismissed(true, cx);
+        cx.notify();
+    }
+
+    fn dismiss_ai_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.new_user_onboarding_upsell_dismissed
+            .store(true, Ordering::Release);
+        OnboardingUpsell::set_dismissed(true, cx);
+        self.dismiss_agent_layout_onboarding(cx);
+        cx.notify();
+    }
+
+    fn should_render_new_user_onboarding(&mut self, cx: &mut Context<Self>) -> bool {
+        if self
+            .new_user_onboarding_upsell_dismissed
+            .load(Ordering::Acquire)
+        {
             return false;
         }
 
@@ -3986,9 +4087,12 @@ impl AgentPanel {
                 .and_then(|period| period.0.checked_add_days(chrono::Days::new(1)))
                 .is_some_and(|date| date < chrono::Utc::now())
         {
-            OnboardingUpsell::set_dismissed(true, cx);
-            self.on_boarding_upsell_dismissed
-                .store(true, Ordering::Release);
+            if !self
+                .new_user_onboarding_upsell_dismissed
+                .load(Ordering::Acquire)
+            {
+                self.dismiss_ai_onboarding(cx);
+            }
             return false;
         }
 
@@ -4017,16 +4121,20 @@ impl AgentPanel {
         }
     }
 
-    fn render_onboarding(
-        &self,
+    fn render_new_user_onboarding(
+        &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        if !self.should_render_onboarding(cx) {
+        if !self.should_render_new_user_onboarding(cx) {
             return None;
         }
 
-        Some(div().child(self.onboarding.clone()))
+        Some(
+            div()
+                .bg(cx.theme().colors().editor_background)
+                .child(self.new_user_onboarding.clone()),
+        )
     }
 
     fn render_trial_end_upsell(
@@ -4220,7 +4328,8 @@ impl Render for AgentPanel {
             }))
             .child(self.render_toolbar(window, cx))
             .children(self.render_workspace_trust_message(cx))
-            .children(self.render_onboarding(window, cx))
+            .children(self.render_new_user_onboarding(window, cx))
+            .children(self.render_agent_layout_onboarding(window, cx))
             .map(|parent| match &self.active_view {
                 ActiveView::Uninitialized => parent,
                 ActiveView::AgentThread {
@@ -4309,6 +4418,12 @@ struct OnboardingUpsell;
 
 impl Dismissable for OnboardingUpsell {
     const KEY: &'static str = "dismissed-trial-upsell";
+}
+
+struct AgentLayoutOnboarding;
+
+impl Dismissable for AgentLayoutOnboarding {
+    const KEY: &'static str = "dismissed-agent-layout-onboarding";
 }
 
 struct TrialEndUpsell;

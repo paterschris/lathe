@@ -1233,10 +1233,13 @@ dependencies = [
 name = "auto_update_ui"
 version = "0.1.0"
 dependencies = [
+ "agent_settings",
  "anyhow",
  "auto_update",
  "client",
+ "db",
  "editor",
+ "fs",
  "gpui",
  "markdown_preview",
  "release_channel",
@@ -1244,9 +1247,11 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "telemetry",
  "ui",
  "util",
  "workspace",
+ "zed_actions",
 ]
 
 [[package]]
@@ -11584,6 +11589,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
+ "cloud_api_types",
+ "collections",
  "component",
  "db",
  "documented",
