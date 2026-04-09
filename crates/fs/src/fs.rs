@@ -170,6 +170,13 @@ pub trait Fs: Send + Sync {
     async fn is_case_sensitive(&self) -> bool;
     fn subscribe_to_jobs(&self) -> JobEventReceiver;
 
+    /// Restores a given `TrashedEntry`, moving it from the system's trash back
+    /// to the original path.
+    async fn restore(
+        &self,
+        trashed_entry: TrashedEntry,
+    ) -> std::result::Result<(), TrashRestoreError>;
+
     #[cfg(feature = "test-support")]
     fn as_fake(&self) -> Arc<FakeFs> {
         panic!("called as_fake on a real fs");
@@ -181,7 +188,7 @@ pub trait Fs: Send + Sync {
 // tests from changes to that crate's API surface.
 /// Represents a file or directory that has been moved to the system trash,
 /// retaining enough information to restore it to its original location.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct TrashedEntry {
     /// Platform-specific identifier for the file/directory in the trash.
     ///
@@ -201,6 +208,41 @@ impl From<trash::TrashItem> for TrashedEntry {
             id: item.id,
             name: item.name,
             original_parent: item.original_parent,
+        }
+    }
+}
+
+impl TrashedEntry {
+    fn into_trash_item(self) -> trash::TrashItem {
+        trash::TrashItem {
+            id: self.id,
+            name: self.name,
+            original_parent: self.original_parent,
+            // `TrashedEntry` doesn't preserve `time_deleted` as we don't
+            // currently need it for restore, so we default it to 0 here.
+            time_deleted: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TrashRestoreError {
+    /// The specified `path` was not found in the system's trash.
+    NotFound { path: PathBuf },
+    /// A file or directory already exists at the restore destination.
+    Collision { path: PathBuf },
+    /// Any other platform-specific error.
+    Unknown { description: String },
+}
+
+impl From<trash::Error> for TrashRestoreError {
+    fn from(err: trash::Error) -> Self {
+        match err {
+            trash::Error::RestoreCollision { path, .. } => Self::Collision { path },
+            trash::Error::Unknown { description } => Self::Unknown { description },
+            other => Self::Unknown {
+                description: other.to_string(),
+            },
         }
     }
 }
@@ -1211,6 +1253,13 @@ impl Fs for RealFs {
             Ordering::Release,
         );
         res
+    }
+
+    async fn restore(
+        &self,
+        trashed_entry: TrashedEntry,
+    ) -> std::result::Result<(), TrashRestoreError> {
+        trash::restore_all([trashed_entry.into_trash_item()]).map_err(Into::into)
     }
 }
 
@@ -3041,6 +3090,51 @@ impl Fs for FakeFs {
         let (sender, receiver) = futures::channel::mpsc::unbounded();
         self.state.lock().job_event_subscribers.lock().push(sender);
         receiver
+    }
+
+    async fn restore(
+        &self,
+        trashed_entry: TrashedEntry,
+    ) -> std::result::Result<(), TrashRestoreError> {
+        let mut state = self.state.lock();
+
+        let Some((trashed_entry, fake_entry)) = state
+            .trash
+            .iter()
+            .find(|(entry, _)| *entry == trashed_entry)
+            .cloned()
+        else {
+            return Err(TrashRestoreError::NotFound {
+                path: PathBuf::from(trashed_entry.id),
+            });
+        };
+
+        let path = trashed_entry
+            .original_parent
+            .join(trashed_entry.name.clone());
+
+        let result = state.write_path(&path, |entry| match entry {
+            btree_map::Entry::Vacant(entry) => {
+                entry.insert(fake_entry);
+                Ok(())
+            }
+            btree_map::Entry::Occupied(_) => {
+                anyhow::bail!("Failed to restore {:?}", path);
+            }
+        });
+
+        match result {
+            Ok(_) => {
+                state.trash.retain(|(entry, _)| *entry != trashed_entry);
+                Ok(())
+            }
+            Err(_) => {
+                // For now we'll just assume that this failed because it was a
+                // collision error, which I think that, for the time being, is
+                // the only case where this could fail?
+                Err(TrashRestoreError::Collision { path })
+            }
+        }
     }
 
     #[cfg(feature = "test-support")]
