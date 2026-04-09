@@ -115,20 +115,15 @@ pub trait Fs: Send + Sync {
     /// system trash.
     async fn remove_dir(&self, path: &Path, options: RemoveOptions) -> Result<()>;
 
-    /// Moves a directory to the system trash.
+    /// Moves a file or directory to the system trash.
     /// Returns a [`TrashedEntry`] that can be used to keep track of the
-    /// location of the trashed directory in the system's trash.
-    async fn trash_dir(&self, path: &Path) -> Result<TrashedEntry>;
+    /// location of the trashed item in the system's trash.
+    async fn trash(&self, path: &Path, options: RemoveOptions) -> Result<TrashedEntry>;
 
     /// Removes a file from the filesystem.
     /// There is no expectation that the file will be preserved in the system
     /// trash.
     async fn remove_file(&self, path: &Path, options: RemoveOptions) -> Result<()>;
-
-    /// Moves a file to the system trash.
-    /// Returns a [`TrashedEntry`] that can be used to keep track of the
-    /// location of the trashed file in the system's trash.
-    async fn trash_file(&self, path: &Path) -> Result<TrashedEntry>;
 
     async fn open_handle(&self, path: &Path) -> Result<Arc<dyn FileHandle>>;
     async fn open_sync(&self, path: &Path) -> Result<Box<dyn io::Read + Send + Sync>>;
@@ -175,7 +170,7 @@ pub trait Fs: Send + Sync {
     async fn restore(
         &self,
         trashed_entry: TrashedEntry,
-    ) -> std::result::Result<(), TrashRestoreError>;
+    ) -> std::result::Result<PathBuf, TrashRestoreError>;
 
     #[cfg(feature = "test-support")]
     fn as_fake(&self) -> Arc<FakeFs> {
@@ -188,7 +183,7 @@ pub trait Fs: Send + Sync {
 // tests from changes to that crate's API surface.
 /// Represents a file or directory that has been moved to the system trash,
 /// retaining enough information to restore it to its original location.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct TrashedEntry {
     /// Platform-specific identifier for the file/directory in the trash.
     ///
@@ -196,9 +191,9 @@ pub struct TrashedEntry {
     /// * macOS & Windows – Full path to the file/directory in the system's
     /// trash.
     pub id: OsString,
-    /// Original name of the file/directory before it was moved to the trash.
+    /// Name of the file/directory at the time of trashing, including extension.
     pub name: OsString,
-    /// Original parent directory.
+    /// Absolute path to the parent directory at the time of trashing.
     pub original_parent: PathBuf,
 }
 
@@ -225,13 +220,13 @@ impl TrashedEntry {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum TrashRestoreError {
-    /// The specified `path` was not found in the system's trash.
+    #[error("The specified `path` ({}) was not found in the system's trash.", path.display())]
     NotFound { path: PathBuf },
-    /// A file or directory already exists at the restore destination.
+    #[error("File or directory ({}) already exists at the restore destination.", path.display())]
     Collision { path: PathBuf },
-    /// Any other platform-specific error.
+    #[error("Unknown error ({description})")]
     Unknown { description: String },
 }
 
@@ -801,12 +796,26 @@ impl Fs for RealFs {
         }
     }
 
-    async fn trash_file(&self, path: &Path) -> Result<TrashedEntry> {
-        Ok(trash::delete_with_info(path)?.into())
-    }
+    async fn trash(&self, path: &Path, _options: RemoveOptions) -> Result<TrashedEntry> {
+        // We must make the path absolute or trash will make a weird abomination
+        // of the zed working directory (not usually the worktree) and whatever
+        // the path variable holds.
+        let path = self
+            .canonicalize(path)
+            .await
+            .context("Could not canonicalize the path of the file")?;
 
-    async fn trash_dir(&self, path: &Path) -> Result<TrashedEntry> {
-        self.trash_file(path).await
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::Builder::new()
+            .name("trash file or dir".to_string())
+            .spawn(|| tx.send(trash::delete_with_info(path)))
+            .expect("The os can spawn threads");
+
+        Ok(rx
+            .await
+            .context("Tx dropped or fs.restore panicked")?
+            .context("Could not trash file or dir")?
+            .into())
     }
 
     async fn open_sync(&self, path: &Path) -> Result<Box<dyn io::Read + Send + Sync>> {
@@ -1258,8 +1267,19 @@ impl Fs for RealFs {
     async fn restore(
         &self,
         trashed_entry: TrashedEntry,
-    ) -> std::result::Result<(), TrashRestoreError> {
-        trash::restore_all([trashed_entry.into_trash_item()]).map_err(Into::into)
+    ) -> std::result::Result<PathBuf, TrashRestoreError> {
+        let restored_item_path = trashed_entry.original_parent.join(&trashed_entry.name);
+
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::Builder::new()
+            .name("restore trashed item".to_string())
+            .spawn(move || {
+                let res = trash::restore_all([trashed_entry.into_trash_item()]);
+                tx.send(res)
+            })
+            .expect("The OS can spawn a threads");
+        rx.await.expect("Restore all never panics")?;
+        Ok(restored_item_path)
     }
 }
 
@@ -2794,16 +2814,17 @@ impl Fs for FakeFs {
         self.remove_dir_inner(path, options).await.map(|_| ())
     }
 
-    async fn trash_dir(&self, path: &Path) -> Result<TrashedEntry> {
+    async fn trash(&self, path: &Path, options: RemoveOptions) -> Result<TrashedEntry> {
         let normalized_path = normalize_path(path);
         let parent_path = normalized_path.parent().context("cannot remove the root")?;
         let base_name = normalized_path.file_name().unwrap();
-        let options = RemoveOptions {
-            recursive: true,
-            ..Default::default()
+        let result = if self.is_dir(path).await {
+            self.remove_dir_inner(path, options).await?
+        } else {
+            self.remove_file_inner(path, options).await?
         };
 
-        match self.remove_dir_inner(path, options).await? {
+        match result {
             Some(fake_entry) => {
                 let trashed_entry = TrashedEntry {
                     id: base_name.to_str().unwrap().into(),
@@ -2821,27 +2842,6 @@ impl Fs for FakeFs {
 
     async fn remove_file(&self, path: &Path, options: RemoveOptions) -> Result<()> {
         self.remove_file_inner(path, options).await.map(|_| ())
-    }
-
-    async fn trash_file(&self, path: &Path) -> Result<TrashedEntry> {
-        let normalized_path = normalize_path(path);
-        let parent_path = normalized_path.parent().context("cannot remove the root")?;
-        let base_name = normalized_path.file_name().unwrap();
-
-        match self.remove_file_inner(path, Default::default()).await? {
-            Some(fake_entry) => {
-                let trashed_entry = TrashedEntry {
-                    id: base_name.to_str().unwrap().into(),
-                    name: base_name.to_str().unwrap().into(),
-                    original_parent: parent_path.to_path_buf(),
-                };
-
-                let mut state = self.state.lock();
-                state.trash.push((trashed_entry.clone(), fake_entry));
-                Ok(trashed_entry)
-            }
-            None => anyhow::bail!("{normalized_path:?} does not exist"),
-        }
     }
 
     async fn open_sync(&self, path: &Path) -> Result<Box<dyn io::Read + Send + Sync>> {
@@ -3092,10 +3092,7 @@ impl Fs for FakeFs {
         receiver
     }
 
-    async fn restore(
-        &self,
-        trashed_entry: TrashedEntry,
-    ) -> std::result::Result<(), TrashRestoreError> {
+    async fn restore(&self, trashed_entry: TrashedEntry) -> Result<PathBuf, TrashRestoreError> {
         let mut state = self.state.lock();
 
         let Some((trashed_entry, fake_entry)) = state
@@ -3126,7 +3123,8 @@ impl Fs for FakeFs {
         match result {
             Ok(_) => {
                 state.trash.retain(|(entry, _)| *entry != trashed_entry);
-                Ok(())
+                state.emit_event([(path.clone(), Some(PathEventKind::Created))]);
+                Ok(path)
             }
             Err(_) => {
                 // For now we'll just assume that this failed because it was a
