@@ -688,6 +688,26 @@ impl Render for ThemeCustomizer {
                 v_flex()
                     .flex_grow()
                     .h_full()
+                    .child(
+                        h_flex()
+                            .px_2()
+                            .py_1()
+                            .border_b_1()
+                            .border_color(cx.theme().colors().border)
+                            .child(
+                                Label::new(
+                                    self.selected_field
+                                        .map(|f| f.display_name().to_string())
+                                        .unwrap_or_else(|| "No selection".to_string()),
+                                )
+                                .size(LabelSize::Default)
+                                .color(if self.selected_field.is_some() {
+                                    Color::Default
+                                } else {
+                                    Color::Muted
+                                }),
+                            ),
+                    )
                     .child(self.render_color_editor(cx)),
             )
     }

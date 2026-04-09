@@ -500,9 +500,9 @@ pub enum TerminalDockPosition {
 #[serde(rename_all = "snake_case")]
 pub enum AwaitingInputSound {
     /// No sound.
-    #[default]
     Off,
     /// A subtle chime indicating the agent has finished.
+    #[default]
     AgentDone,
     /// The mute sound effect.
     Mute,
