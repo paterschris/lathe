@@ -538,7 +538,6 @@ impl TerminalView {
             self.awaiting_input = None;
             cx.emit(ItemEvent::UpdateTab);
             cx.notify();
-            self.workspace.update(cx, |_, cx| cx.notify()).ok();
         }
     }
 
@@ -1247,6 +1246,7 @@ impl TerminalView {
     }
 
     fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_awaiting_input(cx);
         self.terminal.update(cx, |terminal, _| {
             terminal.set_cursor_shape(self.cursor_shape);
             terminal.focus_in();
@@ -1380,9 +1380,8 @@ impl Item for TerminalView {
     type Event = ItemEvent;
 
     fn activated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.focus_handle.is_focused(window) {
-            self.focus_in(window, cx);
-        }
+        self.focus_handle.focus(window, cx);
+        self.focus_in(window, cx);
     }
 
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent> {
