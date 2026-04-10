@@ -1,12 +1,12 @@
+use collections::{BTreeMap, HashMap, HashSet};
 use gpui::SharedString;
 use linkify::LinkFinder;
 pub use pulldown_cmark::TagEnd as MarkdownTagEnd;
 use pulldown_cmark::{
     Alignment, CowStr, HeadingLevel, LinkType, MetadataBlockKind, Options, Parser,
 };
-use std::{collections::BTreeMap, ops::Range, sync::Arc};
-
-use collections::HashSet;
+use std::{ops::Range, sync::Arc};
+use util::markdown::generate_heading_slug;
 
 use crate::{html, path_range::PathWithRange};
 
@@ -37,6 +37,7 @@ pub(crate) struct ParsedMarkdownData {
     pub language_paths: HashSet<Arc<str>>,
     pub root_block_starts: Vec<usize>,
     pub html_blocks: BTreeMap<usize, html::html_parser::ParsedHtmlBlock>,
+    pub heading_slugs: HashMap<SharedString, usize>,
 }
 
 impl ParseState {
@@ -80,12 +81,84 @@ impl ParseState {
     }
 }
 
-pub(crate) fn parse_markdown_with_options(text: &str, parse_html: bool) -> ParsedMarkdownData {
+const MAX_DUPLICATE_HEADING_SLUGS: usize = 128;
+
+fn build_heading_slugs(
+    source: &str,
+    events: &[(Range<usize>, MarkdownEvent)],
+) -> HashMap<SharedString, usize> {
+    let mut slugs = HashMap::default();
+    let mut slug_counts: HashMap<String, usize> = HashMap::default();
+    let mut inside_heading = false;
+    let mut heading_text = String::new();
+    let mut heading_source_start: Option<usize> = None;
+
+    for (range, event) in events {
+        match event {
+            MarkdownEvent::Start(MarkdownTag::Heading { .. }) => {
+                inside_heading = true;
+                heading_text.clear();
+                heading_source_start = None;
+            }
+            MarkdownEvent::End(MarkdownTagEnd::Heading(_)) => {
+                if inside_heading {
+                    let source_offset = heading_source_start.unwrap_or(range.start);
+                    let base_slug = generate_heading_slug(&heading_text);
+                    let count = slug_counts.entry(base_slug.clone()).or_insert(0);
+                    let mut slug = if *count == 0 {
+                        base_slug.clone()
+                    } else {
+                        format!("{base_slug}-{count}")
+                    };
+                    *count += 1;
+                    while slugs.contains_key(slug.as_str()) {
+                        let Some(count) = slug_counts.get_mut(&base_slug) else {
+                            slug.clear();
+                            break;
+                        };
+                        if *count >= MAX_DUPLICATE_HEADING_SLUGS {
+                            slug.clear();
+                            break;
+                        }
+                        slug = format!("{base_slug}-{count}");
+                        *count += 1;
+                    }
+                    if !slug.is_empty() {
+                        slugs.insert(SharedString::from(slug), source_offset);
+                    }
+                    inside_heading = false;
+                }
+            }
+            MarkdownEvent::Text | MarkdownEvent::Code if inside_heading => {
+                if heading_source_start.is_none() {
+                    heading_source_start = Some(range.start);
+                }
+                heading_text.push_str(&source[range.clone()]);
+            }
+            MarkdownEvent::SubstitutedText(substituted) if inside_heading => {
+                if heading_source_start.is_none() {
+                    heading_source_start = Some(range.start);
+                }
+                heading_text.push_str(substituted);
+            }
+            _ => {}
+        }
+    }
+
+    slugs
+}
+
+pub(crate) fn parse_markdown_with_options(
+    text: &str,
+    parse_html: bool,
+    parse_heading_slugs: bool,
+) -> ParsedMarkdownData {
     let mut state = ParseState::default();
     let mut language_names = HashSet::default();
     let mut language_paths = HashSet::default();
     let mut html_blocks = BTreeMap::default();
     let mut within_link = false;
+    let mut within_code_block = false;
     let mut within_metadata = false;
     let mut parser = Parser::new_ext(text, PARSE_OPTIONS)
         .into_offset_iter()
@@ -147,6 +220,7 @@ pub(crate) fn parse_markdown_with_options(text: &str, parse_html: bool) -> Parse
                         continue;
                     }
                     pulldown_cmark::Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Indented) => {
+                        within_code_block = true;
                         MarkdownTag::CodeBlock {
                             kind: CodeBlockKind::Indented,
                             metadata: CodeBlockMetadata {
@@ -158,6 +232,7 @@ pub(crate) fn parse_markdown_with_options(text: &str, parse_html: bool) -> Parse
                     pulldown_cmark::Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(
                         ref info,
                     )) => {
+                        within_code_block = true;
                         let content_range = extract_code_block_content_range(&text[range.clone()]);
                         let content_range =
                             content_range.start + range.start..content_range.end + range.start;
@@ -255,6 +330,8 @@ pub(crate) fn parse_markdown_with_options(text: &str, parse_html: bool) -> Parse
             pulldown_cmark::Event::End(tag) => {
                 if let pulldown_cmark::TagEnd::Link = tag {
                     within_link = false;
+                } else if let pulldown_cmark::TagEnd::CodeBlock = tag {
+                    within_code_block = false;
                 }
                 state.push_event(range, MarkdownEvent::End(tag));
             }
@@ -270,6 +347,13 @@ pub(crate) fn parse_markdown_with_options(text: &str, parse_html: bool) -> Parse
                         (range, MarkdownEvent::SubstitutedText(str.to_owned()))
                     }
                 }
+
+                if within_code_block {
+                    let (range, event) = event_for(text, range, &parsed);
+                    state.push_event(range, event);
+                    continue;
+                }
+
                 #[derive(Debug)]
                 struct TextRange<'a> {
                     source_range: Range<usize>,
@@ -316,7 +400,7 @@ pub(crate) fn parse_markdown_with_options(text: &str, parse_html: bool) -> Parse
 
                 let mut ranges = ranges.into_iter().peekable();
 
-                if !within_link {
+                if !within_link && !within_code_block {
                     let mut finder = LinkFinder::new();
                     finder.kinds(&[linkify::LinkKind::Url]);
 
@@ -428,12 +512,19 @@ pub(crate) fn parse_markdown_with_options(text: &str, parse_html: bool) -> Parse
         }
     }
 
+    let heading_slugs = if parse_heading_slugs {
+        build_heading_slugs(text, &state.events)
+    } else {
+        HashMap::default()
+    };
+
     ParsedMarkdownData {
         events: state.events,
         language_names,
         language_paths,
         root_block_starts: state.root_block_starts,
         html_blocks,
+        heading_slugs,
     }
 }
 
@@ -685,7 +776,7 @@ mod tests {
     #[test]
     fn test_html_comments() {
         assert_eq!(
-            parse_markdown_with_options("  <!--\nrdoc-file=string.c\n-->\nReturns", false),
+            parse_markdown_with_options("  <!--\nrdoc-file=string.c\n-->\nReturns", false, false),
             ParsedMarkdownData {
                 events: vec![
                     (2..30, RootStart),
@@ -713,7 +804,8 @@ mod tests {
         assert_eq!(
             parse_markdown_with_options(
                 "&nbsp;&nbsp; https://some.url some \\`&#9658;\\` text",
-                false
+                false,
+                false,
             ),
             ParsedMarkdownData {
                 events: vec![
@@ -752,7 +844,8 @@ mod tests {
         assert_eq!(
             parse_markdown_with_options(
                 "You can use the [GitHub Search API](https://docs.github.com/en",
-                false
+                false,
+                false,
             )
             .events,
             vec![
@@ -785,7 +878,8 @@ mod tests {
         assert_eq!(
             parse_markdown_with_options(
                 "-- --- ... \"double quoted\" 'single quoted' ----------",
-                false
+                false,
+                false,
             ),
             ParsedMarkdownData {
                 events: vec![
@@ -818,7 +912,7 @@ mod tests {
     #[test]
     fn test_code_block_metadata() {
         assert_eq!(
-            parse_markdown_with_options("```rust\nfn main() {\n let a = 1;\n}\n```", false),
+            parse_markdown_with_options("```rust\nfn main() {\n let a = 1;\n}\n```", false, false),
             ParsedMarkdownData {
                 events: vec![
                     (0..37, RootStart),
@@ -846,7 +940,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_markdown_with_options("    fn main() {}", false),
+            parse_markdown_with_options("    fn main() {}", false, false),
             ParsedMarkdownData {
                 events: vec![
                     (4..16, RootStart),
@@ -870,10 +964,62 @@ mod tests {
         );
     }
 
+    fn assert_code_block_does_not_emit_links(markdown: &str) {
+        let parsed = parse_markdown_with_options(markdown, false, false);
+        let mut code_block_depth = 0;
+        let mut code_block_count = 0;
+        let mut saw_text_inside_code_block = false;
+
+        for (_, event) in &parsed.events {
+            match event {
+                Start(CodeBlock { .. }) => {
+                    code_block_depth += 1;
+                    code_block_count += 1;
+                }
+                End(MarkdownTagEnd::CodeBlock) => {
+                    assert!(
+                        code_block_depth > 0,
+                        "encountered a code block end without a matching start"
+                    );
+                    code_block_depth -= 1;
+                }
+                Start(Link { .. }) | End(MarkdownTagEnd::Link) => {
+                    assert_eq!(
+                        code_block_depth, 0,
+                        "code blocks should not emit link events"
+                    );
+                }
+                Text | SubstitutedText(_) if code_block_depth > 0 => {
+                    saw_text_inside_code_block = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(code_block_count, 1, "expected exactly one code block");
+        assert_eq!(code_block_depth, 0, "unterminated code block");
+        assert!(
+            saw_text_inside_code_block,
+            "expected text inside the code block"
+        );
+    }
+
+    #[test]
+    fn test_code_blocks_do_not_autolink_urls() {
+        assert_code_block_does_not_emit_links("```txt\nhttps://example.com\n```");
+        assert_code_block_does_not_emit_links("    https://example.com");
+        assert_code_block_does_not_emit_links(
+            "```txt\r\nhttps:/\\/example.com\r\nhttps://example&#46;com\r\n```",
+        );
+        assert_code_block_does_not_emit_links(
+            "    https:/\\/example.com\r\n    https://example&#46;com",
+        );
+    }
+
     #[test]
     fn test_metadata_blocks_do_not_affect_root_blocks() {
         assert_eq!(
-            parse_markdown_with_options("+++\ntitle = \"Example\"\n+++\n\nParagraph", false),
+            parse_markdown_with_options("+++\ntitle = \"Example\"\n+++\n\nParagraph", false, false),
             ParsedMarkdownData {
                 events: vec![
                     (27..36, RootStart),
@@ -895,7 +1041,7 @@ mod tests {
 |------|---------|
 | [x]  | Fix bug |
 | [ ]  | Add feature |";
-        let parsed = parse_markdown_with_options(markdown, false);
+        let parsed = parse_markdown_with_options(markdown, false, false);
 
         let mut in_table = false;
         let mut saw_task_list_marker = false;
@@ -974,7 +1120,8 @@ mod tests {
         assert_eq!(
             parse_markdown_with_options(
                 "https:/\\/example.com is equivalent to https://example&#46;com!",
-                false
+                false,
+                false,
             )
             .events,
             vec![
@@ -1015,7 +1162,8 @@ mod tests {
         assert_eq!(
             parse_markdown_with_options(
                 "Visit https://example.com/cat\\/é&#8205;☕ for coffee!",
-                false
+                false,
+                false,
             )
             .events,
             [
@@ -1041,5 +1189,43 @@ mod tests {
                 (0..55, RootEnd(0)),
             ]
         );
+    }
+
+    #[test]
+    fn test_heading_slugs() {
+        let parsed = parse_markdown_with_options(
+            "# Hello World\n\n## Code `block`\n\n### Third Level\n\n#### Fourth Level\n\n## Hello World",
+            false,
+            true,
+        );
+        assert_eq!(parsed.heading_slugs.len(), 5);
+        assert!(parsed.heading_slugs.contains_key("hello-world"));
+        assert!(parsed.heading_slugs.contains_key("code-block"));
+        assert!(parsed.heading_slugs.contains_key("third-level"));
+        assert!(parsed.heading_slugs.contains_key("fourth-level"));
+        assert!(parsed.heading_slugs.contains_key("hello-world-1"));
+    }
+
+    #[test]
+    fn test_heading_source_index_for_slug() {
+        let parsed = parse_markdown_with_options(
+            "# Duplicate\n\nText\n\n## Duplicate\n\nMore text",
+            false,
+            true,
+        );
+        let first = parsed.heading_slugs.get("duplicate").copied();
+        let second = parsed.heading_slugs.get("duplicate-1").copied();
+        assert!(first.is_some());
+        assert!(second.is_some());
+        assert!(first.expect("first slug missing") < second.expect("second slug missing"));
+    }
+
+    #[test]
+    fn test_heading_slug_collision_with_dedup_suffix() {
+        let parsed = parse_markdown_with_options("# Foo\n\n## Foo\n\n## Foo 1", false, true);
+        assert_eq!(parsed.heading_slugs.len(), 3);
+        assert!(parsed.heading_slugs.contains_key("foo"));
+        assert!(parsed.heading_slugs.contains_key("foo-1"));
+        assert!(parsed.heading_slugs.contains_key("foo-1-1"));
     }
 }

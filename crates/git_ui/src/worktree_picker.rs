@@ -19,12 +19,14 @@ use remote_connection::{RemoteConnectionModal, connect};
 use settings::Settings;
 use std::{path::PathBuf, sync::Arc};
 use ui::{HighlightedLabel, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
-use util::{ResultExt, debug_panic};
+use util::{ResultExt, debug_panic, paths::PathExt};
 use workspace::{
     ModalView, MultiWorkspace, OpenMode, Workspace, notifications::DetachAndPromptErr,
 };
 
 use crate::git_panel::show_error_toast;
+
+const MAIN_WORKTREE_DISPLAY_NAME: &str = "main";
 
 actions!(
     git,
@@ -254,6 +256,14 @@ struct WorktreeEntry {
     is_new: bool,
 }
 
+impl WorktreeEntry {
+    fn can_delete(&self, forbidden_deletion_path: Option<&PathBuf>) -> bool {
+        !self.is_new
+            && !self.worktree.is_main
+            && forbidden_deletion_path != Some(&self.worktree.path)
+    }
+}
+
 pub struct WorktreeListDelegate {
     matches: Vec<WorktreeEntry>,
     all_worktrees: Option<Vec<GitWorktree>>,
@@ -265,6 +275,7 @@ pub struct WorktreeListDelegate {
     focus_handle: FocusHandle,
     default_branch: Option<SharedString>,
     forbidden_deletion_path: Option<PathBuf>,
+    current_worktree_path: Option<PathBuf>,
 }
 
 impl WorktreeListDelegate {
@@ -274,6 +285,10 @@ impl WorktreeListDelegate {
         _window: &mut Window,
         cx: &mut Context<WorktreeList>,
     ) -> Self {
+        let current_worktree_path = repo
+            .as_ref()
+            .map(|r| r.read(cx).work_directory_abs_path.to_path_buf());
+
         Self {
             matches: vec![],
             all_worktrees: None,
@@ -285,6 +300,7 @@ impl WorktreeListDelegate {
             focus_handle: cx.focus_handle(),
             default_branch: None,
             forbidden_deletion_path: None,
+            current_worktree_path,
         }
     }
 
@@ -310,8 +326,13 @@ impl WorktreeListDelegate {
                     .clone();
                 let new_worktree_path =
                     repo.path_for_new_linked_worktree(&branch, &worktree_directory_setting)?;
-                let receiver =
-                    repo.create_worktree(branch.clone(), new_worktree_path.clone(), commit);
+                let receiver = repo.create_worktree(
+                    git::repository::CreateWorktreeTarget::NewBranch {
+                        branch_name: branch.clone(),
+                        base_sha: commit,
+                    },
+                    new_worktree_path.clone(),
+                );
                 anyhow::Ok((receiver, new_worktree_path))
             })?;
             receiver.await??;
@@ -356,7 +377,7 @@ impl WorktreeListDelegate {
                 workspace
                     .update_in(cx, |workspace, window, cx| {
                         workspace.open_workspace_for_paths(
-                            OpenMode::Replace,
+                            OpenMode::Activate,
                             vec![new_worktree_path],
                             window,
                             cx,
@@ -410,7 +431,7 @@ impl WorktreeListDelegate {
             return;
         };
         let open_mode = if replace_current_window {
-            OpenMode::Replace
+            OpenMode::Activate
         } else {
             OpenMode::NewWindow
         };
@@ -462,7 +483,7 @@ impl WorktreeListDelegate {
         let Some(entry) = self.matches.get(idx).cloned() else {
             return;
         };
-        if entry.is_new || self.forbidden_deletion_path.as_ref() == Some(&entry.worktree.path) {
+        if !entry.can_delete(self.forbidden_deletion_path.as_ref()) {
             return;
         }
         let Some(repo) = self.repo.clone() else {
@@ -627,6 +648,7 @@ async fn open_remote_worktree(
         paths,
         app_state,
         window_to_use,
+        None,
         cx,
     )
     .await?;
@@ -686,7 +708,14 @@ impl PickerDelegate for WorktreeListDelegate {
                 let candidates = all_worktrees
                     .iter()
                     .enumerate()
-                    .map(|(ix, worktree)| StringMatchCandidate::new(ix, worktree.display_name()))
+                    .map(|(ix, worktree)| {
+                        let name = if worktree.is_main {
+                            MAIN_WORKTREE_DISPLAY_NAME
+                        } else {
+                            worktree.display_name()
+                        };
+                        StringMatchCandidate::new(ix, name)
+                    })
                     .collect::<Vec<StringMatchCandidate>>();
                 fuzzy::match_strings(
                     &candidates,
@@ -709,9 +738,14 @@ impl PickerDelegate for WorktreeListDelegate {
             picker
                 .update(cx, |picker, _| {
                     if !query.is_empty()
-                        && !matches
-                            .first()
-                            .is_some_and(|entry| entry.worktree.display_name() == query)
+                        && !matches.first().is_some_and(|entry| {
+                            let name = if entry.worktree.is_main {
+                                MAIN_WORKTREE_DISPLAY_NAME
+                            } else {
+                                entry.worktree.display_name()
+                            };
+                            name == query
+                        })
                     {
                         let query = query.replace(' ', "-");
                         matches.push(WorktreeEntry {
@@ -719,6 +753,7 @@ impl PickerDelegate for WorktreeListDelegate {
                                 path: Default::default(),
                                 ref_name: Some(format!("refs/heads/{query}").into()),
                                 sha: Default::default(),
+                                is_main: false,
                             },
                             positions: Vec::new(),
                             is_new: true,
@@ -745,7 +780,7 @@ impl PickerDelegate for WorktreeListDelegate {
         if entry.is_new {
             self.create_worktree(&entry.worktree.display_name(), secondary, None, window, cx);
         } else {
-            self.open_worktree(&entry.worktree.path, secondary, window, cx);
+            self.open_worktree(&entry.worktree.path, !secondary, window, cx);
         }
 
         cx.emit(DismissEvent);
@@ -763,7 +798,7 @@ impl PickerDelegate for WorktreeListDelegate {
         cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
         let entry = &self.matches.get(ix)?;
-        let path = entry.worktree.path.to_string_lossy().to_string();
+        let path = entry.worktree.path.compact().to_string_lossy().to_string();
         let sha = entry
             .worktree
             .sha
@@ -786,17 +821,21 @@ impl PickerDelegate for WorktreeListDelegate {
                 ),
             )
         } else {
-            let branch = entry.worktree.display_name();
-            let branch_first_line = branch.lines().next().unwrap_or(branch);
+            let display_name = if entry.worktree.is_main {
+                MAIN_WORKTREE_DISPLAY_NAME
+            } else {
+                entry.worktree.display_name()
+            };
+            let first_line = display_name.lines().next().unwrap_or(display_name);
             let positions: Vec<_> = entry
                 .positions
                 .iter()
                 .copied()
-                .filter(|&pos| pos < branch_first_line.len())
+                .filter(|&pos| pos < first_line.len())
                 .collect();
 
             (
-                HighlightedLabel::new(branch_first_line.to_owned(), positions)
+                HighlightedLabel::new(first_line.to_owned(), positions)
                     .truncate()
                     .into_any_element(),
                 path,
@@ -805,8 +844,7 @@ impl PickerDelegate for WorktreeListDelegate {
 
         let focus_handle = self.focus_handle.clone();
 
-        let can_delete =
-            !entry.is_new && self.forbidden_deletion_path.as_ref() != Some(&entry.worktree.path);
+        let can_delete = entry.can_delete(self.forbidden_deletion_path.as_ref());
 
         let delete_button = |entry_ix: usize| {
             IconButton::new(("delete-worktree", entry_ix), IconName::Trash)
@@ -819,8 +857,16 @@ impl PickerDelegate for WorktreeListDelegate {
                 }))
         };
 
+        let is_current = !entry.is_new
+            && self
+                .current_worktree_path
+                .as_ref()
+                .is_some_and(|current| *current == entry.worktree.path);
+
         let entry_icon = if entry.is_new {
             IconName::Plus
+        } else if is_current {
+            IconName::Check
         } else {
             IconName::GitWorktree
         };
@@ -836,7 +882,11 @@ impl PickerDelegate for WorktreeListDelegate {
                         .gap_2p5()
                         .child(
                             Icon::new(entry_icon)
-                                .color(Color::Muted)
+                                .color(if is_current {
+                                    Color::Accent
+                                } else {
+                                    Color::Muted
+                                })
                                 .size(IconSize::Small),
                         )
                         .child(v_flex().w_full().child(branch_name).map(|this| {
@@ -866,7 +916,7 @@ impl PickerDelegate for WorktreeListDelegate {
                                         )
                                         .child(
                                             Label::new(sublabel)
-                                                .truncate()
+                                                .truncate_start()
                                                 .color(Color::Muted)
                                                 .size(LabelSize::Small)
                                                 .flex_1(),
@@ -876,12 +926,30 @@ impl PickerDelegate for WorktreeListDelegate {
                             }
                         })),
                 )
-                .when(can_delete, |this| {
-                    if selected {
-                        this.end_slot(delete_button(ix))
-                    } else {
-                        this.end_hover_slot(delete_button(ix))
-                    }
+                .when(!entry.is_new, |this| {
+                    let focus_handle = self.focus_handle.clone();
+                    let open_in_new_window_button =
+                        IconButton::new(("open-new-window", ix), IconName::ArrowUpRight)
+                            .icon_size(IconSize::Small)
+                            .tooltip(move |_, cx| {
+                                Tooltip::for_action_in(
+                                    "Open in New Window",
+                                    &menu::SecondaryConfirm,
+                                    &focus_handle,
+                                    cx,
+                                )
+                            })
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(menu::SecondaryConfirm.boxed_clone(), cx);
+                            });
+
+                    this.end_slot(
+                        h_flex()
+                            .gap_0p5()
+                            .child(open_in_new_window_button)
+                            .when(can_delete, |this| this.child(delete_button(ix))),
+                    )
+                    .show_end_slot_on_hover()
                 }),
         )
     }
@@ -894,9 +962,8 @@ impl PickerDelegate for WorktreeListDelegate {
         let focus_handle = self.focus_handle.clone();
         let selected_entry = self.matches.get(self.selected_index);
         let is_creating = selected_entry.is_some_and(|entry| entry.is_new);
-        let can_delete = selected_entry.is_some_and(|entry| {
-            !entry.is_new && self.forbidden_deletion_path.as_ref() != Some(&entry.worktree.path)
-        });
+        let can_delete = selected_entry
+            .is_some_and(|entry| entry.can_delete(self.forbidden_deletion_path.as_ref()));
 
         let footer_container = h_flex()
             .w_full()
