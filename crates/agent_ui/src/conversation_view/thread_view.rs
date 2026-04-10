@@ -5170,6 +5170,7 @@ impl ThreadView {
                         let mut editor =
                             Editor::for_multibuffer(buffer, Some(project.clone()), window, cx);
                         editor.set_breadcrumb_header(thread_title);
+                        editor.disable_mouse_wheel_zoom();
                         editor
                     })),
                     None,
