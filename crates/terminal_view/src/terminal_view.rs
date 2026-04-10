@@ -531,6 +531,7 @@ impl TerminalView {
     fn clear_awaiting_input(&mut self, cx: &mut Context<Self>) {
         if self.awaiting_input.is_some() {
             self.awaiting_input = None;
+            self.has_had_input = false;
             cx.emit(ItemEvent::UpdateTab);
             cx.notify();
         }

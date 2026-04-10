@@ -34,7 +34,6 @@ Switching to a terminal tab via ctrl+tab properly activates the cursor without n
 ```sh
 brew tap paterschris/tap
 brew install --cask lathe
-xattr -dr com.apple.quarantine /Applications/Lathe.app
 ```
 
 ### Manual download

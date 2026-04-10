@@ -47,15 +47,37 @@ esac
 zip_name="Lathe-${version}-${arch}-macos.zip"
 out_dir="target/release"
 
+signing_identity="Developer ID Application: Chris Paterson (Z2DJF8UWJG)"
+notarize_profile="lathe-notarize"
+
 echo "=== Packaging ${app_name} ==="
 echo "  Version: ${version}"
 echo "  Arch: ${arch}"
 
+# Sign the app bundle
+echo ""
+echo "--- Signing ---"
+codesign --force --deep --options runtime --sign "$signing_identity" "$app_path"
+echo "  Signed with: ${signing_identity}"
+
 # Create zip using ditto (preserves macOS metadata and code signatures)
 ditto -c -k --keepParent "$app_path" "${out_dir}/${zip_name}"
 
+# Notarize
 echo ""
-echo "=== Package created ==="
+echo "--- Notarizing ---"
+xcrun notarytool submit "${out_dir}/${zip_name}" --keychain-profile "$notarize_profile" --wait
+echo "  Notarization complete"
+
+# Staple the ticket to the app
+xcrun stapler staple "$app_path"
+echo "  Stapled notarization ticket"
+
+# Re-zip with the stapled ticket
+ditto -c -k --keepParent "$app_path" "${out_dir}/${zip_name}"
+
+echo ""
+echo "=== Package created (signed + notarized) ==="
 echo "  ${out_dir}/${zip_name}"
 echo ""
 echo "To create a GitHub release:"
