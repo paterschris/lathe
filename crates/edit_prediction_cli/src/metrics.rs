@@ -1297,3 +1297,5 @@ index abc123..def456 100644
         );
     }
 }
+
+pub use edit_prediction::metrics::compute_kept_rate;

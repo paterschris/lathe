@@ -305,7 +305,7 @@ type: (primitive_type) @type.builtin
   "#ifndef"
   "#include"
   (preproc_directive)
-] @preproc
+] @keyword.preproc @preproc
 
 (comment) @comment
 

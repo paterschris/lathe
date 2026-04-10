@@ -11,6 +11,7 @@ use crate::{
     repository_selector::RepositorySelector,
 };
 use agent_settings::AgentSettings;
+use alacritty_terminal::vte::ansi;
 use anyhow::Context as _;
 use askpass::AskPassDelegate;
 use collections::{BTreeMap, HashMap, HashSet};
@@ -20,7 +21,6 @@ use editor::{
     actions::ExpandAllDiffHunks,
 };
 use editor::{EditorStyle, RewrapOptions};
-use feature_flags::{FeatureFlagAppExt as _, GitGraphFeatureFlag};
 use file_icons::FileIcons;
 use futures::StreamExt as _;
 use git::commit::ParsedCommitMessage;
@@ -49,7 +49,7 @@ use language_model::{
     LanguageModelRequestMessage, Role,
 };
 use menu;
-use multi_buffer::ExcerptInfo;
+use multi_buffer::ExcerptBoundaryInfo;
 use notifications::status_toast::{StatusToast, ToastIcon};
 use panel::{PanelHeader, panel_button, panel_filled_button, panel_icon_button};
 use project::{
@@ -781,7 +781,7 @@ impl GitPanel {
                 move |this, _git_store, event, window, cx| match event {
                     GitStoreEvent::RepositoryUpdated(
                         _,
-                        RepositoryEvent::StatusesChanged | RepositoryEvent::BranchChanged,
+                        RepositoryEvent::StatusesChanged | RepositoryEvent::HeadChanged,
                         true,
                     )
                     | GitStoreEvent::RepositoryAdded
@@ -2156,6 +2156,7 @@ impl GitPanel {
                 CommitOptions {
                     amend: false,
                     signoff: self.signoff_enabled,
+                    allow_empty: false,
                 },
                 window,
                 cx,
@@ -2196,6 +2197,7 @@ impl GitPanel {
                         CommitOptions {
                             amend: true,
                             signoff: self.signoff_enabled,
+                            allow_empty: false,
                         },
                         window,
                         cx,
@@ -4455,7 +4457,11 @@ impl GitPanel {
                         git_panel
                             .update(cx, |git_panel, cx| {
                                 git_panel.commit_changes(
-                                    CommitOptions { amend, signoff },
+                                    CommitOptions {
+                                        amend,
+                                        signoff,
+                                        allow_empty: false,
+                                    },
                                     window,
                                     cx,
                                 );
@@ -4529,7 +4535,6 @@ impl GitPanel {
         let commit = branch.most_recent_commit.as_ref()?.clone();
         let workspace = self.workspace.clone();
         let this = cx.entity();
-        let can_open_git_graph = cx.has_flag::<GitGraphFeatureFlag>();
 
         Some(
             h_flex()
@@ -4607,18 +4612,16 @@ impl GitPanel {
                                     ),
                             )
                         })
-                        .when(can_open_git_graph, |this| {
-                            this.child(
-                                panel_icon_button("git-graph-button", IconName::GitGraph)
-                                    .icon_size(IconSize::Small)
-                                    .tooltip(|_window, cx| {
-                                        Tooltip::for_action("Open Git Graph", &Open, cx)
-                                    })
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(Open.boxed_clone(), cx)
-                                    }),
-                            )
-                        }),
+                        .child(
+                            panel_icon_button("git-graph-button", IconName::GitGraph)
+                                .icon_size(IconSize::Small)
+                                .tooltip(|_window, cx| {
+                                    Tooltip::for_action("Open Git Graph", &Open, cx)
+                                })
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Open.boxed_clone(), cx)
+                                }),
+                        ),
                 ),
         )
     }
@@ -5754,11 +5757,12 @@ impl editor::Addon for GitPanelAddon {
 
     fn render_buffer_header_controls(
         &self,
-        excerpt_info: &ExcerptInfo,
+        _excerpt_info: &ExcerptBoundaryInfo,
+        buffer: &language::BufferSnapshot,
         window: &Window,
         cx: &App,
     ) -> Option<AnyElement> {
-        let file = excerpt_info.buffer.file()?;
+        let file = buffer.file()?;
         let git_panel = self.workspace.upgrade()?.read(cx).panel::<GitPanel>(cx)?;
 
         git_panel
@@ -6404,7 +6408,13 @@ fn open_output(
     cx: &mut Context<Workspace>,
 ) {
     let operation = operation.into();
-    let buffer = cx.new(|cx| Buffer::local(output, cx));
+
+    let mut handler = GitOutputHandler::default();
+    let mut processor = ansi::Processor::<ansi::StdSyncHandler>::default();
+    processor.advance(&mut handler, output.as_bytes());
+    let plain_text = handler.output;
+
+    let buffer = cx.new(|cx| Buffer::local(plain_text.as_str(), cx));
     buffer.update(cx, |buffer, cx| {
         buffer.set_capability(language::Capability::ReadOnly, cx);
     });
@@ -6418,6 +6428,32 @@ fn open_output(
     });
 
     workspace.add_item_to_center(Box::new(editor), window, cx);
+}
+
+#[derive(Default)]
+struct GitOutputHandler {
+    output: String,
+    line_start: usize,
+}
+
+impl ansi::Handler for GitOutputHandler {
+    fn input(&mut self, c: char) {
+        self.output.push(c);
+    }
+
+    fn linefeed(&mut self) {
+        self.output.push('\n');
+        self.line_start = self.output.len();
+    }
+
+    fn carriage_return(&mut self) {
+        self.output.truncate(self.line_start);
+    }
+
+    fn put_tab(&mut self, count: u16) {
+        self.output
+            .extend(std::iter::repeat_n('\t', count as usize));
+    }
 }
 
 pub(crate) fn show_error_toast(
@@ -7858,6 +7894,25 @@ mod tests {
         // "Update tracked"
         let message = panel.update(cx, |panel, cx| panel.suggest_commit_message(cx));
         assert_eq!(message, Some("Update tracked".to_string()));
+    }
+
+    #[test]
+    fn test_git_output_handler_strips_ansi_codes() {
+        use alacritty_terminal::vte::ansi;
+
+        let cases = [
+            ("no escape codes here\n", "no escape codes here\n"),
+            ("\x1b[31mhello\x1b[0m", "hello"),
+            ("\x1b[1;32mfoo\x1b[0m bar", "foo bar"),
+            ("progress 10%\rprogress 100%\n", "progress 100%\n"),
+        ];
+
+        for (input, expected) in cases {
+            let mut handler = GitOutputHandler::default();
+            let mut processor = ansi::Processor::<ansi::StdSyncHandler>::default();
+            processor.advance(&mut handler, input.as_bytes());
+            assert_eq!(handler.output, expected);
+        }
     }
 
     #[gpui::test]
