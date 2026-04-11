@@ -1510,6 +1510,9 @@ impl ThreadView {
         let Some(queued) = self.remove_from_queue(index, cx) else {
             return;
         };
+
+        self.message_editor.focus_handle(cx).focus(window, cx);
+
         let content = queued.content;
         let tracked_buffers = queued.tracked_buffers;
 
@@ -2257,12 +2260,14 @@ impl ThreadView {
 
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
 
-        div()
+        h_flex()
             .w_full()
-            .max_w(max_content_width)
-            .mx_auto()
+            .justify_center()
             .child(
                 v_flex()
+                    .flex_basis(max_content_width)
+                    .flex_shrink()
+                    .flex_grow_0()
                     .mx_2()
                     .bg(self.activity_bar_bg(cx))
                     .border_1()
