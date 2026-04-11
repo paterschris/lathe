@@ -2184,6 +2184,15 @@ impl AgentPanel {
             self.retain_running_thread(old_view, cx);
         }
 
+        // Keep the toolbar's selected agent in sync with the active thread's agent.
+        if let ActiveView::AgentThread { conversation_view } = &self.active_view {
+            let thread_agent = conversation_view.read(cx).agent_key().clone();
+            if self.selected_agent != thread_agent {
+                self.selected_agent = thread_agent;
+                self.serialize(cx);
+            }
+        }
+
         // Subscribe to the active ThreadView's events (e.g. FirstSendRequested)
         // so the panel can intercept the first send for worktree creation.
         // Re-subscribe whenever the ConnectionView changes, since the inner
@@ -4012,11 +4021,10 @@ impl AgentPanel {
                                                     workspace.panel::<AgentPanel>(cx)
                                                 {
                                                     panel.update(cx, |panel, cx| {
-                                                        panel.new_agent_thread(
-                                                            Agent::NativeAgent,
-                                                            window,
-                                                            cx,
-                                                        );
+                                                        panel.selected_agent = Agent::NativeAgent;
+                                                        panel.reset_start_thread_in_to_default(cx);
+                                                        let id = panel.create_draft(window, cx);
+                                                        panel.activate_draft(id, true, window, cx);
                                                     });
                                                 }
                                             });
@@ -4097,12 +4105,15 @@ impl AgentPanel {
                                                         workspace.panel::<AgentPanel>(cx)
                                                     {
                                                         panel.update(cx, |panel, cx| {
-                                                            panel.new_agent_thread(
-                                                                Agent::Custom {
-                                                                    id: agent_id.clone(),
-                                                                },
-                                                                window,
+                                                            panel.selected_agent = Agent::Custom {
+                                                                id: agent_id.clone(),
+                                                            };
+                                                            panel.reset_start_thread_in_to_default(
                                                                 cx,
+                                                            );
+                                                            let id = panel.create_draft(window, cx);
+                                                            panel.activate_draft(
+                                                                id, true, window, cx,
                                                             );
                                                         });
                                                     }
@@ -4145,8 +4156,11 @@ impl AgentPanel {
         let selected_agent = div()
             .id("selected_agent_icon")
             .when_some(selected_agent_custom_icon, |this, icon_path| {
-                this.px_1()
-                    .child(Icon::from_external_svg(icon_path).color(Color::Muted))
+                this.px_1().child(
+                    Icon::from_external_svg(icon_path)
+                        .color(Color::Muted)
+                        .size(IconSize::Small),
+                )
             })
             .when(!has_custom_icon, |this| {
                 this.when_some(selected_agent_builtin_icon, |this, icon| {
@@ -7356,5 +7370,80 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    async fn test_selected_agent_syncs_when_navigating_between_threads(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+
+        let custom_agent = Agent::Custom {
+            id: "my-custom-agent".into(),
+        };
+
+        // Create a draft thread with the custom agent.
+        panel.update(&mut cx, |panel, _cx| {
+            panel.selected_agent = custom_agent.clone();
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        let draft_id = panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(panel.selected_agent, custom_agent);
+            panel
+                .active_draft_id()
+                .expect("should have an active draft")
+        });
+
+        // Open a different thread (stub agent) — this navigates away from the draft.
+        let connection = StubAgentConnection::new();
+        let stub_agent = Agent::Custom { id: "Test".into() };
+        open_thread_with_connection(&panel, connection.clone(), &mut cx);
+        let other_session_id = active_session_id(&panel, &cx);
+
+        // Send a message so the thread is retained when we navigate away.
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new("response".into()),
+        )]);
+        send_message(&panel, &mut cx);
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_ne!(
+                panel.selected_agent, custom_agent,
+                "selected_agent should have changed to the stub agent"
+            );
+        });
+
+        // Navigate back to the draft thread.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.activate_draft(draft_id, true, window, cx);
+        });
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel.selected_agent, custom_agent,
+                "selected_agent should sync back to the draft's agent"
+            );
+        });
+
+        // Navigate to the other thread via load_agent_thread (simulating history click).
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.load_agent_thread(
+                stub_agent.clone(),
+                other_session_id,
+                None,
+                None,
+                true,
+                window,
+                cx,
+            );
+        });
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel.selected_agent, stub_agent,
+                "selected_agent should sync to the loaded thread's agent"
+            );
+        });
     }
 }
