@@ -45,6 +45,24 @@ fi
 
 cp -R "$app_path" "$dest"
 
+# Sign with Developer ID if available (avoids TCC prompts for
+# Documents/Desktop/Downloads), otherwise fall back to ad-hoc.
+signing_identity="Developer ID Application: Chris Paterson (Z2DJF8UWJG)"
+if security find-identity -v -p codesigning | grep -q "$signing_identity"; then
+    echo "Signing ${app_name} with Developer ID..."
+    codesign --force --deep --options runtime \
+        --entitlements crates/zed/resources/zed.entitlements \
+        --sign "$signing_identity" "$dest"
+else
+    echo "Developer ID not found, using ad-hoc signature..."
+    entitlements_tmp=$(mktemp)
+    sed '/com.apple.developer.associated-domains/,+1d' \
+        crates/zed/resources/zed.entitlements > "$entitlements_tmp"
+    codesign --force --deep --entitlements "$entitlements_tmp" --sign - "$dest"
+    rm -f "$entitlements_tmp"
+fi
+xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
+
 echo ""
 echo "=== Installed ==="
 echo "  ${dest}"

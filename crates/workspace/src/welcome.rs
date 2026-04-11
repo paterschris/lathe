@@ -457,9 +457,9 @@ impl Render for WelcomePage {
         };
 
         let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Zed"
+            "Welcome back to Lathe"
         } else {
-            "Welcome to Zed"
+            "Welcome to Lathe"
         };
 
         h_flex()
@@ -489,7 +489,7 @@ impl Render for WelcomePage {
                             .child(Vector::square(VectorName::ZedLogo, rems_from_px(45.)))
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
+                                    Label::new("A Zed fork, sharpened")
                                         .size(LabelSize::Small)
                                         .color(Color::Muted)
                                         .italic(),

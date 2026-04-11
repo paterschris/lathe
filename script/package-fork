@@ -57,7 +57,9 @@ echo "  Arch: ${arch}"
 # Sign the app bundle
 echo ""
 echo "--- Signing ---"
-codesign --force --deep --options runtime --sign "$signing_identity" "$app_path"
+codesign --force --deep --options runtime \
+    --entitlements crates/zed/resources/zed.entitlements \
+    --sign "$signing_identity" "$app_path"
 echo "  Signed with: ${signing_identity}"
 
 # Create zip using ditto (preserves macOS metadata and code signatures)
