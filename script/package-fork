@@ -54,32 +54,48 @@ echo "=== Packaging ${app_name} ==="
 echo "  Version: ${version}"
 echo "  Arch: ${arch}"
 
-# Sign the app bundle
-echo ""
-echo "--- Signing ---"
-codesign --force --deep --options runtime \
-    --entitlements crates/zed/resources/zed.entitlements \
-    --sign "$signing_identity" "$app_path"
-echo "  Signed with: ${signing_identity}"
+# Check if signing identity is available
+can_sign=false
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$signing_identity"; then
+    can_sign=true
+fi
+
+if $can_sign; then
+    # Sign the app bundle
+    echo ""
+    echo "--- Signing ---"
+    codesign --force --deep --options runtime \
+        --entitlements crates/zed/resources/zed.entitlements \
+        --sign "$signing_identity" "$app_path"
+    echo "  Signed with: ${signing_identity}"
+else
+    echo ""
+    echo "--- Signing skipped (identity not found in keychain) ---"
+fi
 
 # Create zip using ditto (preserves macOS metadata and code signatures)
 ditto -c -k --keepParent "$app_path" "${out_dir}/${zip_name}"
 
-# Notarize
-echo ""
-echo "--- Notarizing ---"
-xcrun notarytool submit "${out_dir}/${zip_name}" --keychain-profile "$notarize_profile" --wait
-echo "  Notarization complete"
+if $can_sign; then
+    # Notarize
+    echo ""
+    echo "--- Notarizing ---"
+    xcrun notarytool submit "${out_dir}/${zip_name}" --keychain-profile "$notarize_profile" --wait
+    echo "  Notarization complete"
 
-# Staple the ticket to the app
-xcrun stapler staple "$app_path"
-echo "  Stapled notarization ticket"
+    # Staple the ticket to the app
+    xcrun stapler staple "$app_path"
+    echo "  Stapled notarization ticket"
 
-# Re-zip with the stapled ticket
-ditto -c -k --keepParent "$app_path" "${out_dir}/${zip_name}"
+    # Re-zip with the stapled ticket
+    ditto -c -k --keepParent "$app_path" "${out_dir}/${zip_name}"
 
-echo ""
-echo "=== Package created (signed + notarized) ==="
+    echo ""
+    echo "=== Package created (signed + notarized) ==="
+else
+    echo ""
+    echo "=== Package created (unsigned) ==="
+fi
 echo "  ${out_dir}/${zip_name}"
 echo ""
 echo "To create a GitHub release:"
