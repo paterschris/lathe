@@ -38,11 +38,14 @@ brew install --cask lathe
 
 ### Manual download
 
-Download the latest `.zip` from [Releases](https://github.com/paterschris/lathe/releases), unzip, and drag **Lathe.app** to `/Applications`.
+Download the latest release from [Releases](https://github.com/paterschris/lathe/releases):
 
-Currently only **Apple Silicon (aarch64)** macOS builds are provided.
+- **macOS**: Download the `.zip`, unzip, and drag **Lathe.app** to `/Applications`.
+- **Linux**: Download the `.tar.gz` and extract it, or use the install script after building from source (see below).
 
 ### Build from source
+
+**macOS:**
 
 ```sh
 git clone git@github.com:paterschris/lathe.git
@@ -51,7 +54,17 @@ script/build-fork      # ~10-15 min first time
 script/install-fork    # copies to /Applications
 ```
 
-Installs as **Lathe.app** and runs alongside stock Zed without conflicts.
+**Linux:**
+
+```sh
+git clone git@github.com:paterschris/lathe.git
+cd lathe
+script/build-fork-linux      # installs system deps, builds
+script/package-fork-linux    # creates .tar.gz
+script/install-fork-linux    # installs to ~/.local/share/lathe, symlinks CLI to ~/.local/bin
+```
+
+Installs as **Lathe** and runs alongside stock Zed without conflicts.
 
 ## Updating
 
@@ -61,12 +74,21 @@ Installs as **Lathe.app** and runs alongside stock Zed without conflicts.
 brew upgrade lathe
 ```
 
-### Manual / source
+### Manual / source (macOS)
 
 ```sh
 git pull
 script/build-fork
 script/install-fork
+```
+
+### Manual / source (Linux)
+
+```sh
+git pull
+script/build-fork-linux
+script/package-fork-linux
+script/install-fork-linux
 ```
 
 ## Relationship to Zed
@@ -84,5 +106,6 @@ Builds, packages, and publishes a GitHub release. Requires the [GitHub CLI](http
 ## Notes
 
 - First builds take significantly longer than incremental rebuilds
-- The app shares settings and extensions with stock Zed (`~/Library/Application Support/Zed`)
+- On macOS, the app shares settings and extensions with stock Zed (`~/Library/Application Support/Zed`)
+- On Linux, the app installs to `~/.local/share/lathe` with the CLI symlinked to `~/.local/bin/lathe`
 - `cargo-bundle` is installed automatically from [zed-industries/cargo-bundle](https://github.com/zed-industries/cargo-bundle)
