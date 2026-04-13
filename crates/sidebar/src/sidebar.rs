@@ -3193,11 +3193,12 @@ impl Sidebar {
                         .clone()
                 });
 
+            let excluded = [workspace_to_remove.clone()];
             let remove_task = multi_workspace.update(cx, |mw, cx| {
                 mw.remove(
                     [workspace_to_remove],
                     move |this, window, cx| {
-                        this.find_or_create_local_workspace(fallback_paths, window, cx)
+                        this.find_or_create_local_workspace(fallback_paths, &excluded, window, cx)
                     },
                     window,
                     cx,
