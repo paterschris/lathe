@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+echo "=== Building Lathe (Linux) ==="
+
+# --- Prerequisites ---
+
+# 1. System dependencies (apt, dnf, pacman, etc.)
+if [ -f script/linux ]; then
+    echo "Installing Linux system dependencies..."
+    script/linux
+fi
+
+# 2. Rust toolchain (via rustup)
+if ! command -v rustc &>/dev/null || ! command -v cargo &>/dev/null; then
+    if command -v rustup &>/dev/null; then
+        echo "Rust toolchain not active. Attempting 'rustup default stable'..."
+        rustup default stable
+    else
+        echo "Rust is not installed. Installing via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+    fi
+fi
+
+# 3. Ensure cargo is on PATH
+if ! command -v cargo &>/dev/null; then
+    if [ -f "$HOME/.cargo/env" ]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+    fi
+    if ! command -v cargo &>/dev/null; then
+        echo "Error: cargo not found on PATH even after sourcing ~/.cargo/env"
+        exit 1
+    fi
+fi
+
+export ZED_BUNDLE=true
+export CC=${CC:-$(which clang)}
+
+# Determine architecture
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+
+echo "Target: $target_triple"
+
+# Use lld on aarch64 for libwebrtc linking, set rpath for bundled libs
+if [[ "$(uname -m)" == "aarch64" ]]; then
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=lld -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
+else
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
+fi
+
+echo "Building release binary..."
+cargo build --release --target "${target_triple}" --package zed --package cli
+
+echo ""
+echo "=== Build complete ==="
+echo "  Binary: target/${target_triple}/release/zed"
+echo "  CLI:    target/${target_triple}/release/cli"
+echo ""
+echo "To package: script/package-fork-linux"

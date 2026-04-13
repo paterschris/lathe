@@ -43,18 +43,82 @@ jobs:
             echo "version=${version}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lathe-macos
+          path: target/release/Lathe-*.zip
+          if-no-files-found: error
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Linux dependencies
+        run: script/linux
+
+      - name: Build
+        run: script/build-fork-linux
+
+      - name: Package
+        run: script/package-fork-linux
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lathe-linux
+          path: target/release/Lathe-*-linux.tar.gz
+          if-no-files-found: error
+
+  create-release:
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           version="${{ steps.version.outputs.version }}"
           tag="v${version}"
-          zip_file=$(ls target/release/Lathe-*.zip)
+
+          # Collect all release files
+          mkdir -p release-files
+          cp artifacts/lathe-macos/Lathe-*.zip release-files/
+          cp artifacts/lathe-linux/Lathe-*-linux.tar.gz release-files/
 
           if gh release view "$tag" 2>/dev/null; then
-            gh release upload "$tag" "$zip_file" --clobber
+            gh release upload "$tag" release-files/* --clobber
           else
-            gh release create "$tag" "$zip_file" \
+            gh release create "$tag" release-files/* \
               --title "Lathe ${tag}" \
               --generate-notes
           fi
