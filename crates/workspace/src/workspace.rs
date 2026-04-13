@@ -33,8 +33,9 @@ pub use dock::Panel;
 pub use multi_workspace::{
     CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MultiWorkspace,
     MultiWorkspaceEvent, NewThread, NextProject, NextThread, PreviousProject, PreviousThread,
-    ShowFewerThreads, ShowMoreThreads, Sidebar, SidebarEvent, SidebarHandle, SidebarRenderState,
-    SidebarSide, ToggleWorkspaceSidebar, sidebar_side_context_menu,
+    ProjectGroup, ProjectGroupKey, SerializedProjectGroupState, ShowFewerThreads, ShowMoreThreads,
+    Sidebar, SidebarEvent, SidebarHandle, SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar,
+    sidebar_side_context_menu,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
@@ -86,14 +87,14 @@ pub use persistence::{
     WorkspaceDb, delete_unloaded_items,
     model::{
         DockStructure, ItemId, MultiWorkspaceState, SerializedMultiWorkspace,
-        SerializedProjectGroupKey, SerializedWorkspaceLocation, SessionWorkspace,
+        SerializedProjectGroup, SerializedWorkspaceLocation, SessionWorkspace,
     },
     read_serialized_multi_workspaces, resolve_worktree_workspaces,
 };
 use postage::stream::Stream;
 use project::{
-    DirectoryLister, Project, ProjectEntryId, ProjectGroupKey, ProjectPath, ResolvedPath, Worktree,
-    WorktreeId, WorktreeSettings,
+    DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, Worktree, WorktreeId,
+    WorktreeSettings,
     debugger::{breakpoint_store::BreakpointStoreEvent, session::ThreadStatus},
     project_settings::ProjectSettings,
     toolchain_store::ToolchainStoreEvent,
@@ -213,6 +214,16 @@ pub trait DebuggerProvider {
     fn debug_scenario_scheduled_last(&self, cx: &App) -> bool;
 
     fn active_thread_state(&self, cx: &App) -> Option<ThreadStatus>;
+}
+
+pub trait WorkspaceSidebarDelegate: Send + Sync {
+    fn reconcile_group(
+        &self,
+        workspace: &mut Workspace,
+        group_key: &ProjectGroupKey,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> bool;
 }
 
 /// Opens a file or directory.
@@ -1371,6 +1382,7 @@ pub struct Workspace {
     _panels_task: Option<Task<Result<()>>>,
     sidebar_focus_handle: Option<FocusHandle>,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
+    sidebar_delegate: Option<Arc<dyn WorkspaceSidebarDelegate>>,
 }
 
 impl EventEmitter<Event> for Workspace {}
@@ -1799,6 +1811,7 @@ impl Workspace {
             removing: false,
             sidebar_focus_handle: None,
             multi_workspace,
+            sidebar_delegate: None,
             open_in_dev_container: false,
             _dev_container_task: None,
         }
@@ -2459,6 +2472,14 @@ impl Workspace {
         self.multi_workspace = Some(multi_workspace);
     }
 
+    pub fn set_sidebar_delegate(&mut self, delegate: Arc<dyn WorkspaceSidebarDelegate>) {
+        self.sidebar_delegate = Some(delegate);
+    }
+
+    pub fn sidebar_delegate(&self) -> Option<Arc<dyn WorkspaceSidebarDelegate>> {
+        self.sidebar_delegate.clone()
+    }
+
     pub fn app_state(&self) -> &Arc<AppState> {
         &self.app_state
     }
@@ -2847,6 +2868,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<Option<Vec<PathBuf>>> {
+        // TODO: If `on_prompt_for_open_path` is set, we should always use it
+        // rather than gating on `use_system_path_prompts`. This would let tests
+        // inject a mock without also having to disable the setting.
         if !lister.is_local(cx) || !WorkspaceSettings::get_global(cx).use_system_path_prompts {
             let prompt = self.on_prompt_for_open_path.take().unwrap();
             let rx = prompt(self, lister, window, cx);
@@ -8726,7 +8750,7 @@ pub async fn restore_multiworkspace(
             log::error!("Failed to restore active workspace: {err:#}");
 
             let mut fallback_handle = None;
-            for key in &state.project_group_keys {
+            for key in &state.project_groups {
                 let key: ProjectGroupKey = key.clone().into();
                 let paths = key.path_list().paths().to_vec();
                 match cx
@@ -8776,20 +8800,21 @@ pub async fn apply_restored_multiworkspace_state(
 ) {
     let MultiWorkspaceState {
         sidebar_open,
-        project_group_keys,
+        project_groups,
         sidebar_state,
         ..
     } = state;
 
-    if !project_group_keys.is_empty() {
+    if !project_groups.is_empty() {
         // Resolve linked worktree paths to their main repo paths so
         // stale keys from previous sessions get normalized and deduped.
-        let mut resolved_keys: Vec<ProjectGroupKey> = Vec::new();
-        for key in project_group_keys
-            .iter()
-            .cloned()
-            .map(ProjectGroupKey::from)
-        {
+        let mut resolved_groups: Vec<SerializedProjectGroupState> = Vec::new();
+        for serialized in project_groups.iter().cloned() {
+            let SerializedProjectGroupState {
+                key,
+                expanded,
+                visible_thread_count,
+            } = serialized.into_restored_state();
             if key.path_list().paths().is_empty() {
                 continue;
             }
@@ -8806,14 +8831,18 @@ pub async fn apply_restored_multiworkspace_state(
                 }
             }
             let resolved = ProjectGroupKey::new(key.host(), PathList::new(&resolved_paths));
-            if !resolved_keys.contains(&resolved) {
-                resolved_keys.push(resolved);
+            if !resolved_groups.iter().any(|g| g.key == resolved) {
+                resolved_groups.push(SerializedProjectGroupState {
+                    key: resolved,
+                    expanded,
+                    visible_thread_count,
+                });
             }
         }
 
         window_handle
-            .update(cx, |multi_workspace, _window, _cx| {
-                multi_workspace.restore_project_group_keys(resolved_keys);
+            .update(cx, |multi_workspace, _window, cx| {
+                multi_workspace.restore_project_groups(resolved_groups, cx);
             })
             .ok();
     }
@@ -9885,7 +9914,7 @@ async fn open_remote_project_inner(
         });
 
         if let Some(project_group_key) = provisional_project_group_key.clone() {
-            multi_workspace.set_workspace_group_key(&new_workspace, project_group_key);
+            multi_workspace.retain_workspace(new_workspace.clone(), project_group_key, cx);
         }
         multi_workspace.activate(new_workspace.clone(), window, cx);
         new_workspace
@@ -9957,14 +9986,13 @@ pub fn join_in_room_project(
                 .and_then(|window_handle| {
                     window_handle
                         .update(cx, |multi_workspace, _window, cx| {
-                            for workspace in multi_workspace.workspaces() {
-                                if workspace.read(cx).project().read(cx).remote_id()
-                                    == Some(project_id)
-                                {
-                                    return Some((window_handle, workspace.clone()));
-                                }
-                            }
-                            None
+                            multi_workspace
+                                .workspaces()
+                                .find(|workspace| {
+                                    workspace.read(cx).project().read(cx).remote_id()
+                                        == Some(project_id)
+                                })
+                                .map(|workspace| (window_handle, workspace.clone()))
                         })
                         .unwrap_or(None)
                 })
@@ -10915,8 +10943,7 @@ mod tests {
         // Activate workspace A
         multi_workspace_handle
             .update(cx, |mw, window, cx| {
-                let workspace = mw.workspaces().next().unwrap().clone();
-                mw.activate(workspace, window, cx);
+                mw.activate(workspace_a.clone(), window, cx);
             })
             .unwrap();
 
@@ -11039,7 +11066,7 @@ mod tests {
         assert!(!removed, "removal should have been cancelled");
 
         multi_workspace_handle
-            .read_with(cx, |mw, _| {
+            .read_with(cx, |mw, _cx| {
                 assert_eq!(
                     mw.workspace(),
                     &workspace_b,
@@ -11067,7 +11094,7 @@ mod tests {
 
         // Should be back on workspace A, and B should be gone.
         multi_workspace_handle
-            .read_with(cx, |mw, _| {
+            .read_with(cx, |mw, _cx| {
                 assert_eq!(
                     mw.workspace(),
                     &workspace_a,
