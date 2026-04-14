@@ -726,10 +726,19 @@ impl MultiWorkspace {
         cx: &mut Context<Self>,
     ) {
         Self::subscribe_to_workspace(workspace, window, cx);
-        self.sync_sidebar_to_workspace(workspace, cx);
         let weak_self = cx.weak_entity();
         workspace.update(cx, |workspace, cx| {
             workspace.set_multi_workspace(weak_self, cx);
+        });
+
+        let entity = cx.entity();
+        cx.defer({
+            let workspace = workspace.clone();
+            move |cx| {
+                entity.update(cx, |this, cx| {
+                    this.sync_sidebar_to_workspace(&workspace, cx);
+                })
+            }
         });
     }
 
