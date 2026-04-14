@@ -18,29 +18,34 @@ if ! xcode-select -p &>/dev/null; then
     exit 1
 fi
 
-# 2. Rust toolchain (via rustup)
-if ! command -v rustc &>/dev/null || ! command -v cargo &>/dev/null; then
-    if command -v rustup &>/dev/null; then
-        echo "Rust toolchain not active. Attempting 'rustup default stable'..."
-        rustup default stable
-    else
-        echo "Rust is not installed. Installing via rustup..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    fi
-fi
-
-# 3. Ensure cargo is on PATH (handles fresh installs where shell hasn't been reloaded)
-if ! command -v cargo &>/dev/null; then
+# 2. Ensure rustup is installed
+if ! command -v rustup &>/dev/null; then
+    echo "Rust is not installed. Installing via rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     if [ -f "$HOME/.cargo/env" ]; then
         # shellcheck disable=SC1091
         source "$HOME/.cargo/env"
     elif [ -d "$HOME/.cargo/bin" ]; then
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
-    if ! command -v cargo &>/dev/null; then
-        echo "Error: cargo not found on PATH."
-        echo "Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-        exit 1
+fi
+
+# 3. Ensure the stable toolchain is available and cargo is on PATH
+if ! command -v cargo &>/dev/null; then
+    # rustup exists but cargo isn't on PATH — resolve cargo's location from rustup
+    cargo_bin=$(rustup which cargo 2>/dev/null || true)
+    if [ -n "$cargo_bin" ]; then
+        export PATH="$(dirname "$cargo_bin"):$PATH"
+    else
+        # Toolchain might not be installed yet
+        rustup toolchain install stable
+        cargo_bin=$(rustup which cargo 2>/dev/null || true)
+        if [ -n "$cargo_bin" ]; then
+            export PATH="$(dirname "$cargo_bin"):$PATH"
+        else
+            echo "Error: cargo not found. Try: rustup toolchain install stable"
+            exit 1
+        fi
     fi
 fi
 
