@@ -638,6 +638,10 @@ impl ThreadMetadataStore {
         cx: &mut Context<Self>,
     ) {
         if let Some(thread) = self.threads.get(&thread_id) {
+            debug_assert!(
+                !thread.archived,
+                "update_working_directories called on archived thread"
+            );
             self.save_internal(ThreadMetadata {
                 worktree_paths: WorktreePaths::from_path_lists(
                     thread.main_worktree_paths().clone(),
@@ -662,6 +666,12 @@ impl ThreadMetadataStore {
                 continue;
             };
             if thread.worktree_paths == worktree_paths {
+                continue;
+            }
+            // Don't overwrite paths for archived threads — the
+            // project may no longer include the worktree that was
+            // removed during the archive flow.
+            if thread.archived {
                 continue;
             }
             self.save_internal(ThreadMetadata {
@@ -1102,10 +1112,24 @@ impl ThreadMetadataStore {
 
         let agent_id = thread_ref.connection().agent_id();
 
-        let project = thread_ref.project().read(cx);
-        let worktree_paths = project.worktree_paths(cx);
-
-        let remote_connection = project.remote_connection_options(cx);
+        // Preserve project-dependent fields for archived threads.
+        // The worktree may already have been removed from the
+        // project as part of the archive flow, so re-evaluating
+        // these from the current project state would yield
+        // empty/incorrect results.
+        let (worktree_paths, remote_connection) =
+            if let Some(existing) = existing_thread.filter(|t| t.archived) {
+                (
+                    existing.worktree_paths.clone(),
+                    existing.remote_connection.clone(),
+                )
+            } else {
+                let project = thread_ref.project().read(cx);
+                (
+                    project.worktree_paths(cx),
+                    project.remote_connection_options(cx),
+                )
+            };
 
         // Threads without a folder path (e.g. started in an empty
         // window) are archived by default so they don't get lost,
@@ -3542,5 +3566,106 @@ mod tests {
 
         let result = WorktreePaths::from_path_lists(main, folder);
         assert!(result.is_err());
+    }
+
+    /// Regression test: archiving a thread created in a git worktree must
+    /// preserve the thread's folder paths so that restoring it later does
+    /// not prompt the user to re-associate a project.
+    #[gpui::test]
+    async fn test_archived_thread_retains_paths_after_worktree_removal(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/worktrees/feature",
+            serde_json::json!({ "src": { "main.rs": "" } }),
+        )
+        .await;
+        let project = Project::test(fs, [Path::new("/worktrees/feature")], cx).await;
+        let connection = StubAgentConnection::new();
+
+        let (panel, mut vcx) = setup_panel_with_project(project.clone(), cx);
+        crate::test_support::open_thread_with_connection(&panel, connection, &mut vcx);
+
+        let thread = panel.read_with(&vcx, |panel, cx| panel.active_agent_thread(cx).unwrap());
+        let thread_id = crate::test_support::active_thread_id(&panel, &vcx);
+
+        // Push content so the event handler saves metadata with the
+        // project's worktree paths.
+        thread.update_in(&mut vcx, |thread, _window, cx| {
+            thread.push_user_content_block(None, "Hello".into(), cx);
+        });
+        vcx.run_until_parked();
+
+        // Verify paths were saved correctly.
+        let (folder_paths_before, main_paths_before) = cx.read(|cx| {
+            let store = ThreadMetadataStore::global(cx).read(cx);
+            let entry = store.entry(thread_id).unwrap();
+            assert!(
+                !entry.folder_paths().is_empty(),
+                "thread should have folder paths before archiving"
+            );
+            (
+                entry.folder_paths().clone(),
+                entry.main_worktree_paths().clone(),
+            )
+        });
+
+        // Archive the thread.
+        cx.update(|cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.archive(thread_id, None, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // Remove the worktree from the project, simulating what the
+        // archive flow does for linked git worktrees.
+        let worktree_id = cx.update(|cx| {
+            project
+                .read(cx)
+                .visible_worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .id()
+        });
+        project.update(cx, |project, cx| {
+            project.remove_worktree(worktree_id, cx);
+        });
+        cx.run_until_parked();
+
+        // Trigger a thread event after archiving + worktree removal.
+        // In production this happens when an async title-generation task
+        // completes after the thread was archived.
+        thread.update_in(&mut vcx, |thread, _window, cx| {
+            thread.set_title("Generated title".into(), cx).detach();
+        });
+        vcx.run_until_parked();
+
+        // The archived thread must still have its original folder paths.
+        cx.read(|cx| {
+            let store = ThreadMetadataStore::global(cx).read(cx);
+            let entry = store.entry(thread_id).unwrap();
+            assert!(entry.archived, "thread should still be archived");
+            assert_eq!(
+                entry.display_title().as_ref(),
+                "Generated title",
+                "title should still be updated for archived threads"
+            );
+            assert_eq!(
+                entry.folder_paths(),
+                &folder_paths_before,
+                "archived thread must retain its folder paths after worktree \
+                 removal + subsequent thread event, otherwise restoring it \
+                 will prompt the user to re-associate a project"
+            );
+            assert_eq!(
+                entry.main_worktree_paths(),
+                &main_paths_before,
+                "archived thread must retain its main worktree paths after \
+                 worktree removal + subsequent thread event"
+            );
+        });
     }
 }
