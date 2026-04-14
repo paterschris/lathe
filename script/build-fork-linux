@@ -14,10 +14,9 @@ if [ -f script/linux ]; then
     script/linux
 fi
 
-# 2. Rust toolchain (via rustup)
-# 2. Ensure rustup is installed
-if ! command -v rustup &>/dev/null; then
-    echo "Rust is not installed. Installing via rustup..."
+# 2. Rust toolchain — install or repair from scratch if needed
+install_rust() {
+    echo "Installing Rust via rustup..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     if [ -f "$HOME/.cargo/env" ]; then
         # shellcheck disable=SC1091
@@ -25,23 +24,40 @@ if ! command -v rustup &>/dev/null; then
     elif [ -d "$HOME/.cargo/bin" ]; then
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
+}
+
+# Ensure cargo/rustc are on PATH from any prior install
+if [ -f "$HOME/.cargo/env" ]; then
+    # shellcheck disable=SC1091
+    source "$HOME/.cargo/env"
+elif [ -d "$HOME/.cargo/bin" ]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-# 3. Ensure the stable toolchain is available and cargo is on PATH
-if ! command -v cargo &>/dev/null; then
-    cargo_bin=$(rustup which cargo 2>/dev/null || true)
-    if [ -n "$cargo_bin" ]; then
-        export PATH="$(dirname "$cargo_bin"):$PATH"
-    else
-        rustup toolchain install stable
+if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+    if command -v rustup &>/dev/null; then
         cargo_bin=$(rustup which cargo 2>/dev/null || true)
         if [ -n "$cargo_bin" ]; then
             export PATH="$(dirname "$cargo_bin"):$PATH"
         else
-            echo "Error: cargo not found. Try: rustup toolchain install stable"
-            exit 1
+            rustup toolchain install stable
+            cargo_bin=$(rustup which cargo 2>/dev/null || true)
+            if [ -n "$cargo_bin" ]; then
+                export PATH="$(dirname "$cargo_bin"):$PATH"
+            else
+                install_rust
+            fi
         fi
+    else
+        install_rust
     fi
+fi
+
+# Final check
+if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+    echo "Error: Failed to install Rust. Please install manually:"
+    echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    exit 1
 fi
 
 export ZED_BUNDLE=true

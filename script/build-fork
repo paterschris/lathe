@@ -10,7 +10,6 @@ echo "=== Building Lathe ==="
 
 # 1. Xcode with Metal compiler
 if ! xcrun --find metal &>/dev/null 2>&1; then
-    # Metal compiler requires the full Xcode app, not just CLI tools
     if [ -d "/Applications/Xcode.app" ]; then
         echo "Selecting Xcode.app for Metal shader compilation..."
         sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -24,35 +23,54 @@ if ! xcrun --find metal &>/dev/null 2>&1; then
     fi
 fi
 
-# 2. Ensure rustup is installed
-if ! command -v rustup &>/dev/null; then
-    echo "Rust is not installed. Installing via rustup..."
+# 2. Rust toolchain — install or repair from scratch if needed
+install_rust() {
+    echo "Installing Rust via rustup..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    # Source the env that rustup just created
     if [ -f "$HOME/.cargo/env" ]; then
         # shellcheck disable=SC1091
         source "$HOME/.cargo/env"
     elif [ -d "$HOME/.cargo/bin" ]; then
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
+}
+
+# Ensure cargo/rustc are on PATH from any prior install
+if [ -f "$HOME/.cargo/env" ]; then
+    # shellcheck disable=SC1091
+    source "$HOME/.cargo/env"
+elif [ -d "$HOME/.cargo/bin" ]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-# 3. Ensure the stable toolchain is available and cargo is on PATH
-if ! command -v cargo &>/dev/null; then
-    # rustup exists but cargo isn't on PATH — resolve cargo's location from rustup
-    cargo_bin=$(rustup which cargo 2>/dev/null || true)
-    if [ -n "$cargo_bin" ]; then
-        export PATH="$(dirname "$cargo_bin"):$PATH"
-    else
-        # Toolchain might not be installed yet
-        rustup toolchain install stable
+if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+    if command -v rustup &>/dev/null; then
+        # rustup exists — try to resolve cargo through it
         cargo_bin=$(rustup which cargo 2>/dev/null || true)
         if [ -n "$cargo_bin" ]; then
             export PATH="$(dirname "$cargo_bin"):$PATH"
         else
-            echo "Error: cargo not found. Try: rustup toolchain install stable"
-            exit 1
+            # Toolchain missing or broken — install it
+            rustup toolchain install stable
+            cargo_bin=$(rustup which cargo 2>/dev/null || true)
+            if [ -n "$cargo_bin" ]; then
+                export PATH="$(dirname "$cargo_bin"):$PATH"
+            else
+                # rustup is broken — reinstall everything
+                install_rust
+            fi
         fi
+    else
+        install_rust
     fi
+fi
+
+# Final check
+if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+    echo "Error: Failed to install Rust. Please install manually:"
+    echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    exit 1
 fi
 
 # 4. Ensure cargo-bundle is installed (Zed's fork)
