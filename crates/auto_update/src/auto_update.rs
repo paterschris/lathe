@@ -273,7 +273,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Zed was installed via a package manager.",
+            "Lathe was installed via a package manager.",
             Some(&message),
             &["Ok"],
             cx,

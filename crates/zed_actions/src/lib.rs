@@ -60,7 +60,7 @@ actions!(
         OpenServerSettings,
         /// Quits the application.
         Quit,
-        /// Shows information about Zed.
+        /// Shows information about Lathe.
         About,
         /// Opens the documentation website.
         OpenDocs,
