@@ -9875,11 +9875,13 @@ async fn open_remote_project_inner(
 
     for path in paths {
         let result = cx
-            .update(|cx| Workspace::project_path_for_path(project.clone(), &path, true, cx))
+            .update(|cx| {
+                Workspace::project_path_for_path(project.clone(), path.as_path(), true, cx)
+            })
             .await;
         match result {
             Ok((_, project_path)) => {
-                project_paths_to_open.push((path.clone(), Some(project_path)));
+                project_paths_to_open.push((path, Some(project_path)));
             }
             Err(error) => {
                 project_path_errors.push(error);
