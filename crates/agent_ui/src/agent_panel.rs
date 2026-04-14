@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{
         Arc,
@@ -755,9 +755,9 @@ impl StartThreadIn {
     fn branch_trigger_label(&self, project: &Project, cx: &App) -> Option<StartThreadInLabel> {
         match self {
             Self::NewWorktree { branch_target, .. } => {
-                let (branch_name, is_occupied) = match branch_target {
+                let label: SharedString = match branch_target {
                     NewWorktreeBranchTarget::CurrentBranch => {
-                        let name: SharedString = if project.repositories(cx).len() > 1 {
+                        if project.repositories(cx).len() > 1 {
                             "current branches".into()
                         } else {
                             project
@@ -769,48 +769,24 @@ impl StartThreadIn {
                                         .map(|branch| SharedString::from(branch.name().to_string()))
                                 })
                                 .unwrap_or_else(|| "HEAD".into())
-                        };
-                        (name, false)
+                        }
                     }
-                    NewWorktreeBranchTarget::ExistingBranch { name } => {
-                        let occupied = Self::is_branch_occupied(name, project, cx);
-                        (name.clone().into(), occupied)
-                    }
+                    NewWorktreeBranchTarget::ExistingBranch { name } => name.clone().into(),
                     NewWorktreeBranchTarget::CreateBranch {
                         from_ref: Some(from_ref),
                         ..
-                    } => {
-                        let occupied = Self::is_branch_occupied(from_ref, project, cx);
-                        (from_ref.clone().into(), occupied)
-                    }
-                    NewWorktreeBranchTarget::CreateBranch { name, .. } => {
-                        (name.clone().into(), false)
-                    }
-                };
-
-                let prefix = if is_occupied {
-                    Some("New From:".into())
-                } else {
-                    None
+                    } => from_ref.clone().into(),
+                    NewWorktreeBranchTarget::CreateBranch { name, .. } => name.clone().into(),
                 };
 
                 Some(StartThreadInLabel {
-                    prefix,
-                    label: branch_name,
+                    prefix: None,
+                    label,
                     suffix: None,
                 })
             }
             _ => None,
         }
-    }
-
-    fn is_branch_occupied(branch_name: &str, project: &Project, cx: &App) -> bool {
-        project.repositories(cx).values().any(|repo| {
-            repo.read(cx)
-                .linked_worktrees
-                .iter()
-                .any(|wt| wt.branch_name() == Some(branch_name))
-        })
     }
 }
 
@@ -3147,28 +3123,15 @@ impl AgentPanel {
 
     fn resolve_worktree_branch_target(
         branch_target: &NewWorktreeBranchTarget,
-        existing_branches: &HashSet<String>,
-        occupied_branches: &HashSet<String>,
-        rng: &mut impl rand::Rng,
-    ) -> Result<(String, bool, Option<String>)> {
-        let mut generate_branch_name = || {
-            let refs: Vec<&str> = existing_branches.iter().map(|s| s.as_str()).collect();
-            crate::branch_names::generate_branch_name(&refs, rng)
-                .ok_or_else(|| anyhow!("Failed to generate a unique branch name"))
-        };
-
+    ) -> (Option<String>, Option<String>) {
         match branch_target {
-            NewWorktreeBranchTarget::CreateBranch { name, from_ref } => {
-                Ok((name.clone(), false, from_ref.clone()))
-            }
+            NewWorktreeBranchTarget::CurrentBranch => (None, None),
             NewWorktreeBranchTarget::ExistingBranch { name } => {
-                if occupied_branches.contains(name) {
-                    Ok((generate_branch_name()?, false, Some(name.clone())))
-                } else {
-                    Ok((name.clone(), true, None))
-                }
+                (Some(name.clone()), Some(name.clone()))
             }
-            NewWorktreeBranchTarget::CurrentBranch => Ok((generate_branch_name()?, false, None)),
+            NewWorktreeBranchTarget::CreateBranch { name, from_ref } => {
+                (Some(name.clone()), from_ref.clone())
+            }
         }
     }
 
@@ -3183,9 +3146,7 @@ impl AgentPanel {
         worktree_name: Option<String>,
         existing_worktree_names: &[String],
         existing_worktree_paths: &HashSet<PathBuf>,
-        branch_name: &str,
-        use_existing_branch: bool,
-        start_point: Option<String>,
+        base_ref: Option<String>,
         worktree_directory_setting: &str,
         rng: &mut impl rand::Rng,
         cx: &mut Context<Self>,
@@ -3203,8 +3164,8 @@ impl AgentPanel {
         let worktree_name = worktree_name.unwrap_or_else(|| {
             let existing_refs: Vec<&str> =
                 existing_worktree_names.iter().map(|s| s.as_str()).collect();
-            crate::branch_names::generate_branch_name(&existing_refs, rng)
-                .unwrap_or_else(|| branch_name.to_string())
+            crate::worktree_names::generate_worktree_name(&existing_refs, rng)
+                .unwrap_or_else(|| "worktree".to_string())
         });
 
         for repo in git_repos {
@@ -3214,19 +3175,8 @@ impl AgentPanel {
                 if existing_worktree_paths.contains(&new_path) {
                     anyhow::bail!("A worktree already exists at {}", new_path.display());
                 }
-                let target = if use_existing_branch {
-                    debug_assert!(
-                        git_repos.len() == 1,
-                        "use_existing_branch should only be true for a single repo"
-                    );
-                    git::repository::CreateWorktreeTarget::ExistingBranch {
-                        branch_name: branch_name.to_string(),
-                    }
-                } else {
-                    git::repository::CreateWorktreeTarget::NewBranch {
-                        branch_name: branch_name.to_string(),
-                        base_sha: start_point.clone(),
-                    }
+                let target = git::repository::CreateWorktreeTarget::Detached {
+                    base_sha: base_ref.clone(),
                 };
                 let receiver = repo.create_worktree(target, new_path.clone());
                 let work_dir = repo.work_directory_abs_path.clone();
@@ -3351,6 +3301,103 @@ impl AgentPanel {
         Err(anyhow!(error_message))
     }
 
+    /// Attempts to check out a branch in a newly created worktree.
+    /// First tries checking out an existing branch, then tries creating a new
+    /// branch. If both fail, the worktree stays in detached HEAD state.
+    async fn try_checkout_branch_in_worktree(
+        repo: &Entity<project::git_store::Repository>,
+        branch_name: &str,
+        worktree_path: &Path,
+        cx: &mut AsyncWindowContext,
+    ) {
+        // First, try checking out the branch (it may already exist).
+        let Ok(receiver) = cx.update(|_, cx| {
+            repo.update(cx, |repo, _cx| {
+                repo.checkout_branch_in_worktree(
+                    branch_name.to_string(),
+                    worktree_path.to_path_buf(),
+                    false,
+                )
+            })
+        }) else {
+            log::warn!(
+                "Failed to check out branch {branch_name} for worktree at {}. \
+                 Staying in detached HEAD state.",
+                worktree_path.display(),
+            );
+
+            return;
+        };
+
+        let Ok(result) = receiver.await else {
+            log::warn!(
+                "Branch checkout was canceled for worktree at {}. \
+                 Staying in detached HEAD state.",
+                worktree_path.display()
+            );
+
+            return;
+        };
+
+        if let Err(err) = result {
+            log::info!(
+                "Failed to check out branch '{branch_name}' in worktree at {}, \
+                         will try creating it: {err}",
+                worktree_path.display()
+            );
+        } else {
+            log::info!(
+                "Checked out branch '{branch_name}' in worktree at {}",
+                worktree_path.display()
+            );
+
+            return;
+        }
+
+        // Checkout failed, so try creating the branch.
+        let create_result = cx.update(|_, cx| {
+            repo.update(cx, |repo, _cx| {
+                repo.checkout_branch_in_worktree(
+                    branch_name.to_string(),
+                    worktree_path.to_path_buf(),
+                    true,
+                )
+            })
+        });
+
+        match create_result {
+            Ok(receiver) => match receiver.await {
+                Ok(Ok(())) => {
+                    log::info!(
+                        "Created and checked out branch '{branch_name}' in worktree at {}",
+                        worktree_path.display()
+                    );
+                }
+                Ok(Err(err)) => {
+                    log::warn!(
+                        "Failed to create branch '{branch_name}' in worktree at {}: {err}. \
+                         Staying in detached HEAD state.",
+                        worktree_path.display()
+                    );
+                }
+                Err(_) => {
+                    log::warn!(
+                        "Branch creation was canceled for worktree at {}. \
+                         Staying in detached HEAD state.",
+                        worktree_path.display()
+                    );
+                }
+            },
+            Err(err) => {
+                log::warn!(
+                    "Failed to dispatch branch creation for worktree at {}: {err}. \
+                     Staying in detached HEAD state.",
+                    worktree_path.display(),
+                );
+            }
+        }
+    }
+
     fn set_worktree_creation_error(
         &mut self,
         message: SharedString,
@@ -3400,15 +3447,9 @@ impl AgentPanel {
             return;
         }
 
-        let (branch_receivers, worktree_receivers, worktree_directory_setting) =
+        let (worktree_receivers, worktree_directory_setting) =
             if matches!(args, WorktreeCreationArgs::New { .. }) {
                 (
-                    Some(
-                        git_repos
-                            .iter()
-                            .map(|repo| repo.update(cx, |repo, _cx| repo.branches()))
-                            .collect::<Vec<_>>(),
-                    ),
                     Some(
                         git_repos
                             .iter()
@@ -3423,7 +3464,7 @@ impl AgentPanel {
                     ),
                 )
             } else {
-                (None, None, None)
+                (None, None)
             };
 
         let active_file_path = self.workspace.upgrade().and_then(|workspace| {
@@ -3467,38 +3508,17 @@ impl AgentPanel {
                     worktree_name,
                     branch_target,
                 } => {
-                    let branch_receivers = branch_receivers
-                        .expect("branch receivers must be prepared for new worktree creation");
                     let worktree_receivers = worktree_receivers
                         .expect("worktree receivers must be prepared for new worktree creation");
                     let worktree_directory_setting = worktree_directory_setting
                         .expect("worktree directory must be prepared for new worktree creation");
 
-                    let mut existing_branches = HashSet::default();
-                    for result in futures::future::join_all(branch_receivers).await {
-                        match result {
-                            Ok(Ok(branches)) => {
-                                for branch in branches {
-                                    existing_branches.insert(branch.name().to_string());
-                                }
-                            }
-                            Ok(Err(err)) => {
-                                Err::<(), _>(err).log_err();
-                            }
-                            Err(_) => {}
-                        }
-                    }
-
-                    let mut occupied_branches = HashSet::default();
                     let mut existing_worktree_names = Vec::new();
                     let mut existing_worktree_paths = HashSet::default();
                     for result in futures::future::join_all(worktree_receivers).await {
                         match result {
                             Ok(Ok(worktrees)) => {
                                 for worktree in worktrees {
-                                    if let Some(branch_name) = worktree.branch_name() {
-                                        occupied_branches.insert(branch_name.to_string());
-                                    }
                                     if let Some(name) = worktree
                                         .path
                                         .parent()
@@ -3519,25 +3539,8 @@ impl AgentPanel {
 
                     let mut rng = rand::rng();
 
-                    let (branch_name, use_existing_branch, start_point) =
-                        match Self::resolve_worktree_branch_target(
-                            &branch_target,
-                            &existing_branches,
-                            &occupied_branches,
-                            &mut rng,
-                        ) {
-                            Ok(target) => target,
-                            Err(err) => {
-                                this.update_in(cx, |this, window, cx| {
-                                    this.set_worktree_creation_error(
-                                        err.to_string().into(),
-                                        window,
-                                        cx,
-                                    );
-                                })?;
-                                return anyhow::Ok(());
-                            }
-                        };
+                    let (branch_to_checkout, base_ref) =
+                        Self::resolve_worktree_branch_target(&branch_target);
 
                     let (creation_infos, path_remapping) =
                         match this.update_in(cx, |_this, _window, cx| {
@@ -3546,9 +3549,7 @@ impl AgentPanel {
                                 worktree_name,
                                 &existing_worktree_names,
                                 &existing_worktree_paths,
-                                &branch_name,
-                                use_existing_branch,
-                                start_point,
+                                base_ref,
                                 &worktree_directory_setting,
                                 &mut rng,
                                 cx,
@@ -3569,6 +3570,12 @@ impl AgentPanel {
                             }
                         };
 
+                    let repo_paths: Vec<(Entity<project::git_store::Repository>, PathBuf)> =
+                        creation_infos
+                            .iter()
+                            .map(|(repo, path, _)| (repo.clone(), path.clone()))
+                            .collect();
+
                     let fs = cx.update(|_, cx| <dyn Fs>::global(cx))?;
 
                     let created_paths =
@@ -3585,6 +3592,18 @@ impl AgentPanel {
                                 return anyhow::Ok(());
                             }
                         };
+
+                    if let Some(ref branch_name) = branch_to_checkout {
+                        for (repo, worktree_path) in &repo_paths {
+                            Self::try_checkout_branch_in_worktree(
+                                repo,
+                                branch_name,
+                                worktree_path,
+                                cx,
+                            )
+                            .await;
+                        }
+                    }
 
                     let mut all_paths = created_paths;
                     let has_non_git = !non_git_paths.is_empty();
@@ -5379,7 +5398,7 @@ mod tests {
     use fs::FakeFs;
     use gpui::{TestAppContext, VisualTestContext};
     use project::Project;
-    use rand::rngs::StdRng;
+
     use serde_json::json;
     use std::path::Path;
     use std::time::Instant;
@@ -6709,54 +6728,37 @@ mod tests {
         );
     }
 
-    #[gpui::test(iterations = 10)]
-    fn test_resolve_worktree_branch_target(mut rng: StdRng) {
-        let existing_branches = HashSet::from_iter([
-            "main".to_string(),
-            "feature".to_string(),
-            "origin/main".to_string(),
-        ]);
-
-        let resolved = AgentPanel::resolve_worktree_branch_target(
-            &NewWorktreeBranchTarget::CreateBranch {
+    #[gpui::test]
+    fn test_resolve_worktree_branch_target() {
+        let resolved =
+            AgentPanel::resolve_worktree_branch_target(&NewWorktreeBranchTarget::CreateBranch {
                 name: "new-branch".to_string(),
                 from_ref: Some("main".to_string()),
-            },
-            &existing_branches,
-            &HashSet::from_iter(["main".to_string()]),
-            &mut rng,
-        )
-        .unwrap();
+            });
         assert_eq!(
             resolved,
-            ("new-branch".to_string(), false, Some("main".to_string()))
+            (Some("new-branch".to_string()), Some("main".to_string()))
         );
 
-        let resolved = AgentPanel::resolve_worktree_branch_target(
-            &NewWorktreeBranchTarget::ExistingBranch {
-                name: "feature".to_string(),
-            },
-            &existing_branches,
-            &HashSet::default(),
-            &mut rng,
-        )
-        .unwrap();
-        assert_eq!(resolved, ("feature".to_string(), true, None));
+        let resolved =
+            AgentPanel::resolve_worktree_branch_target(&NewWorktreeBranchTarget::CreateBranch {
+                name: "new-branch".to_string(),
+                from_ref: None,
+            });
+        assert_eq!(resolved, (Some("new-branch".to_string()), None));
 
-        let resolved = AgentPanel::resolve_worktree_branch_target(
-            &NewWorktreeBranchTarget::ExistingBranch {
-                name: "main".to_string(),
-            },
-            &existing_branches,
-            &HashSet::from_iter(["main".to_string()]),
-            &mut rng,
-        )
-        .unwrap();
-        assert_eq!(resolved.1, false);
-        assert_eq!(resolved.2, Some("main".to_string()));
-        assert_ne!(resolved.0, "main");
-        assert!(existing_branches.contains("main"));
-        assert!(!existing_branches.contains(&resolved.0));
+        let resolved =
+            AgentPanel::resolve_worktree_branch_target(&NewWorktreeBranchTarget::ExistingBranch {
+                name: "feature".to_string(),
+            });
+        assert_eq!(
+            resolved,
+            (Some("feature".to_string()), Some("feature".to_string()))
+        );
+
+        let resolved =
+            AgentPanel::resolve_worktree_branch_target(&NewWorktreeBranchTarget::CurrentBranch);
+        assert_eq!(resolved, (None, None));
     }
 
     #[gpui::test]

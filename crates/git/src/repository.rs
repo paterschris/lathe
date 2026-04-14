@@ -757,6 +757,13 @@ pub trait GitRepository: Send + Sync {
         path: PathBuf,
     ) -> BoxFuture<'_, Result<()>>;
 
+    fn checkout_branch_in_worktree(
+        &self,
+        branch_name: String,
+        worktree_path: PathBuf,
+        create: bool,
+    ) -> BoxFuture<'_, Result<()>>;
+
     fn remove_worktree(&self, path: PathBuf, force: bool) -> BoxFuture<'_, Result<()>>;
 
     fn rename_worktree(&self, old_path: PathBuf, new_path: PathBuf) -> BoxFuture<'_, Result<()>>;
@@ -1794,6 +1801,32 @@ impl GitRepository for RealGitRepository {
                     new_path.as_os_str().into(),
                 ];
                 git_binary?.run(&args).await?;
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn checkout_branch_in_worktree(
+        &self,
+        branch_name: String,
+        worktree_path: PathBuf,
+        create: bool,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = GitBinary::new(
+            self.any_git_binary_path.clone(),
+            worktree_path,
+            self.path(),
+            self.executor.clone(),
+            self.is_trusted(),
+        );
+
+        self.executor
+            .spawn(async move {
+                if create {
+                    git_binary.run(&["checkout", "-b", &branch_name]).await?;
+                } else {
+                    git_binary.run(&["checkout", &branch_name]).await?;
+                }
                 anyhow::Ok(())
             })
             .boxed()

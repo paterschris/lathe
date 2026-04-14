@@ -320,11 +320,9 @@ impl ThreadBranchPickerDelegate {
     fn branch_aside_text(&self, branch_name: &str, is_remote: bool) -> Option<SharedString> {
         if self.is_branch_occupied(branch_name) {
             Some(
-                format!(
-                    "This branch is already checked out in another worktree. \
-                     A new branch will be created from {branch_name}."
-                )
-                .into(),
+                "This branch is already checked out in another worktree. \
+                 The new worktree will start in detached HEAD state."
+                    .into(),
             )
         } else if is_remote {
             Some("A new local branch will be created from this remote branch.".into())
@@ -726,6 +724,7 @@ impl PickerDelegate for ThreadBranchPickerDelegate {
                     .default_branch_name
                     .as_ref()
                     .filter(|name| *name != &self.current_branch_name)?;
+
                 let is_occupied = self.is_branch_occupied(default_branch_name);
 
                 let item = ListItem::new("default-branch")
