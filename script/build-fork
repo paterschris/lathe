@@ -8,7 +8,15 @@ echo "=== Building Lathe ==="
 
 # --- Prerequisites ---
 
-# 1. Xcode with Metal compiler
+# 1. Xcode Command Line Tools
+if ! xcode-select -p &>/dev/null; then
+    echo "Installing Xcode Command Line Tools..."
+    xcode-select --install
+    echo "Please complete the installation dialog, then re-run this script."
+    exit 1
+fi
+
+# 2. Xcode with Metal compiler
 if ! xcrun --find metal &>/dev/null 2>&1; then
     if [ -d "/Applications/Xcode.app" ]; then
         echo "Selecting Xcode.app for Metal shader compilation..."
@@ -21,6 +29,12 @@ if ! xcrun --find metal &>/dev/null 2>&1; then
         echo "Install Xcode from the App Store, then re-run this script."
         exit 1
     fi
+fi
+
+# 3. Metal Toolchain component
+if ! xcrun metal -v &>/dev/null 2>&1; then
+    echo "Installing Metal Toolchain..."
+    xcodebuild -downloadComponent MetalToolchain
 fi
 
 # 2. Rust toolchain — install or repair from scratch if needed
