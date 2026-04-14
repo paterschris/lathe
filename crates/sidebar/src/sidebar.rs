@@ -27,7 +27,7 @@ use project::{
     AgentId, AgentRegistryStore, Event as ProjectEvent, WorktreeId, linked_worktree_short_name,
 };
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
-use remote::RemoteConnectionOptions;
+use remote::{RemoteConnectionOptions, same_remote_connection_identity};
 use ui::utils::platform_title_bar_height;
 
 use serde::{Deserialize, Serialize};
@@ -962,6 +962,7 @@ impl Sidebar {
                 host,
                 provisional_key,
                 |options, window, cx| connect_remote(active_workspace, options, window, cx),
+                &[],
                 window,
                 cx,
             )
@@ -997,6 +998,7 @@ impl Sidebar {
                 host,
                 provisional_key,
                 |options, window, cx| connect_remote(active_workspace, options, window, cx),
+                &[],
                 window,
                 cx,
             )
@@ -1118,6 +1120,7 @@ impl Sidebar {
             let mut threads: Vec<ThreadEntry> = Vec::new();
             let mut has_running_threads = false;
             let mut waiting_thread_count: usize = 0;
+            let group_host = group_key.host();
 
             if should_load_threads {
                 let thread_store = ThreadMetadataStore::global(cx);
@@ -1172,7 +1175,7 @@ impl Sidebar {
                 // linked worktree the thread was opened in.
                 for row in thread_store
                     .read(cx)
-                    .entries_for_main_worktree_path(group_key.path_list())
+                    .entries_for_main_worktree_path(group_key.path_list(), group_host.as_ref())
                     .cloned()
                 {
                     if !seen_thread_ids.insert(row.thread_id) {
@@ -1188,7 +1191,7 @@ impl Sidebar {
                 // Load any legacy threads for the main worktrees of this project group.
                 for row in thread_store
                     .read(cx)
-                    .entries_for_path(group_key.path_list())
+                    .entries_for_path(group_key.path_list(), group_host.as_ref())
                     .cloned()
                 {
                     if !seen_thread_ids.insert(row.thread_id) {
@@ -1214,7 +1217,7 @@ impl Sidebar {
                     let worktree_path_list = PathList::new(std::slice::from_ref(&path));
                     for row in thread_store
                         .read(cx)
-                        .entries_for_path(&worktree_path_list)
+                        .entries_for_path(&worktree_path_list, group_host.as_ref())
                         .cloned()
                     {
                         if !seen_thread_ids.insert(row.thread_id) {
@@ -1295,11 +1298,11 @@ impl Sidebar {
             } else {
                 let store = ThreadMetadataStore::global(cx).read(cx);
                 store
-                    .entries_for_main_worktree_path(group_key.path_list())
+                    .entries_for_main_worktree_path(group_key.path_list(), group_host.as_ref())
                     .next()
                     .is_some()
                     || store
-                        .entries_for_path(group_key.path_list())
+                        .entries_for_path(group_key.path_list(), group_host.as_ref())
                         .next()
                         .is_some()
             };
@@ -2572,6 +2575,7 @@ impl Sidebar {
                 host,
                 provisional_key,
                 |options, window, cx| connect_remote(active_workspace, options, window, cx),
+                &[],
                 window,
                 cx,
             )
@@ -2604,20 +2608,40 @@ impl Sidebar {
     fn find_current_workspace_for_path_list(
         &self,
         path_list: &PathList,
+        remote_connection: Option<&RemoteConnectionOptions>,
         cx: &App,
     ) -> Option<Entity<Workspace>> {
         self.find_workspace_in_current_window(cx, |workspace, cx| {
             workspace_path_list(workspace, cx).paths() == path_list.paths()
+                && same_remote_connection_identity(
+                    workspace
+                        .read(cx)
+                        .project()
+                        .read(cx)
+                        .remote_connection_options(cx)
+                        .as_ref(),
+                    remote_connection,
+                )
         })
     }
 
     fn find_open_workspace_for_path_list(
         &self,
         path_list: &PathList,
+        remote_connection: Option<&RemoteConnectionOptions>,
         cx: &App,
     ) -> Option<(WindowHandle<MultiWorkspace>, Entity<Workspace>)> {
         self.find_workspace_across_windows(cx, |workspace, cx| {
             workspace_path_list(workspace, cx).paths() == path_list.paths()
+                && same_remote_connection_identity(
+                    workspace
+                        .read(cx)
+                        .project()
+                        .read(cx)
+                        .remote_connection_options(cx)
+                        .as_ref(),
+                    remote_connection,
+                )
         })
     }
 
@@ -2645,12 +2669,15 @@ impl Sidebar {
                 self.activate_thread_locally(&metadata, &workspace, false, window, cx);
             } else {
                 let path_list = metadata.folder_paths().clone();
-                if let Some((target_window, workspace)) =
-                    self.find_open_workspace_for_path_list(&path_list, cx)
-                {
+                if let Some((target_window, workspace)) = self.find_open_workspace_for_path_list(
+                    &path_list,
+                    metadata.remote_connection.as_ref(),
+                    cx,
+                ) {
                     self.activate_thread_in_other_window(metadata, workspace, target_window, cx);
                 } else {
-                    let key = ProjectGroupKey::new(None, path_list.clone());
+                    let key =
+                        ProjectGroupKey::new(metadata.remote_connection.clone(), path_list.clone());
                     self.open_workspace_and_activate_thread(metadata, path_list, &key, window, cx);
                 }
             }
@@ -2674,12 +2701,18 @@ impl Sidebar {
                         ThreadMetadataStore::global(cx)
                             .update(cx, |store, cx| store.unarchive(thread_id, cx));
 
-                        if let Some(workspace) =
-                            this.find_current_workspace_for_path_list(&path_list, cx)
-                        {
+                        if let Some(workspace) = this.find_current_workspace_for_path_list(
+                            &path_list,
+                            metadata.remote_connection.as_ref(),
+                            cx,
+                        ) {
                             this.activate_thread_locally(&metadata, &workspace, false, window, cx);
-                        } else if let Some((target_window, workspace)) =
-                            this.find_open_workspace_for_path_list(&path_list, cx)
+                        } else if let Some((target_window, workspace)) = this
+                            .find_open_workspace_for_path_list(
+                                &path_list,
+                                metadata.remote_connection.as_ref(),
+                                cx,
+                            )
                         {
                             this.activate_thread_in_other_window(
                                 metadata,
@@ -2688,7 +2721,10 @@ impl Sidebar {
                                 cx,
                             );
                         } else {
-                            let key = ProjectGroupKey::new(None, path_list.clone());
+                            let key = ProjectGroupKey::new(
+                                metadata.remote_connection.clone(),
+                                path_list.clone(),
+                            );
                             this.open_workspace_and_activate_thread(
                                 metadata, path_list, &key, window, cx,
                             );
@@ -2763,7 +2799,10 @@ impl Sidebar {
 
                         this.update_in(cx, |this, window, cx| {
                             this.restoring_tasks.remove(&thread_id);
-                            let key = ProjectGroupKey::new(None, new_paths.clone());
+                            let key = ProjectGroupKey::new(
+                                updated_metadata.remote_connection.clone(),
+                                new_paths.clone(),
+                            );
                             this.open_workspace_and_activate_thread(
                                 updated_metadata,
                                 new_paths,
@@ -2981,11 +3020,13 @@ impl Sidebar {
                     })
                     .filter(|plan| {
                         thread_id.map_or(true, |tid| {
-                            !thread_worktree_archive::path_is_referenced_by_other_unarchived_threads(
-                                tid,
-                                &plan.root_path,
-                                cx,
-                            )
+                            !store
+                                .read(cx)
+                                .path_is_referenced_by_other_unarchived_threads(
+                                    tid,
+                                    &plan.root_path,
+                                    metadata.remote_connection.as_ref(),
+                                )
                         })
                     })
                     .collect::<Vec<_>>()
@@ -3035,9 +3076,11 @@ impl Sidebar {
                 return None;
             }
 
+            let thread_remote_connection =
+                metadata.as_ref().and_then(|m| m.remote_connection.as_ref());
             let remaining = ThreadMetadataStore::global(cx)
                 .read(cx)
-                .entries_for_path(folder_paths)
+                .entries_for_path(folder_paths, thread_remote_connection)
                 .filter(|t| t.session_id.as_ref() != Some(session_id))
                 .count();
 
@@ -3156,9 +3199,14 @@ impl Sidebar {
                 mw.remove(
                     workspaces_to_remove,
                     move |this, window, cx| {
-                        this.find_or_create_local_workspace(
+                        let active_workspace = this.workspace().clone();
+                        this.find_or_create_workspace(
                             fallback_paths,
+                            project_group_key.host(),
                             Some(project_group_key),
+                            |options, window, cx| {
+                                connect_remote(active_workspace, options, window, cx)
+                            },
                             &excluded,
                             window,
                             cx,

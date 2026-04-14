@@ -3587,6 +3587,7 @@ impl AgentPanel {
                             cx,
                         )
                     },
+                    &[],
                     window,
                     cx,
                 );
