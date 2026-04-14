@@ -22,8 +22,6 @@ if ! command -v rustc &>/dev/null || ! command -v cargo &>/dev/null; then
     else
         echo "Rust is not installed. Installing via rustup..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        # shellcheck disable=SC1091
-        source "$HOME/.cargo/env"
     fi
 fi
 
@@ -32,9 +30,12 @@ if ! command -v cargo &>/dev/null; then
     if [ -f "$HOME/.cargo/env" ]; then
         # shellcheck disable=SC1091
         source "$HOME/.cargo/env"
+    elif [ -d "$HOME/.cargo/bin" ]; then
+        export PATH="$HOME/.cargo/bin:$PATH"
     fi
     if ! command -v cargo &>/dev/null; then
-        echo "Error: cargo not found on PATH even after sourcing ~/.cargo/env"
+        echo "Error: cargo not found on PATH."
+        echo "Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
         exit 1
     fi
 fi
