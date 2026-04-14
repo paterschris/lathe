@@ -8,14 +8,20 @@ echo "=== Building Lathe ==="
 
 # --- Prerequisites ---
 
-# 1. Xcode Command Line Tools
-if ! xcode-select -p &>/dev/null; then
-    echo "Xcode Command Line Tools not found. Installing..."
-    xcode-select --install
-    echo ""
-    echo "A system dialog should have appeared to install Xcode Command Line Tools."
-    echo "Please complete the installation, then re-run this script."
-    exit 1
+# 1. Xcode with Metal compiler
+if ! xcrun --find metal &>/dev/null 2>&1; then
+    # Metal compiler requires the full Xcode app, not just CLI tools
+    if [ -d "/Applications/Xcode.app" ]; then
+        echo "Selecting Xcode.app for Metal shader compilation..."
+        sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+    elif [ -d "/Applications/Xcode-beta.app" ]; then
+        echo "Selecting Xcode-beta.app for Metal shader compilation..."
+        sudo xcode-select -s /Applications/Xcode-beta.app/Contents/Developer
+    else
+        echo "Error: Xcode is required to build Lathe (for Metal shader compilation)."
+        echo "Install Xcode from the App Store, then re-run this script."
+        exit 1
+    fi
 fi
 
 # 2. Ensure rustup is installed
