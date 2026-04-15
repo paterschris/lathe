@@ -68,6 +68,7 @@ use gpui::{
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
 use project::project_settings::ProjectSettings;
+use project::trusted_worktrees::{PathTrust, TrustedWorktrees};
 use project::{Project, ProjectPath, Worktree, WorktreePaths, linked_worktree_short_name};
 use prompt_store::{PromptStore, UserPromptId};
 use release_channel::ReleaseChannel;
@@ -2659,6 +2660,52 @@ impl AgentPanel {
         }
     }
 
+    fn maybe_propagate_worktree_trust(
+        this: &WeakEntity<Self>,
+        new_workspace: &Entity<workspace::Workspace>,
+        paths: &[PathBuf],
+        cx: &mut AsyncWindowContext,
+    ) {
+        cx.update(|_, cx| {
+            if ProjectSettings::get_global(cx).session.trust_all_worktrees {
+                return;
+            }
+            let Some(trusted_store) = TrustedWorktrees::try_get_global(cx) else {
+                return;
+            };
+
+            let source_is_trusted = this
+                .upgrade()
+                .map(|panel| {
+                    let source_worktree_store = panel.read(cx).project.read(cx).worktree_store();
+                    !trusted_store
+                        .read(cx)
+                        .has_restricted_worktrees(&source_worktree_store, cx)
+                })
+                .unwrap_or(false);
+
+            if !source_is_trusted {
+                return;
+            }
+
+            let worktree_store = new_workspace.read(cx).project().read(cx).worktree_store();
+            let paths_to_trust: HashSet<_> = paths
+                .iter()
+                .filter_map(|path| {
+                    let (worktree, _) = worktree_store.read(cx).find_worktree(path, cx)?;
+                    Some(PathTrust::Worktree(worktree.read(cx).id()))
+                })
+                .collect();
+
+            if !paths_to_trust.is_empty() {
+                trusted_store.update(cx, |store, cx| {
+                    store.trust(&worktree_store, paths_to_trust, cx);
+                });
+            }
+        })
+        .ok();
+    }
+
     /// Kicks off an async git-worktree creation for each repository. Returns:
     ///
     /// - `creation_infos`: a vec of `(repo, new_path, receiver)` tuples—the
@@ -3391,6 +3438,8 @@ impl AgentPanel {
                 futures::future::join_all(tasks)
             })
             .await;
+
+        Self::maybe_propagate_worktree_trust(&this, &new_workspace, &all_paths, cx);
 
         let initial_content = AgentInitialContent::ContentBlock {
             blocks: content,
