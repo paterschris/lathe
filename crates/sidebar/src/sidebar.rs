@@ -4,7 +4,9 @@ use acp_thread::ThreadStatus;
 use action_log::DiffStats;
 use agent_client_protocol::{self as acp};
 use agent_settings::AgentSettings;
-use agent_ui::thread_metadata_store::{ThreadMetadata, ThreadMetadataStore, WorktreePaths};
+use agent_ui::thread_metadata_store::{
+    ThreadMetadata, ThreadMetadataStore, WorktreePaths, worktree_info_from_thread_paths,
+};
 use agent_ui::thread_worktree_archive;
 use agent_ui::threads_archive_view::{
     ThreadsArchiveView, ThreadsArchiveViewEvent, format_history_entry_timestamp,
@@ -23,9 +25,7 @@ use gpui::{
 use menu::{
     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
 };
-use project::{
-    AgentId, AgentRegistryStore, Event as ProjectEvent, WorktreeId, linked_worktree_short_name,
-};
+use project::{AgentId, AgentRegistryStore, Event as ProjectEvent, WorktreeId};
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
 use remote::{RemoteConnectionOptions, same_remote_connection_identity};
 use ui::utils::platform_title_bar_height;
@@ -36,6 +36,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use theme::ActiveTheme;
 use ui::{
     AgentThreadStatus, CommonAnimationExt, ContextMenu, Divider, GradientFade, HighlightedLabel,
@@ -182,14 +183,6 @@ impl ThreadEntryWorkspace {
 }
 
 #[derive(Clone)]
-struct WorktreeInfo {
-    name: SharedString,
-    full_path: SharedString,
-    highlight_positions: Vec<usize>,
-    kind: ui::WorktreeKind,
-}
-
-#[derive(Clone)]
 struct ThreadEntry {
     metadata: ThreadMetadata,
     icon: IconName,
@@ -201,7 +194,7 @@ struct ThreadEntry {
     is_title_generating: bool,
     is_draft: bool,
     highlight_positions: Vec<usize>,
-    worktrees: Vec<WorktreeInfo>,
+    worktrees: Vec<ThreadItemWorktreeInfo>,
     diff_stats: DiffStats,
 }
 
@@ -334,69 +327,6 @@ fn root_repository_snapshots(
 
 fn workspace_path_list(workspace: &Entity<Workspace>, cx: &App) -> PathList {
     PathList::new(&workspace.read(cx).root_paths(cx))
-}
-
-/// Derives worktree display info from a thread's stored path list.
-///
-/// For each path in the thread's `folder_paths`, produces a
-/// [`WorktreeInfo`] with a short display name, full path, and whether
-/// the worktree is the main checkout or a linked git worktree. When
-/// multiple main paths exist and a linked worktree's short name alone
-/// wouldn't identify which main project it belongs to, the main project
-/// name is prefixed for disambiguation (e.g. `project:feature`).
-///
-fn worktree_info_from_thread_paths(worktree_paths: &WorktreePaths) -> Vec<WorktreeInfo> {
-    let mut infos: Vec<WorktreeInfo> = Vec::new();
-    let mut linked_short_names: Vec<(SharedString, SharedString)> = Vec::new();
-    let mut unique_main_count = HashSet::new();
-
-    for (main_path, folder_path) in worktree_paths.ordered_pairs() {
-        unique_main_count.insert(main_path.clone());
-        let is_linked = main_path != folder_path;
-
-        if is_linked {
-            let short_name = linked_worktree_short_name(main_path, folder_path).unwrap_or_default();
-            let project_name = main_path
-                .file_name()
-                .map(|n| SharedString::from(n.to_string_lossy().to_string()))
-                .unwrap_or_default();
-            linked_short_names.push((short_name.clone(), project_name));
-            infos.push(WorktreeInfo {
-                name: short_name,
-                full_path: SharedString::from(folder_path.display().to_string()),
-                highlight_positions: Vec::new(),
-                kind: ui::WorktreeKind::Linked,
-            });
-        } else {
-            let Some(name) = folder_path.file_name() else {
-                continue;
-            };
-            infos.push(WorktreeInfo {
-                name: SharedString::from(name.to_string_lossy().to_string()),
-                full_path: SharedString::from(folder_path.display().to_string()),
-                highlight_positions: Vec::new(),
-                kind: ui::WorktreeKind::Main,
-            });
-        }
-    }
-
-    // When the group has multiple main worktree paths and the thread's
-    // folder paths don't all share the same short name, prefix each
-    // linked worktree chip with its main project name so the user knows
-    // which project it belongs to.
-    let all_same_name = infos.len() > 1 && infos.iter().all(|i| i.name == infos[0].name);
-
-    if unique_main_count.len() > 1 && !all_same_name {
-        for (info, (_short_name, project_name)) in infos
-            .iter_mut()
-            .filter(|i| i.kind == ui::WorktreeKind::Linked)
-            .zip(linked_short_names.iter())
-        {
-            info.name = SharedString::from(format!("{}:{}", project_name, info.name));
-        }
-    }
-
-    infos
 }
 
 /// Shows a [`RemoteConnectionModal`] on the given workspace and establishes
@@ -636,7 +566,8 @@ impl Sidebar {
                     event,
                     project::git_store::GitStoreEvent::RepositoryUpdated(
                         _,
-                        project::git_store::RepositoryEvent::GitWorktreeListChanged,
+                        project::git_store::RepositoryEvent::GitWorktreeListChanged
+                            | project::git_store::RepositoryEvent::HeadChanged,
                         _,
                     )
                 ) {
@@ -1080,6 +1011,28 @@ impl Sidebar {
         let path_detail_map: HashMap<PathBuf, usize> =
             all_paths.into_iter().zip(path_details).collect();
 
+        let mut branch_by_path: HashMap<PathBuf, SharedString> = HashMap::new();
+        for ws in &workspaces {
+            let project = ws.read(cx).project().read(cx);
+            for repo in project.repositories(cx).values() {
+                let snapshot = repo.read(cx).snapshot();
+                if let Some(branch) = &snapshot.branch {
+                    branch_by_path.insert(
+                        snapshot.work_directory_abs_path.to_path_buf(),
+                        SharedString::from(Arc::<str>::from(branch.name())),
+                    );
+                }
+                for linked_wt in snapshot.linked_worktrees() {
+                    if let Some(branch) = linked_wt.branch_name() {
+                        branch_by_path.insert(
+                            linked_wt.path.clone(),
+                            SharedString::from(Arc::<str>::from(branch)),
+                        );
+                    }
+                }
+            }
+        }
+
         for group in &groups {
             let group_key = &group.key;
             let group_workspaces = &group.workspaces;
@@ -1136,7 +1089,8 @@ impl Sidebar {
                 let make_thread_entry =
                     |row: ThreadMetadata, workspace: ThreadEntryWorkspace| -> ThreadEntry {
                         let (icon, icon_from_external_svg) = resolve_agent_icon(&row.agent_id);
-                        let worktrees = worktree_info_from_thread_paths(&row.worktree_paths);
+                        let worktrees =
+                            worktree_info_from_thread_paths(&row.worktree_paths, &branch_by_path);
                         let is_draft = row.is_draft();
                         ThreadEntry {
                             metadata: row,
@@ -3546,11 +3500,10 @@ impl Sidebar {
                         worktrees: thread
                             .worktrees
                             .iter()
-                            .map(|wt| ThreadItemWorktreeInfo {
-                                name: wt.name.clone(),
-                                full_path: wt.full_path.clone(),
-                                highlight_positions: Vec::new(),
-                                kind: wt.kind,
+                            .cloned()
+                            .map(|mut wt| {
+                                wt.highlight_positions = Vec::new();
+                                wt
                             })
                             .collect(),
                         diff_stats: thread.diff_stats,
@@ -3815,18 +3768,7 @@ impl Sidebar {
             .when_some(thread.icon_from_external_svg.clone(), |this, svg| {
                 this.custom_icon_from_external_svg(svg)
             })
-            .worktrees(
-                thread
-                    .worktrees
-                    .iter()
-                    .map(|wt| ThreadItemWorktreeInfo {
-                        name: wt.name.clone(),
-                        full_path: wt.full_path.clone(),
-                        highlight_positions: wt.highlight_positions.clone(),
-                        kind: wt.kind,
-                    })
-                    .collect(),
-            )
+            .worktrees(thread.worktrees.clone())
             .timestamp(timestamp)
             .highlight_positions(thread.highlight_positions.to_vec())
             .title_generating(thread.is_title_generating)
