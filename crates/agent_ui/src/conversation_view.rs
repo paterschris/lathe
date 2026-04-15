@@ -46,7 +46,10 @@ use prompt_store::{PromptId, PromptStore};
 use crate::DEFAULT_THREAD_TITLE;
 use crate::message_editor::SessionCapabilities;
 use rope::Point;
-use settings::{NotifyWhenAgentWaiting, Settings as _, SettingsStore, ThinkingBlockDisplay};
+use settings::{
+    NewThreadLocation, NotifyWhenAgentWaiting, Settings as _, SettingsStore, SidebarSide,
+    ThinkingBlockDisplay,
+};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -659,6 +662,7 @@ impl ConversationView {
         project: Entity<Project>,
         thread_store: Option<Entity<ThreadStore>>,
         prompt_store: Option<Entity<PromptStore>>,
+        source: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -709,6 +713,7 @@ impl ConversationView {
                 title,
                 project,
                 initial_content,
+                source,
                 window,
                 cx,
             ),
@@ -753,6 +758,7 @@ impl ConversationView {
             title,
             self.project.clone(),
             None,
+            "agent_panel",
             window,
             cx,
         );
@@ -777,6 +783,7 @@ impl ConversationView {
         title: Option<SharedString>,
         project: Entity<Project>,
         initial_content: Option<AgentInitialContent>,
+        source: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ServerState {
@@ -809,6 +816,15 @@ impl ConversationView {
 
         let connect_result = connection_entry.read(cx).wait_for_connection();
 
+        let side = match AgentSettings::get_global(cx).sidebar_side() {
+            SidebarSide::Left => "left",
+            SidebarSide::Right => "right",
+        };
+        let thread_location = match AgentSettings::get_global(cx).new_thread_location {
+            NewThreadLocation::LocalProject => "current_worktree",
+            NewThreadLocation::NewWorktree => "new_worktree",
+        };
+
         let load_task = cx.spawn_in(window, async move |this, cx| {
             let (connection, history) = match connect_result.await {
                 Ok(AgentConnectedState {
@@ -825,7 +841,13 @@ impl ConversationView {
                 }
             };
 
-            telemetry::event!("Agent Thread Started", agent = connection.telemetry_id());
+            telemetry::event!(
+                "Agent Thread Started",
+                agent = connection.telemetry_id(),
+                source = source,
+                side = side,
+                thread_location = thread_location
+            );
 
             let mut resumed_without_history = false;
             let result = if let Some(session_id) = resume_session_id.clone() {
@@ -2642,6 +2664,7 @@ impl ConversationView {
                                                             root_work_dirs.clone(),
                                                             root_title.clone(),
                                                             true,
+                                                            "agent_panel",
                                                             window,
                                                             cx,
                                                         );
@@ -3151,6 +3174,7 @@ pub(crate) mod tests {
                     project,
                     Some(thread_store),
                     None,
+                    "agent_panel",
                     window,
                     cx,
                 )
@@ -3287,6 +3311,7 @@ pub(crate) mod tests {
                     project,
                     Some(thread_store),
                     None,
+                    "agent_panel",
                     window,
                     cx,
                 )
@@ -3368,6 +3393,7 @@ pub(crate) mod tests {
                     project,
                     Some(thread_store),
                     None,
+                    "agent_panel",
                     window,
                     cx,
                 )
@@ -3690,6 +3716,7 @@ pub(crate) mod tests {
                     project.clone(),
                     Some(thread_store),
                     None,
+                    "agent_panel",
                     window,
                     cx,
                 )
@@ -3787,6 +3814,7 @@ pub(crate) mod tests {
                     project.clone(),
                     Some(thread_store),
                     None,
+                    "agent_panel",
                     window,
                     cx,
                 )
@@ -3889,6 +3917,7 @@ pub(crate) mod tests {
                     project1.clone(),
                     Some(thread_store),
                     None,
+                    "agent_panel",
                     window,
                     cx,
                 )
@@ -4136,6 +4165,7 @@ pub(crate) mod tests {
                     project,
                     Some(thread_store),
                     None,
+                    "agent_panel",
                     window,
                     cx,
                 )
@@ -4906,6 +4936,7 @@ pub(crate) mod tests {
                     project.clone(),
                     Some(thread_store.clone()),
                     None,
+                    "agent_panel",
                     window,
                     cx,
                 )
@@ -7238,6 +7269,7 @@ pub(crate) mod tests {
                     project,
                     Some(thread_store),
                     None,
+                    "agent_panel",
                     window,
                     cx,
                 )

@@ -223,7 +223,7 @@ pub fn init(cx: &mut App) {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         workspace.focus_panel::<AgentPanel>(window, cx);
                         panel.update(cx, |panel, cx| {
-                            let id = panel.create_thread(window, cx);
+                            let id = panel.create_thread("agent_panel", window, cx);
                             panel.activate_retained_thread(id, true, window, cx);
                         });
                     }
@@ -364,6 +364,7 @@ pub fn init(cx: &mut App) {
                                 auto_submit: true,
                             }),
                             true,
+                            "agent_panel",
                             window,
                             cx,
                         );
@@ -390,6 +391,7 @@ pub fn init(cx: &mut App) {
                                     auto_submit: true,
                                 }),
                                 true,
+                                "agent_panel",
                                 window,
                                 cx,
                             );
@@ -418,6 +420,7 @@ pub fn init(cx: &mut App) {
                                     auto_submit: true,
                                 }),
                                 true,
+                                "agent_panel",
                                 window,
                                 cx,
                             );
@@ -925,6 +928,7 @@ impl AgentPanel {
                                 thread_info.work_dirs.as_ref().map(|dirs| PathList::deserialize(dirs)),
                                 thread_info.title.as_ref().map(|t| t.clone().into()),
                                 false,
+                                "agent_panel",
                                 window,
                                 cx,
                             );
@@ -955,6 +959,7 @@ impl AgentPanel {
                             None,
                             None,
                             initial_content,
+                            "agent_panel",
                             window,
                             cx,
                         );
@@ -1256,6 +1261,7 @@ impl AgentPanel {
             work_dirs,
             title,
             true,
+            "agent_panel",
             window,
             cx,
         );
@@ -1330,7 +1336,8 @@ impl AgentPanel {
         } else {
             self.selected_agent.clone()
         };
-        let thread = self.create_agent_thread(agent, None, None, None, None, window, cx);
+        let thread =
+            self.create_agent_thread(agent, None, None, None, None, "agent_panel", window, cx);
         self.draft_thread = Some(thread.conversation_view.clone());
         self.observe_draft_editor(&thread.conversation_view, cx);
         thread.conversation_view
@@ -1360,13 +1367,18 @@ impl AgentPanel {
         }
     }
 
-    pub fn create_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) -> ThreadId {
+    pub fn create_thread(
+        &mut self,
+        source: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ThreadId {
         let agent = if self.project.read(cx).is_via_collab() {
             Agent::NativeAgent
         } else {
             self.selected_agent.clone()
         };
-        let thread = self.create_agent_thread(agent, None, None, None, None, window, cx);
+        let thread = self.create_agent_thread(agent, None, None, None, None, source, window, cx);
         let thread_id = thread.conversation_view.read(cx).thread_id;
         self.retained_threads
             .insert(thread_id, thread.conversation_view);
@@ -1532,6 +1544,7 @@ impl AgentPanel {
                         title: thread.title,
                     }),
                     true,
+                    "agent_panel",
                     window,
                     cx,
                 );
@@ -1549,6 +1562,7 @@ impl AgentPanel {
         title: Option<SharedString>,
         initial_content: Option<AgentInitialContent>,
         focus: bool,
+        source: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1565,6 +1579,7 @@ impl AgentPanel {
             work_dirs,
             title,
             initial_content,
+            source,
             window,
             cx,
         );
@@ -1651,6 +1666,7 @@ impl AgentPanel {
                         thread.work_dirs.clone(),
                         thread.title.clone(),
                         true,
+                        "agent_panel",
                         window,
                         cx,
                     );
@@ -2383,6 +2399,7 @@ impl AgentPanel {
                                     entry.work_dirs.clone(),
                                     entry.title.clone(),
                                     true,
+                                    "agent_panel",
                                     window,
                                     cx,
                                 );
@@ -2467,6 +2484,7 @@ impl AgentPanel {
             None,
             external_source_prompt.map(AgentInitialContent::from),
             true,
+            "agent_panel",
             window,
             cx,
         );
@@ -2491,6 +2509,7 @@ impl AgentPanel {
             None,
             initial_content,
             focus,
+            "agent_panel",
             window,
             cx,
         );
@@ -2507,6 +2526,7 @@ impl AgentPanel {
         work_dirs: Option<PathList>,
         title: Option<SharedString>,
         focus: bool,
+        source: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2563,6 +2583,7 @@ impl AgentPanel {
             title,
             None,
             focus,
+            source,
             window,
             cx,
         );
@@ -2575,6 +2596,7 @@ impl AgentPanel {
         work_dirs: Option<PathList>,
         title: Option<SharedString>,
         initial_content: Option<AgentInitialContent>,
+        source: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AgentThread {
@@ -2585,6 +2607,7 @@ impl AgentPanel {
             work_dirs,
             title,
             initial_content,
+            source,
             window,
             cx,
         )
@@ -2598,6 +2621,7 @@ impl AgentPanel {
         work_dirs: Option<PathList>,
         title: Option<SharedString>,
         initial_content: Option<AgentInitialContent>,
+        source: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AgentThread {
@@ -2650,6 +2674,7 @@ impl AgentPanel {
                 project,
                 thread_store,
                 self.prompt_store.clone(),
+                source,
                 window,
                 cx,
             )
@@ -3644,6 +3669,7 @@ impl AgentPanel {
                             None,
                             Some(initial_content),
                             true,
+                            "agent_panel",
                             window,
                             cx,
                         );
@@ -3720,6 +3746,11 @@ impl Panel for AgentPanel {
     }
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
+        let side = match position {
+            DockPosition::Left => "left",
+            DockPosition::Right | DockPosition::Bottom => "right",
+        };
+        telemetry::event!("Agent Panel Side Changed", side = side);
         settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
             settings
                 .agent
@@ -4202,8 +4233,6 @@ impl AgentPanel {
             let agent_server_store = agent_server_store;
 
             Rc::new(move |window, cx| {
-                telemetry::event!("New Thread Clicked");
-
                 let active_thread = active_thread.clone();
                 Some(ContextMenu::build(window, cx, |menu, _window, cx| {
                     menu.context(focus_handle.clone())
@@ -4246,7 +4275,11 @@ impl AgentPanel {
                                                 {
                                                     panel.update(cx, |panel, cx| {
                                                         panel.selected_agent = Agent::NativeAgent;
-                                                        let id = panel.create_thread(window, cx);
+                                                        let id = panel.create_thread(
+                                                            "agent_panel",
+                                                            window,
+                                                            cx,
+                                                        );
                                                         panel.activate_retained_thread(
                                                             id, true, window, cx,
                                                         );
@@ -4333,8 +4366,11 @@ impl AgentPanel {
                                                             panel.selected_agent = Agent::Custom {
                                                                 id: agent_id.clone(),
                                                             };
-                                                            let id =
-                                                                panel.create_thread(window, cx);
+                                                            let id = panel.create_thread(
+                                                                "agent_panel",
+                                                                window,
+                                                                cx,
+                                                            );
                                                             panel.activate_retained_thread(
                                                                 id, true, window, cx,
                                                             );
@@ -5095,6 +5131,7 @@ impl AgentPanel {
             None,
             None,
             None,
+            "agent_panel",
             window,
             cx,
         );
@@ -5153,6 +5190,7 @@ impl AgentPanel {
             None,
             None,
             None,
+            "agent_panel",
             window,
             cx,
         );
@@ -6172,6 +6210,7 @@ mod tests {
                 None,
                 None,
                 true,
+                "agent_panel",
                 window,
                 cx,
             );
@@ -6220,6 +6259,7 @@ mod tests {
                 None,
                 None,
                 true,
+                "agent_panel",
                 window,
                 cx,
             );
@@ -7908,6 +7948,7 @@ mod tests {
                 None,
                 None,
                 true,
+                "agent_panel",
                 window,
                 cx,
             );
