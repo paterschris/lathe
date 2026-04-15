@@ -1,4 +1,7 @@
-use crate::{CommonAnimationExt, DiffStat, GradientFade, HighlightedLabel, Tooltip, prelude::*};
+use crate::{
+    CommonAnimationExt, DecoratedIcon, DiffStat, GradientFade, HighlightedLabel, IconDecoration,
+    Tooltip, prelude::*,
+};
 
 use gpui::{
     Animation, AnimationExt, AnyView, ClickEvent, Hsla, MouseButton, SharedString,
@@ -39,6 +42,7 @@ pub struct ThreadItem {
     icon_color: Option<Color>,
     icon_visible: bool,
     custom_icon_from_external_svg: Option<SharedString>,
+    icon_decoration: Option<IconDecoration>,
     title: SharedString,
     title_label_color: Option<Color>,
     title_generating: bool,
@@ -71,6 +75,7 @@ impl ThreadItem {
             icon_color: None,
             icon_visible: true,
             custom_icon_from_external_svg: None,
+            icon_decoration: None,
             title: title.into(),
             title_label_color: None,
             title_generating: false,
@@ -114,6 +119,11 @@ impl ThreadItem {
 
     pub fn icon_visible(mut self, visible: bool) -> Self {
         self.icon_visible = visible;
+        self
+    }
+
+    pub fn icon_decoration(mut self, decoration: IconDecoration) -> Self {
+        self.icon_decoration = Some(decoration);
         self
     }
 
@@ -325,6 +335,10 @@ impl RenderOnce for ThreadItem {
                 .when_some(icon_tooltip, |icon, tooltip| {
                     icon.tooltip(Tooltip::text(tooltip))
                 })
+                .into_any_element()
+        } else if let Some(decoration) = self.icon_decoration {
+            icon_container()
+                .child(DecoratedIcon::new(agent_icon, Some(decoration)))
                 .into_any_element()
         } else {
             icon_container().child(agent_icon).into_any_element()
@@ -553,35 +567,41 @@ impl RenderOnce for ThreadItem {
                             .min_w_0()
                             .gap_1p5()
                             .child(icon_container()) // Icon Spacing
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .flex_shrink()
-                                    .overflow_hidden()
-                                    .gap_1p5()
-                                    .when_some(self.project_name, |this, name| {
-                                        this.child(
-                                            Label::new(name)
-                                                .size(LabelSize::Small)
-                                                .color(Color::Muted),
-                                        )
-                                    })
-                                    .when(
-                                        has_project_name && (has_project_paths || has_worktree),
-                                        |this| this.child(dot_separator()),
+                            .when(
+                                has_project_name || has_project_paths || has_worktree,
+                                |this| {
+                                    this.child(
+                                        h_flex()
+                                            .min_w_0()
+                                            .flex_shrink()
+                                            .overflow_hidden()
+                                            .gap_1p5()
+                                            .when_some(self.project_name, |this, name| {
+                                                this.child(
+                                                    Label::new(name)
+                                                        .size(LabelSize::Small)
+                                                        .color(Color::Muted),
+                                                )
+                                            })
+                                            .when(
+                                                has_project_name
+                                                    && (has_project_paths || has_worktree),
+                                                |this| this.child(dot_separator()),
+                                            )
+                                            .when_some(project_paths, |this, paths| {
+                                                this.child(
+                                                    Label::new(paths)
+                                                        .size(LabelSize::Small)
+                                                        .color(Color::Muted)
+                                                        .into_any_element(),
+                                                )
+                                            })
+                                            .when(has_project_paths && has_worktree, |this| {
+                                                this.child(dot_separator())
+                                            })
+                                            .children(worktree_labels),
                                     )
-                                    .when_some(project_paths, |this, paths| {
-                                        this.child(
-                                            Label::new(paths)
-                                                .size(LabelSize::Small)
-                                                .color(Color::Muted)
-                                                .into_any_element(),
-                                        )
-                                    })
-                                    .when(has_project_paths && has_worktree, |this| {
-                                        this.child(dot_separator())
-                                    })
-                                    .children(worktree_labels),
+                                },
                             )
                             .when(
                                 (has_project_name || has_project_paths || has_worktree)

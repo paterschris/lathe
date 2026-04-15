@@ -68,7 +68,7 @@ gpui::actions!(
         /// Creates a new thread in the currently selected or active project group.
         NewThreadInGroup,
         /// Toggles between the thread list and the archive view.
-        ToggleArchive,
+        ViewAllThreads,
     ]
 );
 
@@ -2490,7 +2490,7 @@ impl Sidebar {
         })
     }
 
-    fn activate_archived_thread(
+    fn open_thread_from_archive(
         &mut self,
         metadata: ThreadMetadata,
         window: &mut Window,
@@ -2533,9 +2533,13 @@ impl Sidebar {
         }
 
         let store = ThreadMetadataStore::global(cx);
-        let task = store
-            .read(cx)
-            .get_archived_worktrees_for_thread(thread_id, cx);
+        let task = if metadata.archived {
+            store
+                .read(cx)
+                .get_archived_worktrees_for_thread(thread_id, cx)
+        } else {
+            Task::ready(Ok(Vec::new()))
+        };
         let path_list = metadata.folder_paths().clone();
 
         let restore_task = cx.spawn_in(window, async move |this, cx| {
@@ -2545,8 +2549,10 @@ impl Sidebar {
                 if archived_worktrees.is_empty() {
                     this.update_in(cx, |this, window, cx| {
                         this.restoring_tasks.remove(&thread_id);
-                        ThreadMetadataStore::global(cx)
-                            .update(cx, |store, cx| store.unarchive(thread_id, cx));
+                        if metadata.archived {
+                            ThreadMetadataStore::global(cx)
+                                .update(cx, |store, cx| store.unarchive(thread_id, cx));
+                        }
 
                         if let Some(workspace) = this.find_current_workspace_for_path_list(
                             &path_list,
@@ -4389,7 +4395,7 @@ impl Sidebar {
                 this.child(
                     IconButton::new("thread-import", IconName::ThreadImport)
                         .icon_size(IconSize::Small)
-                        .tooltip(Tooltip::text("Import ACP Threads"))
+                        .tooltip(Tooltip::text("Import External Agent Threads"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.show_archive(window, cx);
                             this.show_thread_import_modal(window, cx);
@@ -4401,10 +4407,10 @@ impl Sidebar {
                     .icon_size(IconSize::Small)
                     .toggle_state(is_archive)
                     .tooltip(move |_, cx| {
-                        Tooltip::for_action("Toggle Archived Threads", &ToggleArchive, cx)
+                        Tooltip::for_action("View All Threads", &ViewAllThreads, cx)
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_archive(&ToggleArchive, window, cx);
+                        this.toggle_archive(&ViewAllThreads, window, cx);
                     })),
             )
             .child(self.render_recent_projects_button(cx));
@@ -4522,7 +4528,7 @@ impl Sidebar {
             )
     }
 
-    fn toggle_archive(&mut self, _: &ToggleArchive, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_archive(&mut self, _: &ViewAllThreads, window: &mut Window, cx: &mut Context<Self>) {
         match &self.view {
             SidebarView::ThreadList => {
                 let side = match self.side(cx) {
@@ -4574,8 +4580,8 @@ impl Sidebar {
                 ThreadsArchiveViewEvent::Close => {
                     this.show_thread_list(window, cx);
                 }
-                ThreadsArchiveViewEvent::Unarchive { thread } => {
-                    this.activate_archived_thread(thread.clone(), window, cx);
+                ThreadsArchiveViewEvent::Activate { thread } => {
+                    this.open_thread_from_archive(thread.clone(), window, cx);
                 }
                 ThreadsArchiveViewEvent::CancelRestore { thread_id } => {
                     this.restoring_tasks.remove(thread_id);
