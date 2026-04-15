@@ -259,6 +259,7 @@ pub struct NewNativeAgentThreadFromSummary {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Agent {
     #[default]
     #[serde(alias = "NativeAgent", alias = "TextThread")]
@@ -268,6 +269,8 @@ pub enum Agent {
         #[serde(rename = "name")]
         id: AgentId,
     },
+    #[cfg(any(test, feature = "test-support"))]
+    Stub,
 }
 
 impl From<AgentId> for Agent {
@@ -285,6 +288,8 @@ impl Agent {
         match self {
             Self::NativeAgent => agent::ZED_AGENT_ID.clone(),
             Self::Custom { id } => id.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Stub => "stub".into(),
         }
     }
 
@@ -296,6 +301,8 @@ impl Agent {
         match self {
             Self::NativeAgent => "Zed Agent".into(),
             Self::Custom { id, .. } => id.0.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Stub => "Stub Agent".into(),
         }
     }
 
@@ -303,6 +310,8 @@ impl Agent {
         match self {
             Self::NativeAgent => None,
             Self::Custom { .. } => Some(IconName::Sparkle),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Stub => None,
         }
     }
 
@@ -316,6 +325,8 @@ impl Agent {
             Self::Custom { id: name } => {
                 Rc::new(agent_servers::CustomAgentServer::new(name.clone()))
             }
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Stub => Rc::new(crate::test_support::StubAgentServer::default_response()),
         }
     }
 }

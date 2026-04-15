@@ -275,31 +275,6 @@ pub struct ThreadMetadata {
 }
 
 impl ThreadMetadata {
-    pub fn new_draft(
-        thread_id: ThreadId,
-        agent_id: AgentId,
-        title: Option<SharedString>,
-        worktree_paths: WorktreePaths,
-        remote_connection: Option<RemoteConnectionOptions>,
-    ) -> Self {
-        let now = Utc::now();
-        Self {
-            thread_id,
-            session_id: None,
-            agent_id,
-            title,
-            updated_at: now,
-            created_at: Some(now),
-            worktree_paths: worktree_paths.clone(),
-            remote_connection,
-            archived: worktree_paths.is_empty(),
-        }
-    }
-
-    pub fn is_draft(&self) -> bool {
-        self.session_id.is_none()
-    }
-
     pub fn display_title(&self) -> SharedString {
         self.title
             .clone()
@@ -1140,7 +1115,7 @@ impl ThreadMetadataStore {
         };
 
         let thread_ref = thread.read(cx);
-        if thread_ref.entries().is_empty() {
+        if thread_ref.is_draft_thread() {
             return;
         }
 
@@ -2272,18 +2247,14 @@ mod tests {
         let session_id = thread.read_with(&vcx, |t, _| t.session_id().clone());
         let thread_id = crate::test_support::active_thread_id(&panel, &vcx);
 
-        // Initial metadata was created by the panel with session_id: None.
+        // Draft threads no longer create metadata entries.
         cx.read(|cx| {
             let store = ThreadMetadataStore::global(cx).read(cx);
-            assert_eq!(store.entry_ids().count(), 1);
-            assert!(
-                store.entry(thread_id).unwrap().session_id.is_none(),
-                "expected initial panel metadata to have no session_id"
-            );
+            assert_eq!(store.entry_ids().count(), 0);
         });
 
         // Setting a title on an empty thread should be ignored by the
-        // event handler (entries are empty), leaving session_id as None.
+        // event handler (entries are empty), so no metadata is created.
         thread.update_in(&mut vcx, |thread, _window, cx| {
             thread.set_title("Draft Thread".into(), cx).detach();
         });
@@ -2291,9 +2262,10 @@ mod tests {
 
         cx.read(|cx| {
             let store = ThreadMetadataStore::global(cx).read(cx);
-            assert!(
-                store.entry(thread_id).unwrap().session_id.is_none(),
-                "expected title updates on empty thread to be ignored by event handler"
+            assert_eq!(
+                store.entry_ids().count(),
+                0,
+                "expected title updates on empty thread to not create metadata"
             );
         });
 
