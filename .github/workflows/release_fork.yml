@@ -73,7 +73,18 @@ jobs:
       - name: Build
         run: script/build-fork
 
+      - name: Verify signing identity
+        run: |
+          echo "Checking for signing identity..."
+          security find-identity -v -p codesigning
+          security find-identity -v -p codesigning | grep -q "Developer ID Application" || {
+            echo "ERROR: No Developer ID signing identity found in keychain"
+            exit 1
+          }
+
       - name: Package
+        env:
+          LATHE_REQUIRE_SIGNING: "1"
         run: script/package-fork
 
       - name: Upload macOS artifact

@@ -58,6 +58,12 @@ echo "  Arch: ${arch}"
 can_sign=false
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$signing_identity"; then
     can_sign=true
+elif [ "${LATHE_REQUIRE_SIGNING:-}" = "1" ]; then
+    echo "ERROR: Signing required (LATHE_REQUIRE_SIGNING=1) but identity not found:"
+    echo "  Expected: ${signing_identity}"
+    echo "  Available identities:"
+    security find-identity -v -p codesigning 2>/dev/null || echo "    (none)"
+    exit 1
 fi
 
 if $can_sign; then
@@ -85,6 +91,17 @@ if $can_sign; then
         --entitlements crates/zed/resources/zed.entitlements \
         --sign "$signing_identity" "$app_path"
     echo "  Signed with: ${signing_identity}"
+
+    # Verify the signature and entitlements
+    echo ""
+    echo "--- Verifying signature ---"
+    codesign --verify --deep --strict "$app_path"
+    echo "  Signature valid"
+    codesign -d --entitlements - "$app_path" 2>&1 | grep -q "allow-jit" || {
+        echo "ERROR: JIT entitlement missing from signed binary"
+        exit 1
+    }
+    echo "  JIT entitlement confirmed"
 else
     echo ""
     echo "--- Signing skipped (identity not found in keychain) ---"
