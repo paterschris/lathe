@@ -23,7 +23,6 @@ use crate::{
     docker::{
         Docker, DockerClient, DockerComposeConfig, DockerComposeService, DockerComposeServiceBuild,
         DockerComposeServicePort, DockerComposeVolume, DockerInspect, DockerPs,
-        get_remote_dir_from_config,
     },
     features::{DevContainerFeatureJson, FeatureManifest, parse_oci_feature_ref},
     get_oci_token,
@@ -57,7 +56,7 @@ struct DevContainerManifest {
     features_build_info: Option<FeaturesBuildInfo>,
     features: Vec<FeatureManifest>,
 }
-const DEFAULT_REMOTE_PROJECT_DIR: &str = "/workspaces/";
+const DEFAULT_REMOTE_PROJECT_DIR: &str = "/workspaces";
 impl DevContainerManifest {
     async fn new(
         context: &DevContainerContext,
@@ -772,17 +771,14 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${{PATH:-\3}}/g' /etc/profile || true
         };
 
         let remote_user = get_remote_user_from_config(&running_container, self)?;
-        let remote_workspace_folder = get_remote_dir_from_config(
-            &running_container,
-            (&self.local_project_directory.display()).to_string(),
-        )?;
+        let remote_workspace_folder = self.remote_workspace_folder()?;
 
         let remote_env = self.runtime_remote_env(&running_container.config.env_as_map()?)?;
 
         Ok(DevContainerUp {
             container_id: running_container.id,
             remote_user,
-            remote_workspace_folder,
+            remote_workspace_folder: remote_workspace_folder.display().to_string(),
             extension_ids: self.extension_ids(),
             remote_env,
         })
@@ -1716,7 +1712,14 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${PATH:-\3}/g' /etc/profile || true
             .as_ref()
             .map(|folder| PathBuf::from(folder))
             .or(Some(
-                PathBuf::from(DEFAULT_REMOTE_PROJECT_DIR).join(self.local_workspace_base_name()?),
+                // We explicitly use "/" here, instead of PathBuf::join
+                // because we want remote targets to use unix-style filepaths,
+                // even on a Windows host
+                PathBuf::from(format!(
+                    "{}/{}",
+                    DEFAULT_REMOTE_PROJECT_DIR,
+                    self.local_workspace_base_name()?
+                )),
             ))
             .ok_or(DevContainerError::DevContainerParseFailed)
     }
@@ -1738,7 +1741,14 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${PATH:-\3}/g' /etc/profile || true
 
         Ok(MountDefinition {
             source: Some(self.local_workspace_folder()),
-            target: format!("/workspaces/{}", project_directory_name.display()),
+            // We explicitly use "/" here, instead of PathBuf::join
+            // because we want the remote target to use unix-style filepaths,
+            // even on a Windows host
+            target: format!(
+                "{}/{}",
+                PathBuf::from(DEFAULT_REMOTE_PROJECT_DIR).display(),
+                project_directory_name.display()
+            ),
             mount_type: None,
         })
     }
@@ -1847,6 +1857,8 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${PATH:-\3}/g' /etc/profile || true
     }
 
     async fn build_and_run(&mut self) -> Result<DevContainerUp, DevContainerError> {
+        self.dev_container().validate_devcontainer_contents()?;
+
         self.run_initialize_commands().await?;
 
         self.download_feature_and_dockerfile_resources().await?;
@@ -1980,17 +1992,14 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${PATH:-\3}/g' /etc/profile || true
 
             let remote_user = get_remote_user_from_config(&docker_inspect, self)?;
 
-            let remote_folder = get_remote_dir_from_config(
-                &docker_inspect,
-                (&self.local_project_directory.display()).to_string(),
-            )?;
+            let remote_folder = self.remote_workspace_folder()?;
 
             let remote_env = self.runtime_remote_env(&docker_inspect.config.env_as_map()?)?;
 
             let dev_container_up = DevContainerUp {
                 container_id: docker_ps.id,
                 remote_user: remote_user,
-                remote_workspace_folder: remote_folder,
+                remote_workspace_folder: remote_folder.display().to_string(),
                 extension_ids: self.extension_ids(),
                 remote_env,
             };
@@ -2494,7 +2503,10 @@ mod test {
         },
         oci::TokenResponse,
     };
+    #[cfg(not(target_os = "windows"))]
     const TEST_PROJECT_PATH: &str = "/path/to/local/project";
+    #[cfg(target_os = "windows")]
+    const TEST_PROJECT_PATH: &str = r#"C:\\path\to\local\project"#;
 
     async fn build_tarball(content: Vec<(&str, &str)>) -> Vec<u8> {
         let buffer = futures::io::Cursor::new(Vec::new());
@@ -2755,11 +2767,11 @@ mod test {
                 OsStr::new("--sig-proxy=false"),
                 OsStr::new("-d"),
                 OsStr::new("--mount"),
-                OsStr::new(
-                    "type=bind,source=/path/to/local/project,target=/workspaces/project,consistency=cached"
-                ),
+                OsStr::new(&format!(
+                    "type=bind,source={TEST_PROJECT_PATH},target=/workspaces/project,consistency=cached"
+                )),
                 OsStr::new("-l"),
-                OsStr::new("devcontainer.local_folder=/path/to/local/project"),
+                OsStr::new(&format!("devcontainer.local_folder={TEST_PROJECT_PATH}")),
                 OsStr::new("-l"),
                 OsStr::new(&format!(
                     "devcontainer.config_file={expected_config_file_label}"
@@ -2935,7 +2947,8 @@ mod test {
                 .remote_env
                 .as_ref()
                 .and_then(|env| env.get("LOCAL_WORKSPACE_FOLDER")),
-            Some(&TEST_PROJECT_PATH.to_string())
+            // We replace backslashes with forward slashes during variable replacement for JSON safety
+            Some(&TEST_PROJECT_PATH.replace("\\", "/"))
         );
 
         // ${localEnv:VARIABLE_NAME}
@@ -3038,7 +3051,8 @@ mod test {
                 .remote_env
                 .as_ref()
                 .and_then(|env| env.get("LOCAL_WORKSPACE_FOLDER")),
-            Some(&TEST_PROJECT_PATH.to_string())
+            // We replace backslashes with forward slashes during variable replacement for JSON safety
+            Some(&TEST_PROJECT_PATH.replace("\\", "/"))
         );
     }
 
@@ -4569,6 +4583,33 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${PATH:-\3}/g' /etc/profile || true
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    async fn test_spawns_devcontainer_with_plain_image(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        env_logger::try_init().ok();
+        let given_devcontainer_contents = r#"
+            {
+              "name": "cli-${devcontainerId}",
+              "image": "test_image:latest",
+            }
+            "#;
+
+        let (_, mut devcontainer_manifest) =
+            init_default_devcontainer_manifest(cx, given_devcontainer_contents)
+                .await
+                .unwrap();
+
+        devcontainer_manifest.parse_nonremote_vars().unwrap();
+
+        let devcontainer_up = devcontainer_manifest.build_and_run().await.unwrap();
+
+        assert_eq!(
+            devcontainer_up.remote_workspace_folder,
+            "/workspaces/project"
+        );
+    }
+
     #[cfg(not(target_os = "windows"))]
     #[gpui::test]
     async fn test_spawns_devcontainer_with_docker_compose_and_plain_image(cx: &mut TestAppContext) {
@@ -5017,11 +5058,14 @@ FROM docker.io/hexpm/elixir:1.21-erlang-28.4.1-debian-trixie-20260316-slim AS de
             &self,
             config_files: &Vec<PathBuf>,
         ) -> Result<Option<DockerComposeConfig>, DevContainerError> {
+            let project_path = PathBuf::from(TEST_PROJECT_PATH);
             if config_files.len() == 1
                 && config_files.get(0)
-                    == Some(&PathBuf::from(
-                        "/path/to/local/project/.devcontainer/docker-compose.yml",
-                    ))
+                    == Some(
+                        &project_path
+                            .join(".devcontainer")
+                            .join("docker-compose.yml"),
+                    )
             {
                 return Ok(Some(DockerComposeConfig {
                     name: None,
