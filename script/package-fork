@@ -61,10 +61,27 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q "$signing_iden
 fi
 
 if $can_sign; then
-    # Sign the app bundle
+    # Sign the app bundle (inside-out, as Apple recommends)
     echo ""
     echo "--- Signing ---"
-    codesign --force --deep --options runtime \
+
+    # Sign nested frameworks and dylibs first (no entitlements for these)
+    find "$app_path/Contents/Frameworks" "$app_path/Contents/MacOS/WebRTC.framework" \
+        -type f \( -name "*.dylib" -o -name "*.so" -o -perm +111 \) \
+        2>/dev/null | while read -r lib; do
+        codesign --force --options runtime \
+            --sign "$signing_identity" "$lib" 2>/dev/null || true
+    done
+
+    # Sign any nested .app or .framework bundles
+    find "$app_path" -depth -name "*.framework" -o -name "*.app" | while read -r bundle; do
+        [ "$bundle" = "$app_path" ] && continue
+        codesign --force --options runtime \
+            --sign "$signing_identity" "$bundle" 2>/dev/null || true
+    done
+
+    # Sign the main binary with entitlements (must be last)
+    codesign --force --options runtime \
         --entitlements crates/zed/resources/zed.entitlements \
         --sign "$signing_identity" "$app_path"
     echo "  Signed with: ${signing_identity}"
