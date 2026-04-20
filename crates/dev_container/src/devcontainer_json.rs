@@ -19,9 +19,10 @@ pub(crate) enum PortAttributeProtocol {
     Http,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum OnAutoForward {
+    #[default]
     Notify,
     OpenBrowser,
     OpenBrowserOnce,
@@ -33,11 +34,16 @@ pub(crate) enum OnAutoForward {
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PortAttributes {
-    label: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
     on_auto_forward: OnAutoForward,
+    #[serde(default)]
     elevate_if_needed: bool,
+    #[serde(default)]
     require_local_port: bool,
-    protocol: PortAttributeProtocol,
+    #[serde(default)]
+    protocol: Option<PortAttributeProtocol>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -824,30 +830,30 @@ mod test {
                     (
                         "3000".to_string(),
                         PortAttributes {
-                            label: "This Port".to_string(),
+                            label: Some("This Port".to_string()),
                             on_auto_forward: OnAutoForward::Notify,
                             elevate_if_needed: false,
                             require_local_port: true,
-                            protocol: PortAttributeProtocol::Https
+                            protocol: Some(PortAttributeProtocol::Https)
                         }
                     ),
                     (
                         "db:5432".to_string(),
                         PortAttributes {
-                            label: "This Port too".to_string(),
+                            label: Some("This Port too".to_string()),
                             on_auto_forward: OnAutoForward::Silent,
                             elevate_if_needed: true,
                             require_local_port: false,
-                            protocol: PortAttributeProtocol::Http
+                            protocol: Some(PortAttributeProtocol::Http)
                         }
                     )
                 ])),
                 other_ports_attributes: Some(PortAttributes {
-                    label: "Other Ports".to_string(),
+                    label: Some("Other Ports".to_string()),
                     on_auto_forward: OnAutoForward::OpenBrowser,
                     elevate_if_needed: true,
                     require_local_port: true,
-                    protocol: PortAttributeProtocol::Https
+                    protocol: Some(PortAttributeProtocol::Https)
                 }),
                 update_remote_user_uid: Some(true),
                 remote_env: Some(HashMap::from([
@@ -1043,30 +1049,30 @@ mod test {
                     (
                         "3000".to_string(),
                         PortAttributes {
-                            label: "This Port".to_string(),
+                            label: Some("This Port".to_string()),
                             on_auto_forward: OnAutoForward::Notify,
                             elevate_if_needed: false,
                             require_local_port: true,
-                            protocol: PortAttributeProtocol::Https
+                            protocol: Some(PortAttributeProtocol::Https)
                         }
                     ),
                     (
                         "db:5432".to_string(),
                         PortAttributes {
-                            label: "This Port too".to_string(),
+                            label: Some("This Port too".to_string()),
                             on_auto_forward: OnAutoForward::Silent,
                             elevate_if_needed: true,
                             require_local_port: false,
-                            protocol: PortAttributeProtocol::Http
+                            protocol: Some(PortAttributeProtocol::Http)
                         }
                     )
                 ])),
                 other_ports_attributes: Some(PortAttributes {
-                    label: "Other Ports".to_string(),
+                    label: Some("Other Ports".to_string()),
                     on_auto_forward: OnAutoForward::OpenBrowser,
                     elevate_if_needed: true,
                     require_local_port: true,
-                    protocol: PortAttributeProtocol::Https
+                    protocol: Some(PortAttributeProtocol::Https)
                 }),
                 update_remote_user_uid: Some(true),
                 remote_env: Some(HashMap::from([
@@ -1271,30 +1277,30 @@ mod test {
                     (
                         "3000".to_string(),
                         PortAttributes {
-                            label: "This Port".to_string(),
+                            label: Some("This Port".to_string()),
                             on_auto_forward: OnAutoForward::Notify,
                             elevate_if_needed: false,
                             require_local_port: true,
-                            protocol: PortAttributeProtocol::Https
+                            protocol: Some(PortAttributeProtocol::Https)
                         }
                     ),
                     (
                         "db:5432".to_string(),
                         PortAttributes {
-                            label: "This Port too".to_string(),
+                            label: Some("This Port too".to_string()),
                             on_auto_forward: OnAutoForward::Silent,
                             elevate_if_needed: true,
                             require_local_port: false,
-                            protocol: PortAttributeProtocol::Http
+                            protocol: Some(PortAttributeProtocol::Http)
                         }
                     )
                 ])),
                 other_ports_attributes: Some(PortAttributes {
-                    label: "Other Ports".to_string(),
+                    label: Some("Other Ports".to_string()),
                     on_auto_forward: OnAutoForward::OpenBrowser,
                     elevate_if_needed: true,
                     require_local_port: true,
-                    protocol: PortAttributeProtocol::Https
+                    protocol: Some(PortAttributeProtocol::Https)
                 }),
                 update_remote_user_uid: Some(true),
                 remote_env: Some(HashMap::from([
@@ -1505,6 +1511,60 @@ mod test {
     }
 
     #[test]
+    fn should_deserialize_port_attributes_with_missing_optional_fields() {
+        let json = r#"
+        {
+            "image": "nginx",
+            "portsAttributes": {
+                "8080": {
+                    "label": "app",
+                    "onAutoForward": "silent"
+                }
+            }
+        }
+        "#;
+
+        let result = deserialize_devcontainer_json(json);
+        assert!(
+            result.is_ok(),
+            "Expected deserialization to succeed with partial portsAttributes, got: {:?}",
+            result.err()
+        );
+
+        let devcontainer = result.unwrap();
+        let port_attrs = devcontainer.ports_attributes.unwrap();
+        let attrs = port_attrs.get("8080").unwrap();
+        assert_eq!(attrs.elevate_if_needed, false);
+        assert_eq!(attrs.require_local_port, false);
+    }
+
+    #[test]
+    fn should_deserialize_port_attributes_with_all_fields_omitted() {
+        let json = r#"
+        {
+            "image": "nginx",
+            "portsAttributes": {
+                "3000": {}
+            }
+        }
+        "#;
+
+        let result = deserialize_devcontainer_json(json);
+        assert!(
+            result.is_ok(),
+            "Expected deserialization to succeed with empty portsAttributes, got: {:?}",
+            result.err()
+        );
+
+        let devcontainer = result.unwrap();
+        let port_attrs = devcontainer.ports_attributes.unwrap();
+        let attrs = port_attrs.get("3000").unwrap();
+        assert_eq!(attrs.on_auto_forward, OnAutoForward::Notify);
+        assert_eq!(attrs.elevate_if_needed, false);
+        assert_eq!(attrs.require_local_port, false);
+    }
+
+    #[test]
     fn should_fail_validation_with_workspace_mount_only() {
         let given_image_container_json = r#"
             // These are some external comments. serde_lenient should handle them
@@ -1579,6 +1639,7 @@ mod test {
             ))
         );
     }
+
     #[test]
     fn should_pass_validation_with_workspace_folder_for_docker_compose() {
         let given_image_container_json = r#"
