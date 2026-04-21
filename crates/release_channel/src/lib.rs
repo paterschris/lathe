@@ -7,7 +7,7 @@ use std::{env, str::FromStr, sync::LazyLock};
 use gpui::{App, Global};
 use semver::Version;
 
-/// stable | dev | nightly | preview
+/// stable | dev | nightly | preview | beta
 pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
     if cfg!(debug_assertions) {
         env::var("ZED_RELEASE_CHANNEL")
@@ -31,6 +31,7 @@ pub fn app_identifier() -> &'static str {
         ReleaseChannel::Dev => "Lathe-Editor-Dev",
         ReleaseChannel::Nightly => "Lathe-Editor-Nightly",
         ReleaseChannel::Preview => "Lathe-Editor-Preview",
+        ReleaseChannel::Beta => "Lathe-Editor-Beta",
         ReleaseChannel::Stable => "Lathe-Editor-Stable",
     }
 }
@@ -133,6 +134,13 @@ pub enum ReleaseChannel {
     /// The Preview release channel.
     Preview,
 
+    /// The Beta release channel.
+    ///
+    /// Distributed out-of-band (not via homebrew or the standard install
+    /// scripts). Auto-updates from a separate feed when `LATHE_BETA_UPDATE_URL`
+    /// is set at build time, otherwise auto-update is a no-op.
+    Beta,
+
     /// The Stable release channel.
     Stable,
 }
@@ -176,6 +184,7 @@ impl ReleaseChannel {
             ReleaseChannel::Dev => "Lathe Dev",
             ReleaseChannel::Nightly => "Lathe Nightly",
             ReleaseChannel::Preview => "Lathe Preview",
+            ReleaseChannel::Beta => "Lathe Beta",
             ReleaseChannel::Stable => "Lathe",
         }
     }
@@ -186,6 +195,7 @@ impl ReleaseChannel {
             ReleaseChannel::Dev => "dev",
             ReleaseChannel::Nightly => "nightly",
             ReleaseChannel::Preview => "preview",
+            ReleaseChannel::Beta => "beta",
             ReleaseChannel::Stable => "stable",
         }
     }
@@ -198,6 +208,7 @@ impl ReleaseChannel {
             ReleaseChannel::Dev => "dev.lathe.lathe-Dev",
             ReleaseChannel::Nightly => "dev.lathe.lathe-Nightly",
             ReleaseChannel::Preview => "dev.lathe.lathe-Preview",
+            ReleaseChannel::Beta => "dev.lathe.lathe-Beta",
             ReleaseChannel::Stable => "dev.lathe.lathe",
         }
     }
@@ -208,6 +219,7 @@ impl ReleaseChannel {
             Self::Dev => None,
             Self::Nightly => Some("nightly=1"),
             Self::Preview => Some("preview=1"),
+            Self::Beta => Some("beta=1"),
             Self::Stable => None,
         }
     }
@@ -225,6 +237,7 @@ impl FromStr for ReleaseChannel {
             "dev" => ReleaseChannel::Dev,
             "nightly" => ReleaseChannel::Nightly,
             "preview" => ReleaseChannel::Preview,
+            "beta" => ReleaseChannel::Beta,
             "stable" => ReleaseChannel::Stable,
             _ => return Err(InvalidReleaseChannel),
         })

@@ -4,6 +4,7 @@ mod remote_connections;
 mod remote_servers;
 pub mod sidebar_recent_projects;
 mod ssh_config;
+pub mod workspace_groups;
 
 use std::{
     path::{Path, PathBuf},
@@ -247,6 +248,8 @@ fn get_branch_for_worktree(
 }
 
 pub fn init(cx: &mut App) {
+    workspace_groups::init(cx);
+
     #[cfg(target_os = "windows")]
     cx.on_action(|open_wsl: &zed_actions::wsl_actions::OpenFolderInWsl, cx| {
         let create_new_window = open_wsl.create_new_window;

@@ -27,6 +27,24 @@ Terminal tabs get a subtle green background when active, making them easy to spo
 ### Terminal focus fix
 Switching to a terminal tab via ctrl+tab properly activates the cursor without needing to click into the terminal.
 
+### Multi-account collab switcher
+Sign into more than one Zed Cloud account and switch between them from the avatar menu. Saved accounts are listed under **Accounts** by their GitHub username, with **Add Account…** and **Sign Out** actions.
+
+### Copy collab link dialog
+When generating a shareable collab link, a dialog lets you pick which saved account to link from — useful when you work across personal and work Zed Cloud accounts.
+
+### Workspace groups with account binding
+Save the set of currently open projects as a named **workspace group**, then reopen the whole group in a new window later. Each group can optionally be bound to a saved collab account, so opening the group automatically switches to that account first.
+
+Commands (via the command palette):
+
+- `workspace groups: Save Workspace Group`
+- `workspace groups: Open Workspace Group`
+- `workspace groups: Update Current Workspace Group`
+- `workspace groups: Rename Current Workspace Group`
+- `workspace groups: Bind Workspace Group Account`
+- `workspace groups: Unbind Workspace Group Account`
+
 ## Install
 
 ### Homebrew (recommended)

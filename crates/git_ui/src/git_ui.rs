@@ -9,6 +9,7 @@ use ui::{
 };
 
 mod blame_ui;
+mod branch_status_indicator;
 pub mod clone;
 
 use git::{
@@ -47,6 +48,7 @@ pub mod stash_picker;
 pub mod text_diff_view;
 pub mod worktree_picker;
 
+pub use branch_status_indicator::BranchStatusIndicator;
 pub use conflict_view::MergeConflictIndicator;
 
 pub fn init(cx: &mut App) {
@@ -428,7 +430,7 @@ fn rename_current_branch(
     });
 }
 
-fn render_remote_button(
+pub(crate) fn render_remote_button(
     id: impl Into<SharedString>,
     branch: &Branch,
     keybinding_target: Option<FocusHandle>,

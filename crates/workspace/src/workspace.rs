@@ -5787,6 +5787,17 @@ impl Workspace {
         let project = self.project().read(cx);
         let mut title = String::new();
 
+        if let Some(name) = self
+            .multi_workspace
+            .as_ref()
+            .and_then(|mw| mw.upgrade())
+            .and_then(|mw| mw.read(cx).workspace_group_name().map(str::to_owned))
+        {
+            title.push('[');
+            title.push_str(&name);
+            title.push_str("] ");
+        }
+
         for (i, worktree) in project.visible_worktrees(cx).enumerate() {
             let name = {
                 let settings_location = SettingsLocation {
@@ -8852,7 +8863,8 @@ pub async fn restore_multiworkspace(
     apply_restored_multiworkspace_state(window_handle, &state, app_state.fs.clone(), cx).await;
 
     window_handle
-        .update(cx, |_, window, _cx| {
+        .update(cx, |multi_workspace, window, cx| {
+            multi_workspace.rebind_session_bindings(window, cx);
             window.activate_window();
         })
         .ok();
@@ -8870,8 +8882,17 @@ pub async fn apply_restored_multiworkspace_state(
         sidebar_open,
         project_group_keys,
         sidebar_state,
+        workspace_group_name,
         ..
     } = state;
+
+    if let Some(name) = workspace_group_name.clone() {
+        window_handle
+            .update(cx, |multi_workspace, _window, _cx| {
+                multi_workspace.set_workspace_group_name(Some(name));
+            })
+            .ok();
+    }
 
     if !project_group_keys.is_empty() {
         // Resolve linked worktree paths to their main repo paths so

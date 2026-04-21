@@ -107,7 +107,7 @@ pub fn run(command: Commands) -> anyhow::Result<()> {
         Commands::Version => {
             let release_channel = *RELEASE_CHANNEL;
             match release_channel {
-                ReleaseChannel::Stable | ReleaseChannel::Preview => {
+                ReleaseChannel::Stable | ReleaseChannel::Preview | ReleaseChannel::Beta => {
                     println!("{}", env!("ZED_PKG_VERSION"))
                 }
                 ReleaseChannel::Nightly | ReleaseChannel::Dev => {
@@ -127,7 +127,9 @@ pub fn run(command: Commands) -> anyhow::Result<()> {
 }
 
 pub static VERSION: LazyLock<String> = LazyLock::new(|| match *RELEASE_CHANNEL {
-    ReleaseChannel::Stable | ReleaseChannel::Preview => env!("ZED_PKG_VERSION").to_owned(),
+    ReleaseChannel::Stable | ReleaseChannel::Preview | ReleaseChannel::Beta => {
+        env!("ZED_PKG_VERSION").to_owned()
+    }
     ReleaseChannel::Nightly | ReleaseChannel::Dev => {
         let commit_sha = option_env!("ZED_COMMIT_SHA").unwrap_or("missing-zed-commit-sha");
         let build_identifier = option_env!("ZED_BUILD_ID");

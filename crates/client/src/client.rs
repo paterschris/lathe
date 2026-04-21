@@ -1,6 +1,7 @@
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 
+pub mod accounts;
 mod llm_token;
 mod proxy;
 pub mod telemetry;
@@ -25,7 +26,9 @@ use futures::{
     channel::{mpsc, oneshot},
     future::BoxFuture,
 };
-use gpui::{App, AsyncApp, Entity, Global, Task, WeakEntity, actions};
+use gpui::{
+    Action, App, AsyncApp, ClipboardItem, Entity, Global, PromptLevel, Task, WeakEntity, actions,
+};
 use http_client::{HttpClient, HttpClientWithUrl, http, read_proxy_from_env};
 use parking_lot::{Mutex, RwLock};
 use postage::watch;
@@ -95,9 +98,26 @@ actions!(
         /// Signs out of Zed account.
         SignOut,
         /// Reconnects to the collaboration server.
-        Reconnect
+        Reconnect,
+        /// Starts the browser sign-in flow to add a new collab account without
+        /// removing the current one.
+        AddAccount
     ]
 );
+
+/// Activates the given saved collab account.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = client, no_json, no_register)]
+pub struct SwitchAccount {
+    pub account_id: String,
+}
+
+/// Deletes the given saved collab account from the index and keychain.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = client, no_json, no_register)]
+pub struct RemoveAccount {
+    pub account_id: String,
+}
 
 #[derive(Deserialize, RegisterSetting)]
 pub struct ClientSettings {
@@ -174,13 +194,42 @@ pub fn init(client: &Arc<Client>, cx: &mut App) {
         }
     })
     .on_action({
-        let client = client;
+        let client = client.clone();
         move |_: &Reconnect, cx| {
             if let Some(client) = client.upgrade() {
                 cx.spawn(async move |cx| {
                     client.reconnect(cx);
                 })
                 .detach();
+            }
+        }
+    })
+    .on_action({
+        let client = client.clone();
+        move |_: &AddAccount, cx| {
+            if let Some(client) = client.upgrade() {
+                cx.spawn(async move |cx| client.add_account(cx).await)
+                    .detach_and_log_err(cx);
+            }
+        }
+    })
+    .on_action({
+        let client = client.clone();
+        move |action: &SwitchAccount, cx| {
+            if let Some(client) = client.upgrade() {
+                let account_id = action.account_id.clone();
+                cx.spawn(async move |cx| client.switch_account(account_id, cx).await)
+                    .detach_and_log_err(cx);
+            }
+        }
+    })
+    .on_action({
+        let client = client;
+        move |action: &RemoveAccount, cx| {
+            if let Some(client) = client.upgrade() {
+                let account_id = action.account_id.clone();
+                cx.spawn(async move |cx| client.remove_account(account_id, cx).await)
+                    .detach_and_log_err(cx);
             }
         }
     });
@@ -362,22 +411,77 @@ impl ClientCredentialsProvider {
             }
 
             let server_url = self.server_url(cx).ok()?;
-            let (user_id, access_token) = self
+            let mut index = accounts::load_index();
+
+            if let Some(account) = index.active().cloned() {
+                let keychain_url = accounts::keychain_url(&server_url, account.user_id);
+                if let Some((user_id, access_token)) = self
+                    .provider
+                    .read_credentials(&keychain_url, cx)
+                    .await
+                    .log_err()
+                    .flatten()
+                {
+                    return Some(Credentials {
+                        user_id: user_id.parse().ok()?,
+                        access_token: String::from_utf8(access_token).ok()?,
+                    });
+                }
+                return None;
+            }
+
+            // Legacy migration: no accounts index yet, but credentials may
+            // live under the plain server_url from an older Lathe version.
+            let (user_id_str, access_token_bytes) = self
                 .provider
                 .read_credentials(&server_url, cx)
                 .await
                 .log_err()
                 .flatten()?;
 
+            let user_id: u64 = user_id_str.parse().ok()?;
+            let access_token = String::from_utf8(access_token_bytes.clone()).ok()?;
+
+            let keychain_url = accounts::keychain_url(&server_url, user_id);
+            self.provider
+                .write_credentials(
+                    &keychain_url,
+                    &user_id_str,
+                    access_token.as_bytes(),
+                    cx,
+                )
+                .await
+                .log_err();
+
+            let account_id = accounts::account_id_for(&server_url, user_id);
+            let label = index
+                .find(&account_id)
+                .map(|a| a.label.clone())
+                .unwrap_or_else(|| format!("Account {user_id}"));
+            let account = accounts::CollabAccount {
+                id: account_id,
+                label,
+                user_id,
+                server_url: server_url.clone(),
+            };
+            index.active_id = Some(account.id.clone());
+            index.upsert(account);
+            accounts::save_index(&index).log_err();
+
+            self.provider
+                .delete_credentials(&server_url, cx)
+                .await
+                .log_err();
+
             Some(Credentials {
-                user_id: user_id.parse().ok()?,
-                access_token: String::from_utf8(access_token).ok()?,
+                user_id,
+                access_token,
             })
         }
         .boxed_local()
     }
 
-    /// Writes the credentials to the provider.
+    /// Writes the credentials to the provider and records the account in the index.
     fn write_credentials<'a>(
         &'a self,
         user_id: u64,
@@ -386,26 +490,59 @@ impl ClientCredentialsProvider {
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
         async move {
             let server_url = self.server_url(cx)?;
+            let keychain_url = accounts::keychain_url(&server_url, user_id);
+
             self.provider
                 .write_credentials(
-                    &server_url,
+                    &keychain_url,
                     &user_id.to_string(),
                     access_token.as_bytes(),
                     cx,
                 )
-                .await
+                .await?;
+
+            let mut index = accounts::load_index();
+            let account_id = accounts::account_id_for(&server_url, user_id);
+            let label = index
+                .find(&account_id)
+                .map(|a| a.label.clone())
+                .unwrap_or_else(|| format!("Account {user_id}"));
+            index.upsert(accounts::CollabAccount {
+                id: account_id.clone(),
+                label,
+                user_id,
+                server_url: server_url.clone(),
+            });
+            index.active_id = Some(account_id);
+            accounts::save_index(&index).log_err();
+
+            Ok(())
         }
         .boxed_local()
     }
 
-    /// Deletes the credentials from the provider.
+    /// Deletes the active account's credentials from the provider and removes it from the index.
     fn delete_credentials<'a>(
         &'a self,
         cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
         async move {
             let server_url = self.server_url(cx)?;
-            self.provider.delete_credentials(&server_url, cx).await
+            let mut index = accounts::load_index();
+
+            if let Some(account) = index.active().cloned() {
+                let keychain_url = accounts::keychain_url(&server_url, account.user_id);
+                self.provider
+                    .delete_credentials(&keychain_url, cx)
+                    .await
+                    .log_err();
+                index.remove(&account.id);
+                accounts::save_index(&index).log_err();
+                Ok(())
+            } else {
+                // No active account tracked — clear any legacy entry.
+                self.provider.delete_credentials(&server_url, cx).await
+            }
         }
         .boxed_local()
     }
@@ -1363,8 +1500,46 @@ impl Client {
             let (open_url_tx, open_url_rx) = oneshot::channel::<String>();
             cx.update(|cx| {
                 cx.spawn(async move |cx| {
-                    if let Ok(url) = open_url_rx.await {
+                    let Ok(url) = open_url_rx.await else {
+                        return;
+                    };
+
+                    let active_window = cx.update(|cx| cx.active_window());
+
+                    let Some(window) = active_window else {
                         cx.update(|cx| cx.open_url(&url));
+                        return;
+                    };
+
+                    let prompt_detail = format!(
+                        "Copy the link to open in the browser of your choice, or open it in your default browser now.\n\n{url}"
+                    );
+                    let buttons: [&str; 3] = ["Copy Link", "Open in Browser", "Cancel"];
+                    let prompt = window.update(cx, |_, window, cx| {
+                        window.prompt(
+                            PromptLevel::Info,
+                            "Sign in to continue",
+                            Some(&prompt_detail),
+                            &buttons,
+                            cx,
+                        )
+                    });
+
+                    let choice = match prompt {
+                        Ok(rx) => rx.await.ok(),
+                        Err(_) => None,
+                    };
+
+                    match choice {
+                        Some(0) => {
+                            cx.update(|cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                            });
+                        }
+                        Some(1) => {
+                            cx.update(|cx| cx.open_url(&url));
+                        }
+                        _ => {}
                     }
                 })
                 .detach();
@@ -1599,6 +1774,102 @@ impl Client {
         if let Some(sign_out_tx) = self.sign_out_tx.lock().clone() {
             sign_out_tx.unbounded_send(()).ok();
         }
+    }
+
+    /// Returns all saved collab accounts.
+    pub fn list_accounts(&self) -> Vec<accounts::CollabAccount> {
+        accounts::load_index().accounts
+    }
+
+    /// Returns the id of the currently active saved account, if any.
+    pub fn active_account_id(&self) -> Option<String> {
+        accounts::load_index().active_id
+    }
+
+    /// Disconnects the current session, marks the given account as active,
+    /// and signs back in using that account's stored credentials.
+    pub async fn switch_account(
+        self: &Arc<Self>,
+        account_id: String,
+        cx: &AsyncApp,
+    ) -> Result<()> {
+        let mut index = accounts::load_index();
+        if index.find(&account_id).is_none() {
+            anyhow::bail!("unknown collab account: {account_id}");
+        }
+        if index.active_id.as_deref() == Some(&account_id)
+            && !self.status().borrow().is_signed_out()
+        {
+            return Ok(());
+        }
+
+        self.state.write().credentials = None;
+        self.cloud_client.clear_credentials();
+        self.disconnect(cx);
+
+        index.active_id = Some(account_id);
+        accounts::save_index(&index).log_err();
+
+        self.sign_in_with_optional_connect(true, cx).await
+    }
+
+    /// Starts a new browser sign-in flow to add a second account, disconnecting
+    /// the current session first. The new account is stored under its own
+    /// keychain entry and becomes the active account on success.
+    pub async fn add_account(self: &Arc<Self>, cx: &AsyncApp) -> Result<()> {
+        self.state.write().credentials = None;
+        self.cloud_client.clear_credentials();
+        self.disconnect(cx);
+
+        // Clearing active_id causes read_credentials to return None, which
+        // forces a fresh browser auth flow. write_credentials will insert the
+        // new account into the index and mark it active.
+        let mut index = accounts::load_index();
+        index.active_id = None;
+        accounts::save_index(&index).log_err();
+
+        self.sign_in_with_optional_connect(true, cx).await
+    }
+
+    /// Deletes the given account's keychain entry and removes it from the
+    /// index. If it was the active account, the session is torn down; if other
+    /// accounts remain, the first is promoted and signed in.
+    pub async fn remove_account(
+        self: &Arc<Self>,
+        account_id: String,
+        cx: &AsyncApp,
+    ) -> Result<()> {
+        let mut index = accounts::load_index();
+        let Some(account) = index.find(&account_id).cloned() else {
+            return Ok(());
+        };
+
+        let was_active = index.active_id.as_deref() == Some(&account_id);
+        let server_url = self
+            .credentials_provider
+            .server_url(cx)
+            .unwrap_or_else(|_| account.server_url.clone());
+        let keychain_url = accounts::keychain_url(&server_url, account.user_id);
+
+        if was_active {
+            self.state.write().credentials = None;
+            self.cloud_client.clear_credentials();
+            self.disconnect(cx);
+        }
+
+        self.credentials_provider
+            .provider
+            .delete_credentials(&keychain_url, cx)
+            .await
+            .log_err();
+
+        index.remove(&account_id);
+        accounts::save_index(&index).log_err();
+
+        if was_active && !index.accounts.is_empty() {
+            self.sign_in_with_optional_connect(true, cx).await?;
+        }
+        Ok(())
     }
 
     pub fn disconnect(self: &Arc<Self>, cx: &AsyncApp) {

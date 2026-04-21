@@ -2173,31 +2173,53 @@ impl Terminal {
                         .read()
                         .as_ref()
                         .map(|fpi| {
-                            let process_file = fpi
+                            let cwd_name = fpi
                                 .cwd
                                 .file_name()
                                 .map(|name| name.to_string_lossy().into_owned())
                                 .unwrap_or_default();
 
-                            let argv = fpi.argv.as_slice();
-                            let process_name = format!(
-                                "{}{}",
-                                fpi.name,
-                                if !argv.is_empty() {
-                                    format!(" {}", (argv[1..]).join(" "))
-                                } else {
-                                    "".to_string()
+                            let project_name = fpi
+                                .cwd
+                                .ancestors()
+                                .find(|ancestor| ancestor.join(".git").exists())
+                                .and_then(|root| root.file_name())
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| cwd_name.clone());
+
+                            let is_claude_code = fpi.argv.iter().any(|arg| {
+                                if arg.starts_with('-') {
+                                    return false;
                                 }
-                            );
-                            let (process_file, process_name) = if truncate {
+                                let lowered = arg.to_ascii_lowercase();
+                                let tail = lowered
+                                    .rsplit(|c| c == '/' || c == '\\')
+                                    .next()
+                                    .unwrap_or("");
+                                tail == "claude" || tail == "claude-code"
+                            }) || fpi.name.eq_ignore_ascii_case("claude")
+                                || fpi.name.eq_ignore_ascii_case("claude-code");
+
+                            let detail = if is_claude_code {
+                                "Claude".to_string()
+                            } else {
+                                cwd_name
+                            };
+
+                            let (project_name, detail) = if truncate {
                                 (
-                                    truncate_and_trailoff(&process_file, MAX_CHARS),
-                                    truncate_and_trailoff(&process_name, MAX_CHARS),
+                                    truncate_and_trailoff(&project_name, MAX_CHARS),
+                                    truncate_and_trailoff(&detail, MAX_CHARS),
                                 )
                             } else {
-                                (process_file, process_name)
+                                (project_name, detail)
                             };
-                            format!("{process_file} — {process_name}")
+
+                            if detail.is_empty() || detail == project_name {
+                                project_name
+                            } else {
+                                format!("{project_name} — {detail}")
+                            }
                         })
                         .unwrap_or_else(|| "Terminal".to_string()),
                     TerminalType::DisplayOnly => "Terminal".to_string(),
@@ -2265,7 +2287,7 @@ impl Terminal {
 
         let mut lines = Vec::new();
         for line_offset in 0..20 {
-            let line_idx = Line(cursor_line.0 - line_offset as i32);
+            let line_idx = Line(cursor_line.0 - line_offset);
             if line_idx.0 < term.topmost_line().0 {
                 break;
             }

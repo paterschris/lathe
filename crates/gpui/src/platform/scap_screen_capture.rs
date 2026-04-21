@@ -1,7 +1,7 @@
 //! Screen capture for Linux and Windows
 use crate::{
     DevicePixels, ForegroundExecutor, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream,
-    Size, SourceMetadata, size,
+    Size, SourceKind, SourceMetadata, size,
 };
 use anyhow::{Context as _, Result, anyhow};
 use futures::channel::oneshot;
@@ -80,6 +80,7 @@ impl ScreenCaptureSource for ScapCaptureSource {
             label: Some(self.target.title.clone().into()),
             is_main: None,
             id: self.target.id as u64,
+            kind: SourceKind::Display,
         })
     }
 
@@ -174,6 +175,7 @@ impl ScreenCaptureSource for ScapDefaultTargetCaptureSource {
             label: None,
             is_main: None,
             id: self.target.id as u64,
+            kind: SourceKind::Display,
         })
     }
 
@@ -256,6 +258,7 @@ impl ScreenCaptureStream for ScapStream {
             label: Some(self.display.title.clone().into()),
             is_main: None,
             id: self.display.id as u64,
+            kind: SourceKind::Display,
         })
     }
 }

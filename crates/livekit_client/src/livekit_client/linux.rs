@@ -39,6 +39,7 @@ impl ScreenCaptureStream for WaylandScreenCaptureStream {
             label: None,
             is_main: None,
             resolution: gpui::size(gpui::DevicePixels(1), gpui::DevicePixels(1)),
+            kind: gpui::SourceKind::Display,
         })
     }
 }

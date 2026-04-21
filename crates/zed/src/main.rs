@@ -891,6 +891,8 @@ fn main() {
 
         component_preview::init(app_state.clone(), cx);
 
+        spawn_periodic_session_rebinder(cx);
+
         cx.spawn(async move |cx| {
             while let Some(urls) = open_rx.next().await {
                 cx.update(|cx| {
@@ -902,6 +904,35 @@ fn main() {
         })
         .detach();
     });
+}
+
+// Every open window periodically re-tags its workspaces with the current
+// session id in the SQLite workspaces table. This way if Lathe is crashed or
+// force-quit (skipping `app_will_quit`), the next launch still has every
+// recently-open window pointing at the last session id and can restore them
+// all. Without this, any window that never triggered a normal serialization
+// event (e.g. untouched after a restore) would keep a stale session id and
+// silently disappear from the next session restore.
+fn spawn_periodic_session_rebinder(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(30))
+                .await;
+            cx.update(|cx| {
+                for window in cx.windows() {
+                    if let Some(multi_workspace) = window.downcast::<MultiWorkspace>() {
+                        multi_workspace
+                            .update(cx, |multi_workspace, window, cx| {
+                                multi_workspace.rebind_session_bindings(window, cx);
+                            })
+                            .log_err();
+                    }
+                }
+            });
+        }
+    })
+    .detach();
 }
 
 fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut App) {

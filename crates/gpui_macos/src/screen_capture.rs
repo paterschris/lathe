@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow};
 use block::ConcreteBlock;
 use cocoa::{
     base::{YES, id, nil},
-    foundation::NSArray,
+    foundation::{NSArray, NSBundle},
 };
 use collections::HashMap;
 use core_foundation::base::TCFType;
@@ -11,11 +11,12 @@ use core_graphics::display::{
     CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayModeGetPixelHeight,
     CGDisplayModeGetPixelWidth, CGDisplayModeRelease,
 };
+use core_graphics::geometry::CGRect;
 use ctor::ctor;
 use futures::channel::oneshot;
 use gpui::{
     DevicePixels, ForegroundExecutor, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream,
-    SharedString, SourceMetadata, size,
+    SharedString, SourceKind, SourceMetadata, size,
 };
 use media::core_media::{CMSampleBuffer, CMSampleBufferRef};
 use metal::NSInteger;
@@ -31,9 +32,24 @@ use std::{cell::RefCell, ffi::c_void, mem, ptr, rc::Rc};
 use crate::NSStringExt;
 
 #[derive(Clone)]
+enum MacCaptureTarget {
+    Display {
+        sc_display: id,
+        meta: Option<ScreenMeta>,
+    },
+    Window {
+        sc_window: id,
+        window_id: u32,
+        title: Option<SharedString>,
+        app_name: Option<SharedString>,
+        is_own_app: bool,
+        resolution: gpui::Size<DevicePixels>,
+    },
+}
+
+#[derive(Clone)]
 pub struct MacScreenCaptureSource {
-    sc_display: id,
-    meta: Option<ScreenMeta>,
+    target: MacCaptureTarget,
 }
 
 pub struct MacScreenCaptureStream {
@@ -51,30 +67,57 @@ const SCStreamOutputTypeScreen: NSInteger = 0;
 
 impl ScreenCaptureSource for MacScreenCaptureSource {
     fn metadata(&self) -> Result<SourceMetadata> {
-        let (display_id, size) = unsafe {
-            let display_id: CGDirectDisplayID = msg_send![self.sc_display, displayID];
-            let display_mode_ref = CGDisplayCopyDisplayMode(display_id);
-            let width = CGDisplayModeGetPixelWidth(display_mode_ref);
-            let height = CGDisplayModeGetPixelHeight(display_mode_ref);
-            CGDisplayModeRelease(display_mode_ref);
+        match &self.target {
+            MacCaptureTarget::Display { sc_display, meta } => {
+                let (display_id, resolution) = unsafe {
+                    let display_id: CGDirectDisplayID = msg_send![*sc_display, displayID];
+                    let display_mode_ref = CGDisplayCopyDisplayMode(display_id);
+                    let width = CGDisplayModeGetPixelWidth(display_mode_ref);
+                    let height = CGDisplayModeGetPixelHeight(display_mode_ref);
+                    CGDisplayModeRelease(display_mode_ref);
 
-            (
-                display_id,
-                size(DevicePixels(width as i32), DevicePixels(height as i32)),
-            )
-        };
-        let (label, is_main) = self
-            .meta
-            .clone()
-            .map(|meta| (meta.label, meta.is_main))
-            .unzip();
+                    (
+                        display_id,
+                        size(DevicePixels(width as i32), DevicePixels(height as i32)),
+                    )
+                };
+                let (label, is_main) = meta
+                    .clone()
+                    .map(|meta| (meta.label, meta.is_main))
+                    .unzip();
 
-        Ok(SourceMetadata {
-            id: display_id as u64,
-            label,
-            is_main,
-            resolution: size,
-        })
+                Ok(SourceMetadata {
+                    id: display_id as u64,
+                    label,
+                    is_main,
+                    resolution,
+                    kind: SourceKind::Display,
+                })
+            }
+            MacCaptureTarget::Window {
+                window_id,
+                title,
+                app_name,
+                is_own_app,
+                resolution,
+                ..
+            } => {
+                let label = title
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| app_name.clone());
+                Ok(SourceMetadata {
+                    id: *window_id as u64,
+                    label,
+                    is_main: None,
+                    resolution: *resolution,
+                    kind: SourceKind::Window {
+                        app_name: app_name.clone(),
+                        is_own_app: *is_own_app,
+                    },
+                })
+            }
+        }
     }
 
     fn stream(
@@ -89,8 +132,15 @@ impl ScreenCaptureSource for MacScreenCaptureSource {
             let delegate: id = msg_send![DELEGATE_CLASS, alloc];
             let output: id = msg_send![OUTPUT_CLASS, alloc];
 
-            let excluded_windows = NSArray::array(nil);
-            let filter: id = msg_send![filter, initWithDisplay:self.sc_display excludingWindows:excluded_windows];
+            let filter: id = match &self.target {
+                MacCaptureTarget::Display { sc_display, .. } => {
+                    let excluded_windows = NSArray::array(nil);
+                    msg_send![filter, initWithDisplay:*sc_display excludingWindows:excluded_windows]
+                }
+                MacCaptureTarget::Window { sc_window, .. } => {
+                    msg_send![filter, initWithDesktopIndependentWindow:*sc_window]
+                }
+            };
             let configuration: id = msg_send![configuration, init];
             let _: id = msg_send![configuration, setScalesToFit: true];
             let _: id = msg_send![configuration, setPixelFormat: 0x42475241];
@@ -159,7 +209,14 @@ impl ScreenCaptureSource for MacScreenCaptureSource {
 impl Drop for MacScreenCaptureSource {
     fn drop(&mut self) {
         unsafe {
-            let _: () = msg_send![self.sc_display, release];
+            match &self.target {
+                MacCaptureTarget::Display { sc_display, .. } => {
+                    let _: () = msg_send![*sc_display, release];
+                }
+                MacCaptureTarget::Window { sc_window, .. } => {
+                    let _: () = msg_send![*sc_window, release];
+                }
+            }
         }
     }
 }
@@ -240,29 +297,121 @@ unsafe fn screen_id_to_human_label() -> HashMap<CGDirectDisplayID, ScreenMeta> {
     map
 }
 
+unsafe fn ns_string_to_shared(string: id) -> Option<SharedString> {
+    if string == nil {
+        return None;
+    }
+    let cstr: *const std::os::raw::c_char = unsafe { msg_send![string, UTF8String] };
+    if cstr.is_null() {
+        return None;
+    }
+    let rust_str = unsafe { std::ffi::CStr::from_ptr(cstr) }
+        .to_string_lossy()
+        .into_owned();
+    if rust_str.is_empty() {
+        None
+    } else {
+        Some(rust_str.into())
+    }
+}
+
+unsafe fn own_bundle_identifier() -> Option<String> {
+    let bundle: id = unsafe { NSBundle::mainBundle() };
+    if bundle == nil {
+        return None;
+    }
+    let bundle_id: id = unsafe { msg_send![bundle, bundleIdentifier] };
+    unsafe { ns_string_to_shared(bundle_id) }.map(|s| s.to_string())
+}
+
+unsafe fn window_resolution(sc_window: id) -> gpui::Size<DevicePixels> {
+    let frame: CGRect = msg_send![sc_window, frame];
+    // SCShareableContent exposes frames in points. Multiply by the main
+    // screen's backing scale factor to produce a reasonable pixel resolution
+    // for the capture configuration. On non-retina displays this resolves
+    // to the point dimensions; on retina it doubles them.
+    let main_screen: id = msg_send![class!(NSScreen), mainScreen];
+    let scale: f64 = if main_screen == nil {
+        1.0
+    } else {
+        msg_send![main_screen, backingScaleFactor]
+    };
+    let width = (frame.size.width * scale).round().max(1.0) as i32;
+    let height = (frame.size.height * scale).round().max(1.0) as i32;
+    size(DevicePixels(width), DevicePixels(height))
+}
+
 pub(crate) fn get_sources() -> oneshot::Receiver<Result<Vec<Rc<dyn ScreenCaptureSource>>>> {
     unsafe {
         let (tx, rx) = oneshot::channel();
         let tx = Rc::new(RefCell::new(Some(tx)));
         let screen_id_to_label = screen_id_to_human_label();
+        let own_bundle = own_bundle_identifier();
         let block = ConcreteBlock::new(move |shareable_content: id, error: id| {
             let Some(tx) = tx.borrow_mut().take() else {
                 return;
             };
 
             let result = if error == nil {
+                let mut result: Vec<Rc<dyn ScreenCaptureSource>> = Vec::new();
+
                 let displays: id = msg_send![shareable_content, displays];
-                let mut result = Vec::new();
                 for i in 0..displays.count() {
                     let display = displays.objectAtIndex(i);
                     let id: CGDirectDisplayID = msg_send![display, displayID];
                     let meta = screen_id_to_label.get(&id).cloned();
                     let source = MacScreenCaptureSource {
-                        sc_display: msg_send![display, retain],
-                        meta,
+                        target: MacCaptureTarget::Display {
+                            sc_display: msg_send![display, retain],
+                            meta,
+                        },
                     };
                     result.push(Rc::new(source) as Rc<dyn ScreenCaptureSource>);
                 }
+
+                let windows: id = msg_send![shareable_content, windows];
+                for i in 0..windows.count() {
+                    let window = windows.objectAtIndex(i);
+                    let window_id: u32 = msg_send![window, windowID];
+                    let title_ns: id = msg_send![window, title];
+                    let title = ns_string_to_shared(title_ns);
+
+                    let owning_app: id = msg_send![window, owningApplication];
+                    let (app_name, is_own_app) = if owning_app == nil {
+                        (None, false)
+                    } else {
+                        let app_name_ns: id = msg_send![owning_app, applicationName];
+                        let app_name = ns_string_to_shared(app_name_ns);
+                        let bundle_id_ns: id = msg_send![owning_app, bundleIdentifier];
+                        let bundle_id = ns_string_to_shared(bundle_id_ns).map(|s| s.to_string());
+                        let is_own = match (&own_bundle, &bundle_id) {
+                            (Some(own), Some(other)) => own == other,
+                            _ => false,
+                        };
+                        (app_name, is_own)
+                    };
+
+                    // Skip windows that are both untitled and from an unknown
+                    // app — they're usually helper surfaces (popovers,
+                    // tooltips) the user never wants to share.
+                    if title.is_none() && app_name.is_none() {
+                        continue;
+                    }
+
+                    let resolution = window_resolution(window);
+                    let source = MacScreenCaptureSource {
+                        target: MacCaptureTarget::Window {
+                            sc_window: msg_send![window, retain],
+                            window_id,
+                            title,
+                            app_name,
+                            is_own_app,
+                            resolution,
+                        },
+                    };
+                    result.push(Rc::new(source) as Rc<dyn ScreenCaptureSource>);
+                }
+
                 Ok(result)
             } else {
                 let msg: id = msg_send![error, localizedDescription];

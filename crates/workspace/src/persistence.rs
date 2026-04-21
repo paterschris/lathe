@@ -4008,6 +4008,7 @@ mod tests {
                 project_group_keys: vec![],
                 sidebar_open: true,
                 sidebar_state: None,
+                workspace_group_name: None,
             },
         )
         .await;
@@ -4020,6 +4021,7 @@ mod tests {
                 project_group_keys: vec![],
                 sidebar_open: false,
                 sidebar_state: None,
+                workspace_group_name: None,
             },
         )
         .await;

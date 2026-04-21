@@ -318,6 +318,7 @@ pub struct MultiWorkspace {
     _serialize_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     previous_focus_handle: Option<FocusHandle>,
+    workspace_group_name: Option<String>,
 }
 
 impl EventEmitter<MultiWorkspaceEvent> for MultiWorkspace {}
@@ -377,6 +378,7 @@ impl MultiWorkspace {
                 settings_subscription,
             ],
             previous_focus_handle: None,
+            workspace_group_name: None,
         }
     }
 
@@ -1109,6 +1111,14 @@ impl MultiWorkspace {
             .chain(self.active_workspace.transient_workspace())
     }
 
+    pub fn workspace_group_name(&self) -> Option<&str> {
+        self.workspace_group_name.as_deref()
+    }
+
+    pub fn set_workspace_group_name(&mut self, name: Option<String>) {
+        self.workspace_group_name = name;
+    }
+
     /// Adds a workspace to this window as persistent without changing which
     /// workspace is active. Unlike `activate()`, this always inserts into the
     /// persistent list regardless of sidebar state — it's used for system-
@@ -1259,6 +1269,30 @@ impl MultiWorkspace {
         }
     }
 
+    /// Re-tag every workspace in this window with the current session id and
+    /// window id in the database. Guards against restored workspaces keeping a
+    /// stale `session_id` (which would exclude them from the next launch's
+    /// `last_session` restore if the app were to crash or be force-quit before
+    /// any normal serialization event fires).
+    pub fn rebind_session_bindings(&self, window: &Window, cx: &mut Context<Self>) {
+        let window_id = window.window_handle().window_id().as_u64();
+        let session_id = self.workspace().read(cx).session_id();
+        let db = crate::persistence::WorkspaceDb::global(cx);
+        for workspace in self.workspaces() {
+            let Some(workspace_id) = workspace.read(cx).database_id() else {
+                continue;
+            };
+            let db = db.clone();
+            let session_id = session_id.clone();
+            cx.background_spawn(async move {
+                db.set_session_binding(workspace_id, session_id, Some(window_id))
+                    .await
+                    .log_err();
+            })
+            .detach();
+        }
+    }
+
     fn sync_sidebar_to_workspace(&self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
         if self.sidebar_open() {
             let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
@@ -1281,6 +1315,7 @@ impl MultiWorkspace {
                             .collect::<Vec<_>>(),
                         sidebar_open: this.sidebar_open,
                         sidebar_state: this.sidebar.as_ref().and_then(|s| s.serialized_state(cx)),
+                        workspace_group_name: this.workspace_group_name.clone(),
                     };
                     (this.window_id, state)
                 })

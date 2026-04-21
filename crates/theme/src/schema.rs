@@ -6,8 +6,7 @@ use palette::FromColor;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings_content::{
-    FontStyleContent, FontWeightContent, HighlightStyleContent, StatusColorsContent,
-    ThemeColorsContent, ThemeStyleContent,
+    FontStyleContent, StatusColorsContent, ThemeColorsContent, ThemeStyleContent,
 };
 
 /// The appearance of a theme in serialized content.

@@ -188,6 +188,7 @@ impl ScreenCaptureStream for TestScreenCaptureStream {
             is_main: None,
             label: None,
             resolution: size(DevicePixels(1), DevicePixels(1)),
+            kind: gpui::SourceKind::Display,
         })
     }
 }

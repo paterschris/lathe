@@ -23,6 +23,8 @@ stable)
     expected_tag_name="v${version}";;
 preview)
     expected_tag_name="v${version}-pre";;
+beta)
+    expected_tag_name="v${version}-beta";;
 *)
     echo "can't publish a release on channel ${channel}"
     exit 1;;
