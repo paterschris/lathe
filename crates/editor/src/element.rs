@@ -843,7 +843,7 @@ impl EditorElement {
             }
         }
 
-        let position = point_for_position.previous_valid;
+        let position = point_for_position.nearest_valid;
         if let Some(mode) = Editor::columnar_selection_mode(&modifiers, cx) {
             editor.select(
                 SelectPhase::BeginColumnar {
@@ -898,7 +898,7 @@ impl EditorElement {
             {
                 let point_for_position = position_map.point_for_position(event.position);
                 editor.set_gutter_context_menu(
-                    point_for_position.previous_valid.row(),
+                    point_for_position.nearest_valid.row(),
                     None,
                     event.position,
                     window,
@@ -916,7 +916,7 @@ impl EditorElement {
         mouse_context_menu::deploy_context_menu(
             editor,
             Some(event.position),
-            point_for_position.previous_valid,
+            point_for_position.nearest_valid,
             window,
             cx,
         );
@@ -935,7 +935,7 @@ impl EditorElement {
         }
 
         let point_for_position = position_map.point_for_position(event.position);
-        let position = point_for_position.previous_valid;
+        let position = point_for_position.nearest_valid;
 
         editor.select(
             SelectPhase::BeginColumnar {
@@ -977,7 +977,7 @@ impl EditorElement {
                 if event.position == *click_position {
                     editor.select(
                         SelectPhase::Begin {
-                            position: point_for_position.previous_valid,
+                            position: point_for_position.nearest_valid,
                             add: false,
                             click_count: 1, // ready to drag state only occurs on click count 1
                         },
@@ -1001,7 +1001,7 @@ impl EditorElement {
                         || cfg!(not(target_os = "macos")) && event.modifiers.control);
                     editor.move_selection_on_drop(
                         &selection.clone(),
-                        point_for_position.previous_valid,
+                        point_for_position.nearest_valid,
                         is_cut,
                         window,
                         cx,
@@ -1037,7 +1037,7 @@ impl EditorElement {
             if EditorSettings::get_global(cx).middle_click_paste {
                 if let Some(text) = cx.read_from_primary().and_then(|item| item.text()) {
                     let point_for_position = position_map.point_for_position(event.position);
-                    let position = point_for_position.previous_valid;
+                    let position = point_for_position.nearest_valid;
 
                     editor.select(
                         SelectPhase::Begin {
@@ -1166,7 +1166,7 @@ impl EditorElement {
         if !editor.has_pending_selection() {
             let drop_anchor = position_map
                 .snapshot
-                .display_point_to_anchor(point_for_position.previous_valid, Bias::Left);
+                .display_point_to_anchor(point_for_position.nearest_valid, Bias::Left);
             match editor.selection_drag_state {
                 SelectionDragState::Dragging {
                     ref mut drop_cursor,
@@ -1210,7 +1210,7 @@ impl EditorElement {
                         editor.selection_drag_state = SelectionDragState::None;
                         editor.select(
                             SelectPhase::Begin {
-                                position: click_point.previous_valid,
+                                position: click_point.nearest_valid,
                                 add: false,
                                 click_count: 1,
                             },
@@ -1219,7 +1219,7 @@ impl EditorElement {
                         );
                         editor.select(
                             SelectPhase::Update {
-                                position: point_for_position.previous_valid,
+                                position: point_for_position.nearest_valid,
                                 goal_column: point_for_position.exact_unclipped.column(),
                                 scroll_delta,
                             },
@@ -1233,7 +1233,7 @@ impl EditorElement {
         } else {
             editor.select(
                 SelectPhase::Update {
-                    position: point_for_position.previous_valid,
+                    position: point_for_position.nearest_valid,
                     goal_column: point_for_position.exact_unclipped.column(),
                     scroll_delta,
                 },
@@ -1260,7 +1260,7 @@ impl EditorElement {
         editor.show_mouse_cursor(cx);
 
         let point_for_position = position_map.point_for_position(event.position);
-        let valid_point = point_for_position.previous_valid;
+        let valid_point = point_for_position.nearest_valid;
 
         // Update diff review drag state if we're dragging
         if editor.diff_review_drag_state.is_some() {
@@ -6688,7 +6688,7 @@ impl EditorElement {
                         let snapshot = editor.snapshot(window, cx);
                         let anchor = snapshot
                             .display_snapshot
-                            .display_point_to_anchor(point_for_position.previous_valid, Bias::Left);
+                            .display_point_to_anchor(point_for_position.nearest_valid, Bias::Left);
                         editor.change_selections(
                             SelectionEffects::scroll(Autoscroll::top_relative(line_index)),
                             window,
@@ -11902,6 +11902,7 @@ pub(crate) struct PositionMap {
 pub struct PointForPosition {
     pub previous_valid: DisplayPoint,
     pub next_valid: DisplayPoint,
+    pub nearest_valid: DisplayPoint,
     pub exact_unclipped: DisplayPoint,
     pub column_overshoot_after_line_end: u32,
 }
@@ -11971,12 +11972,23 @@ impl PositionMap {
         let previous_valid = self.snapshot.clip_point(exact_unclipped, Bias::Left);
         let next_valid = self.snapshot.clip_point(exact_unclipped, Bias::Right);
 
+        let nearest_valid = if previous_valid == next_valid {
+            previous_valid
+        } else {
+            match self.snapshot.inlay_bias_at(exact_unclipped) {
+                Some(Bias::Left) => next_valid,
+                Some(Bias::Right) => previous_valid,
+                None => previous_valid,
+            }
+        };
+
         let column_overshoot_after_line_end =
             (x_overshoot_after_line_end / self.em_layout_width) as u32;
         *exact_unclipped.column_mut() += column_overshoot_after_line_end;
         PointForPosition {
             previous_valid,
             next_valid,
+            nearest_valid,
             exact_unclipped,
             column_overshoot_after_line_end,
         }
@@ -12006,12 +12018,23 @@ impl PositionMap {
         let previous_valid = self.snapshot.clip_point(exact_unclipped, Bias::Left);
         let next_valid = self.snapshot.clip_point(exact_unclipped, Bias::Right);
 
+        let nearest_valid = if previous_valid == next_valid {
+            previous_valid
+        } else {
+            match self.snapshot.inlay_bias_at(exact_unclipped) {
+                Some(Bias::Left) => next_valid,
+                Some(Bias::Right) => previous_valid,
+                None => previous_valid,
+            }
+        };
+
         let column_overshoot_after_line_end =
             (x_overshoot_after_line_end / self.em_layout_width) as u32;
         *exact_unclipped.column_mut() += column_overshoot_after_line_end;
         PointForPosition {
             previous_valid,
             next_valid,
+            nearest_valid,
             exact_unclipped,
             column_overshoot_after_line_end,
         }
