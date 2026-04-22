@@ -13,6 +13,12 @@
             <string>public.plain-text</string>
             <string>public.text</string>
             <string>public.utf8-plain-text</string>
+            <string>public.source-code</string>
+            <string>public.script</string>
+            <string>public.shell-script</string>
+            <string>public.xml</string>
+            <string>public.yaml</string>
+            <string>public.json</string>
         </array>
     </dict>
     <dict>
@@ -30,34 +36,121 @@
         <string>Default</string>
         <key>CFBundleTypeExtensions</key>
         <array>
+            <string>APKBUILD</string>
+            <string>COMMIT_EDITMSG</string>
+            <string>Dockerfile</string>
+            <string>EDIT_DESCRIPTION</string>
             <string>Gemfile</string>
+            <string>MERGE_MSG</string>
+            <string>Makefile</string>
+            <string>NOTES_EDITMSG</string>
+            <string>PKGBUILD</string>
+            <string>TAG_EDITMSG</string>
+            <string>babelrc</string>
+            <string>bash</string>
+            <string>bash_aliases</string>
+            <string>bash_logout</string>
+            <string>bash_profile</string>
+            <string>bashrc</string>
+            <string>bats</string>
+            <string>bst</string>
             <string>c</string>
             <string>c++</string>
+            <string>c++m</string>
             <string>cc</string>
+            <string>ccm</string>
+            <string>cjs</string>
+            <string>clang-format</string>
+            <string>clangd</string>
+            <string>comp</string>
             <string>cpp</string>
+            <string>cppm</string>
             <string>css</string>
+            <string>cts</string>
+            <string>cu</string>
+            <string>cuh</string>
+            <string>cxx</string>
+            <string>cxxm</string>
+            <string>diff</string>
+            <string>env</string>
             <string>erb</string>
+            <string>eslintrc</string>
             <string>ex</string>
             <string>exs</string>
+            <string>frag</string>
+            <string>geojson</string>
+            <string>geom</string>
+            <string>gleam</string>
+            <string>glsl</string>
             <string>go</string>
             <string>h</string>
             <string>h++</string>
             <string>hh</string>
             <string>hpp</string>
+            <string>htm</string>
             <string>html</string>
+            <string>hxx</string>
+            <string>inl</string>
+            <string>ino</string>
+            <string>ipp</string>
+            <string>ixx</string>
             <string>js</string>
+            <string>jshintrc</string>
             <string>json</string>
+            <string>jsonc</string>
             <string>jsx</string>
+            <string>luaurc</string>
+            <string>markdown</string>
             <string>md</string>
+            <string>mdc</string>
+            <string>mdwn</string>
+            <string>mdx</string>
+            <string>mesh</string>
+            <string>mjs</string>
+            <string>mod</string>
+            <string>mpy</string>
+            <string>mts</string>
+            <string>patch</string>
+            <string>pcss</string>
+            <string>postcss</string>
+            <string>prettierrc</string>
+            <string>profile</string>
+            <string>proto</string>
             <string>py</string>
+            <string>pyi</string>
+            <string>rahit</string>
             <string>rb</string>
+            <string>rcall</string>
+            <string>rchit</string>
+            <string>rgen</string>
+            <string>rint</string>
             <string>rkt</string>
+            <string>rmiss</string>
             <string>rs</string>
             <string>scm</string>
+            <string>sh</string>
+            <string>shtml</string>
+            <string>stylelintrc</string>
+            <string>swcrc</string>
+            <string>task</string>
+            <string>tesc</string>
+            <string>tese</string>
             <string>toml</string>
             <string>ts</string>
             <string>tsx</string>
             <string>txt</string>
+            <string>vert</string>
+            <string>work</string>
+            <string>yaml</string>
+            <string>yml</string>
+            <string>zlogin</string>
+            <string>zprofile</string>
+            <string>zsh</string>
+            <string>zsh_aliases</string>
+            <string>zsh_histfile</string>
+            <string>zsh_profile</string>
+            <string>zshenv</string>
+            <string>zshrc</string>
         </array>
     </dict>
 </array>
