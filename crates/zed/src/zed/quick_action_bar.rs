@@ -133,7 +133,7 @@ impl Render for QuickActionBar {
             editor_value.edit_predictions_enabled_at_cursor(cx);
         let supports_minimap = editor_value.supports_minimap(cx);
         let minimap_enabled = supports_minimap && editor_value.minimap().is_some();
-        let has_available_code_actions = editor_value.has_available_code_actions();
+        let has_available_code_actions = editor_value.has_available_code_actions_for_selection();
         let code_action_enabled = editor_value.code_actions_enabled_for_toolbar(cx);
         let focus_handle = editor_value.focus_handle(cx);
 
@@ -169,7 +169,6 @@ impl Render for QuickActionBar {
         );
 
         let code_actions_dropdown = code_action_enabled.then(|| {
-            let focus = editor.focus_handle(cx);
             let is_deployed = {
                 let menu_ref = editor.read(cx).context_menu().borrow();
                 let code_action_menu = menu_ref
@@ -211,16 +210,18 @@ impl Render for QuickActionBar {
                             )
                         })
                         .on_click({
-                            let focus = focus;
+                            let editor = editor.clone();
                             move |_, window, cx| {
-                                focus.dispatch_action(
-                                    &ToggleCodeActions {
-                                        deployed_from: Some(CodeActionSource::QuickActionBar),
-                                        quick_launch: false,
-                                    },
-                                    window,
-                                    cx,
-                                );
+                                editor.update(cx, |editor, cx| {
+                                    editor.toggle_code_actions(
+                                        &ToggleCodeActions {
+                                            deployed_from: Some(CodeActionSource::QuickActionBar),
+                                            quick_launch: false,
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                })
                             }
                         }),
                 )
