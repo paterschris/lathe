@@ -112,7 +112,7 @@ fi
 ditto -c -k --keepParent "$app_path" "${out_dir}/${zip_name}"
 
 if $can_sign; then
-    # Notarize
+    # Notarize the zip
     echo ""
     echo "--- Notarizing ---"
     xcrun notarytool submit "${out_dir}/${zip_name}" --keychain-profile "$notarize_profile" --wait
@@ -126,12 +126,41 @@ if $can_sign; then
     ditto -c -k --keepParent "$app_path" "${out_dir}/${zip_name}"
 
     echo ""
-    echo "=== Package created (signed + notarized) ==="
+    echo "=== Zip created (signed + notarized) ==="
 else
     echo ""
-    echo "=== Package created (unsigned) ==="
+    echo "=== Zip created (unsigned) ==="
 fi
 echo "  ${out_dir}/${zip_name}"
+
+# Create a DMG alongside the zip. The zip is consumed by Homebrew; the DMG
+# is what the in-app auto-updater expects on macOS (see auto_update.rs's
+# install_release_macos which mounts via hdiutil). We produce both so a
+# single release serves both install paths.
+dmg_name="Lathe-${version}-${arch}-macos.dmg"
+echo ""
+echo "--- Creating DMG ---"
+rm -f "${out_dir}/${dmg_name}"
+hdiutil create \
+    -srcfolder "$app_path" \
+    -volname "$(basename "$app_path" .app)" \
+    -fs HFS+ \
+    -format UDZO \
+    -imagekey zlib-level=9 \
+    "${out_dir}/${dmg_name}"
+echo "  ${out_dir}/${dmg_name}"
+
+if $can_sign; then
+    echo ""
+    echo "--- Signing and notarizing DMG ---"
+    codesign --force --sign "$signing_identity" --timestamp "${out_dir}/${dmg_name}"
+    xcrun notarytool submit "${out_dir}/${dmg_name}" --keychain-profile "$notarize_profile" --wait
+    xcrun stapler staple "${out_dir}/${dmg_name}"
+    echo "  DMG signed + notarized + stapled"
+fi
+
 echo ""
 echo "To create a GitHub release:"
-echo "  gh release create v${version} \"${out_dir}/${zip_name}\" --title \"Lathe v${version}\" --notes \"Release v${version}\""
+echo "  gh release create v${version} \\"
+echo "    \"${out_dir}/${zip_name}\" \"${out_dir}/${dmg_name}\" \\"
+echo "    --title \"Lathe v${version}\" --notes \"Release v${version}\""

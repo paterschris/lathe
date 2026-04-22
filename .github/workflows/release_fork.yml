@@ -71,6 +71,11 @@ jobs:
             --password "$APPLE_APP_PASSWORD"
 
       - name: Build
+        env:
+          # Baked into the binary so the in-app updater can query GitHub
+          # releases for Stable/Preview. Beta also falls back to this URL
+          # when LATHE_BETA_UPDATE_URL is unset.
+          LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases/latest
         run: script/build-fork
 
       - name: Verify signing identity
@@ -87,11 +92,13 @@ jobs:
           LATHE_REQUIRE_SIGNING: "1"
         run: script/package-fork
 
-      - name: Upload macOS artifact
+      - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: lathe-macos
-          path: target/release/Lathe-*.zip
+          path: |
+            target/release/Lathe-*.zip
+            target/release/Lathe-*.dmg
           if-no-files-found: error
 
       - name: Clean up keychain
@@ -99,6 +106,96 @@ jobs:
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
           security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+
+  validate-macos:
+    needs: build-macos
+    runs-on: macos-15
+    steps:
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: lathe-macos
+          path: artifacts
+
+      - name: Unzip bundle
+        run: |
+          cd artifacts
+          ZIP=$(ls Lathe-*.zip | head -1)
+          echo "Unzipping $ZIP"
+          unzip -q "$ZIP" -d ./app
+          ls ./app
+
+      - name: Validate Info.plist is well-formed
+        run: |
+          APP="artifacts/app/Lathe.app"
+          plutil -lint "$APP/Contents/Info.plist"
+
+      - name: Validate required Info.plist keys
+        run: |
+          APP="artifacts/app/Lathe.app"
+          set -e
+          for key in CFBundleIdentifier CFBundleShortVersionString \
+                    CFBundleDocumentTypes CFBundleURLTypes \
+                    CFBundleExecutable LSMinimumSystemVersion; do
+            /usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist" > /dev/null
+            echo "  ok: $key"
+          done
+
+      - name: Validate expected CFBundleTypeExtensions
+        run: |
+          APP="artifacts/app/Lathe.app"
+          PLIST="$APP/Contents/Info.plist"
+          exts=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:1:CFBundleTypeExtensions" "$PLIST")
+          # Canary extensions that should always be present. If a future
+          # change accidentally drops the extensions array or picks up the
+          # wrong CFBundleDocumentTypes index, this catches it.
+          for want in md json js ts rs py toml yaml sh env cjs mjs mdx; do
+            echo "$exts" | grep -qw "$want" || { echo "MISSING extension: $want"; exit 1; }
+          done
+          echo "  ok: canary extensions present"
+
+      - name: Validate Apple Event handler symbols are present
+        # Regression guard for the kAEOpenDocuments fix. If the handler or
+        # its registration selector disappears from the binary, Finder's
+        # "Open With" breaks silently at runtime.
+        run: |
+          BIN="artifacts/app/Lathe.app/Contents/MacOS/zed"
+          strings "$BIN" | grep -q 'handleOpenDocumentsEvent:withReplyEvent:' \
+            || { echo "MISSING selector: handleOpenDocumentsEvent:withReplyEvent:"; exit 1; }
+          strings "$BIN" | grep -q 'handleGetURLEvent:withReplyEvent:' \
+            || { echo "MISSING selector: handleGetURLEvent:withReplyEvent:"; exit 1; }
+          echo "  ok: Apple Event handler selectors present"
+
+      - name: Validate code signature
+        run: |
+          APP="artifacts/app/Lathe.app"
+          codesign --verify --verbose=2 "$APP"
+          codesign --verify --deep --strict "$APP"
+
+      - name: Validate notarization (stapled ticket)
+        run: |
+          APP="artifacts/app/Lathe.app"
+          xcrun stapler validate "$APP"
+
+      - name: Smoke test launch
+        # Proves the app actually reaches its run loop on a clean runner.
+        # Catches things like missing dylibs, dyld errors, and entitlement
+        # mismatches that plist checks can't see.
+        run: |
+          APP="artifacts/app/Lathe.app"
+          # Strip quarantine so Gatekeeper doesn't block on first launch in
+          # the sandboxed runner home.
+          xattr -dr com.apple.quarantine "$APP" || true
+          open -n "$APP"
+          sleep 8
+          if pgrep -f "Lathe.app/Contents/MacOS/zed" > /dev/null; then
+            echo "  ok: app launched and is running"
+            pkill -f "Lathe.app/Contents/MacOS/zed" || true
+          else
+            echo "FAIL: app failed to launch or crashed on startup"
+            ls -la ~/Library/Logs/DiagnosticReports 2>/dev/null || true
+            exit 1
+          fi
 
   build-linux:
     runs-on: ubuntu-22.04
@@ -133,7 +230,7 @@ jobs:
           if-no-files-found: error
 
   create-release:
-    needs: [build-macos, build-linux]
+    needs: [build-macos, build-linux, validate-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -163,6 +260,7 @@ jobs:
           # Collect all release files
           mkdir -p release-files
           cp artifacts/lathe-macos/Lathe-*.zip release-files/
+          cp artifacts/lathe-macos/Lathe-*.dmg release-files/
           cp artifacts/lathe-linux/Lathe-*-linux.tar.gz release-files/
 
           if gh release view "$tag" 2>/dev/null; then
