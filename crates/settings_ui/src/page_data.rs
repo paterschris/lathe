@@ -8975,6 +8975,20 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
 
     let is_global = active_language().is_none();
 
+    let code_lens_item = [SettingsPageItem::SettingItem(SettingItem {
+        title: "Code Lens",
+        description: "Whether and how to display code lenses from language servers.",
+        field: Box::new(SettingField {
+            json_path: Some("code_lens"),
+            pick: |settings_content| settings_content.editor.code_lens.as_ref(),
+            write: |settings_content, value| {
+                settings_content.editor.code_lens = value;
+            },
+        }),
+        metadata: None,
+        files: USER,
+    })];
+
     let lsp_document_colors_item = [SettingsPageItem::SettingItem(SettingItem {
         title: "LSP Document Colors",
         description: "How to render LSP color previews in the editor.",
@@ -8999,6 +9013,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             whitespace_section(),
             completions_section(),
             inlay_hints_section(),
+            code_lens_item,
             lsp_document_colors_item,
             tasks_section(),
             miscellaneous_section(),
@@ -9014,6 +9029,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             whitespace_section(),
             completions_section(),
             inlay_hints_section(),
+            code_lens_item,
             tasks_section(),
             miscellaneous_section(),
         )
