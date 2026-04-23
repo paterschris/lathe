@@ -277,7 +277,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           version="${{ steps.version.outputs.version }}"
-          tag="v${version}"
+
+          # Tag scheme matches upstream zed-industries/zed's
+          # script/determine-release-channel: non-stable channels get
+          # a `-<channel>` suffix so stable and beta/preview/nightly
+          # of the same version can coexist as separate GitHub releases.
+          channel=$(<crates/zed/RELEASE_CHANNEL)
+          if [ "$channel" = "stable" ]; then
+            tag="v${version}"
+          else
+            tag="v${version}-${channel}"
+          fi
 
           # Collect all release files
           mkdir -p release-files
@@ -288,7 +298,6 @@ jobs:
           # Mark any non-stable channel as prerelease so the GitHub UI
           # shows the prerelease badge and `gh release view --latest`
           # skips beta/preview/nightly when pointing users at releases.
-          channel=$(<crates/zed/RELEASE_CHANNEL)
           prerelease_flag=""
           if [ "$channel" != "stable" ]; then
             prerelease_flag="--prerelease"
