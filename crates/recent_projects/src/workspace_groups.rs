@@ -3,7 +3,7 @@ use std::{cmp, collections::BTreeMap, sync::Arc};
 use anyhow::Context as _;
 use client::{Client, accounts::CollabAccount};
 use db::kvp::KeyValueStore;
-use fuzzy::{StringMatch, StringMatchCandidate};
+use fuzzy_nucleo::{Case, LengthPenalty, StringMatch, StringMatchCandidate};
 use gpui::{
     App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     IntoElement, ParentElement, PromptLevel, Render, Styled, Subscription, Task, WeakEntity,
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use ui::{HighlightedLabel, ListItem, ListItemSpacing, prelude::*};
 use util::ResultExt;
 use workspace::{
-    ModalView, MultiWorkspace, OpenMode, SerializedProjectGroupKey, Workspace,
+    ModalView, MultiWorkspace, OpenMode, SerializedProjectGroup, Workspace,
     with_active_or_new_workspace,
 };
 
@@ -43,10 +43,10 @@ actions!(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamedWorkspaceGroup {
     pub name: String,
-    pub key: SerializedProjectGroupKey,
+    pub key: SerializedProjectGroup,
 }
 
-fn load_map(kvp: &KeyValueStore) -> BTreeMap<String, SerializedProjectGroupKey> {
+fn load_map(kvp: &KeyValueStore) -> BTreeMap<String, SerializedProjectGroup> {
     let Ok(Some(raw)) = kvp.read_kvp(INDEX_KEY) else {
         return BTreeMap::new();
     };
@@ -63,7 +63,7 @@ pub fn list_groups(kvp: &KeyValueStore) -> Vec<NamedWorkspaceGroup> {
 async fn save_group_async(
     kvp: KeyValueStore,
     name: String,
-    key: SerializedProjectGroupKey,
+    key: SerializedProjectGroup,
 ) -> anyhow::Result<()> {
     let mut map = load_map(&kvp);
     map.insert(name, key);
@@ -178,8 +178,8 @@ fn handle_update_current(cx: &mut App) {
     cx.defer(move |cx| {
         let Ok(pair) = handle.update(cx, |mw, _, _| {
             let name = mw.workspace_group_name()?.to_owned();
-            let key: ProjectGroupKey = mw.project_group_keys().next().cloned()?;
-            Some((name, SerializedProjectGroupKey::from(key)))
+            let key: ProjectGroupKey = mw.project_group_keys().into_iter().next()?;
+            Some((name, SerializedProjectGroup::from_group(&key, true)))
         }) else {
             return;
         };
@@ -275,12 +275,14 @@ fn handle_save(cx: &mut App) {
     cx.defer(move |cx| {
         multi_workspace
             .update(cx, |mw, window, cx| {
-                let keys: Vec<ProjectGroupKey> = mw.project_group_keys().cloned().collect();
+                let keys: Vec<ProjectGroupKey> = mw.project_group_keys();
                 if keys.is_empty() {
                     return;
                 }
-                let serialized: Vec<SerializedProjectGroupKey> =
-                    keys.into_iter().map(Into::into).collect();
+                let serialized: Vec<SerializedProjectGroup> = keys
+                    .iter()
+                    .map(|k| SerializedProjectGroup::from_group(k, true))
+                    .collect();
                 let preset_name = mw.workspace_group_name().map(str::to_owned);
                 let mw_handle = cx.entity().downgrade();
                 let workspace = mw.workspace().clone();
@@ -321,7 +323,7 @@ pub struct SaveWorkspaceGroupModal {
 
 impl SaveWorkspaceGroupModal {
     fn new(
-        keys: Vec<SerializedProjectGroupKey>,
+        keys: Vec<SerializedProjectGroup>,
         preset_name: Option<String>,
         multi_workspace: WeakEntity<MultiWorkspace>,
         _focus_handle: FocusHandle,
@@ -377,7 +379,7 @@ impl Render for SaveWorkspaceGroupModal {
 }
 
 struct SaveWorkspaceGroupDelegate {
-    keys: Vec<SerializedProjectGroupKey>,
+    keys: Vec<SerializedProjectGroup>,
     multi_workspace: WeakEntity<MultiWorkspace>,
     existing_names: Vec<String>,
     matches: Vec<StringMatch>,
@@ -436,16 +438,13 @@ impl PickerDelegate for SaveWorkspaceGroupDelegate {
                     })
                     .collect()
             } else {
-                fuzzy::match_strings(
+                fuzzy_nucleo::match_strings(
                     &candidates,
                     &query,
-                    true,
-                    true,
+                    Case::Smart,
+                    LengthPenalty::On,
                     200,
-                    &Default::default(),
-                    cx.background_executor().clone(),
                 )
-                .await
             };
             picker
                 .update(cx, |picker, _| {
@@ -466,7 +465,7 @@ impl PickerDelegate for SaveWorkspaceGroupDelegate {
         let kvp = KeyValueStore::global(cx);
         let mw = self.multi_workspace.clone();
         let do_save = move |name: String,
-                            key: SerializedProjectGroupKey,
+                            key: SerializedProjectGroup,
                             kvp: KeyValueStore,
                             mw: WeakEntity<MultiWorkspace>,
                             cx: &mut gpui::AsyncApp| {
@@ -527,7 +526,7 @@ impl PickerDelegate for SaveWorkspaceGroupDelegate {
         _: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
         let hit = self.matches.get(ix)?;
-        let is_exact = self.query.trim() == hit.string;
+        let is_exact = hit.string == self.query.trim();
         Some(
             ListItem::new(("save-wg", ix))
                 .inset(true)
@@ -688,16 +687,13 @@ impl PickerDelegate for OpenWorkspaceGroupDelegate {
                     })
                     .collect()
             } else {
-                fuzzy::match_strings(
+                fuzzy_nucleo::match_strings(
                     &candidates,
                     &query,
-                    true,
-                    true,
+                    Case::Smart,
+                    LengthPenalty::On,
                     200,
-                    &Default::default(),
-                    cx.background_executor().clone(),
                 )
-                .await
             };
             picker
                 .update(cx, |picker, _| {

@@ -198,7 +198,7 @@ impl Dismissable for ParallelAgentAnnouncement {
 
 fn announcement_for_version(version: &Version, cx: &App) -> Option<AnnouncementContent> {
     let version_with_parallel_agents = match ReleaseChannel::global(cx) {
-        ReleaseChannel::Stable => Version::new(0, 233, 0),
+        ReleaseChannel::Stable | ReleaseChannel::Beta => Version::new(0, 233, 0),
         ReleaseChannel::Dev | ReleaseChannel::Nightly | ReleaseChannel::Preview => {
             Version::new(0, 232, 0)
         }

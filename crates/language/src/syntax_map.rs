@@ -1495,13 +1495,11 @@ fn sibling_index_parity(args: &[QueryPredicateArg], mat: &QueryMatch, want_odd: 
     let Some(grandparent) = parent.parent() else {
         return false;
     };
-    let mut index = 0;
     let mut cursor = grandparent.walk();
-    for child in grandparent.named_children(&mut cursor) {
+    for (index, child) in grandparent.named_children(&mut cursor).enumerate() {
         if child.id() == parent.id() {
             return (index % 2 != 0) == want_odd;
         }
-        index += 1;
     }
     false
 }
@@ -1534,13 +1532,11 @@ fn sibling_index_mod(args: &[QueryPredicateArg], mat: &QueryMatch) -> bool {
     let Some(grandparent) = parent.parent() else {
         return false;
     };
-    let mut index = 0;
     let mut cursor = grandparent.walk();
-    for child in grandparent.named_children(&mut cursor) {
+    for (index, child) in grandparent.named_children(&mut cursor).enumerate() {
         if child.id() == parent.id() {
             return index % modulus == remainder;
         }
-        index += 1;
     }
     false
 }
@@ -1714,12 +1710,9 @@ fn find_parameter_identifier(param_node: tree_sitter::Node) -> Option<tree_sitte
     }
     // Fallback: first identifier child
     let mut cursor = param_node.walk();
-    for child in param_node.named_children(&mut cursor) {
-        if child.kind() == "identifier" {
-            return Some(child);
-        }
-    }
-    None
+    param_node
+        .named_children(&mut cursor)
+        .find(|&child| child.kind() == "identifier")
 }
 
 fn join_ranges(

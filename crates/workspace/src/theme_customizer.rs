@@ -566,7 +566,7 @@ impl SliderChannel {
             .map(|i| {
                 let t = i as f32 / steps as f32;
                 match self {
-                    Self::Hue => hsla(t, color.s.max(0.5), color.l.max(0.3).min(0.7), 1.0),
+                    Self::Hue => hsla(t, color.s.max(0.5), color.l.clamp(0.3, 0.7), 1.0),
                     Self::Saturation => hsla(color.h, t, color.l, 1.0),
                     Self::Lightness => hsla(color.h, color.s, t, 1.0),
                     Self::Alpha => hsla(color.h, color.s, color.l, t),
@@ -697,7 +697,7 @@ impl Render for ThemeCustomizer {
                             .child(
                                 Label::new(
                                     self.selected_field
-                                        .map(|f| f.display_name().to_string())
+                                        .map(|f| f.display_name())
                                         .unwrap_or_else(|| "No selection".to_string()),
                                 )
                                 .size(LabelSize::Default)
