@@ -19,8 +19,16 @@ version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/
 arch=$(uname -m)
 
 suffix=""
+icon_suffix=""
 if [ "$channel" != "stable" ]; then
     suffix="-$channel"
+    # No dedicated beta icon set; reuse the preview icons to match
+    # the [package.metadata.bundle-beta] entry in crates/zed/Cargo.toml.
+    if [ "$channel" = "beta" ]; then
+        icon_suffix="-preview"
+    else
+        icon_suffix="$suffix"
+    fi
 fi
 
 # Resolve app/desktop names by channel
@@ -32,6 +40,10 @@ case "$channel" in
     preview)
         app_name="Lathe Preview"
         app_id="dev.lathe.Lathe-Preview"
+        ;;
+    beta)
+        app_name="Lathe Beta"
+        app_id="dev.lathe.Lathe-Beta"
         ;;
     nightly)
         app_name="Lathe Nightly"
@@ -98,9 +110,9 @@ ldd "$zed_binary" | \
 # Icons
 echo "--- Copying icons ---"
 mkdir -p "${app_dir}/share/icons/hicolor/512x512/apps"
-cp "crates/zed/resources/app-icon${suffix}.png" "${app_dir}/share/icons/hicolor/512x512/apps/lathe.png"
+cp "crates/zed/resources/app-icon${icon_suffix}.png" "${app_dir}/share/icons/hicolor/512x512/apps/lathe.png"
 mkdir -p "${app_dir}/share/icons/hicolor/1024x1024/apps"
-cp "crates/zed/resources/app-icon${suffix}@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/lathe.png"
+cp "crates/zed/resources/app-icon${icon_suffix}@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/lathe.png"
 
 # .desktop file
 echo "--- Creating .desktop entry ---"

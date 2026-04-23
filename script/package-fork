@@ -15,6 +15,7 @@ channel=$(<crates/zed/RELEASE_CHANNEL)
 case "$channel" in
     stable) app_name="Lathe.app" ;;
     preview) app_name="Lathe Preview.app" ;;
+    beta) app_name="Lathe Beta.app" ;;
     nightly) app_name="Lathe Nightly.app" ;;
     dev) app_name="Lathe Dev.app" ;;
     *) app_name="Lathe Dev.app" ;;
