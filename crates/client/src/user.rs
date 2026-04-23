@@ -243,8 +243,11 @@ impl UserStore {
                                         name: response.user.name.clone(),
                                     });
 
-                                    crate::accounts::set_active_label(&user.github_login)
-                                        .log_err();
+                                    crate::accounts::set_active_user_info(
+                                        &user.github_login,
+                                        &user.avatar_uri,
+                                    )
+                                    .log_err();
 
                                     Some((user, response))
                                 } else {

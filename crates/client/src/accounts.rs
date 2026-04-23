@@ -8,6 +8,10 @@ pub struct CollabAccount {
     pub label: String,
     pub user_id: u64,
     pub server_url: String,
+    #[serde(default)]
+    pub login: Option<String>,
+    #[serde(default)]
+    pub avatar_uri: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -80,6 +84,36 @@ pub fn set_active_label(label: &str) -> Result<()> {
         return Ok(());
     }
     account.label = label.to_string();
+    save_index(&index)
+}
+
+/// Caches the active account's login + avatar so other workspaces bound to
+/// this account can render it in their title bars even when it isn't the
+/// currently-connected account. No-op when there is no active account.
+pub fn set_active_user_info(login: &str, avatar_uri: &str) -> Result<()> {
+    let mut index = load_index();
+    let Some(active_id) = index.active_id.clone() else {
+        return Ok(());
+    };
+    let Some(account) = index.accounts.iter_mut().find(|a| a.id == active_id) else {
+        return Ok(());
+    };
+    let mut changed = false;
+    if account.label != login {
+        account.label = login.to_string();
+        changed = true;
+    }
+    if account.login.as_deref() != Some(login) {
+        account.login = Some(login.to_string());
+        changed = true;
+    }
+    if account.avatar_uri.as_deref() != Some(avatar_uri) {
+        account.avatar_uri = Some(avatar_uri.to_string());
+        changed = true;
+    }
+    if !changed {
+        return Ok(());
+    }
     save_index(&index)
 }
 

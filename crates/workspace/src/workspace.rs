@@ -1401,6 +1401,7 @@ pub struct Workspace {
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     active_worktree_creation: ActiveWorktreeCreation,
     deferred_save_items: Vec<Box<dyn WeakItemHandle>>,
+    bound_collab_account_id: Option<String>,
 }
 
 impl EventEmitter<Event> for Workspace {}
@@ -1766,6 +1767,9 @@ impl Workspace {
         cx.defer_in(window, move |this, window, cx| {
             this.update_window_title(window, cx);
             this.show_initial_notifications(cx);
+            if let Some(database_id) = this.database_id {
+                this.apply_bound_collab_account(database_id, cx);
+            }
         });
 
         let mut center = PaneGroup::new(center_pane.clone());
@@ -1833,6 +1837,7 @@ impl Workspace {
             open_in_dev_container: false,
             _dev_container_task: None,
             deferred_save_items: Vec::new(),
+            bound_collab_account_id: None,
         }
     }
 
@@ -6557,6 +6562,7 @@ impl Workspace {
                 let db = WorkspaceDb::global(cx);
                 cx.background_spawn(async move { db.update_timestamp(database_id).await })
                     .detach();
+                self.apply_bound_collab_account(database_id, cx);
             }
         } else {
             // When window is deactivated, flush any deferred saves since focus has left the window
@@ -6578,6 +6584,62 @@ impl Workspace {
                 });
             }
         }
+    }
+
+    pub fn bound_collab_account_id(&self) -> Option<&str> {
+        self.bound_collab_account_id.as_deref()
+    }
+
+    pub fn set_bound_collab_account_id(
+        &mut self,
+        account_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.bound_collab_account_id == account_id {
+            return;
+        }
+        self.bound_collab_account_id = account_id.clone();
+        cx.notify();
+        let Some(database_id) = self.database_id else {
+            return;
+        };
+        let db = WorkspaceDb::global(cx);
+        cx.background_spawn(async move { db.set_collab_account_id(database_id, account_id).await })
+            .detach_and_log_err(cx);
+    }
+
+    fn apply_bound_collab_account(
+        &self,
+        database_id: WorkspaceId,
+        cx: &mut Context<Self>,
+    ) {
+        let db = WorkspaceDb::global(cx);
+        let client = self.client().clone();
+        cx.spawn(async move |this, cx| {
+            let bound_id = db.collab_account_id(database_id).await.ok().flatten();
+            this.update(cx, |this, cx| {
+                if this.bound_collab_account_id != bound_id {
+                    this.bound_collab_account_id = bound_id.clone();
+                    cx.notify();
+                }
+            })
+            .ok();
+            let Some(bound_id) = bound_id else {
+                return;
+            };
+            if client.active_account_id().as_deref() == Some(bound_id.as_str()) {
+                return;
+            }
+            if !client
+                .list_accounts()
+                .iter()
+                .any(|account| account.id == bound_id)
+            {
+                return;
+            }
+            client.switch_account(bound_id, cx).await.log_err();
+        })
+        .detach();
     }
 
     pub fn active_call(&self) -> Option<&dyn AnyActiveCall> {

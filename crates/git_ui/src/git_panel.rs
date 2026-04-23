@@ -2345,10 +2345,12 @@ impl GitPanel {
             self.fill_co_authors(&mut message, cx);
         }
 
+        let author = self.github_commit_author(cx);
+
         let task = if self.has_staged_changes() {
             // Repository serializes all git operations, so we can just send a commit immediately
             let commit_task = active_repository.update(cx, |repo, cx| {
-                repo.commit(message.into(), None, options, askpass, cx)
+                repo.commit(message.into(), author, options, askpass, cx)
             });
             cx.background_spawn(async move { commit_task.await? })
         } else {
@@ -2370,7 +2372,7 @@ impl GitPanel {
             cx.spawn(async move |_, cx| {
                 stage_task.await?;
                 let commit_task = active_repository.update(cx, |repo, cx| {
-                    repo.commit(message.into(), None, options, askpass, cx)
+                    repo.commit(message.into(), author, options, askpass, cx)
                 });
                 commit_task.await?
             })
@@ -3363,6 +3365,36 @@ impl GitPanel {
             .clone()
             .or_else(|| user.name.clone())
             .unwrap_or_else(|| user.github_login.clone().to_string());
+        Some((name, email))
+    }
+
+    /// Returns an override author for the upcoming commit when this workspace
+    /// is bound to a collab account and the active repo's push URL points at
+    /// github.com. Other remotes (bitbucket, gitlab, self-hosted, …) return
+    /// `None` so git's own user.name/user.email resolution stays in charge.
+    fn github_commit_author(&self, cx: &App) -> Option<(SharedString, SharedString)> {
+        let workspace = self.workspace.upgrade()?;
+        let workspace = workspace.read(cx);
+        let bound_id = workspace.bound_collab_account_id()?.to_string();
+        let client = workspace.client().clone();
+
+        let remote_url = self.active_repository.as_ref()?.read(cx).default_remote_url()?;
+        let provider_registry = GitHostingProviderRegistry::global(cx);
+        let (provider, _) = git::parse_git_remote_url(provider_registry, &remote_url)?;
+        if provider.name() != "GitHub" {
+            return None;
+        }
+
+        let account = client
+            .list_accounts()
+            .into_iter()
+            .find(|a| a.id == bound_id)?;
+        let login = account.login.as_deref()?;
+        let name = SharedString::from(login.to_string());
+        let email = SharedString::from(format!(
+            "{}+{}@users.noreply.github.com",
+            account.user_id, login
+        ));
         Some((name, email))
     }
 

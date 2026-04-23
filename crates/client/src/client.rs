@@ -454,8 +454,9 @@ impl ClientCredentialsProvider {
                 .log_err();
 
             let account_id = accounts::account_id_for(&server_url, user_id);
-            let label = index
-                .find(&account_id)
+            let existing = index.find(&account_id).cloned();
+            let label = existing
+                .as_ref()
                 .map(|a| a.label.clone())
                 .unwrap_or_else(|| format!("Account {user_id}"));
             let account = accounts::CollabAccount {
@@ -463,6 +464,8 @@ impl ClientCredentialsProvider {
                 label,
                 user_id,
                 server_url: server_url.clone(),
+                login: existing.as_ref().and_then(|a| a.login.clone()),
+                avatar_uri: existing.as_ref().and_then(|a| a.avatar_uri.clone()),
             };
             index.active_id = Some(account.id.clone());
             index.upsert(account);
@@ -503,8 +506,9 @@ impl ClientCredentialsProvider {
 
             let mut index = accounts::load_index();
             let account_id = accounts::account_id_for(&server_url, user_id);
-            let label = index
-                .find(&account_id)
+            let existing = index.find(&account_id).cloned();
+            let label = existing
+                .as_ref()
                 .map(|a| a.label.clone())
                 .unwrap_or_else(|| format!("Account {user_id}"));
             index.upsert(accounts::CollabAccount {
@@ -512,6 +516,8 @@ impl ClientCredentialsProvider {
                 label,
                 user_id,
                 server_url: server_url.clone(),
+                login: existing.as_ref().and_then(|a| a.login.clone()),
+                avatar_uri: existing.as_ref().and_then(|a| a.avatar_uri.clone()),
             });
             index.active_id = Some(account_id);
             accounts::save_index(&index).log_err();

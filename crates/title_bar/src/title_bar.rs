@@ -1201,28 +1201,53 @@ impl TitleBar {
 
         let saved_accounts = self.client.list_accounts();
         let active_account_id = self.client.active_account_id();
+        let workspace = self.workspace.clone();
 
+        let bound_account_id = workspace
+            .upgrade()
+            .and_then(|w| w.read(cx).bound_collab_account_id().map(|s| s.to_string()));
+        let bound_account = bound_account_id
+            .as_ref()
+            .and_then(|id| saved_accounts.iter().find(|a| &a.id == id).cloned());
+        let display_avatar = bound_account
+            .as_ref()
+            .and_then(|a| a.avatar_uri.clone())
+            .map(gpui::SharedUri::from)
+            .or_else(|| user_avatar.clone());
+        let display_login = bound_account
+            .as_ref()
+            .and_then(|a| a.login.clone())
+            .map(gpui::SharedString::from)
+            .or_else(|| user_login.clone());
+        let display_account_id = bound_account_id.or_else(|| active_account_id.clone());
+
+        let show_business_organization = display_account_id == active_account_id;
         let trigger = if is_signed_in && show_user_picture {
-            let avatar = user_avatar.map(|avatar| Avatar::new(avatar)).map(|avatar| {
-                if show_update_button {
-                    avatar.indicator(
-                        div()
-                            .absolute()
-                            .bottom_0()
-                            .right_0()
-                            .child(Indicator::dot().color(Color::Accent)),
-                    )
-                } else {
-                    avatar
-                }
-            });
+            let avatar = display_avatar
+                .map(Avatar::new)
+                .map(|avatar| {
+                    if show_update_button {
+                        avatar.indicator(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .right_0()
+                                .child(Indicator::dot().color(Color::Accent)),
+                        )
+                    } else {
+                        avatar
+                    }
+                });
 
             ButtonLike::new("user-menu").child(
                 h_flex()
-                    .when_some(business_organization, |this, organization| {
-                        this.gap_2()
-                            .child(Label::new(&organization.name).size(LabelSize::Small))
-                    })
+                    .when_some(
+                        business_organization.filter(|_| show_business_organization),
+                        |this, organization| {
+                            this.gap_2()
+                                .child(Label::new(&organization.name).size(LabelSize::Small))
+                        },
+                    )
                     .children(avatar),
             )
         } else {
@@ -1239,18 +1264,22 @@ impl TitleBar {
                 let user_store = user_store.clone();
                 let saved_accounts = saved_accounts.clone();
                 let active_account_id = active_account_id.clone();
+                let workspace = workspace.clone();
+                let display_login = display_login.clone();
+                let display_account_id = display_account_id.clone();
 
                 ContextMenu::build(window, cx, |menu, _, _cx| {
                     menu.when(is_signed_in, |this| {
-                        let user_login = user_login.clone();
+                        let display_login = display_login.clone();
                         this.custom_entry(
                             move |_window, _cx| {
-                                let user_login = user_login.clone().unwrap_or_default();
+                                let display_login =
+                                    display_login.clone().map(|s| s.to_string()).unwrap_or_default();
 
                                 h_flex()
                                     .w_full()
                                     .justify_between()
-                                    .child(Label::new(user_login))
+                                    .child(Label::new(display_login))
                                     .when(!has_organization, |parent| {
                                         parent.child(PlanChip::new(plan.unwrap_or(Plan::ZedFree)))
                                     })
@@ -1356,16 +1385,26 @@ impl TitleBar {
                             for account in &saved_accounts {
                                 let account_id = account.id.clone();
                                 let is_active =
+                                    display_account_id.as_deref() == Some(&account.id);
+                                let is_globally_active =
                                     active_account_id.as_deref() == Some(&account.id);
-                                let label = if is_active {
+                                let label = if is_globally_active {
                                     user_login
                                         .as_ref()
                                         .map(|login| login.to_string())
-                                        .unwrap_or_else(|| account.label.clone())
+                                        .unwrap_or_else(|| {
+                                            account
+                                                .login
+                                                .clone()
+                                                .unwrap_or_else(|| account.label.clone())
+                                        })
                                 } else {
-                                    account.label.clone()
+                                    account
+                                        .login
+                                        .clone()
+                                        .unwrap_or_else(|| account.label.clone())
                                 };
-                                if is_active && user_login.is_some() {
+                                if is_globally_active && user_login.is_some() {
                                     client::accounts::set_active_label(&label).log_err();
                                 }
                                 this = this.custom_entry(
@@ -1384,7 +1423,16 @@ impl TitleBar {
                                     },
                                     {
                                         let account_id = account_id.clone();
+                                        let workspace = workspace.clone();
                                         move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    workspace.set_bound_collab_account_id(
+                                                        Some(account_id.clone()),
+                                                        cx,
+                                                    );
+                                                });
+                                            }
                                             window.dispatch_action(
                                                 client::SwitchAccount {
                                                     account_id: account_id.clone(),
@@ -1428,3 +1476,4 @@ impl TitleBar {
             .anchor(Anchor::TopRight)
     }
 }
+
