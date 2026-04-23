@@ -19,17 +19,15 @@ version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/
 arch=$(uname -m)
 
 suffix=""
-icon_suffix=""
 if [ "$channel" != "stable" ]; then
     suffix="-$channel"
-    # No dedicated beta icon set; reuse the preview icons to match
-    # the [package.metadata.bundle-beta] entry in crates/zed/Cargo.toml.
-    if [ "$channel" = "beta" ]; then
-        icon_suffix="-preview"
-    else
-        icon_suffix="$suffix"
-    fi
 fi
+# icon_suffix tracked separately from suffix so a channel with no
+# dedicated icon set can be routed to a fallback without duplicating
+# the app_name case block below. Each channel with its own
+# `crates/zed/resources/app-icon-<channel>{,@2x}.png` pair should
+# resolve to its own suffix here.
+icon_suffix="$suffix"
 
 # Resolve app/desktop names by channel
 case "$channel" in
