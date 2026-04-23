@@ -117,22 +117,33 @@ jobs:
           name: lathe-macos
           path: artifacts
 
-      - name: Unzip bundle
+      - name: Unzip bundle and resolve app path
+        # The zipped .app is named after the channel ("Lathe.app",
+        # "Lathe Beta.app", "Lathe Preview.app", ...). Rather than
+        # hardcoding the name per channel in every step, unzip and
+        # pick up whichever single .app landed in artifacts/app.
         run: |
           cd artifacts
           ZIP=$(ls Lathe-*.zip | head -1)
           echo "Unzipping $ZIP"
           unzip -q "$ZIP" -d ./app
           ls ./app
+          cd ..
+          APP_NAME=$(ls artifacts/app | grep '\.app$' | head -1)
+          if [ -z "$APP_NAME" ]; then
+            echo "FAIL: no .app bundle found in artifacts/app"
+            ls -la artifacts/app
+            exit 1
+          fi
+          echo "APP=artifacts/app/${APP_NAME}" >> "$GITHUB_ENV"
+          echo "Resolved APP=artifacts/app/${APP_NAME}"
 
       - name: Validate Info.plist is well-formed
         run: |
-          APP="artifacts/app/Lathe.app"
           plutil -lint "$APP/Contents/Info.plist"
 
       - name: Validate required Info.plist keys
         run: |
-          APP="artifacts/app/Lathe.app"
           set -e
           for key in CFBundleIdentifier CFBundleShortVersionString \
                     CFBundleDocumentTypes CFBundleURLTypes \
@@ -143,7 +154,6 @@ jobs:
 
       - name: Validate expected CFBundleTypeExtensions
         run: |
-          APP="artifacts/app/Lathe.app"
           PLIST="$APP/Contents/Info.plist"
           exts=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:1:CFBundleTypeExtensions" "$PLIST")
           # Canary extensions that should always be present. If a future
@@ -159,7 +169,7 @@ jobs:
         # its registration selector disappears from the binary, Finder's
         # "Open With" breaks silently at runtime.
         run: |
-          BIN="artifacts/app/Lathe.app/Contents/MacOS/zed"
+          BIN="$APP/Contents/MacOS/zed"
           strings "$BIN" | grep -q 'handleOpenDocumentsEvent:withReplyEvent:' \
             || { echo "MISSING selector: handleOpenDocumentsEvent:withReplyEvent:"; exit 1; }
           strings "$BIN" | grep -q 'handleGetURLEvent:withReplyEvent:' \
@@ -168,13 +178,11 @@ jobs:
 
       - name: Validate code signature
         run: |
-          APP="artifacts/app/Lathe.app"
           codesign --verify --verbose=2 "$APP"
           codesign --verify --deep --strict "$APP"
 
       - name: Validate notarization (stapled ticket)
         run: |
-          APP="artifacts/app/Lathe.app"
           xcrun stapler validate "$APP"
 
       - name: Smoke test launch
@@ -182,15 +190,16 @@ jobs:
         # Catches things like missing dylibs, dyld errors, and entitlement
         # mismatches that plist checks can't see.
         run: |
-          APP="artifacts/app/Lathe.app"
           # Strip quarantine so Gatekeeper doesn't block on first launch in
           # the sandboxed runner home.
           xattr -dr com.apple.quarantine "$APP" || true
           open -n "$APP"
           sleep 8
-          if pgrep -f "Lathe.app/Contents/MacOS/zed" > /dev/null; then
+          # Match the process by the Contents/MacOS/zed tail so the check
+          # is channel-agnostic (the parent .app name varies per channel).
+          if pgrep -f "Contents/MacOS/zed" > /dev/null; then
             echo "  ok: app launched and is running"
-            pkill -f "Lathe.app/Contents/MacOS/zed" || true
+            pkill -f "Contents/MacOS/zed" || true
           else
             echo "FAIL: app failed to launch or crashed on startup"
             ls -la ~/Library/Logs/DiagnosticReports 2>/dev/null || true
