@@ -248,11 +248,24 @@ jobs:
         id: version
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            version="${{ github.event.inputs.version }}"
           else
             version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=${version}" >> "$GITHUB_OUTPUT"
           fi
+          channel=$(<crates/zed/RELEASE_CHANNEL)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # Surface the channel in the workflow step summary so cutting a
+          # release off a branch that's still on an off-channel marker
+          # (e.g. beta) is visible at a glance, not a silent surprise.
+          {
+            echo "## Release dispatch"
+            echo ""
+            echo "- **Version:** \`${version}\`"
+            echo "- **Channel:** \`${channel}\`"
+            if [ "$channel" != "stable" ]; then
+              echo "- The created GitHub release will be flagged as **prerelease**."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -272,10 +285,23 @@ jobs:
           cp artifacts/lathe-macos/Lathe-*.dmg release-files/
           cp artifacts/lathe-linux/Lathe-*-linux.tar.gz release-files/
 
+          # Mark any non-stable channel as prerelease so the GitHub UI
+          # shows the prerelease badge and `gh release view --latest`
+          # skips beta/preview/nightly when pointing users at releases.
+          channel=$(<crates/zed/RELEASE_CHANNEL)
+          prerelease_flag=""
+          if [ "$channel" != "stable" ]; then
+            prerelease_flag="--prerelease"
+          fi
+
           if gh release view "$tag" 2>/dev/null; then
             gh release upload "$tag" release-files/* --clobber
+            if [ -n "$prerelease_flag" ]; then
+              gh release edit "$tag" --prerelease
+            fi
           else
             gh release create "$tag" release-files/* \
               --title "Lathe ${tag}" \
-              --generate-notes
+              --generate-notes \
+              $prerelease_flag
           fi
