@@ -2,24 +2,36 @@
 
 A customized code editor forked from [Zed](https://zed.dev), focused on better terminal workflows, visual git integration, and deep theme customization.
 
+Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks for my own workflow without waiting on upstream review, and without needing each change to fit Zed's product scope. Upstream Zed is the primary project — this fork tracks it closely and layers on my own changes.
+
+**Platforms:** macOS (Apple Silicon) and Linux (x86_64). Windows support is planned — upstream Zed builds on Windows, so it should be a manageable effort, but Lathe isn't yet built or tested there.
+
+**Stability:** Lathe is maintained for my own daily use. Upstream syncs can occasionally introduce breakage; bug reports are welcome.
+
 ## Features
 
-### Terminal awaiting-input indicator
-Shows a return icon in the terminal tab and title bar when Claude Code or other interactive prompts are waiting for input.
+### Custom theme and syntax highlighting
+Lathe ships with its own default theme and a refined syntax highlighting palette applied across all supported languages. The theme is tuned for long coding sessions — balanced contrast, distinct-but-not-loud accent colors for keywords, strings, and types, and deliberate choices for diagnostic and git-status colors so the editor stays readable when things go wrong. Pair it with the Theme Customizer (below) to tweak any of the 135+ color tokens to taste.
 
-![Awaiting Input Indicator](assets/screenshots/awaiting-input-indicator.gif)
+![Default Theme](assets/screenshots/default-theme-code.png)
+
+
+### Theme Customizer
+A built-in panel for editing all 135+ theme colors with HSLA sliders and live preview. Includes category filters, Lathe-specific color badges, and per-color reset. Open via the command palette: `theme customizer: Open`.
+
+![Command Palette](assets/screenshots/theme-customizer-command-palette.png)
+
+![Theme Customizer](assets/screenshots/theme-customizer.gif)
 
 ### Git-aware tab and panel styling
 Tabs and project panel entries are color-coded by git status — modified, created, deleted, conflict, error, and warning states each get distinct colors.
 
 ![Git Tab Styling](assets/screenshots/git-aware-editor-tabs.png)
 
-### Theme Customizer
-A built-in panel for editing all 135+ theme colors with HSLA sliders and live preview. Includes category filters, Lathe-specific color badges, and per-color reset. Open via the command palette: `theme customizer: Open`.
+### Terminal awaiting-input indicator
+Shows a return icon in the terminal tab and title bar when Claude Code or other interactive prompts are waiting for input.
 
-![Command Palette](assets/screenshots/theme-customizer-command-pallette.png)
-
-![Theme Customizer](assets/screenshots/theme-customizer.gif)
+![Awaiting Input Indicator](assets/screenshots/awaiting-input-indicator.gif)
 
 ### Active terminal tab tint
 Terminal tabs get a subtle green background when active, making them easy to spot among editor tabs.
@@ -58,7 +70,7 @@ brew install --cask lathe
 
 Download the latest release from [Releases](https://github.com/paterschris/lathe/releases):
 
-- **macOS**: Download the `.zip`, unzip, and drag **Lathe.app** to `/Applications`.
+- **macOS**: Download the `.dmg`, open it, and drag **Lathe.app** to `/Applications`. A `.zip` is also available if you prefer. macOS builds are code-signed and notarized by Apple.
 - **Linux**: Download the `.tar.gz` and extract it, or use the install script after building from source (see below).
 
 ### Build from source
@@ -83,6 +95,21 @@ script/install-fork-linux    # installs to ~/.local/share/lathe, symlinks CLI to
 ```
 
 Installs as **Lathe** and runs alongside stock Zed without conflicts.
+
+To run the build without installing to `/Applications`, launch the bundle directly:
+
+```sh
+open target/release/bundle/osx/Lathe.app
+```
+
+## Release channels
+
+Lathe ships on two channels:
+
+- **Stable** — tagged `vX.Y.Z`, the recommended build for daily use.
+- **Beta** — tagged `vX.Y.Z-beta`, published as GitHub prereleases with a distinct app icon. Beta builds typically contain the latest upstream Zed sync before it's rolled into stable.
+
+Homebrew installs stable by default. To try a beta, grab the `-beta` asset from [Releases](https://github.com/paterschris/lathe/releases).
 
 ## Updating
 
@@ -112,6 +139,22 @@ script/install-fork-linux
 ## Relationship to Zed
 
 Lathe periodically merges from [upstream Zed](https://github.com/zed-industries/zed) to stay current with new features and fixes. Custom changes are kept in separate commits to make merges straightforward.
+
+**Last synced with upstream Zed: 2026-04-22.**
+
+## License
+
+Lathe inherits its licensing from upstream Zed:
+
+- The application is licensed under the [GNU Affero General Public License v3.0](LICENSE-AGPL).
+- `gpui` and several foundational crates are licensed under the [GNU General Public License v3.0](LICENSE-GPL).
+- Other components are licensed under the [Apache License 2.0](LICENSE-APACHE).
+
+All upstream license terms are preserved. See the individual `LICENSE-*` files at the repo root.
+
+## Contributing
+
+Lathe is primarily a personal fork, but I want to preserve the open-source feel of Zed. If you hit a bug, want a tweak, or have an idea that fits the spirit of the fork, feel free to open an issue or PR. See [CONTRIBUTING.md](CONTRIBUTING.md) for the inherited Zed guidelines; Lathe-specific conventions live in [CLAUDE.md](CLAUDE.md) and `.rules`.
 
 ## Releasing
 
