@@ -157,32 +157,6 @@ impl MarkdownStyle {
             rule_color: colors.border,
             block_quote_border_color: colors.border,
             code_block_overflow_x_scroll: true,
-            heading_level_styles: Some(HeadingLevelStyles {
-                h1: Some(TextStyleRefinement {
-                    font_size: Some(rems(1.15).into()),
-                    ..Default::default()
-                }),
-                h2: Some(TextStyleRefinement {
-                    font_size: Some(rems(1.1).into()),
-                    ..Default::default()
-                }),
-                h3: Some(TextStyleRefinement {
-                    font_size: Some(rems(1.05).into()),
-                    ..Default::default()
-                }),
-                h4: Some(TextStyleRefinement {
-                    font_size: Some(rems(1.).into()),
-                    ..Default::default()
-                }),
-                h5: Some(TextStyleRefinement {
-                    font_size: Some(rems(0.95).into()),
-                    ..Default::default()
-                }),
-                h6: Some(TextStyleRefinement {
-                    font_size: Some(rems(0.875).into()),
-                    ..Default::default()
-                }),
-            }),
             code_block: StyleRefinement {
                 padding: EdgesRefinement {
                     top: Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(8.)))),
@@ -249,6 +223,7 @@ pub struct Markdown {
     source: SharedString,
     selection: Selection,
     pressed_link: Option<RenderedLink>,
+    pressed_footnote_ref: Option<RenderedFootnoteRef>,
     autoscroll_request: Option<usize>,
     active_root_block: Option<usize>,
     parsed_markdown: ParsedMarkdown,
@@ -262,6 +237,7 @@ pub struct Markdown {
     mermaid_state: MermaidState,
     copied_code_blocks: HashSet<ElementId>,
     code_block_scroll_handles: BTreeMap<usize, ScrollHandle>,
+    context_menu_link: Option<SharedString>,
     context_menu_selected_text: Option<String>,
     search_highlights: Vec<Range<usize>>,
     active_search_highlight: Option<usize>,
@@ -419,6 +395,7 @@ impl Markdown {
             source,
             selection: Selection::default(),
             pressed_link: None,
+            pressed_footnote_ref: None,
             autoscroll_request: None,
             active_root_block: None,
             should_reparse: false,
@@ -432,6 +409,7 @@ impl Markdown {
             mermaid_state: MermaidState::default(),
             copied_code_blocks: HashSet::default(),
             code_block_scroll_handles: BTreeMap::default(),
+            context_menu_link: None,
             context_menu_selected_text: None,
             search_highlights: Vec::new(),
             active_search_highlight: None,
@@ -530,6 +508,13 @@ impl Markdown {
     ) {
         self.autoscroll_request = Some(source_index);
         cx.refresh_windows();
+    }
+
+    fn footnote_definition_content_start(&self, label: &SharedString) -> Option<usize> {
+        self.parsed_markdown
+            .footnote_definitions
+            .get(label)
+            .copied()
     }
 
     pub fn set_active_root_for_source_index(
@@ -647,8 +632,16 @@ impl Markdown {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
-    fn capture_selection_for_context_menu(&mut self) {
+    fn capture_for_context_menu(&mut self, link: Option<SharedString>) {
         self.context_menu_selected_text = self.selected_text();
+        self.context_menu_link = link;
+    }
+
+    /// Returns the URL of the link that was most recently right-clicked, if any.
+    /// This is set during a right-click mouse-down event and can be read by parent
+    /// views to include a "Copy Link" item in their context menus.
+    pub fn context_menu_link(&self) -> Option<&SharedString> {
+        self.context_menu_link.as_ref()
     }
 
     fn parse(&mut self, cx: &mut Context<Self>) {
@@ -696,6 +689,7 @@ impl Markdown {
                         html_blocks: BTreeMap::default(),
                         mermaid_diagrams: BTreeMap::default(),
                         heading_slugs: HashMap::default(),
+                        footnote_definitions: HashMap::default(),
                     },
                     Default::default(),
                 );
@@ -709,6 +703,7 @@ impl Markdown {
             let root_block_starts = parsed.root_block_starts;
             let html_blocks = parsed.html_blocks;
             let heading_slugs = parsed.heading_slugs;
+            let footnote_definitions = parsed.footnote_definitions;
             let mermaid_diagrams = if should_render_mermaid_diagrams {
                 extract_mermaid_diagrams(&source, &events)
             } else {
@@ -776,6 +771,7 @@ impl Markdown {
                     html_blocks,
                     mermaid_diagrams,
                     heading_slugs,
+                    footnote_definitions,
                 },
                 images_by_source_offset,
             )
@@ -900,6 +896,7 @@ pub struct ParsedMarkdown {
     pub(crate) html_blocks: BTreeMap<usize, html::html_parser::ParsedHtmlBlock>,
     pub(crate) mermaid_diagrams: BTreeMap<usize, ParsedMarkdownMermaidDiagram>,
     pub heading_slugs: HashMap<SharedString, usize>,
+    pub footnote_definitions: HashMap<SharedString, usize>,
 }
 
 impl ParsedMarkdown {
@@ -1054,12 +1051,12 @@ impl MarkdownElement {
 
             image_container.child(
                 img(source)
+                    .id(("markdown-image", range.start))
                     .max_w_full()
                     .when_some(height, |this, height| this.h(height))
                     .when_some(width, |this, width| this.w(width)),
             )
         });
-        let _ = range;
     }
 
     fn push_markdown_paragraph(
@@ -1101,7 +1098,7 @@ impl MarkdownElement {
         text_align_override: Option<TextAlign>,
     ) {
         let align = text_align_override.unwrap_or(self.style.base_text_style.text_align);
-        let mut heading = div().mb_2();
+        let mut heading = div().mt_4().mb_2();
         heading = apply_heading_style(heading, level, self.style.heading_level_styles.as_ref());
 
         heading = match align {
@@ -1300,18 +1297,22 @@ impl MarkdownElement {
             return;
         }
 
-        let is_hovering_link = hitbox.is_hovered(window)
+        let is_hovering_clickable = hitbox.is_hovered(window)
             && !self.markdown.read(cx).selection.pending
             && rendered_text
-                .link_for_position(window.mouse_position())
-                .is_some();
+                .source_index_for_position(window.mouse_position())
+                .ok()
+                .is_some_and(|source_index| {
+                    rendered_text.link_for_source_index(source_index).is_some()
+                        || rendered_text
+                            .footnote_ref_for_source_index(source_index)
+                            .is_some()
+                });
 
-        if !self.style.prevent_mouse_interaction {
-            if is_hovering_link {
-                window.set_cursor_style(CursorStyle::PointingHand, hitbox);
-            } else {
-                window.set_cursor_style(CursorStyle::IBeam, hitbox);
-            }
+        if is_hovering_clickable {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        } else {
+            window.set_cursor_style(CursorStyle::IBeam, hitbox);
         }
 
         let on_open_url = self.on_url_click.take();
@@ -1319,13 +1320,18 @@ impl MarkdownElement {
 
         self.on_mouse_event(window, cx, {
             let hitbox = hitbox.clone();
-            move |markdown, event: &MouseDownEvent, phase, window, _| {
+            let rendered_text = rendered_text.clone();
+            move |markdown, event: &MouseDownEvent, phase, window, _cx| {
                 if phase.capture()
                     && event.button == MouseButton::Right
                     && hitbox.is_hovered(window)
                 {
-                    // Capture selected text so it survives until menu item is clicked
-                    markdown.capture_selection_for_context_menu();
+                    let link = rendered_text
+                        .source_index_for_position(event.position)
+                        .ok()
+                        .and_then(|ix| rendered_text.link_for_source_index(ix))
+                        .map(|link| link.destination_url.clone());
+                    markdown.capture_for_context_menu(link);
                 }
             }
         });
@@ -1335,14 +1341,28 @@ impl MarkdownElement {
             let hitbox = hitbox.clone();
             move |markdown, event: &MouseDownEvent, phase, window, cx| {
                 if hitbox.is_hovered(window) {
-                    if phase.bubble() {
-                        if let Some(link) = rendered_text.link_for_position(event.position) {
-                            markdown.pressed_link = Some(link.clone());
-                        } else {
-                            let source_index =
-                                match rendered_text.source_index_for_position(event.position) {
-                                    Ok(ix) | Err(ix) => ix,
-                                };
+                    if phase.bubble() && event.button != MouseButton::Right {
+                        let position_result =
+                            rendered_text.source_index_for_position(event.position);
+
+                        if let Ok(source_index) = position_result {
+                            if let Some(footnote_ref) =
+                                rendered_text.footnote_ref_for_source_index(source_index)
+                            {
+                                markdown.pressed_footnote_ref = Some(footnote_ref.clone());
+                            } else if let Some(link) =
+                                rendered_text.link_for_source_index(source_index)
+                            {
+                                markdown.pressed_link = Some(link.clone());
+                            }
+                        }
+
+                        if markdown.pressed_footnote_ref.is_none()
+                            && markdown.pressed_link.is_none()
+                        {
+                            let source_index = match position_result {
+                                Ok(ix) | Err(ix) => ix,
+                            };
                             if let Some(handler) = on_source_click.as_ref() {
                                 let blocked = handler(source_index, event.click_count, window, cx);
                                 if blocked {
@@ -1398,7 +1418,7 @@ impl MarkdownElement {
         self.on_mouse_event(window, cx, {
             let rendered_text = rendered_text.clone();
             let hitbox = hitbox.clone();
-            let was_hovering_link = is_hovering_link;
+            let was_hovering_clickable = is_hovering_clickable;
             move |markdown, event: &MouseMoveEvent, phase, window, cx| {
                 if phase.capture() {
                     return;
@@ -1414,9 +1434,17 @@ impl MarkdownElement {
                     markdown.autoscroll_request = Some(source_index);
                     cx.notify();
                 } else {
-                    let is_hovering_link = hitbox.is_hovered(window)
-                        && rendered_text.link_for_position(event.position).is_some();
-                    if is_hovering_link != was_hovering_link {
+                    let is_hovering_clickable = hitbox.is_hovered(window)
+                        && rendered_text
+                            .source_index_for_position(event.position)
+                            .ok()
+                            .is_some_and(|source_index| {
+                                rendered_text.link_for_source_index(source_index).is_some()
+                                    || rendered_text
+                                        .footnote_ref_for_source_index(source_index)
+                                        .is_some()
+                            });
+                    if is_hovering_clickable != was_hovering_clickable {
                         cx.notify();
                     }
                 }
@@ -1426,8 +1454,21 @@ impl MarkdownElement {
             let rendered_text = rendered_text.clone();
             move |markdown, event: &MouseUpEvent, phase, window, cx| {
                 if phase.bubble() {
-                    if let Some(pressed_link) = markdown.pressed_link.take()
-                        && Some(&pressed_link) == rendered_text.link_for_position(event.position)
+                    let source_index = rendered_text.source_index_for_position(event.position).ok();
+                    if let Some(pressed_footnote_ref) = markdown.pressed_footnote_ref.take()
+                        && source_index
+                            .and_then(|ix| rendered_text.footnote_ref_for_source_index(ix))
+                            == Some(&pressed_footnote_ref)
+                    {
+                        if let Some(source_index) =
+                            markdown.footnote_definition_content_start(&pressed_footnote_ref.label)
+                        {
+                            markdown.autoscroll_request = Some(source_index);
+                            cx.notify();
+                        }
+                    } else if let Some(pressed_link) = markdown.pressed_link.take()
+                        && source_index.and_then(|ix| rendered_text.link_for_source_index(ix))
+                            == Some(&pressed_link)
                     {
                         if let Some(open_url) = on_open_url.as_ref() {
                             open_url(pressed_link.destination_url, window, cx);
@@ -1818,6 +1859,36 @@ impl Element for MarkdownElement {
                                 builder.push_text_style(style)
                             }
                         }
+                        MarkdownTag::FootnoteDefinition(label) => {
+                            if !builder.rendered_footnote_separator {
+                                builder.rendered_footnote_separator = true;
+                                builder.push_div(
+                                    div()
+                                        .border_t_1()
+                                        .mt_2()
+                                        .border_color(self.style.rule_color),
+                                    range,
+                                    markdown_end,
+                                );
+                                builder.pop_div();
+                            }
+                            builder.push_div(
+                                div()
+                                    .pt_1()
+                                    .mb_1()
+                                    .line_height(rems(1.3))
+                                    .text_size(rems(0.85))
+                                    .h_flex()
+                                    .items_start()
+                                    .gap_2()
+                                    .child(
+                                        div().text_size(rems(0.85)).child(format!("{}.", label)),
+                                    ),
+                                range,
+                                markdown_end,
+                            );
+                            builder.push_div(div().flex_1().w_0(), range, markdown_end);
+                        }
                         MarkdownTag::MetadataBlock(_) => {}
                         MarkdownTag::Table(alignments) => {
                             builder.table.start(alignments.clone());
@@ -1973,6 +2044,10 @@ impl Element for MarkdownElement {
                         builder.pop_div();
                         builder.table.end_cell();
                     }
+                    MarkdownTagEnd::FootnoteDefinition => {
+                        builder.pop_div();
+                        builder.pop_div();
+                    }
                     _ => log::debug!("unsupported markdown tag end: {:?}", tag),
                 },
                 MarkdownEvent::Text => {
@@ -2028,7 +2103,12 @@ impl Element for MarkdownElement {
                 MarkdownEvent::TaskListMarker(_) => {
                     // handled inside the `MarkdownTag::Item` case
                 }
-                _ => log::debug!("unsupported markdown event {:?}", event),
+                MarkdownEvent::FootnoteReference(label) => {
+                    builder.push_footnote_ref(label.clone(), range.clone());
+                    builder.push_text_style(self.style.link.clone());
+                    builder.push_text(&format!("[{label}]"), range.clone());
+                    builder.pop_text_style();
+                }
             }
         }
         if self.style.code_block_overflow_x_scroll {
@@ -2270,8 +2350,10 @@ struct MarkdownElementBuilder {
     rendered_lines: Vec<RenderedLine>,
     pending_line: PendingLine,
     rendered_links: Vec<RenderedLink>,
+    rendered_footnote_refs: Vec<RenderedFootnoteRef>,
     current_source_index: usize,
     html_comment: bool,
+    rendered_footnote_separator: bool,
     base_text_style: TextStyle,
     text_style_stack: Vec<TextStyleRefinement>,
     code_block_stack: Vec<Option<Arc<Language>>>,
@@ -2306,8 +2388,10 @@ impl MarkdownElementBuilder {
             rendered_lines: Vec::new(),
             pending_line: PendingLine::default(),
             rendered_links: Vec::new(),
+            rendered_footnote_refs: Vec::new(),
             current_source_index: 0,
             html_comment: false,
+            rendered_footnote_separator: false,
             base_text_style,
             text_style_stack: Vec::new(),
             code_block_stack: Vec::new(),
@@ -2459,6 +2543,13 @@ impl MarkdownElementBuilder {
         });
     }
 
+    fn push_footnote_ref(&mut self, label: SharedString, source_range: Range<usize>) {
+        self.rendered_footnote_refs.push(RenderedFootnoteRef {
+            source_range,
+            label,
+        });
+    }
+
     fn push_text(&mut self, text: &str, source_range: Range<usize>) {
         self.pending_line.source_mappings.push(SourceMapping {
             rendered_index: self.pending_line.text.len(),
@@ -2576,6 +2667,7 @@ impl MarkdownElementBuilder {
             text: RenderedText {
                 lines: self.rendered_lines.into(),
                 links: self.rendered_links.into(),
+                footnote_refs: self.rendered_footnote_refs.into(),
             },
         }
     }
@@ -2690,12 +2782,19 @@ pub struct RenderedMarkdown {
 struct RenderedText {
     lines: Rc<[RenderedLine]>,
     links: Rc<[RenderedLink]>,
+    footnote_refs: Rc<[RenderedFootnoteRef]>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct RenderedLink {
     source_range: Range<usize>,
     destination_url: SharedString,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RenderedFootnoteRef {
+    source_range: Range<usize>,
+    label: SharedString,
 }
 
 impl RenderedText {
@@ -2844,11 +2943,16 @@ impl RenderedText {
         accumulator
     }
 
-    fn link_for_position(&self, position: Point<Pixels>) -> Option<&RenderedLink> {
-        let source_index = self.source_index_for_position(position).ok()?;
+    fn link_for_source_index(&self, source_index: usize) -> Option<&RenderedLink> {
         self.links
             .iter()
             .find(|link| link.source_range.contains(&source_index))
+    }
+
+    fn footnote_ref_for_source_index(&self, source_index: usize) -> Option<&RenderedFootnoteRef> {
+        self.footnote_refs
+            .iter()
+            .find(|fref| fref.source_range.contains(&source_index))
     }
 }
 
@@ -3401,6 +3505,90 @@ mod tests {
         assert!(!has_code_block(&Markdown::escape(diagnostic)));
     }
 
+    #[gpui::test]
+    fn test_link_detected_for_source_index(cx: &mut TestAppContext) {
+        let rendered = render_markdown("[Click here](https://example.com)", cx);
+
+        assert_eq!(rendered.links.len(), 1);
+        assert_eq!(rendered.links[0].destination_url, "https://example.com");
+
+        // Source index 1 ('C' in "Click") is inside the link's source range
+        let link = rendered.link_for_source_index(1);
+        assert!(link.is_some());
+        assert_eq!(link.unwrap().destination_url, "https://example.com");
+
+        // A source index past the end of the link range returns None
+        let past_end = rendered.links[0].source_range.end;
+        assert!(rendered.link_for_source_index(past_end).is_none());
+    }
+
+    #[gpui::test]
+    fn test_link_for_source_index_ignores_plain_text(cx: &mut TestAppContext) {
+        let rendered = render_markdown("Hello world", cx);
+
+        assert!(rendered.links.is_empty());
+        assert!(rendered.link_for_source_index(0).is_none());
+        assert!(rendered.link_for_source_index(5).is_none());
+    }
+
+    #[gpui::test]
+    fn test_context_menu_link_initial_state(cx: &mut TestAppContext) {
+        struct TestWindow;
+        impl Render for TestWindow {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let markdown =
+            cx.new(|cx| Markdown::new("Hello [world](https://example.com)".into(), None, None, cx));
+        cx.run_until_parked();
+
+        cx.update(|_window, cx| {
+            assert!(markdown.read(cx).context_menu_link().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn test_capture_for_context_menu(cx: &mut TestAppContext) {
+        struct TestWindow;
+        impl Render for TestWindow {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let markdown = cx.new(|cx| Markdown::new("text".into(), None, None, cx));
+        cx.run_until_parked();
+
+        // Simulates right-clicking on a link
+        let url: SharedString = "https://example.com".into();
+        markdown.update(cx, |md, _cx| {
+            md.capture_for_context_menu(Some(url.clone()));
+        });
+        cx.update(|_window, cx| {
+            assert_eq!(
+                markdown
+                    .read(cx)
+                    .context_menu_link()
+                    .map(SharedString::as_ref),
+                Some("https://example.com")
+            );
+        });
+
+        // Simulates right-clicking on plain text — link is cleared
+        markdown.update(cx, |md, _cx| {
+            md.capture_for_context_menu(None);
+        });
+        cx.update(|_window, cx| {
+            assert!(markdown.read(cx).context_menu_link().is_none());
+        });
+    }
+
     #[track_caller]
     fn assert_mappings(rendered: &RenderedText, expected: Vec<Vec<(usize, usize)>>) {
         assert_eq!(rendered.lines.len(), expected.len(), "line count mismatch");
@@ -3435,5 +3623,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[gpui::test]
+    fn test_heading_font_sizes_are_distinct(cx: &mut TestAppContext) {
+        let rendered = render_markdown("# H1\n\n## H2\n\n### H3\n\nBody text", cx);
+
+        assert!(
+            rendered.lines.len() >= 4,
+            "expected at least 4 rendered lines, got {}",
+            rendered.lines.len()
+        );
+
+        let h1_line_height = rendered.lines[0].layout.line_height();
+        let h2_line_height = rendered.lines[1].layout.line_height();
+        let h3_line_height = rendered.lines[2].layout.line_height();
+        let body_line_height = rendered.lines[3].layout.line_height();
+
+        assert!(
+            h1_line_height > h2_line_height,
+            "H1 line height ({h1_line_height:?}) should be greater than H2 ({h2_line_height:?})"
+        );
+        assert!(
+            h2_line_height > h3_line_height,
+            "H2 line height ({h2_line_height:?}) should be greater than H3 ({h3_line_height:?})"
+        );
+        assert!(
+            h3_line_height > body_line_height,
+            "H3 line height ({h3_line_height:?}) should be greater than body text ({body_line_height:?})"
+        );
     }
 }
