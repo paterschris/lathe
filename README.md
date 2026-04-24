@@ -142,6 +142,13 @@ Lathe periodically merges from [upstream Zed](https://github.com/zed-industries/
 
 **Last synced with upstream Zed: 2026-04-22.**
 
+> **2026-04-24:** `main` was rewritten to fix a long-standing ancestry tangle that made the fork display as ~37k commits ahead and ~37k behind upstream. The new history is 9 thematic commits on top of `upstream/main`, and the source tree is unchanged. Original SHAs are preserved on the `archive/pre-rebuild-20260424` branch. Existing clones can recover with:
+>
+> ```sh
+> git fetch origin
+> git reset --hard origin/main
+> ```
+
 ## License
 
 Lathe inherits its licensing from upstream Zed:
