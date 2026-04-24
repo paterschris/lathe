@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Check for gh CLI
+if ! command -v gh &>/dev/null; then
+    echo "Error: GitHub CLI (gh) is required. Install via: brew install gh"
+    exit 1
+fi
+
+# Build, then package
+echo "=== Step 1: Build ==="
+script/build-fork
+
+echo ""
+echo "=== Step 2: Package ==="
+script/package-fork
+
+# Get version and zip path
+version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+
+case "$target_triple" in
+    aarch64-*) arch="aarch64" ;;
+    x86_64-*) arch="x86_64" ;;
+    *) arch="$target_triple" ;;
+esac
+
+zip_path="target/release/Lathe-${version}-${arch}-macos.zip"
+tag="v${version}"
+repo="paterschris/lathe"
+
+echo ""
+echo "=== Step 3: Release ==="
+
+# Check if release already exists
+if gh release view "$tag" --repo "$repo" &>/dev/null; then
+    echo "Release ${tag} already exists. Uploading asset to it..."
+    gh release upload "$tag" "$zip_path" --clobber --repo "$repo"
+else
+    echo "Creating release ${tag}..."
+    gh release create "$tag" "$zip_path" \
+        --title "Lathe ${tag}" \
+        --notes "Lathe ${tag} for macOS (${arch})" \
+        --target main \
+        --repo "$repo"
+fi
+
+echo ""
+echo "=== Done ==="
+echo "  https://github.com/$repo/releases/tag/${tag}"

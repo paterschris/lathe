@@ -1,4 +1,4 @@
-//! Provides constructs for the Zed app version and release channel.
+//! Provides constructs for the Lathe app version and release channel.
 
 #![deny(missing_docs)]
 
@@ -7,7 +7,7 @@ use std::{env, str::FromStr, sync::LazyLock};
 use gpui::{App, Global};
 use semver::Version;
 
-/// stable | dev | nightly | preview
+/// stable | dev | nightly | preview | beta
 pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
     if cfg!(debug_assertions) {
         env::var("ZED_RELEASE_CHANNEL")
@@ -28,14 +28,15 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
     match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed-Editor-Dev",
-        ReleaseChannel::Nightly => "Zed-Editor-Nightly",
-        ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        ReleaseChannel::Dev => "Lathe-Editor-Dev",
+        ReleaseChannel::Nightly => "Lathe-Editor-Nightly",
+        ReleaseChannel::Preview => "Lathe-Editor-Preview",
+        ReleaseChannel::Beta => "Lathe-Editor-Beta",
+        ReleaseChannel::Stable => "Lathe-Editor-Stable",
     }
 }
 
-/// The Git commit SHA that Zed was built at.
+/// The Git commit SHA that Lathe was built at.
 #[derive(Clone, Eq, Debug, PartialEq)]
 pub struct AppCommitSha(String);
 
@@ -75,7 +76,7 @@ struct GlobalAppVersion(Version);
 
 impl Global for GlobalAppVersion {}
 
-/// The version of Zed.
+/// The version of Lathe.
 pub struct AppVersion;
 
 impl AppVersion {
@@ -118,12 +119,12 @@ impl AppVersion {
     }
 }
 
-/// A Zed release channel.
+/// A Lathe release channel.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum ReleaseChannel {
     /// The development release channel.
     ///
-    /// Used for local debug builds of Zed.
+    /// Used for local debug builds of Lathe.
     #[default]
     Dev,
 
@@ -132,6 +133,13 @@ pub enum ReleaseChannel {
 
     /// The Preview release channel.
     Preview,
+
+    /// The Beta release channel.
+    ///
+    /// Distributed out-of-band (not via homebrew or the standard install
+    /// scripts). Auto-updates from a separate feed when `LATHE_BETA_UPDATE_URL`
+    /// is set at build time, otherwise auto-update is a no-op.
+    Beta,
 
     /// The Stable release channel.
     Stable,
@@ -181,10 +189,11 @@ impl ReleaseChannel {
     /// Returns the display name for this [`ReleaseChannel`].
     pub fn display_name(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "Zed Dev",
-            ReleaseChannel::Nightly => "Zed Nightly",
-            ReleaseChannel::Preview => "Zed Preview",
-            ReleaseChannel::Stable => "Zed",
+            ReleaseChannel::Dev => "Lathe Dev",
+            ReleaseChannel::Nightly => "Lathe Nightly",
+            ReleaseChannel::Preview => "Lathe Preview",
+            ReleaseChannel::Beta => "Lathe Beta",
+            ReleaseChannel::Stable => "Lathe",
         }
     }
 
@@ -194,19 +203,21 @@ impl ReleaseChannel {
             ReleaseChannel::Dev => "dev",
             ReleaseChannel::Nightly => "nightly",
             ReleaseChannel::Preview => "preview",
+            ReleaseChannel::Beta => "beta",
             ReleaseChannel::Stable => "stable",
         }
     }
 
     /// Returns the application ID that's used by Wayland as application ID
     /// and WM_CLASS on X11.
-    /// This also has to match the bundle identifier for Zed on macOS.
+    /// This also has to match the bundle identifier for Lathe on macOS.
     pub fn app_id(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "dev.zed.Zed-Dev",
-            ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
-            ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
+            ReleaseChannel::Dev => "dev.lathe.lathe-Dev",
+            ReleaseChannel::Nightly => "dev.lathe.lathe-Nightly",
+            ReleaseChannel::Preview => "dev.lathe.lathe-Preview",
+            ReleaseChannel::Beta => "dev.lathe.lathe-Beta",
+            ReleaseChannel::Stable => "dev.lathe.lathe",
         }
     }
 
@@ -216,6 +227,7 @@ impl ReleaseChannel {
             Self::Dev => None,
             Self::Nightly => Some("nightly=1"),
             Self::Preview => Some("preview=1"),
+            Self::Beta => Some("beta=1"),
             Self::Stable => None,
         }
     }
@@ -233,6 +245,7 @@ impl FromStr for ReleaseChannel {
             "dev" => ReleaseChannel::Dev,
             "nightly" => ReleaseChannel::Nightly,
             "preview" => ReleaseChannel::Preview,
+            "beta" => ReleaseChannel::Beta,
             "stable" => ReleaseChannel::Stable,
             _ => return Err(InvalidReleaseChannel),
         })

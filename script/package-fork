@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Determine architecture
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+
+channel=$(<crates/zed/RELEASE_CHANNEL)
+
+# Resolve app name from channel
+case "$channel" in
+    stable) app_name="Lathe.app" ;;
+    preview) app_name="Lathe Preview.app" ;;
+    beta) app_name="Lathe Beta.app" ;;
+    nightly) app_name="Lathe Nightly.app" ;;
+    dev) app_name="Lathe Dev.app" ;;
+    *) app_name="Lathe Dev.app" ;;
+esac
+
+# Find the bundle
+bundle_dir="target/${target_triple}/release/bundle/osx"
+app_path="${bundle_dir}/${app_name}"
+
+if [ ! -d "$app_path" ]; then
+    bundle_dir="target/release/bundle/osx"
+    app_path="${bundle_dir}/${app_name}"
+fi
+
+if [ ! -d "$app_path" ]; then
+    echo "Error: App bundle not found. Run 'script/build-fork' first."
+    exit 1
+fi
+
+# Get version from Cargo.toml
+version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+# Determine arch label
+case "$target_triple" in
+    aarch64-*) arch="aarch64" ;;
+    x86_64-*) arch="x86_64" ;;
+    *) arch="$target_triple" ;;
+esac
+
+zip_name="Lathe-${version}-${arch}-macos.zip"
+out_dir="target/release"
+
+signing_identity="Developer ID Application: Chris Paterson (Z2DJF8UWJG)"
+notarize_profile="lathe-notarize"
+
+echo "=== Packaging ${app_name} ==="
+echo "  Version: ${version}"
+echo "  Arch: ${arch}"
+
+# Check if signing identity is available
+can_sign=false
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$signing_identity"; then
+    can_sign=true
+elif [ "${LATHE_REQUIRE_SIGNING:-}" = "1" ]; then
+    echo "ERROR: Signing required (LATHE_REQUIRE_SIGNING=1) but identity not found:"
+    echo "  Expected: ${signing_identity}"
+    echo "  Available identities:"
+    security find-identity -v -p codesigning 2>/dev/null || echo "    (none)"
+    exit 1
+fi
+
+if $can_sign; then
+    # Sign the app bundle (inside-out, as Apple recommends)
+    echo ""
+    echo "--- Signing ---"
+
+    # Sign nested frameworks and dylibs first (no entitlements for these)
+    if [ -d "$app_path/Contents/Frameworks" ] || [ -d "$app_path/Contents/MacOS/WebRTC.framework" ]; then
+        find "$app_path/Contents/Frameworks" "$app_path/Contents/MacOS/WebRTC.framework" \
+            -type f \( -name "*.dylib" -o -name "*.so" -o -perm +111 \) \
+            2>/dev/null | while read -r lib; do
+            codesign --force --options runtime \
+                --sign "$signing_identity" "$lib" 2>/dev/null || true
+        done
+    fi
+
+    # Sign any nested .app or .framework bundles
+    find "$app_path" -depth \( -name "*.framework" -o -name "*.app" \) -not -path "$app_path" -print0 2>/dev/null | while IFS= read -r -d '' bundle; do
+        codesign --force --options runtime \
+            --sign "$signing_identity" "$bundle" 2>/dev/null || true
+    done
+
+    # Sign the main binary with entitlements (must be last)
+    codesign --force --options runtime \
+        --entitlements crates/zed/resources/zed.entitlements \
+        --sign "$signing_identity" "$app_path"
+    echo "  Signed with: ${signing_identity}"
+
+    # Verify the signature and entitlements
+    echo ""
+    echo "--- Verifying signature ---"
+    codesign --verify --deep --strict "$app_path"
+    echo "  Signature valid"
+    codesign -d --entitlements - "$app_path" 2>&1 | grep -q "allow-jit" || {
+        echo "ERROR: JIT entitlement missing from signed binary"
+        exit 1
+    }
+    echo "  JIT entitlement confirmed"
+else
+    echo ""
+    echo "--- Signing skipped (identity not found in keychain) ---"
+fi
+
+# Create zip using ditto (preserves macOS metadata and code signatures)
+ditto -c -k --keepParent "$app_path" "${out_dir}/${zip_name}"
+
+if $can_sign; then
+    # Notarize the zip
+    echo ""
+    echo "--- Notarizing ---"
+    xcrun notarytool submit "${out_dir}/${zip_name}" --keychain-profile "$notarize_profile" --wait
+    echo "  Notarization complete"
+
+    # Staple the ticket to the app
+    xcrun stapler staple "$app_path"
+    echo "  Stapled notarization ticket"
+
+    # Re-zip with the stapled ticket
+    ditto -c -k --keepParent "$app_path" "${out_dir}/${zip_name}"
+
+    echo ""
+    echo "=== Zip created (signed + notarized) ==="
+else
+    echo ""
+    echo "=== Zip created (unsigned) ==="
+fi
+echo "  ${out_dir}/${zip_name}"
+
+# Create a DMG alongside the zip. The zip is consumed by Homebrew; the DMG
+# is what the in-app auto-updater expects on macOS (see auto_update.rs's
+# install_release_macos which mounts via hdiutil). We produce both so a
+# single release serves both install paths.
+dmg_name="Lathe-${version}-${arch}-macos.dmg"
+echo ""
+echo "--- Creating DMG ---"
+rm -f "${out_dir}/${dmg_name}"
+hdiutil create \
+    -srcfolder "$app_path" \
+    -volname "$(basename "$app_path" .app)" \
+    -fs HFS+ \
+    -format UDZO \
+    -imagekey zlib-level=9 \
+    "${out_dir}/${dmg_name}"
+echo "  ${out_dir}/${dmg_name}"
+
+if $can_sign; then
+    echo ""
+    echo "--- Signing and notarizing DMG ---"
+    codesign --force --sign "$signing_identity" --timestamp "${out_dir}/${dmg_name}"
+    xcrun notarytool submit "${out_dir}/${dmg_name}" --keychain-profile "$notarize_profile" --wait
+    xcrun stapler staple "${out_dir}/${dmg_name}"
+    echo "  DMG signed + notarized + stapled"
+fi
+
+echo ""
+echo "To create a GitHub release:"
+echo "  gh release create v${version} \\"
+echo "    \"${out_dir}/${zip_name}\" \"${out_dir}/${dmg_name}\" \\"
+echo "    --title \"Lathe v${version}\" --notes \"Release v${version}\""

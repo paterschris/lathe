@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Determine architecture
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+
+channel=$(<crates/zed/RELEASE_CHANNEL)
+target_dir="${CARGO_TARGET_DIR:-target}"
+
+# Get version from Cargo.toml
+version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+# Determine arch label
+arch=$(uname -m)
+
+suffix=""
+if [ "$channel" != "stable" ]; then
+    suffix="-$channel"
+fi
+# icon_suffix tracked separately from suffix so a channel with no
+# dedicated icon set can be routed to a fallback without duplicating
+# the app_name case block below. Each channel with its own
+# `crates/zed/resources/app-icon-<channel>{,@2x}.png` pair should
+# resolve to its own suffix here.
+icon_suffix="$suffix"
+
+# Resolve app/desktop names by channel
+case "$channel" in
+    stable)
+        app_name="Lathe"
+        app_id="dev.lathe.Lathe"
+        ;;
+    preview)
+        app_name="Lathe Preview"
+        app_id="dev.lathe.Lathe-Preview"
+        ;;
+    beta)
+        app_name="Lathe Beta"
+        app_id="dev.lathe.Lathe-Beta"
+        ;;
+    nightly)
+        app_name="Lathe Nightly"
+        app_id="dev.lathe.Lathe-Nightly"
+        ;;
+    *)
+        app_name="Lathe Dev"
+        app_id="dev.lathe.Lathe-Dev"
+        ;;
+esac
+
+echo "=== Packaging ${app_name} (Linux) ==="
+echo "  Version: ${version}"
+echo "  Arch: ${arch}"
+echo "  Channel: ${channel}"
+
+# Verify binaries exist
+zed_binary="${target_dir}/${target_triple}/release/zed"
+cli_binary="${target_dir}/${target_triple}/release/cli"
+
+if [ ! -f "$zed_binary" ]; then
+    zed_binary="${target_dir}/release/zed"
+    cli_binary="${target_dir}/release/cli"
+fi
+
+if [ ! -f "$zed_binary" ]; then
+    echo "Error: zed binary not found. Run 'script/build-fork-linux' first."
+    exit 1
+fi
+
+# Strip debug symbols
+echo ""
+echo "--- Stripping debug symbols ---"
+strip_cmd="llvm-objcopy"
+if ! command -v llvm-objcopy &>/dev/null; then
+    strip_cmd="strip"
+fi
+$strip_cmd --strip-debug "$zed_binary"
+$strip_cmd --strip-debug "$cli_binary"
+
+# Assemble the app directory
+temp_dir=$(mktemp -d)
+trap 'rm -rf "$temp_dir"' EXIT
+
+app_dir="${temp_dir}/lathe${suffix}.app"
+
+# Binary
+mkdir -p "${app_dir}/bin" "${app_dir}/libexec"
+cp "$zed_binary" "${app_dir}/libexec/lathe-editor"
+cp "$cli_binary" "${app_dir}/bin/lathe"
+
+# Bundle shared libraries
+echo "--- Bundling shared libraries ---"
+mkdir -p "${app_dir}/lib"
+ldd "$zed_binary" | \
+    cut -d' ' -f3 | \
+    grep -v '\<\(libstdc++.so\|libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' | \
+    while read -r lib; do
+        if [ -f "$lib" ]; then
+            cp "$lib" "${app_dir}/lib/"
+        fi
+    done
+
+# Icons
+echo "--- Copying icons ---"
+mkdir -p "${app_dir}/share/icons/hicolor/512x512/apps"
+cp "crates/zed/resources/app-icon${icon_suffix}.png" "${app_dir}/share/icons/hicolor/512x512/apps/lathe.png"
+mkdir -p "${app_dir}/share/icons/hicolor/1024x1024/apps"
+cp "crates/zed/resources/app-icon${icon_suffix}@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/lathe.png"
+
+# .desktop file
+echo "--- Creating .desktop entry ---"
+export DO_STARTUP_NOTIFY="true"
+export APP_CLI="lathe"
+export APP_ICON="lathe"
+export APP_ARGS="%U"
+export APP_NAME="$app_name"
+
+mkdir -p "${app_dir}/share/applications"
+envsubst < "crates/zed/resources/lathe.desktop.in" > "${app_dir}/share/applications/${app_id}.desktop"
+chmod +x "${app_dir}/share/applications/${app_id}.desktop"
+
+# Licenses (if generated)
+if [ -f "assets/licenses.md" ]; then
+    cp "assets/licenses.md" "${app_dir}/licenses.md"
+fi
+
+# Create archive
+archive_name="Lathe-${version}-${arch}-linux.tar.gz"
+out_dir="${target_dir}/release"
+mkdir -p "$out_dir"
+
+echo "--- Creating archive ---"
+tar -czvf "${out_dir}/${archive_name}" -C "$temp_dir" "lathe${suffix}.app"
+
+echo ""
+echo "=== Package created ==="
+echo "  ${out_dir}/${archive_name}"
+echo ""
+echo "To create a GitHub release:"
+echo "  gh release create v${version} \"${out_dir}/${archive_name}\" --title \"Lathe v${version}\" --notes \"Release v${version}\""

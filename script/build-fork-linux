@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+echo "=== Building Lathe (Linux) ==="
+
+# --- Prerequisites ---
+
+# 1. System dependencies (apt, dnf, pacman, etc.)
+if [ -f script/linux ]; then
+    echo "Installing Linux system dependencies..."
+    script/linux
+fi
+
+# 2. Rust toolchain — install or repair from scratch if needed
+install_rust() {
+    echo "Installing Rust via rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    if [ -f "$HOME/.cargo/env" ]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+    elif [ -d "$HOME/.cargo/bin" ]; then
+        export PATH="$HOME/.cargo/bin:$PATH"
+    fi
+}
+
+# Ensure cargo/rustc are on PATH from any prior install
+if [ -f "$HOME/.cargo/env" ]; then
+    # shellcheck disable=SC1091
+    source "$HOME/.cargo/env"
+elif [ -d "$HOME/.cargo/bin" ]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+fi
+
+if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+    if command -v rustup &>/dev/null; then
+        cargo_bin=$(rustup which cargo 2>/dev/null || true)
+        if [ -n "$cargo_bin" ]; then
+            export PATH="$(dirname "$cargo_bin"):$PATH"
+        else
+            rustup toolchain install stable
+            cargo_bin=$(rustup which cargo 2>/dev/null || true)
+            if [ -n "$cargo_bin" ]; then
+                export PATH="$(dirname "$cargo_bin"):$PATH"
+            else
+                install_rust
+            fi
+        fi
+    else
+        install_rust
+    fi
+fi
+
+# Final check
+if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+    echo "Error: Failed to install Rust. Please install manually:"
+    echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    exit 1
+fi
+
+export ZED_BUNDLE=true
+export CC=${CC:-$(which clang)}
+
+# Determine architecture
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+
+echo "Target: $target_triple"
+
+# Use lld on aarch64 for libwebrtc linking, set rpath for bundled libs
+if [[ "$(uname -m)" == "aarch64" ]]; then
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=lld -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
+else
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
+fi
+
+echo "Building release binary..."
+cargo build --release --target "${target_triple}" --package zed --package cli
+
+echo ""
+echo "=== Build complete ==="
+echo "  Binary: target/${target_triple}/release/zed"
+echo "  CLI:    target/${target_triple}/release/cli"
+echo ""
+echo "To package: script/package-fork-linux"

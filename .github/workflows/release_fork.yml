@@ -1,0 +1,316 @@
+name: Release Lathe
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.1.0). Leave blank to use Cargo.toml version."
+        required: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Import code signing certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+
+          # Decode certificate
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+
+          # Create temporary keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          # Allow codesign to access the keychain without prompting
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Add to keychain search list (prepend so it's found first)
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          # Clean up certificate file
+          rm -f "$RUNNER_TEMP/certificate.p12"
+
+      - name: Set up notarization credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "lathe-notarize" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD"
+
+      - name: Build
+        env:
+          # Baked into the binary so the in-app updater can query GitHub
+          # releases for Stable/Preview. Beta also falls back to this URL
+          # when LATHE_BETA_UPDATE_URL is unset.
+          LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases/latest
+        run: script/build-fork
+
+      - name: Verify signing identity
+        run: |
+          echo "Checking for signing identity..."
+          security find-identity -v -p codesigning
+          security find-identity -v -p codesigning | grep -q "Developer ID Application" || {
+            echo "ERROR: No Developer ID signing identity found in keychain"
+            exit 1
+          }
+
+      - name: Package
+        env:
+          LATHE_REQUIRE_SIGNING: "1"
+        run: script/package-fork
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lathe-macos
+          path: |
+            target/release/Lathe-*.zip
+            target/release/Lathe-*.dmg
+          if-no-files-found: error
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+
+  validate-macos:
+    needs: build-macos
+    runs-on: macos-15
+    steps:
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: lathe-macos
+          path: artifacts
+
+      - name: Unzip bundle and resolve app path
+        # The zipped .app is named after the channel ("Lathe.app",
+        # "Lathe Beta.app", "Lathe Preview.app", ...). Rather than
+        # hardcoding the name per channel in every step, unzip and
+        # pick up whichever single .app landed in artifacts/app.
+        run: |
+          cd artifacts
+          ZIP=$(ls Lathe-*.zip | head -1)
+          echo "Unzipping $ZIP"
+          unzip -q "$ZIP" -d ./app
+          ls ./app
+          cd ..
+          APP_NAME=$(ls artifacts/app | grep '\.app$' | head -1)
+          if [ -z "$APP_NAME" ]; then
+            echo "FAIL: no .app bundle found in artifacts/app"
+            ls -la artifacts/app
+            exit 1
+          fi
+          echo "APP=artifacts/app/${APP_NAME}" >> "$GITHUB_ENV"
+          echo "Resolved APP=artifacts/app/${APP_NAME}"
+
+      - name: Validate Info.plist is well-formed
+        run: |
+          plutil -lint "$APP/Contents/Info.plist"
+
+      - name: Validate required Info.plist keys
+        run: |
+          set -e
+          for key in CFBundleIdentifier CFBundleShortVersionString \
+                    CFBundleDocumentTypes CFBundleURLTypes \
+                    CFBundleExecutable LSMinimumSystemVersion; do
+            /usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist" > /dev/null
+            echo "  ok: $key"
+          done
+
+      - name: Validate expected CFBundleTypeExtensions
+        run: |
+          PLIST="$APP/Contents/Info.plist"
+          exts=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:1:CFBundleTypeExtensions" "$PLIST")
+          # Canary extensions that should always be present. If a future
+          # change accidentally drops the extensions array or picks up the
+          # wrong CFBundleDocumentTypes index, this catches it.
+          for want in md json js ts rs py toml yaml sh env cjs mjs mdx; do
+            echo "$exts" | grep -qw "$want" || { echo "MISSING extension: $want"; exit 1; }
+          done
+          echo "  ok: canary extensions present"
+
+      - name: Validate Apple Event handler symbols are present
+        # Regression guard for the kAEOpenDocuments fix. If the handler or
+        # its registration selector disappears from the binary, Finder's
+        # "Open With" breaks silently at runtime.
+        run: |
+          BIN="$APP/Contents/MacOS/zed"
+          strings "$BIN" | grep -q 'handleOpenDocumentsEvent:withReplyEvent:' \
+            || { echo "MISSING selector: handleOpenDocumentsEvent:withReplyEvent:"; exit 1; }
+          strings "$BIN" | grep -q 'handleGetURLEvent:withReplyEvent:' \
+            || { echo "MISSING selector: handleGetURLEvent:withReplyEvent:"; exit 1; }
+          echo "  ok: Apple Event handler selectors present"
+
+      - name: Validate code signature
+        run: |
+          codesign --verify --verbose=2 "$APP"
+          codesign --verify --deep --strict "$APP"
+
+      - name: Validate notarization (stapled ticket)
+        run: |
+          xcrun stapler validate "$APP"
+
+      - name: Smoke test launch
+        # Proves the app actually reaches its run loop on a clean runner.
+        # Catches things like missing dylibs, dyld errors, and entitlement
+        # mismatches that plist checks can't see.
+        run: |
+          # Strip quarantine so Gatekeeper doesn't block on first launch in
+          # the sandboxed runner home.
+          xattr -dr com.apple.quarantine "$APP" || true
+          open -n "$APP"
+          sleep 8
+          # Match the process by the Contents/MacOS/zed tail so the check
+          # is channel-agnostic (the parent .app name varies per channel).
+          if pgrep -f "Contents/MacOS/zed" > /dev/null; then
+            echo "  ok: app launched and is running"
+            pkill -f "Contents/MacOS/zed" || true
+          else
+            echo "FAIL: app failed to launch or crashed on startup"
+            ls -la ~/Library/Logs/DiagnosticReports 2>/dev/null || true
+            exit 1
+          fi
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Linux dependencies
+        run: script/linux
+
+      - name: Build
+        run: script/build-fork-linux
+
+      - name: Package
+        run: script/package-fork-linux
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lathe-linux
+          path: target/release/Lathe-*-linux.tar.gz
+          if-no-files-found: error
+
+  create-release:
+    needs: [build-macos, build-linux, validate-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          fi
+          channel=$(<crates/zed/RELEASE_CHANNEL)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # Surface the channel in the workflow step summary so cutting a
+          # release off a branch that's still on an off-channel marker
+          # (e.g. beta) is visible at a glance, not a silent surprise.
+          {
+            echo "## Release dispatch"
+            echo ""
+            echo "- **Version:** \`${version}\`"
+            echo "- **Channel:** \`${channel}\`"
+            if [ "$channel" != "stable" ]; then
+              echo "- The created GitHub release will be flagged as **prerelease**."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+
+          # Tag scheme matches upstream zed-industries/zed's
+          # script/determine-release-channel: non-stable channels get
+          # a `-<channel>` suffix so stable and beta/preview/nightly
+          # of the same version can coexist as separate GitHub releases.
+          channel=$(<crates/zed/RELEASE_CHANNEL)
+          if [ "$channel" = "stable" ]; then
+            tag="v${version}"
+          else
+            tag="v${version}-${channel}"
+          fi
+
+          # Collect all release files
+          mkdir -p release-files
+          cp artifacts/lathe-macos/Lathe-*.zip release-files/
+          cp artifacts/lathe-macos/Lathe-*.dmg release-files/
+          cp artifacts/lathe-linux/Lathe-*-linux.tar.gz release-files/
+
+          # Mark any non-stable channel as prerelease so the GitHub UI
+          # shows the prerelease badge and `gh release view --latest`
+          # skips beta/preview/nightly when pointing users at releases.
+          prerelease_flag=""
+          if [ "$channel" != "stable" ]; then
+            prerelease_flag="--prerelease"
+          fi
+
+          if gh release view "$tag" 2>/dev/null; then
+            gh release upload "$tag" release-files/* --clobber
+            if [ -n "$prerelease_flag" ]; then
+              gh release edit "$tag" --prerelease
+            fi
+          else
+            gh release create "$tag" release-files/* \
+              --title "Lathe ${tag}" \
+              --generate-notes \
+              $prerelease_flag
+          fi

@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+echo "=== Building Lathe ==="
+
+# --- Prerequisites ---
+
+# 1. Xcode Command Line Tools
+if ! xcode-select -p &>/dev/null; then
+    echo "Installing Xcode Command Line Tools..."
+    xcode-select --install
+    echo "Please complete the installation dialog, then re-run this script."
+    exit 1
+fi
+
+# 2. Xcode with Metal compiler
+if ! xcrun --find metal &>/dev/null 2>&1; then
+    if [ -d "/Applications/Xcode.app" ]; then
+        echo "Selecting Xcode.app for Metal shader compilation..."
+        sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+    elif [ -d "/Applications/Xcode-beta.app" ]; then
+        echo "Selecting Xcode-beta.app for Metal shader compilation..."
+        sudo xcode-select -s /Applications/Xcode-beta.app/Contents/Developer
+    else
+        echo "Error: Xcode is required to build Lathe (for Metal shader compilation)."
+        echo "Install Xcode from the App Store, then re-run this script."
+        exit 1
+    fi
+fi
+
+# 3. Metal Toolchain component
+if ! xcrun metal -v &>/dev/null 2>&1; then
+    echo "Installing Metal Toolchain..."
+    xcodebuild -downloadComponent MetalToolchain
+fi
+
+# 2. Rust toolchain — install or repair from scratch if needed
+install_rust() {
+    echo "Installing Rust via rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    # Source the env that rustup just created
+    if [ -f "$HOME/.cargo/env" ]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+    elif [ -d "$HOME/.cargo/bin" ]; then
+        export PATH="$HOME/.cargo/bin:$PATH"
+    fi
+}
+
+# Ensure cargo/rustc are on PATH from any prior install
+if [ -f "$HOME/.cargo/env" ]; then
+    # shellcheck disable=SC1091
+    source "$HOME/.cargo/env"
+elif [ -d "$HOME/.cargo/bin" ]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+fi
+
+if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+    if command -v rustup &>/dev/null; then
+        # rustup exists — try to resolve cargo through it
+        cargo_bin=$(rustup which cargo 2>/dev/null || true)
+        if [ -n "$cargo_bin" ]; then
+            export PATH="$(dirname "$cargo_bin"):$PATH"
+        else
+            # Toolchain missing or broken — install it
+            rustup toolchain install stable
+            cargo_bin=$(rustup which cargo 2>/dev/null || true)
+            if [ -n "$cargo_bin" ]; then
+                export PATH="$(dirname "$cargo_bin"):$PATH"
+            else
+                # rustup is broken — reinstall everything
+                install_rust
+            fi
+        fi
+    else
+        install_rust
+    fi
+fi
+
+# Final check
+if ! command -v cargo &>/dev/null || ! command -v rustc &>/dev/null; then
+    echo "Error: Failed to install Rust. Please install manually:"
+    echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    exit 1
+fi
+
+# 4. Ensure cargo-bundle is installed (Zed's fork)
+cargo_bundle_version=$(cargo -q bundle --help 2>&1 | head -n 1 || echo "")
+if [ "$cargo_bundle_version" != "cargo-bundle v0.6.1-zed" ]; then
+    echo "Installing cargo-bundle..."
+    cargo install cargo-bundle --git https://github.com/zed-industries/cargo-bundle.git --branch zed-deploy
+fi
+
+# Deal with versions of macOS that don't include libstdc++ headers
+export CXXFLAGS="-stdlib=libc++"
+
+# Determine architecture
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+
+echo "Target: $target_triple"
+echo "Building release binary..."
+
+cargo build --release --package zed --target "$target_triple"
+
+echo "Creating application bundle..."
+channel=$(<crates/zed/RELEASE_CHANNEL)
+
+pushd crates/zed > /dev/null
+cp Cargo.toml Cargo.toml.backup
+sed -i.bak "s/package.metadata.bundle-${channel}/package.metadata.bundle/" Cargo.toml
+
+export ZED_BUNDLE=true
+export CARGO_BUNDLE_SKIP_BUILD=true
+app_path=$(cargo bundle --release --target "$target_triple" --select-workspace-root | xargs)
+
+mv Cargo.toml.backup Cargo.toml
+rm -f Cargo.toml.bak
+popd > /dev/null
+
+echo ""
+echo "=== Bundle created ==="
+echo "  $app_path"
+echo ""
+echo "To install to /Applications:"
+echo "  script/install-fork"
+echo ""
+echo "To run directly:"
+echo "  open \"$app_path\""

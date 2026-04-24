@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Determine architecture
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+
+channel=$(<crates/zed/RELEASE_CHANNEL)
+
+# Resolve app name from channel
+case "$channel" in
+    stable) app_name="Lathe.app" ;;
+    preview) app_name="Lathe Preview.app" ;;
+    beta) app_name="Lathe Beta.app" ;;
+    nightly) app_name="Lathe Nightly.app" ;;
+    dev) app_name="Lathe Dev.app" ;;
+    *) app_name="Lathe Dev.app" ;;
+esac
+
+bundle_dir="target/${target_triple}/release/bundle/osx"
+app_path="${bundle_dir}/${app_name}"
+
+if [ ! -d "$app_path" ]; then
+    # Try the non-target-triple path
+    bundle_dir="target/release/bundle/osx"
+    app_path="${bundle_dir}/${app_name}"
+fi
+
+if [ ! -d "$app_path" ]; then
+    echo "Error: App bundle not found. Run 'script/build-fork' first."
+    exit 1
+fi
+
+dest="/Applications/${app_name}"
+
+echo "Installing ${app_name} to /Applications..."
+
+if [ -d "$dest" ]; then
+    echo "Removing existing ${app_name}..."
+    rm -rf "$dest"
+fi
+
+cp -R "$app_path" "$dest"
+
+# Sign with Developer ID if available (avoids TCC prompts for
+# Documents/Desktop/Downloads), otherwise fall back to ad-hoc.
+signing_identity="Developer ID Application: Chris Paterson (Z2DJF8UWJG)"
+if security find-identity -v -p codesigning | grep -q "$signing_identity"; then
+    echo "Signing ${app_name} with Developer ID..."
+    codesign --force --deep --options runtime \
+        --entitlements crates/zed/resources/zed.entitlements \
+        --sign "$signing_identity" "$dest"
+else
+    echo "Developer ID not found, using ad-hoc signature..."
+    entitlements_tmp=$(mktemp)
+    sed '/com.apple.developer.associated-domains/,+1d' \
+        crates/zed/resources/zed.entitlements > "$entitlements_tmp"
+    codesign --force --deep --entitlements "$entitlements_tmp" --sign - "$dest"
+    rm -f "$entitlements_tmp"
+fi
+xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
+
+echo ""
+echo "=== Installed ==="
+echo "  ${dest}"
+echo ""
+echo "Launch from Spotlight or run:"
+echo "  open \"${dest}\""
+echo ""
+echo "Note: This fork installs as '${app_name}' and runs alongside stock Zed."
