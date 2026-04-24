@@ -33,6 +33,7 @@ fn address() -> SocketAddr {
         ReleaseChannel::Preview => 43737 + USER_BLOCK,
         ReleaseChannel::Stable => 43737 + (2 * USER_BLOCK),
         ReleaseChannel::Nightly => 43737 + (3 * USER_BLOCK),
+        ReleaseChannel::Beta => 43737 + (4 * USER_BLOCK),
     };
     let mut user_port = port;
     let mut sys = System::new_all();
@@ -72,10 +73,11 @@ fn get_uid_as_u32(uid: &sysinfo::Uid) -> u32 {
 
 fn instance_handshake() -> &'static str {
     match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed Editor Dev Instance Running",
-        ReleaseChannel::Nightly => "Zed Editor Nightly Instance Running",
-        ReleaseChannel::Preview => "Zed Editor Preview Instance Running",
-        ReleaseChannel::Stable => "Zed Editor Stable Instance Running",
+        ReleaseChannel::Dev => "Lathe Editor Dev Instance Running",
+        ReleaseChannel::Nightly => "Lathe Editor Nightly Instance Running",
+        ReleaseChannel::Preview => "Lathe Editor Preview Instance Running",
+        ReleaseChannel::Beta => "Lathe Editor Beta Instance Running",
+        ReleaseChannel::Stable => "Lathe Editor Stable Instance Running",
     }
 }
 

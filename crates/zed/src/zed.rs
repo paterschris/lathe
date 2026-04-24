@@ -410,22 +410,6 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             .detach();
         }
 
-        cx.spawn_in(window, async move |_this, cx| {
-            const TELEMETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-            loop {
-                cx.background_executor().timer(TELEMETRY_INTERVAL).await;
-                if cx
-                    .update(|window, cx| {
-                        input_latency_ui::report_input_latency_telemetry(window, cx);
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-
         let multi_workspace_handle = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             multi_workspace_handle
@@ -568,13 +552,16 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let merge_conflict_indicator =
             cx.new(|cx| git_ui::MergeConflictIndicator::new(workspace, cx));
+        let branch_status_indicator =
+            cx.new(|cx| git_ui::BranchStatusIndicator::new(workspace, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
             status_bar.add_left_item(search_button, window, cx);
             status_bar.add_left_item(lsp_button, window, cx);
             status_bar.add_left_item(diagnostic_summary, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);
-            status_bar.add_left_item(merge_conflict_indicator, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);
+            status_bar.add_left_item(merge_conflict_indicator, window, cx);
+            status_bar.add_left_item(branch_status_indicator, window, cx);
             status_bar.add_right_item(edit_prediction_ui, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
@@ -679,7 +666,7 @@ fn show_software_emulation_warning_if_needed(
         };
         let message = format!(
             db::indoc! {r#"
-            Zed uses {} for rendering and requires a compatible GPU.
+            Lathe uses {} for rendering and requires a compatible GPU.
 
             Currently you are using a software emulated GPU ({}) which
             will result in awful performance.
@@ -1351,6 +1338,9 @@ fn open_about_window(cx: &mut App) {
             ReleaseChannel::Preview => {
                 include_bytes!("../resources/app-icon-preview.png").as_slice()
             }
+            ReleaseChannel::Beta => {
+                include_bytes!("../resources/app-icon-preview.png").as_slice()
+            }
             ReleaseChannel::Stable => include_bytes!("../resources/app-icon.png").as_slice(),
         };
 
@@ -1533,7 +1523,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Zed".into()),
+                title: Some("About Lathe".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),

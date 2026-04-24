@@ -310,15 +310,15 @@ impl Render for Onboarding {
                                     .child(
                                         h_flex()
                                             .gap_4()
-                                            .child(Vector::square(VectorName::ZedLogo, rems(2.5)))
+                                            .child(Vector::square(VectorName::LatheLogo, rems(2.5)))
                                             .child(
                                                 v_flex()
                                                     .child(
-                                                        Headline::new("Welcome to Zed")
+                                                        Headline::new("Welcome to Lathe")
                                                             .size(HeadlineSize::Small),
                                                     )
                                                     .child(
-                                                        Label::new("The editor for what's next")
+                                                        Label::new("A Zed fork, sharpened")
                                                             .color(Color::Muted)
                                                             .size(LabelSize::Small)
                                                             .italic(),

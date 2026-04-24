@@ -74,7 +74,7 @@ use crate::zed::{OpenRequestKind, eager_load_active_theme_and_icon_theme};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
-    let message = "Zed failed to launch";
+    let message = "Lathe failed to launch";
     let error_details = errors
         .into_iter()
         .flat_map(|(kind, paths)| {
@@ -136,7 +136,7 @@ fn fail_to_open_window_async(e: anyhow::Error, cx: &mut AsyncApp) {
 
 fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
     eprintln!(
-        "Zed failed to open a window: {e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
+        "Lathe failed to open a window: {e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
     );
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     {
@@ -152,11 +152,11 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
                 process::exit(1);
             };
 
-            let notification_id = "dev.zed.Oops";
+            let notification_id = "dev.lathe.oops";
             proxy
                 .add_notification(
                     notification_id,
-                    Notification::new("Zed failed to launch")
+                    Notification::new("Lathe failed to launch")
                         .body(Some(
                             format!(
                                 "{e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
@@ -300,7 +300,7 @@ fn main() {
             app_commit_sha,
             *release_channel::RELEASE_CHANNEL,
         );
-        println!("Zed System Specs (from CLI):\n{}", system_specs);
+        println!("Lathe System Specs (from CLI):\n{}", system_specs);
         return;
     }
 
@@ -337,7 +337,7 @@ fn main() {
         session_id.clone(),
         KeyValueStore::from_app_db(&app_db),
     ));
-    let background_executor = app.background_executor();
+
     crashes::init(
         InitCrashHandler {
             session_id,
@@ -358,7 +358,6 @@ fn main() {
         |task| {
             app.background_executor().spawn(task).detach();
         },
-        move |duration| background_executor.timer(duration),
     );
 
     let (open_listener, mut open_rx) = OpenListener::new();
@@ -469,7 +468,7 @@ fn main() {
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
 
         let user_agent = format!(
-            "Zed/{} ({}; {})",
+            "Lathe/{} ({}; {})",
             AppVersion::global(cx),
             std::env::consts::OS,
             std::env::consts::ARCH
@@ -899,6 +898,8 @@ fn main() {
 
         component_preview::init(app_state.clone(), cx);
 
+        spawn_periodic_session_rebinder(cx);
+
         cx.spawn(async move |cx| {
             while let Some(urls) = open_rx.next().await {
                 cx.update(|cx| {
@@ -910,6 +911,35 @@ fn main() {
         })
         .detach();
     });
+}
+
+// Every open window periodically re-tags its workspaces with the current
+// session id in the SQLite workspaces table. This way if Lathe is crashed or
+// force-quit (skipping `app_will_quit`), the next launch still has every
+// recently-open window pointing at the last session id and can restore them
+// all. Without this, any window that never triggered a normal serialization
+// event (e.g. untouched after a restore) would keep a stale session id and
+// silently disappear from the next session restore.
+fn spawn_periodic_session_rebinder(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(30))
+                .await;
+            cx.update(|cx| {
+                for window in cx.windows() {
+                    if let Some(multi_workspace) = window.downcast::<MultiWorkspace>() {
+                        multi_workspace
+                            .update(cx, |multi_workspace, window, cx| {
+                                multi_workspace.rebind_session_bindings(window, cx);
+                            })
+                            .log_err();
+                    }
+                }
+            });
+        }
+    })
+    .detach();
 }
 
 fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut App) {

@@ -9,7 +9,7 @@
 .DS_Store
 .blob_store
 .build
-.claude/settings.local.json
+.claude/
 .envrc
 .flatpak-builder
 .idea
@@ -54,3 +54,8 @@ crates/docs_preprocessor/actions.json
 # Local documentation audit files
 /december-2025-releases.md
 /docs/december-2025-documentation-gaps.md
+chris.r.paterson@pricehawk.dev.p12
+
+# Local scratch files
+/entities.json
+/mempalace.yaml
