@@ -1032,6 +1032,9 @@ impl Domain for WorkspaceDb {
                 ON UPDATE CASCADE
             );
         ),
+        sql!(
+            ALTER TABLE workspaces ADD COLUMN collab_account_id TEXT DEFAULT NULL;
+        ),
     ];
 
     // Allow recovering from bad migration that was initially shipped to nightly
@@ -2343,6 +2346,22 @@ impl WorkspaceDb {
         pub(crate) async fn set_session_binding(workspace_id: WorkspaceId, session_id: Option<String>, window_id: Option<u64>) -> Result<()> {
             UPDATE workspaces
             SET session_id = ?2, window_id = ?3
+            WHERE workspace_id = ?1
+        }
+    }
+
+    query! {
+        pub async fn collab_account_id(workspace_id: WorkspaceId) -> Result<Option<String>> {
+            SELECT collab_account_id
+            FROM workspaces
+            WHERE workspace_id = ?1 AND collab_account_id IS NOT NULL
+        }
+    }
+
+    query! {
+        pub async fn set_collab_account_id(workspace_id: WorkspaceId, account_id: Option<String>) -> Result<()> {
+            UPDATE workspaces
+            SET collab_account_id = ?2
             WHERE workspace_id = ?1
         }
     }
@@ -4410,6 +4429,7 @@ mod tests {
                 project_groups: vec![],
                 sidebar_open: true,
                 sidebar_state: None,
+                workspace_group_name: None,
             },
         )
         .await;
@@ -4422,6 +4442,7 @@ mod tests {
                 project_groups: vec![],
                 sidebar_open: false,
                 sidebar_state: None,
+                workspace_group_name: None,
             },
         )
         .await;

@@ -12,7 +12,7 @@ use client::{Client, proto};
 use futures::channel::mpsc;
 use gpui::{
     Action, AnyElement, AnyEntity, AnyView, App, AppContext, Context, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, Font, Pixels, Point, Render, SharedString, Task,
+    EventEmitter, FocusHandle, Focusable, Font, Hsla, Pixels, Point, Render, SharedString, Task,
     WeakEntity, Window,
 };
 use language::Capability;
@@ -133,6 +133,8 @@ pub struct TabContentParams {
     pub preview: bool,
     /// Tab content should be deemphasized when active pane does not have focus.
     pub deemphasized: bool,
+    /// Override for the tab text color, set by the pane based on git status.
+    pub text_color_override: Option<Color>,
 }
 
 impl TabContentParams {
@@ -192,6 +194,11 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
         None
     }
 
+    /// Returns an optional background color override for this item's tab.
+    fn tab_bg_override(&self, _is_active: bool, _cx: &App) -> Option<Hsla> {
+        None
+    }
+
     /// Returns the tab tooltip text.
     ///
     /// Use this if you don't need to customize the tab tooltip content.
@@ -209,6 +216,7 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
 
     fn to_item_events(_event: &Self::Event, _f: &mut dyn FnMut(ItemEvent)) {}
 
+    fn activated(&mut self, _window: &mut Window, _: &mut Context<Self>) {}
     fn deactivated(&mut self, _window: &mut Window, _: &mut Context<Self>) {}
     fn discarded(&self, _project: Entity<Project>, _window: &mut Window, _cx: &mut Context<Self>) {}
     fn on_removed(&self, _cx: &mut Context<Self>) {}
@@ -256,6 +264,12 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
     }
     fn is_dirty(&self, _: &App) -> bool {
         false
+    }
+    fn is_awaiting_input(&self, _: &App) -> bool {
+        false
+    }
+    fn awaiting_input_tooltip(&self, _: &App) -> &'static str {
+        "Terminal awaiting input"
     }
     fn capability(&self, _: &App) -> Capability {
         Capability::ReadWrite
@@ -465,6 +479,7 @@ pub trait ItemHandle: 'static + Send {
     fn tab_content_text(&self, detail: usize, cx: &App) -> SharedString;
     fn suggested_filename(&self, cx: &App) -> SharedString;
     fn tab_icon(&self, window: &Window, cx: &App) -> Option<Icon>;
+    fn tab_bg_override(&self, is_active: bool, cx: &App) -> Option<Hsla>;
     fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString>;
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent>;
     fn telemetry_event_text(&self, cx: &App) -> Option<&'static str>;
@@ -499,6 +514,7 @@ pub trait ItemHandle: 'static + Send {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     );
+    fn activated(&self, window: &mut Window, cx: &mut App);
     fn deactivated(&self, window: &mut Window, cx: &mut App);
     fn on_removed(&self, cx: &mut App);
     fn workspace_deactivated(&self, window: &mut Window, cx: &mut App);
@@ -506,6 +522,8 @@ pub trait ItemHandle: 'static + Send {
     fn item_id(&self) -> EntityId;
     fn to_any_view(&self) -> AnyView;
     fn is_dirty(&self, cx: &App) -> bool;
+    fn is_awaiting_input(&self, cx: &App) -> bool;
+    fn awaiting_input_tooltip(&self, cx: &App) -> &'static str;
     fn capability(&self, cx: &App) -> Capability;
     fn toggle_read_only(&self, window: &mut Window, cx: &mut App);
     fn has_deleted_file(&self, cx: &App) -> bool;
@@ -619,6 +637,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn tab_icon(&self, window: &Window, cx: &App) -> Option<Icon> {
         self.read(cx).tab_icon(window, cx)
+    }
+
+    fn tab_bg_override(&self, is_active: bool, cx: &App) -> Option<Hsla> {
+        self.read(cx).tab_bg_override(is_active, cx)
     }
 
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent> {
@@ -990,6 +1012,10 @@ impl<T: Item> ItemHandle for Entity<T> {
         });
     }
 
+    fn activated(&self, window: &mut Window, cx: &mut App) {
+        self.update(cx, |this, cx| this.activated(window, cx));
+    }
+
     fn deactivated(&self, window: &mut Window, cx: &mut App) {
         self.update(cx, |this, cx| this.deactivated(window, cx));
     }
@@ -1016,6 +1042,14 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn is_dirty(&self, cx: &App) -> bool {
         self.read(cx).is_dirty(cx)
+    }
+
+    fn is_awaiting_input(&self, cx: &App) -> bool {
+        self.read(cx).is_awaiting_input(cx)
+    }
+
+    fn awaiting_input_tooltip(&self, cx: &App) -> &'static str {
+        self.read(cx).awaiting_input_tooltip(cx)
     }
 
     fn capability(&self, cx: &App) -> Capability {

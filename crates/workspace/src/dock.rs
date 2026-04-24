@@ -787,6 +787,13 @@ impl Dock {
         self.panel_entries.len()
     }
 
+    pub fn panel_panes(&self, cx: &App) -> Vec<Entity<Pane>> {
+        self.panel_entries
+            .iter()
+            .filter_map(|entry| entry.panel.pane(cx))
+            .collect()
+    }
+
     pub fn has_agent_panel(&self, cx: &App) -> bool {
         self.panel_entries
             .iter()

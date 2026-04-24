@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use gpui::{AnyElement, IntoElement, Stateful};
+use gpui::{AnyElement, Hsla, IntoElement, Stateful};
 use smallvec::SmallVec;
 
 use crate::prelude::*;
@@ -38,6 +38,7 @@ pub struct Tab {
     start_slot: Option<AnyElement>,
     end_slot: Option<AnyElement>,
     children: SmallVec<[AnyElement; 2]>,
+    bg_override: Option<Hsla>,
 }
 
 impl Tab {
@@ -53,6 +54,7 @@ impl Tab {
             start_slot: None,
             end_slot: None,
             children: SmallVec::new(),
+            bg_override: None,
         }
     }
 
@@ -73,6 +75,11 @@ impl Tab {
 
     pub fn end_slot<E: IntoElement>(mut self, element: impl Into<Option<E>>) -> Self {
         self.end_slot = element.into().map(IntoElement::into_any_element);
+        self
+    }
+
+    pub fn bg_override(mut self, color: Option<Hsla>) -> Self {
+        self.bg_override = color;
         self
     }
 
@@ -109,7 +116,7 @@ impl ParentElement for Tab {
 impl RenderOnce for Tab {
     #[allow(refining_impl_trait)]
     fn render(self, _: &mut Window, cx: &mut App) -> Stateful<Div> {
-        let (text_color, tab_bg, _tab_hover_bg, _tab_active_bg) = match self.selected {
+        let (text_color, default_tab_bg, _tab_hover_bg, _tab_active_bg) = match self.selected {
             false => (
                 cx.theme().colors().text_muted,
                 cx.theme().colors().tab_inactive_background,
@@ -123,6 +130,8 @@ impl RenderOnce for Tab {
                 cx.theme().colors().element_active,
             ),
         };
+
+        let tab_bg = self.bg_override.unwrap_or(default_tab_bg);
 
         let (start_slot, end_slot) = {
             let start_slot = h_flex()

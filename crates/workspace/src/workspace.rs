@@ -17,10 +17,12 @@ mod persistence;
 pub mod searchable;
 mod security_modal;
 pub mod shared_screen;
+use db::smol::future::yield_now;
 pub use shared_screen::SharedScreen;
 pub mod focus_follows_mouse;
 mod status_bar;
 pub mod tasks;
+mod theme_customizer;
 mod theme_preview;
 mod toast_layer;
 mod toolbar;
@@ -764,6 +766,7 @@ pub fn prompt_for_open_path_and_open(
 
 pub fn init(app_state: Arc<AppState>, cx: &mut App) {
     component::init();
+    theme_customizer::init(cx);
     theme_preview::init(cx);
     toast_layer::init(cx);
     history_manager::init(app_state.fs.clone(), cx);
@@ -1398,6 +1401,7 @@ pub struct Workspace {
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     active_worktree_creation: ActiveWorktreeCreation,
     deferred_save_items: Vec<Box<dyn WeakItemHandle>>,
+    bound_collab_account_id: Option<String>,
 }
 
 impl EventEmitter<Event> for Workspace {}
@@ -1763,6 +1767,9 @@ impl Workspace {
         cx.defer_in(window, move |this, window, cx| {
             this.update_window_title(window, cx);
             this.show_initial_notifications(cx);
+            if let Some(database_id) = this.database_id {
+                this.apply_bound_collab_account(database_id, cx);
+            }
         });
 
         let mut center = PaneGroup::new(center_pane.clone());
@@ -1830,6 +1837,7 @@ impl Workspace {
             open_in_dev_container: false,
             _dev_container_task: None,
             deferred_save_items: Vec::new(),
+            bound_collab_account_id: None,
         }
     }
 
@@ -1869,6 +1877,11 @@ impl Workspace {
 
             if let Some(paths) = serialized_workspace.as_ref().map(|ws| &ws.paths) {
                 paths_to_open = paths.ordered_paths().cloned().collect();
+                if !paths.is_lexicographically_ordered() {
+                    project_handle.update(cx, |project, cx| {
+                        project.set_worktrees_reordered(true, cx);
+                    });
+                }
             }
 
             // Get project paths for all of the abs_paths
@@ -3388,7 +3401,7 @@ impl Workspace {
                                 .unwrap_or(false);
 
                             if focus_changed {
-                                futures_lite::future::yield_now().await;
+                                yield_now().await;
                             }
                         }
 
@@ -5545,6 +5558,77 @@ impl Workspace {
         &self.panes
     }
 
+    pub fn any_item_awaiting_input(&self, cx: &App) -> bool {
+        let dock_panes = self
+            .all_docks()
+            .into_iter()
+            .flat_map(|dock| dock.read(cx).panel_panes(cx));
+        for pane in self.panes.iter().cloned().chain(dock_panes) {
+            for item in pane.read(cx).items() {
+                if item.is_awaiting_input(cx) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn awaiting_input_count(&self, cx: &App) -> usize {
+        let dock_panes = self
+            .all_docks()
+            .into_iter()
+            .flat_map(|dock| dock.read(cx).panel_panes(cx));
+        let mut count = 0;
+        for pane in self.panes.iter().cloned().chain(dock_panes) {
+            for item in pane.read(cx).items() {
+                if item.is_awaiting_input(cx) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    pub fn first_awaiting_input_tooltip(&self, cx: &App) -> &'static str {
+        let dock_panes = self
+            .all_docks()
+            .into_iter()
+            .flat_map(|dock| dock.read(cx).panel_panes(cx));
+        for pane in self.panes.iter().cloned().chain(dock_panes) {
+            for item in pane.read(cx).items() {
+                if item.is_awaiting_input(cx) {
+                    return item.awaiting_input_tooltip(cx);
+                }
+            }
+        }
+        "Terminal awaiting input"
+    }
+
+    pub fn focus_first_awaiting_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let dock_panes: Vec<_> = self
+            .all_docks()
+            .into_iter()
+            .flat_map(|dock| dock.read(cx).panel_panes(cx))
+            .collect();
+        for pane in self.panes.iter().cloned().chain(dock_panes) {
+            let awaiting_index = pane
+                .read(cx)
+                .items()
+                .position(|item| item.is_awaiting_input(cx));
+            if let Some(index) = awaiting_index {
+                pane.update(cx, |pane, cx| {
+                    pane.activate_item(index, true, true, window, cx);
+                });
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn active_pane(&self) -> &Entity<Pane> {
         &self.active_pane
     }
@@ -5826,6 +5910,17 @@ impl Workspace {
         let project = self.project().read(cx);
         let mut title = String::new();
 
+        if let Some(name) = self
+            .multi_workspace
+            .as_ref()
+            .and_then(|mw| mw.upgrade())
+            .and_then(|mw| mw.read(cx).workspace_group_name().map(str::to_owned))
+        {
+            title.push('[');
+            title.push_str(&name);
+            title.push_str("] ");
+        }
+
         for (i, worktree) in project.visible_worktrees(cx).enumerate() {
             let name = worktree.read(cx).root_name_str();
 
@@ -5839,9 +5934,7 @@ impl Workspace {
             title = "empty project".to_string();
         }
 
-        let active_project_path = self.active_item(cx).and_then(|item| item.project_path(cx));
-
-        if let Some(path) = active_project_path.as_ref() {
+        if let Some(path) = self.active_item(cx).and_then(|item| item.project_path(cx)) {
             let filename = path.path.file_name().or_else(|| {
                 Some(
                     project
@@ -5862,11 +5955,6 @@ impl Workspace {
         } else if project.is_shared() {
             title.push_str(" ↗");
         }
-
-        let document_path = active_project_path
-            .as_ref()
-            .and_then(|path| project.absolute_path(path, cx));
-        window.set_document_path(document_path.as_deref());
 
         if let Some(last_title) = self.last_window_title.as_ref()
             && &title == last_title
@@ -6474,6 +6562,7 @@ impl Workspace {
                 let db = WorkspaceDb::global(cx);
                 cx.background_spawn(async move { db.update_timestamp(database_id).await })
                     .detach();
+                self.apply_bound_collab_account(database_id, cx);
             }
         } else {
             // When window is deactivated, flush any deferred saves since focus has left the window
@@ -6495,6 +6584,62 @@ impl Workspace {
                 });
             }
         }
+    }
+
+    pub fn bound_collab_account_id(&self) -> Option<&str> {
+        self.bound_collab_account_id.as_deref()
+    }
+
+    pub fn set_bound_collab_account_id(
+        &mut self,
+        account_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.bound_collab_account_id == account_id {
+            return;
+        }
+        self.bound_collab_account_id = account_id.clone();
+        cx.notify();
+        let Some(database_id) = self.database_id else {
+            return;
+        };
+        let db = WorkspaceDb::global(cx);
+        cx.background_spawn(async move { db.set_collab_account_id(database_id, account_id).await })
+            .detach_and_log_err(cx);
+    }
+
+    fn apply_bound_collab_account(
+        &self,
+        database_id: WorkspaceId,
+        cx: &mut Context<Self>,
+    ) {
+        let db = WorkspaceDb::global(cx);
+        let client = self.client().clone();
+        cx.spawn(async move |this, cx| {
+            let bound_id = db.collab_account_id(database_id).await.ok().flatten();
+            this.update(cx, |this, cx| {
+                if this.bound_collab_account_id != bound_id {
+                    this.bound_collab_account_id = bound_id.clone();
+                    cx.notify();
+                }
+            })
+            .ok();
+            let Some(bound_id) = bound_id else {
+                return;
+            };
+            if client.active_account_id().as_deref() == Some(bound_id.as_str()) {
+                return;
+            }
+            if !client
+                .list_accounts()
+                .iter()
+                .any(|account| account.id == bound_id)
+            {
+                return;
+            }
+            client.switch_account(bound_id, cx).await.log_err();
+        })
+        .detach();
     }
 
     pub fn active_call(&self) -> Option<&dyn AnyActiveCall> {
@@ -8914,7 +9059,8 @@ pub async fn restore_multiworkspace(
     apply_restored_multiworkspace_state(window_handle, &state, app_state.fs.clone(), cx).await;
 
     window_handle
-        .update(cx, |_, window, _cx| {
+        .update(cx, |multi_workspace, window, cx| {
+            multi_workspace.rebind_session_bindings(window, cx);
             window.activate_window();
         })
         .ok();
@@ -8932,8 +9078,17 @@ pub async fn apply_restored_multiworkspace_state(
         sidebar_open,
         project_groups,
         sidebar_state,
+        workspace_group_name,
         ..
     } = state;
+
+    if let Some(name) = workspace_group_name.clone() {
+        window_handle
+            .update(cx, |multi_workspace, _window, _cx| {
+                multi_workspace.set_workspace_group_name(Some(name));
+            })
+            .ok();
+    }
 
     if !project_groups.is_empty() {
         // Resolve linked worktree paths to their main repo paths so
@@ -10886,7 +11041,7 @@ mod tests {
         DismissEvent, Empty, EventEmitter, FocusHandle, Focusable, Render, TestAppContext,
         UpdateGlobal, VisualTestContext, px,
     };
-    use project::{Project, ProjectEntryId, WorktreeId};
+    use project::{Project, ProjectEntryId};
     use serde_json::json;
     use settings::SettingsStore;
     use util::path;
@@ -11033,86 +11188,6 @@ mod tests {
         // Remove a project folder
         project.update(cx, |project, cx| project.remove_worktree(worktree_id, cx));
         assert_eq!(cx.window_title().as_deref(), Some("root2 — one.txt"));
-    }
-
-    #[gpui::test]
-    async fn test_document_path_updates_with_active_item(cx: &mut TestAppContext) {
-        init_test(cx);
-
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(
-            "/root",
-            json!({
-                "one.txt": "",
-                "two.txt": "",
-            }),
-        )
-        .await;
-
-        let project = Project::test(fs, ["root".as_ref()], cx).await;
-        let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
-        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
-        let worktree_id = project.update(cx, |project, cx| {
-            project.worktrees(cx).next().unwrap().read(cx).id()
-        });
-
-        let item1 = cx.new(|cx| {
-            TestItem::new(cx).with_project_items(&[new_test_project_item(
-                1,
-                "one.txt",
-                worktree_id,
-                cx,
-            )])
-        });
-        let item2 = cx.new(|cx| {
-            TestItem::new(cx).with_project_items(&[new_test_project_item(
-                2,
-                "two.txt",
-                worktree_id,
-                cx,
-            )])
-        });
-
-        // Initially no document path
-        assert_eq!(cx.document_path(), None);
-
-        // Add an item - document path should be set
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.add_item_to_active_pane(Box::new(item1), None, true, window, cx)
-        });
-        assert_eq!(
-            cx.document_path(),
-            Some(std::path::PathBuf::from("root/one.txt"))
-        );
-
-        // Add a second item - document path should update
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.add_item_to_active_pane(Box::new(item2), None, true, window, cx)
-        });
-        assert_eq!(
-            cx.document_path(),
-            Some(std::path::PathBuf::from("root/two.txt"))
-        );
-
-        // Close the active item - document path should revert to first item
-        pane.update_in(cx, |pane, window, cx| {
-            pane.close_active_item(&Default::default(), window, cx)
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            cx.document_path(),
-            Some(std::path::PathBuf::from("root/one.txt"))
-        );
-
-        // Close all items - document path should be cleared
-        pane.update_in(cx, |pane, window, cx| {
-            pane.close_active_item(&Default::default(), window, cx)
-        })
-        .await
-        .unwrap();
-        assert_eq!(cx.document_path(), None);
     }
 
     #[gpui::test]
@@ -15403,21 +15478,6 @@ mod tests {
         let item = TestProjectItem::new(id, path, cx);
         item.update(cx, |item, _| {
             item.is_dirty = true;
-        });
-        item
-    }
-
-    fn new_test_project_item(
-        id: u64,
-        path: &str,
-        worktree_id: WorktreeId,
-        cx: &mut App,
-    ) -> Entity<TestProjectItem> {
-        let item = TestProjectItem::new(id, path, cx);
-        item.update(cx, |item, _| {
-            if let Some(ref mut project_path) = item.project_path {
-                project_path.worktree_id = worktree_id;
-            }
         });
         item
     }

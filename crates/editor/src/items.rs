@@ -695,31 +695,51 @@ impl Item for Editor {
     }
 
     fn tab_content(&self, params: TabContentParams, _: &Window, cx: &App) -> AnyElement {
-        let label_color = if ItemSettings::get_global(cx).git_status {
+        let most_severe_diagnostic = self
+            .buffer()
+            .read(cx)
+            .as_singleton()
+            .and_then(|buffer| {
+                buffer
+                    .read(cx)
+                    .buffer_diagnostics(None)
+                    .iter()
+                    .map(|entry| entry.diagnostic.severity)
+                    .min()
+            });
+
+        let label_color = if let Some(color_override) = params.text_color_override {
+            color_override
+        } else if ItemSettings::get_global(cx).git_status {
             self.buffer()
                 .read(cx)
                 .as_singleton()
                 .and_then(|buffer| {
                     let buffer = buffer.read(cx);
                     let path = buffer.project_path(cx)?;
-                    let buffer_id = buffer.remote_id();
                     let project = self.project()?.read(cx);
                     let entry = project.entry_for_path(&path, cx)?;
                     let (repo, repo_path) = project
                         .git_store()
                         .read(cx)
-                        .repository_and_path_for_buffer_id(buffer_id, cx)?;
-                    let status = repo.read(cx).status_for_path(&repo_path)?.status;
+                        .repository_and_path_for_project_path(&path, cx)?;
+                    let status = repo.read(cx).status_for_path(&repo_path)?.status.summary();
 
-                    Some(entry_git_aware_label_color(
-                        status.summary(),
+                    Some(tab_git_aware_label_color(
+                        status,
                         entry.is_ignored,
                         params.selected,
+                        most_severe_diagnostic,
+                        cx,
                     ))
                 })
-                .unwrap_or_else(|| entry_label_color(params.selected))
+                .unwrap_or_else(|| {
+                    tab_diagnostic_label_color(most_severe_diagnostic, cx)
+                        .unwrap_or_else(|| entry_label_color(params.selected))
+                })
         } else {
-            entry_label_color(params.selected)
+            tab_diagnostic_label_color(most_severe_diagnostic, cx)
+                .unwrap_or_else(|| entry_label_color(params.selected))
         };
 
         let description = params.detail.and_then(|detail| {
@@ -1799,10 +1819,6 @@ impl SearchableItem for Editor {
             });
         }
     }
-
-    /// Takes the current cursor position and finds the next match in the
-    /// provided `direction`, the provide `count` number of times, wrapping
-    /// around if necessary.
     fn match_index_for_direction(
         &mut self,
         matches: &[Range<Anchor>],
@@ -1813,48 +1829,45 @@ impl SearchableItem for Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> usize {
-        if count == 0 {
-            return current_index;
-        }
-
-        let cursor = if self.selections.disjoint_anchors_arc().len() == 1 {
+        let buffer = self.buffer().read(cx).snapshot(cx);
+        let current_index_position = if self.selections.disjoint_anchors_arc().len() == 1 {
             self.selections.newest_anchor().head()
         } else {
             matches[current_index].start
         };
 
-        let buffer = self.buffer().read(cx).snapshot(cx);
-        let new_idx = match direction {
-            Direction::Next => matches
-                .iter()
-                .position(|m| m.start.cmp(&cursor, &buffer).is_gt())
-                .unwrap_or(0),
-            Direction::Prev => matches
-                .iter()
-                .rposition(|m| m.end.cmp(&cursor, &buffer).is_lt())
-                .unwrap_or(matches.len() - 1),
-        } as isize;
+        let mut count = count % matches.len();
+        if count == 0 {
+            return current_index;
+        }
+        match direction {
+            Direction::Next => {
+                if matches[current_index]
+                    .start
+                    .cmp(&current_index_position, &buffer)
+                    .is_gt()
+                {
+                    count -= 1
+                }
 
-        // We'll use `count - 1` because the first jump to the next or previous
-        // match already happens in the scenario above, when we find the next or
-        // previous match starting from the cursor position.
-        let count = count.saturating_sub(1);
-        let count = match direction {
-            Direction::Prev => -(count as isize),
-            Direction::Next => count as isize,
-        };
+                (current_index + count) % matches.len()
+            }
+            Direction::Prev => {
+                if matches[current_index]
+                    .end
+                    .cmp(&current_index_position, &buffer)
+                    .is_lt()
+                {
+                    count -= 1;
+                }
 
-        let new_idx = (new_idx + count) % matches.len() as isize;
-        let new_idx = if new_idx.is_negative() {
-            // We need a `matches.len() - 1` here in case `next_idx` has now been
-            // set to `0`, otherwise we'd end up returning `matches.len()`, which
-            // would be out of bounds.
-            new_idx + (matches.len() - 1) as isize
-        } else {
-            new_idx
-        };
-        assert!(new_idx < matches.len() as isize);
-        new_idx as usize
+                if current_index >= count {
+                    current_index - count
+                } else {
+                    matches.len() - (count - current_index)
+                }
+            }
+        }
     }
 
     fn find_matches(
@@ -2005,20 +2018,67 @@ pub fn entry_diagnostic_aware_icon_decoration_and_color(
     }
 }
 
-pub fn entry_git_aware_label_color(git_status: GitSummary, ignored: bool, selected: bool) -> Color {
+pub fn entry_git_aware_label_color(
+    git_status: GitSummary,
+    ignored: bool,
+    selected: bool,
+    cx: &App,
+) -> Color {
     let tracked = git_status.index + git_status.worktree;
+    let colors = cx.theme().colors();
     if git_status.conflict > 0 {
-        Color::Conflict
+        Color::Custom(colors.tab_conflict_foreground)
     } else if tracked.deleted > 0 {
-        Color::Deleted
+        Color::Custom(colors.tab_deleted_foreground)
     } else if tracked.modified > 0 {
-        Color::Modified
+        Color::Custom(colors.tab_modified_foreground)
     } else if tracked.added > 0 || git_status.untracked > 0 {
-        Color::Created
+        Color::Custom(colors.tab_created_foreground)
     } else if ignored {
         Color::Ignored
     } else {
         entry_label_color(selected)
+    }
+}
+
+pub fn tab_git_aware_label_color(
+    git_status: GitSummary,
+    ignored: bool,
+    selected: bool,
+    diagnostic_severity: Option<DiagnosticSeverity>,
+    cx: &App,
+) -> Color {
+    if let Some(color) = tab_diagnostic_label_color(diagnostic_severity, cx) {
+        return color;
+    }
+    let tracked = git_status.index + git_status.worktree;
+    if git_status.conflict > 0 {
+        Color::Custom(cx.theme().colors().tab_conflict_foreground)
+    } else if tracked.deleted > 0 {
+        Color::Custom(cx.theme().colors().tab_deleted_foreground)
+    } else if tracked.modified > 0 {
+        Color::Custom(cx.theme().colors().tab_modified_foreground)
+    } else if tracked.added > 0 || git_status.untracked > 0 {
+        Color::Custom(cx.theme().colors().tab_created_foreground)
+    } else if ignored {
+        Color::Ignored
+    } else {
+        entry_label_color(selected)
+    }
+}
+
+pub fn tab_diagnostic_label_color(
+    diagnostic_severity: Option<DiagnosticSeverity>,
+    cx: &App,
+) -> Option<Color> {
+    match diagnostic_severity {
+        Some(DiagnosticSeverity::ERROR) => {
+            Some(Color::Custom(cx.theme().colors().tab_error_foreground))
+        }
+        Some(DiagnosticSeverity::WARNING) => {
+            Some(Color::Custom(cx.theme().colors().tab_warning_foreground))
+        }
+        _ => None,
     }
 }
 

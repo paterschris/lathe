@@ -114,6 +114,8 @@ pub struct MultiWorkspaceState {
     pub project_groups: Vec<SerializedProjectGroup>,
     #[serde(default)]
     pub sidebar_state: Option<String>,
+    #[serde(default)]
+    pub workspace_group_name: Option<String>,
 }
 
 /// The serialized state of a single MultiWorkspace window from a previous session:
