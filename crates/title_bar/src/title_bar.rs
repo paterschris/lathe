@@ -7,7 +7,6 @@ mod update_version;
 
 use crate::application_menu::{ApplicationMenu, show_menus};
 use crate::plan_chip::PlanChip;
-use agent_settings::{AgentSettings, WindowLayout};
 use arrayvec::ArrayVec;
 use git_ui::worktree_picker::WorktreePicker;
 pub use platform_title_bar::{
@@ -33,19 +32,16 @@ use gpui::{
     pulsating_between,
 };
 use onboarding_banner::OnboardingBanner;
-use project::{
-    Project, git_store::GitStoreEvent, project_settings::ProjectSettings,
-    trusted_worktrees::TrustedWorktrees,
-};
+use project::{Project, git_store::GitStoreEvent, trusted_worktrees::TrustedWorktrees};
 use remote::RemoteConnectionOptions;
-use settings::Settings as _;
+use settings::Settings;
 
 use std::sync::Arc;
 use std::time::Duration;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
 use ui::{
-    Avatar, ButtonLike, ContextMenu, ContextMenuEntry, IconWithIndicator, Indicator, PopoverMenu,
+    Avatar, ButtonLike, ContextMenu, CountBadge, IconWithIndicator, Indicator, PopoverMenu,
     PopoverMenuHandle, TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
 };
 use update_version::UpdateVersion;
@@ -179,7 +175,6 @@ impl Render for TitleBar {
 
         let title_bar_settings = *TitleBarSettings::get_global(cx);
         let button_layout = title_bar_settings.button_layout;
-        let is_git_enabled = ProjectSettings::get_global(cx).git.enabled.status;
 
         let show_menus = show_menus(cx);
 
@@ -236,15 +231,16 @@ impl Render for TitleBar {
                                         .child(self.render_project_name(project_name, window, cx))
                                 })
                                 .when_some(
-                                    repository.filter(|_| is_git_enabled),
+                                    repository.filter(|_| title_bar_settings.show_branch_name),
                                     |title_bar, repository| {
-                                        title_bar.children(self.render_worktree_and_branch(
+                                        title_bar.children(self.render_project_branch(
                                             repository,
                                             linked_worktree_name,
                                             cx,
                                         ))
                                     },
                                 )
+                                .children(self.render_awaiting_input_indicator(cx))
                         })
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -834,7 +830,7 @@ impl TitleBar {
             .anchor(gpui::Anchor::TopLeft)
     }
 
-    fn render_worktree_and_branch(
+    fn render_project_branch(
         &self,
         repository: Entity<project::git_store::Repository>,
         linked_worktree_name: Option<SharedString>,
@@ -879,6 +875,7 @@ impl TitleBar {
             (branch_name, icon_info, is_detached_head)
         };
 
+        let branch_name = branch_name?;
         let settings = TitleBarSettings::get_global(cx);
         let effective_repository = Some(repository);
 
@@ -939,77 +936,112 @@ impl TitleBar {
                 .anchor(gpui::Anchor::TopLeft)
         };
 
-        let branch_picker = branch_name.and_then(|branch_name| {
-            settings.show_branch_name.then(|| {
-                let branch_tooltip_label = branch_name.clone();
-                let (branch_icon, branch_icon_color) = if settings.show_branch_status_icon {
-                    icon_info
-                } else {
-                    (IconName::GitBranch, Color::Muted)
-                };
+        let branch_tooltip_label = branch_name.clone();
+        let (branch_icon, branch_icon_color) = if settings.show_branch_status_icon {
+            icon_info
+        } else {
+            (IconName::GitBranch, Color::Muted)
+        };
 
-                let trigger = if is_detached_head {
-                    Button::new("project_branch_trigger", "Create Branch")
-                        .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                        .label_size(LabelSize::Small)
-                        .start_icon(
-                            Icon::new(IconName::GitBranchPlus)
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                } else {
-                    Button::new("project_branch_trigger", branch_name)
-                        .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                        .label_size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .start_icon(
-                            Icon::new(branch_icon)
-                                .size(IconSize::XSmall)
-                                .color(branch_icon_color),
-                        )
-                };
+        let trigger = if is_detached_head {
+            Button::new("project_branch_trigger", "Create Branch")
+                .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                .label_size(LabelSize::Small)
+                .start_icon(
+                    Icon::new(IconName::GitBranchPlus)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                )
+        } else {
+            Button::new("project_branch_trigger", branch_name)
+                .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                .label_size(LabelSize::Small)
+                .color(Color::Muted)
+                .start_icon(
+                    Icon::new(branch_icon)
+                        .size(IconSize::XSmall)
+                        .color(branch_icon_color),
+                )
+        };
 
-                PopoverMenu::new("branch-menu")
-                    .menu(move |window, cx| {
-                        Some(git_ui::git_picker::popover(
-                            workspace.downgrade(),
-                            effective_repository.clone(),
-                            git_ui::git_picker::GitPickerTab::Branches,
-                            gpui::rems(34.),
-                            window,
-                            cx,
-                        ))
-                    })
-                    .trigger_with_tooltip(trigger, move |_window, cx| {
-                        let meta = if is_detached_head {
-                            format!("Detached HEAD: {}", branch_tooltip_label)
-                        } else {
-                            format!("Currently Checked Out: {}", branch_tooltip_label)
-                        };
-                        Tooltip::with_meta(
-                            "Branch & Stash",
-                            Some(&zed_actions::git::Branch),
-                            meta,
-                            cx,
-                        )
-                    })
-                    .anchor(gpui::Anchor::TopLeft)
+        let git_picker_button = PopoverMenu::new("branch-menu")
+            .menu(move |window, cx| {
+                Some(git_ui::git_picker::popover(
+                    workspace.downgrade(),
+                    effective_repository.clone(),
+                    git_ui::git_picker::GitPickerTab::Branches,
+                    gpui::rems(34.),
+                    window,
+                    cx,
+                ))
             })
-        });
+            .trigger_with_tooltip(trigger, move |_window, cx| {
+                let meta = if is_detached_head {
+                    format!("Detached HEAD: {}", branch_tooltip_label)
+                } else {
+                    format!("Currently Checked Out: {}", branch_tooltip_label)
+                };
+                Tooltip::with_meta("Branch & Stash", Some(&zed_actions::git::Branch), meta, cx)
+            })
+            .anchor(gpui::Anchor::TopLeft);
 
         Some(
             h_flex()
                 .gap_px()
                 .child(worktree_button)
-                .when_some(branch_picker, |this, branch_picker| {
-                    this.child(
-                        Label::new("/")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .alpha(0.25),
-                    )
-                    .child(branch_picker)
+                .child(
+                    Label::new("/")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .alpha(0.25),
+                )
+                .child(git_picker_button)
+                .into_any_element(),
+        )
+    }
+
+    fn render_awaiting_input_indicator(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let workspace = self.workspace.upgrade()?;
+        let count = workspace.read(cx).awaiting_input_count(cx);
+        if count == 0 {
+            return None;
+        }
+        let workspace_handle = self.workspace.clone();
+        let tooltip = workspace.read(cx).first_awaiting_input_tooltip(cx);
+        let tooltip_text = if count > 1 {
+            format!("{count} terminals awaiting input — click to focus")
+        } else {
+            format!("{tooltip} — click to focus")
+        };
+        Some(
+            div()
+                .id("terminal-awaiting-input")
+                .cursor_pointer()
+                .relative()
+                .on_click(move |_, window, cx| {
+                    if let Some(workspace) = workspace_handle.upgrade() {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.focus_first_awaiting_input(window, cx);
+                        });
+                    }
                 })
+                .tooltip(Tooltip::text(tooltip_text))
+                .child(
+                    Icon::new(IconName::Return)
+                        .size(IconSize::Small)
+                        .color(Color::Accent),
+                )
+                .when(count > 1, |this| this.child(CountBadge::new(count)))
+                .with_animation(
+                    "titlebar-awaiting-pulse",
+                    Animation::new(Duration::from_secs(2))
+                        .repeat()
+                        .with_easing(pulsating_between(0.4, 1.0)),
+                    |element, delta| element.opacity(delta),
+                )
                 .into_any_element(),
         )
     }
@@ -1167,27 +1199,55 @@ impl TitleBar {
 
         let show_user_picture = TitleBarSettings::get_global(cx).show_user_picture;
 
+        let saved_accounts = self.client.list_accounts();
+        let active_account_id = self.client.active_account_id();
+        let workspace = self.workspace.clone();
+
+        let bound_account_id = workspace
+            .upgrade()
+            .and_then(|w| w.read(cx).bound_collab_account_id().map(|s| s.to_string()));
+        let bound_account = bound_account_id
+            .as_ref()
+            .and_then(|id| saved_accounts.iter().find(|a| &a.id == id).cloned());
+        let display_avatar = bound_account
+            .as_ref()
+            .and_then(|a| a.avatar_uri.clone())
+            .map(gpui::SharedUri::from)
+            .or_else(|| user_avatar.clone());
+        let display_login = bound_account
+            .as_ref()
+            .and_then(|a| a.login.clone())
+            .map(gpui::SharedString::from)
+            .or_else(|| user_login.clone());
+        let display_account_id = bound_account_id.or_else(|| active_account_id.clone());
+
+        let show_business_organization = display_account_id == active_account_id;
         let trigger = if is_signed_in && show_user_picture {
-            let avatar = user_avatar.map(|avatar| Avatar::new(avatar)).map(|avatar| {
-                if show_update_button {
-                    avatar.indicator(
-                        div()
-                            .absolute()
-                            .bottom_0()
-                            .right_0()
-                            .child(Indicator::dot().color(Color::Accent)),
-                    )
-                } else {
-                    avatar
-                }
-            });
+            let avatar = display_avatar
+                .map(Avatar::new)
+                .map(|avatar| {
+                    if show_update_button {
+                        avatar.indicator(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .right_0()
+                                .child(Indicator::dot().color(Color::Accent)),
+                        )
+                    } else {
+                        avatar
+                    }
+                });
 
             ButtonLike::new("user-menu").child(
                 h_flex()
-                    .when_some(business_organization, |this, organization| {
-                        this.gap_2()
-                            .child(Label::new(&organization.name).size(LabelSize::Small))
-                    })
+                    .when_some(
+                        business_organization.filter(|_| show_business_organization),
+                        |this, organization| {
+                            this.gap_2()
+                                .child(Label::new(&organization.name).size(LabelSize::Small))
+                        },
+                    )
                     .children(avatar),
             )
         } else {
@@ -1202,25 +1262,24 @@ impl TitleBar {
                 let current_organization = current_organization.clone();
                 let organizations = organizations.clone();
                 let user_store = user_store.clone();
-
-                let ai_enabled = !project::DisableAiSettings::get_global(cx).disable_ai;
-                let current_layout = AgentSettings::get_layout(cx);
-                let is_editor = matches!(current_layout, WindowLayout::Editor(_));
-                let is_agent = matches!(current_layout, WindowLayout::Agent(_));
-                let is_custom = matches!(current_layout, WindowLayout::Custom(_));
-                let fs = <dyn fs::Fs>::global(cx);
+                let saved_accounts = saved_accounts.clone();
+                let active_account_id = active_account_id.clone();
+                let workspace = workspace.clone();
+                let display_login = display_login.clone();
+                let display_account_id = display_account_id.clone();
 
                 ContextMenu::build(window, cx, |menu, _, _cx| {
                     menu.when(is_signed_in, |this| {
-                        let user_login = user_login.clone();
+                        let display_login = display_login.clone();
                         this.custom_entry(
                             move |_window, _cx| {
-                                let user_login = user_login.clone().unwrap_or_default();
+                                let display_login =
+                                    display_login.clone().map(|s| s.to_string()).unwrap_or_default();
 
                                 h_flex()
                                     .w_full()
                                     .justify_between()
-                                    .child(Label::new(user_login))
+                                    .child(Label::new(display_login))
                                     .when(!has_organization, |parent| {
                                         parent.child(PlanChip::new(plan.unwrap_or(Plan::ZedFree)))
                                     })
@@ -1319,53 +1378,102 @@ impl TitleBar {
                         "Extensions",
                         zed_actions::Extensions::default().boxed_clone(),
                     )
-                    .when(ai_enabled, |menu| {
-                        let fs = fs.clone();
-                        menu.separator()
-                            .submenu("Panel Layout", move |menu, _window, _cx| {
-                                let fs = fs.clone();
-                                menu.toggleable_entry(
-                                    "Classic",
-                                    is_editor,
-                                    IconPosition::Start,
-                                    None,
+                    .when(
+                        is_signed_in || !saved_accounts.is_empty(),
+                        |this| {
+                            let mut this = this.separator().header("Accounts");
+                            for account in &saved_accounts {
+                                let account_id = account.id.clone();
+                                let is_active =
+                                    display_account_id.as_deref() == Some(&account.id);
+                                let is_globally_active =
+                                    active_account_id.as_deref() == Some(&account.id);
+                                let label = if is_globally_active {
+                                    user_login
+                                        .as_ref()
+                                        .map(|login| login.to_string())
+                                        .unwrap_or_else(|| {
+                                            account
+                                                .login
+                                                .clone()
+                                                .unwrap_or_else(|| account.label.clone())
+                                        })
+                                } else {
+                                    account
+                                        .login
+                                        .clone()
+                                        .unwrap_or_else(|| account.label.clone())
+                                };
+                                if is_globally_active && user_login.is_some() {
+                                    client::accounts::set_active_label(&label).log_err();
+                                }
+                                this = this.custom_entry(
+                                    move |_window, _cx| {
+                                        let mut row = h_flex()
+                                            .w_full()
+                                            .justify_between()
+                                            .child(Label::new(label.clone()));
+                                        if is_active {
+                                            row = row.child(
+                                                Icon::new(IconName::Check)
+                                                    .color(Color::Accent),
+                                            );
+                                        }
+                                        row.into_any_element()
+                                    },
                                     {
-                                        let fs = fs.clone();
-                                        move |_window, cx| {
-                                            drop(AgentSettings::set_layout(
-                                                WindowLayout::Editor(None),
-                                                fs.clone(),
+                                        let account_id = account_id.clone();
+                                        let workspace = workspace.clone();
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    workspace.set_bound_collab_account_id(
+                                                        Some(account_id.clone()),
+                                                        cx,
+                                                    );
+                                                });
+                                            }
+                                            window.dispatch_action(
+                                                client::SwitchAccount {
+                                                    account_id: account_id.clone(),
+                                                }
+                                                .boxed_clone(),
                                                 cx,
-                                            ));
+                                            );
                                         }
                                     },
-                                )
-                                .toggleable_entry("Agentic", is_agent, IconPosition::Start, None, {
-                                    let fs = fs.clone();
-                                    move |_window, cx| {
-                                        drop(AgentSettings::set_layout(
-                                            WindowLayout::Agent(None),
-                                            fs.clone(),
-                                            cx,
-                                        ));
-                                    }
-                                })
-                                .when(is_custom, |menu| {
-                                    menu.item(
-                                        ContextMenuEntry::new("Custom")
-                                            .toggleable(IconPosition::Start, true)
-                                            .disabled(true),
+                                );
+                            }
+                            this.action("Add Account…", client::AddAccount.boxed_clone())
+                                .when(is_signed_in, |this| {
+                                    // Only the currently active account is
+                                    // signed out; other saved accounts stay
+                                    // in the switcher. Name it explicitly so
+                                    // users with multiple accounts aren't
+                                    // guessing.
+                                    let active_label = active_account_id
+                                        .as_ref()
+                                        .and_then(|id| {
+                                            saved_accounts
+                                                .iter()
+                                                .find(|a| &a.id == id)
+                                                .map(|a| a.label.clone())
+                                        });
+                                    let sign_out_label = match active_label {
+                                        Some(label) => format!("Sign Out of {label}"),
+                                        None => "Sign Out".to_string(),
+                                    };
+                                    this.action(
+                                        sign_out_label,
+                                        client::SignOut.boxed_clone(),
                                     )
                                 })
-                            })
-                    })
-                    .when(is_signed_in, |this| {
-                        this.separator()
-                            .action("Sign Out", client::SignOut.boxed_clone())
-                    })
+                        },
+                    )
                 })
                 .into()
             })
             .anchor(Anchor::TopRight)
     }
 }
+
