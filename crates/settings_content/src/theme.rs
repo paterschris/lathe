@@ -149,12 +149,6 @@ pub struct ThemeSettingsContent {
     pub agent_ui_font_size: Option<FontSize>,
     /// The font size for user messages in the agent panel.
     pub agent_buffer_font_size: Option<FontSize>,
-    /// The name of a font to use for rendering in the markdown preview.
-    /// Falls back to the UI font if unset.
-    pub markdown_preview_font_family: Option<FontFamilyName>,
-    /// The theme to use for the markdown preview.
-    /// Falls back to the main editor theme if unset.
-    pub markdown_preview_theme: Option<ThemeSelection>,
     /// The name of the Zed theme to use.
     pub theme: Option<ThemeSelection>,
     /// The name of the icon theme to use.
@@ -700,6 +694,45 @@ pub struct ThemeColorsContent {
     #[serde(rename = "tab.active_background")]
     pub tab_active_background: Option<String>,
 
+    #[serde(rename = "tab.modified_foreground")]
+    pub tab_modified_foreground: Option<String>,
+
+    #[serde(rename = "tab.modified_background")]
+    pub tab_modified_background: Option<String>,
+
+    #[serde(rename = "tab.created_foreground")]
+    pub tab_created_foreground: Option<String>,
+
+    #[serde(rename = "tab.created_background")]
+    pub tab_created_background: Option<String>,
+
+    #[serde(rename = "tab.deleted_foreground")]
+    pub tab_deleted_foreground: Option<String>,
+
+    #[serde(rename = "tab.deleted_background")]
+    pub tab_deleted_background: Option<String>,
+
+    #[serde(rename = "tab.conflict_foreground")]
+    pub tab_conflict_foreground: Option<String>,
+
+    #[serde(rename = "tab.conflict_background")]
+    pub tab_conflict_background: Option<String>,
+
+    #[serde(rename = "tab.error_foreground")]
+    pub tab_error_foreground: Option<String>,
+
+    #[serde(rename = "tab.error_background")]
+    pub tab_error_background: Option<String>,
+
+    #[serde(rename = "tab.warning_foreground")]
+    pub tab_warning_foreground: Option<String>,
+
+    #[serde(rename = "tab.warning_background")]
+    pub tab_warning_background: Option<String>,
+
+    #[serde(rename = "tab.dirty_background")]
+    pub tab_dirty_background: Option<String>,
+
     #[serde(rename = "search.match_background")]
     pub search_match_background: Option<String>,
 
@@ -711,6 +744,18 @@ pub struct ThemeColorsContent {
 
     #[serde(rename = "panel.focused_border")]
     pub panel_focused_border: Option<String>,
+
+    #[serde(rename = "panel.modified_background")]
+    pub panel_modified_background: Option<String>,
+
+    #[serde(rename = "panel.created_background")]
+    pub panel_created_background: Option<String>,
+
+    #[serde(rename = "panel.deleted_background")]
+    pub panel_deleted_background: Option<String>,
+
+    #[serde(rename = "panel.conflict_background")]
+    pub panel_conflict_background: Option<String>,
 
     #[serde(rename = "panel.indent_guide")]
     pub panel_indent_guide: Option<String>,
@@ -1013,6 +1058,15 @@ pub struct ThemeColorsContent {
     #[serde(rename = "version_control.conflict_marker.theirs")]
     pub version_control_conflict_marker_theirs: Option<String>,
 
+    #[serde(rename = "gutter.added_background")]
+    pub gutter_added_background: Option<String>,
+
+    #[serde(rename = "gutter.modified_background")]
+    pub gutter_modified_background: Option<String>,
+
+    #[serde(rename = "gutter.deleted_background")]
+    pub gutter_deleted_background: Option<String>,
+
     /// Deprecated in favor of `version_control_conflict_marker_ours`.
     #[deprecated]
     pub version_control_conflict_ours_background: Option<String>,
@@ -1042,9 +1096,6 @@ pub struct ThemeColorsContent {
     /// Background color for Vim yank highlight.
     #[serde(rename = "vim.yank.background")]
     pub vim_yank_background: Option<String>,
-    /// Foreground color for Helix jump labels.
-    #[serde(rename = "vim.helix_jump_label.foreground")]
-    pub vim_helix_jump_label_foreground: Option<String>,
     /// Background color for Vim Helix Normal mode indicator.
     #[serde(rename = "vim.helix_normal.background")]
     pub vim_helix_normal_background: Option<String>,

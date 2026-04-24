@@ -72,29 +72,11 @@ pub(crate) fn zed_default_dark() -> Theme {
     let teal = hsla(187. / 360., 47. / 100., 55. / 100., 1.0);
     let yellow = hsla(39. / 360., 67. / 100., 69. / 100., 1.0);
 
-    const ADDED_COLOR: Hsla = Hsla {
-        h: 134. / 360.,
-        s: 0.55,
-        l: 0.40,
-        a: 1.0,
-    };
     const WORD_ADDED_COLOR: Hsla = Hsla {
         h: 134. / 360.,
         s: 0.55,
         l: 0.40,
         a: 0.35,
-    };
-    const MODIFIED_COLOR: Hsla = Hsla {
-        h: 48. / 360.,
-        s: 0.76,
-        l: 0.47,
-        a: 1.0,
-    };
-    const REMOVED_COLOR: Hsla = Hsla {
-        h: 350. / 360.,
-        s: 0.88,
-        l: 0.25,
-        a: 1.0,
     };
     const WORD_DELETED_COLOR: Hsla = Hsla {
         h: 350. / 360.,
@@ -155,6 +137,19 @@ pub(crate) fn zed_default_dark() -> Theme {
                 tab_bar_background: bg,
                 tab_inactive_background: bg,
                 tab_active_background: editor,
+                tab_modified_foreground: blue,
+                tab_modified_background: blue.alpha(0.1),
+                tab_created_foreground: green,
+                tab_created_background: green.alpha(0.1),
+                tab_deleted_foreground: red,
+                tab_deleted_background: red.alpha(0.1),
+                tab_conflict_foreground: orange,
+                tab_conflict_background: orange.alpha(0.1),
+                tab_error_foreground: red,
+                tab_error_background: red.alpha(0.1),
+                tab_warning_foreground: yellow,
+                tab_warning_background: yellow.alpha(0.1),
+                tab_dirty_background: hsla(0., 0., 0.5, 0.1),
                 search_match_background: bg,
                 search_active_match_background: bg,
 
@@ -218,6 +213,10 @@ pub(crate) fn zed_default_dark() -> Theme {
                 terminal_ansi_dim_white: crate::neutral().dark().step_10(),
                 panel_background: bg,
                 panel_focused_border: blue,
+                panel_modified_background: gpui::transparent_black(),
+                panel_created_background: gpui::transparent_black(),
+                panel_deleted_background: gpui::transparent_black(),
+                panel_conflict_background: gpui::transparent_black(),
                 panel_indent_guide: hsla(228. / 360., 8. / 100., 25. / 100., 1.),
                 panel_indent_guide_hover: hsla(225. / 360., 13. / 100., 12. / 100., 1.),
                 panel_indent_guide_active: hsla(225. / 360., 13. / 100., 12. / 100., 1.),
@@ -242,16 +241,20 @@ pub(crate) fn zed_default_dark() -> Theme {
                 minimap_thumb_border: hsla(228. / 360., 8. / 100., 25. / 100., 1.),
                 editor_foreground: hsla(218. / 360., 14. / 100., 71. / 100., 1.),
                 link_text_hover: blue,
-                version_control_added: ADDED_COLOR,
-                version_control_deleted: REMOVED_COLOR,
-                version_control_modified: MODIFIED_COLOR,
-                version_control_renamed: MODIFIED_COLOR,
+                version_control_added: crate::green().dark().step_11(),
+                version_control_deleted: crate::red().dark().step_11(),
+                version_control_modified: crate::yellow().dark().step_11(),
+                version_control_renamed: crate::blue().dark().step_11(),
                 version_control_conflict: crate::orange().light().step_12(),
                 version_control_ignored: crate::gray().light().step_12(),
                 version_control_word_added: WORD_ADDED_COLOR,
                 version_control_word_deleted: WORD_DELETED_COLOR,
                 version_control_conflict_marker_ours: crate::green().light().step_12().alpha(0.5),
                 version_control_conflict_marker_theirs: crate::blue().light().step_12().alpha(0.5),
+
+                gutter_added_background: gpui::transparent_black(),
+                gutter_modified_background: gpui::transparent_black(),
+                gutter_deleted_background: gpui::transparent_black(),
 
                 vim_normal_background: SystemColors::default().transparent,
                 vim_insert_background: SystemColors::default().transparent,
@@ -260,7 +263,6 @@ pub(crate) fn zed_default_dark() -> Theme {
                 vim_visual_line_background: SystemColors::default().transparent,
                 vim_visual_block_background: SystemColors::default().transparent,
                 vim_yank_background: hsla(207.8 / 360., 81. / 100., 66. / 100., 0.2),
-                vim_helix_jump_label_foreground: red,
                 vim_helix_normal_background: SystemColors::default().transparent,
                 vim_helix_select_background: SystemColors::default().transparent,
                 vim_normal_foreground: SystemColors::default().transparent,

@@ -132,7 +132,7 @@
   {
     "token_type": "parameter",
     "token_modifiers": [],
-    "style": ["variable"],
+    "style": ["variable.parameter", "variable"],
   },
   {
     "token_type": "variable",
