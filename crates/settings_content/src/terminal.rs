@@ -179,10 +179,18 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: false
     pub show_count_badge: Option<bool>,
-    /// What to do when the `BEL` character (`\a`) is printed to terminal.
+    /// How many seconds of inactivity before the terminal shows
+    /// an awaiting-input indicator. Set to 0 to disable the indicator.
     ///
-    /// Default: "system"
-    pub bell: Option<TerminalBell>,
+    /// Default: 5
+    pub awaiting_input_idle_threshold_secs: Option<u64>,
+    /// Sound to play when a terminal starts awaiting input.
+    /// Set to "off" to disable, or choose one of the built-in sounds:
+    /// "agent_done", "mute", "unmute", "joined_call", "guest_joined_call",
+    /// "leave_call", "start_screenshare", "stop_screenshare".
+    ///
+    /// Default: off
+    pub sound_on_awaiting_input: Option<AwaitingInputSound>,
 }
 
 /// Shell configuration to open the terminal with.
@@ -399,29 +407,6 @@ pub struct TerminalToolbarContent {
 }
 
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    strum::VariantArray,
-    strum::VariantNames,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminalBell {
-    /// Play an OS-specific alert sound.
-    #[default]
-    System,
-    /// Do not play any sound.
-    Off,
-}
-
-#[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
 )]
 #[serde(rename_all = "snake_case")]
@@ -507,6 +492,32 @@ pub enum TerminalDockPosition {
     Left,
     Bottom,
     Right,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AwaitingInputSound {
+    /// No sound.
+    Off,
+    /// A subtle chime indicating the agent has finished.
+    #[default]
+    AgentDone,
+    /// The mute sound effect.
+    Mute,
+    /// The unmute sound effect.
+    Unmute,
+    /// The "joined call" chime.
+    JoinedCall,
+    /// The "guest joined" chime.
+    GuestJoinedCall,
+    /// The "leave call" sound.
+    LeaveCall,
+    /// The "start screenshare" sound.
+    StartScreenshare,
+    /// The "stop screenshare" sound.
+    StopScreenshare,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]

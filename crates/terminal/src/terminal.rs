@@ -26,7 +26,6 @@ use alacritty_terminal::{
     },
 };
 use anyhow::{Context as _, Result, bail};
-use futures_lite::future::yield_now;
 use log::trace;
 
 use futures::{
@@ -40,12 +39,12 @@ use mappings::mouse::{
     scroll_report,
 };
 
-use async_channel::{Receiver, Sender};
 use collections::{HashMap, VecDeque};
 use futures::StreamExt;
 use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
 use settings::Settings;
+use smol::channel::{Receiver, Sender};
 use task::{HideStrategy, Shell, SpawnInTerminal};
 use terminal_hyperlinks::RegexSearches;
 use terminal_settings::{AlternateScroll, CursorShape, TerminalSettings};
@@ -402,6 +401,7 @@ impl TerminalBuilder {
             vi_mode_enabled: false,
             is_remote_terminal: false,
             last_mouse_move_time: Instant::now(),
+            last_output_at: Instant::now(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
             #[cfg(windows)]
@@ -636,6 +636,7 @@ impl TerminalBuilder {
                 vi_mode_enabled: false,
                 is_remote_terminal,
                 last_mouse_move_time: Instant::now(),
+                last_output_at: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
                 #[cfg(windows)]
@@ -737,7 +738,7 @@ impl TerminalBuilder {
                     }
 
                     if events.is_empty() && !wakeup {
-                        yield_now().await;
+                        smol::future::yield_now().await;
                         break 'outer;
                     }
 
@@ -750,7 +751,7 @@ impl TerminalBuilder {
                             this.process_event(event, cx);
                         }
                     })?;
-                    yield_now().await;
+                    smol::future::yield_now().await;
                 }
             }
             anyhow::Ok(())
@@ -872,6 +873,7 @@ pub struct Terminal {
     vi_mode_enabled: bool,
     is_remote_terminal: bool,
     last_mouse_move_time: Instant,
+    last_output_at: Instant,
     last_hyperlink_search_position: Option<Point<Pixels>>,
     mouse_down_hyperlink: Option<(String, bool, Match)>,
     #[cfg(windows)]
@@ -903,6 +905,23 @@ pub struct TaskState {
     pub status: TaskStatus,
     pub completion_rx: Receiver<Option<ExitStatus>>,
     pub spawned_task: SpawnInTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractivePromptKind {
+    GeneralInput,
+    Confirmation,
+    ChooseOption,
+}
+
+impl InteractivePromptKind {
+    pub fn tooltip_text(&self) -> &'static str {
+        match self {
+            Self::GeneralInput => "Terminal awaiting input",
+            Self::Confirmation => "Terminal awaiting confirmation",
+            Self::ChooseOption => "Terminal awaiting selection",
+        }
+    }
 }
 
 /// A status of the current terminal tab's task.
@@ -988,6 +1007,7 @@ impl Terminal {
                 //NOOP, Handled in render
             }
             AlacTermEvent::Wakeup => {
+                self.last_output_at = Instant::now();
                 cx.emit(Event::Wakeup);
 
                 if let TerminalType::Pty { info, .. } = &self.terminal_type {
@@ -2153,31 +2173,53 @@ impl Terminal {
                         .read()
                         .as_ref()
                         .map(|fpi| {
-                            let process_file = fpi
+                            let cwd_name = fpi
                                 .cwd
                                 .file_name()
                                 .map(|name| name.to_string_lossy().into_owned())
                                 .unwrap_or_default();
 
-                            let argv = fpi.argv.as_slice();
-                            let process_name = format!(
-                                "{}{}",
-                                fpi.name,
-                                if !argv.is_empty() {
-                                    format!(" {}", (argv[1..]).join(" "))
-                                } else {
-                                    "".to_string()
+                            let project_name = fpi
+                                .cwd
+                                .ancestors()
+                                .find(|ancestor| ancestor.join(".git").exists())
+                                .and_then(|root| root.file_name())
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| cwd_name.clone());
+
+                            let is_claude_code = fpi.argv.iter().any(|arg| {
+                                if arg.starts_with('-') {
+                                    return false;
                                 }
-                            );
-                            let (process_file, process_name) = if truncate {
+                                let lowered = arg.to_ascii_lowercase();
+                                let tail = lowered
+                                    .rsplit(|c| c == '/' || c == '\\')
+                                    .next()
+                                    .unwrap_or("");
+                                tail == "claude" || tail == "claude-code"
+                            }) || fpi.name.eq_ignore_ascii_case("claude")
+                                || fpi.name.eq_ignore_ascii_case("claude-code");
+
+                            let detail = if is_claude_code {
+                                "Claude".to_string()
+                            } else {
+                                cwd_name
+                            };
+
+                            let (project_name, detail) = if truncate {
                                 (
-                                    truncate_and_trailoff(&process_file, MAX_CHARS),
-                                    truncate_and_trailoff(&process_name, MAX_CHARS),
+                                    truncate_and_trailoff(&project_name, MAX_CHARS),
+                                    truncate_and_trailoff(&detail, MAX_CHARS),
                                 )
                             } else {
-                                (process_file, process_name)
+                                (project_name, detail)
                             };
-                            format!("{process_file} — {process_name}")
+
+                            if detail.is_empty() || detail == project_name {
+                                project_name
+                            } else {
+                                format!("{project_name} — {detail}")
+                            }
                         })
                         .unwrap_or_else(|| "Terminal".to_string()),
                     TerminalType::DisplayOnly => "Terminal".to_string(),
@@ -2213,8 +2255,110 @@ impl Terminal {
         }
     }
 
+    pub fn is_at_prompt(&self) -> bool {
+        match (&self.pid(), self.pid_getter()) {
+            (Some(foreground_pid), Some(pid_getter)) => {
+                *foreground_pid == pid_getter.fallback_pid()
+            }
+            _ => false,
+        }
+    }
+
     pub fn task(&self) -> Option<&TaskState> {
         self.task.as_ref()
+    }
+
+    pub fn last_output_at(&self) -> Instant {
+        self.last_output_at
+    }
+
+    pub fn is_alternate_screen(&self) -> bool {
+        self.last_content.mode.contains(TermMode::ALT_SCREEN)
+    }
+
+    pub fn child_exited(&self) -> Option<ExitStatus> {
+        self.child_exited
+    }
+
+    pub fn interactive_prompt_kind(&self) -> Option<InteractivePromptKind> {
+        let term = self.term.lock_unfair();
+        let cursor_line = term.grid().cursor.point.line;
+        let columns = term.grid().columns();
+
+        let mut lines = Vec::new();
+        for line_offset in 0..20 {
+            let line_idx = Line(cursor_line.0 - line_offset);
+            if line_idx.0 < term.topmost_line().0 {
+                break;
+            }
+            let mut text = String::new();
+            for col in 0..columns {
+                text.push(term.grid()[line_idx][Column(col)].c);
+            }
+            lines.push(text.trim_end().to_string());
+        }
+
+        let combined = lines.join("\n");
+
+        let is_prompt_char = |l: &str| {
+            let trimmed = l.trim();
+            trimmed.starts_with('❯') || trimmed.starts_with('\u{2771}')
+                || trimmed.starts_with('›') || trimmed.starts_with('\u{203a}')
+        };
+
+        let has_numbered_options = lines.iter().any(|l| {
+            let trimmed = l.trim();
+            trimmed.starts_with("1.") || trimmed.starts_with("› 1.") || trimmed.starts_with("❯ 1.")
+        }) && lines.iter().any(|l| {
+            let trimmed = l.trim();
+            trimmed.starts_with("2.") || trimmed.starts_with("3.")
+        });
+        if has_numbered_options {
+            return Some(InteractivePromptKind::ChooseOption);
+        }
+
+        let has_yn_prompt = combined.contains("[y/n]")
+            || combined.contains("[Y/n]")
+            || combined.contains("[yes/no]");
+        if has_yn_prompt {
+            return Some(InteractivePromptKind::Confirmation);
+        }
+
+        let has_proceed_prompt = combined.contains("Would you like to proceed")
+            || combined.contains("Shall I proceed")
+            || combined.contains("Do you want to proceed");
+        if has_proceed_prompt {
+            return Some(InteractivePromptKind::Confirmation);
+        }
+
+        // Claude Code shows "❯" (U+2771) or "›" (U+203A) on the input line.
+        // Check cursor line and a few lines up (status lines like "⏵⏵ bypass
+        // permissions on" can appear between the prompt char and the cursor).
+        let cursor_line_text = lines.first().map(|s| s.as_str()).unwrap_or("");
+        let has_claude_prompt = is_prompt_char(cursor_line_text)
+            || lines.iter().take(5).any(|l| is_prompt_char(l));
+
+        if has_claude_prompt {
+            // Filter out the initial Claude Code startup screen: the version
+            // banner (e.g. "Claude Code v2.1.89") appears near the prompt
+            // before any conversation has happened. This is not an actionable
+            // "awaiting input" state — it's just the app having launched.
+            // The version string also appears in the status bar during active
+            // sessions, so we require that most lines are empty (characteristic
+            // of the sparse startup splash, not a conversation in progress).
+            let has_version_banner = combined.contains("Claude Code v");
+            let non_empty_lines = lines.iter().filter(|l| !l.is_empty()).count();
+            if has_version_banner && non_empty_lines <= 5 {
+                return None;
+            }
+            return Some(InteractivePromptKind::GeneralInput);
+        }
+
+        None
+    }
+
+    pub fn has_interactive_prompt(&self) -> bool {
+        self.interactive_prompt_kind().is_some()
     }
 
     pub fn wait_for_completed_task(&self, cx: &App) -> Task<Option<ExitStatus>> {
@@ -2566,7 +2710,6 @@ mod tests {
         index::{Column, Line, Point as AlacPoint},
         term::cell::Cell,
     };
-    use async_channel::Receiver;
     use collections::HashMap;
     use gpui::{
         Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
@@ -2574,6 +2717,7 @@ mod tests {
     };
     use parking_lot::Mutex;
     use rand::{Rng, distr, rngs::StdRng};
+    use smol::channel::Receiver;
     use task::{Shell, ShellBuilder};
 
     #[cfg(not(target_os = "windows"))]
@@ -2592,7 +2736,7 @@ mod tests {
         command: &str,
         args: &[&str],
     ) -> (Entity<Terminal>, Receiver<Option<ExitStatus>>) {
-        let (completion_tx, completion_rx) = async_channel::unbounded();
+        let (completion_tx, completion_rx) = smol::channel::unbounded();
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let (program, args) =
             ShellBuilder::new(&Shell::System, false).build(Some(command.to_owned()), &args);
@@ -2745,7 +2889,7 @@ mod tests {
 
         cx.executor().allow_parking();
 
-        let (completion_tx, completion_rx) = async_channel::unbounded();
+        let (completion_tx, completion_rx) = smol::channel::unbounded();
         let builder = cx
             .update(|cx| {
                 TerminalBuilder::new(
@@ -2771,7 +2915,7 @@ mod tests {
         // Build an empty command, which will result in a tty shell spawned.
         let terminal = cx.new(|cx| builder.subscribe(cx));
 
-        let (event_tx, event_rx) = async_channel::unbounded::<Event>();
+        let (event_tx, event_rx) = smol::channel::unbounded::<Event>();
         cx.update(|cx| {
             cx.subscribe(&terminal, move |_, e, _| {
                 event_tx.send_blocking(e.clone()).unwrap();
@@ -2842,7 +2986,7 @@ mod tests {
             .unwrap();
         let terminal = cx.new(|cx| builder.subscribe(cx));
 
-        let (event_tx, event_rx) = async_channel::unbounded::<Event>();
+        let (event_tx, event_rx) = smol::channel::unbounded::<Event>();
         cx.update(|cx| {
             cx.subscribe(&terminal, move |_, e, _| {
                 event_tx.send_blocking(e.clone()).unwrap();
@@ -2877,7 +3021,7 @@ mod tests {
     async fn test_terminal_no_exit_on_spawn_failure(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
 
-        let (completion_tx, completion_rx) = async_channel::unbounded();
+        let (completion_tx, completion_rx) = smol::channel::unbounded();
         let (program, args) = ShellBuilder::new(&Shell::System, false)
             .build(Some("asdasdasdasd".to_owned()), &["@@@@@".to_owned()]);
         let builder = cx

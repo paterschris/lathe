@@ -9,10 +9,10 @@ use editor::{
     ui_scrollbar_settings_from_raw,
 };
 use gpui::{
-    Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, ScrollWheelEvent, Styled, Subscription, Task, WeakEntity, actions,
-    anchored, deferred, div,
+    Action, Animation, AnimationExt, AnyElement, App, ClipboardEntry, DismissEvent, Entity,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, Hsla, KeyContext, KeyDownEvent,
+    Keystroke, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Styled,
+    Subscription, Task, WeakEntity, actions, anchored, deferred, div, hsla, pulsating_between,
 };
 use itertools::Itertools;
 use menu;
@@ -20,7 +20,7 @@ use persistence::TerminalDb;
 use project::{Project, ProjectEntryId, search::SearchQuery};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use settings::{Settings, SettingsStore, TerminalBell, TerminalBlink, WorkingDirectory};
+use settings::{Settings, SettingsStore, TerminalBlink, WorkingDirectory};
 use std::{
     any::Any,
     cmp,
@@ -32,9 +32,9 @@ use std::{
 };
 use task::TaskId;
 use terminal::{
-    Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Paste, ScrollLineDown, ScrollLineUp,
-    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, ShowCharacterPalette, TaskState,
-    TaskStatus, Terminal, TerminalBounds, ToggleViMode,
+    Clear, Copy, Event, HoveredWord, InteractivePromptKind, MaybeNavigationTarget, Paste,
+    ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
+    ShowCharacterPalette, TaskState, TaskStatus, Terminal, TerminalBounds, ToggleViMode,
     alacritty_terminal::{
         index::Point as AlacPoint,
         term::{TermMode, point_to_viewport, search::RegexSearch},
@@ -127,6 +127,9 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     //Currently using iTerm bell, show bell emoji in tab until input is received
     has_bell: bool,
+    awaiting_input: Option<InteractivePromptKind>,
+    has_had_input: bool,
+    idle_timer: Task<()>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     cursor_shape: CursorShape,
     blink_manager: Entity<BlinkManager>,
@@ -272,6 +275,9 @@ impl TerminalView {
             workspace: workspace_handle,
             project,
             has_bell: false,
+            awaiting_input: None,
+            has_had_input: false,
+            idle_timer: Task::ready(()),
             focus_handle,
             context_menu: None,
             cursor_shape,
@@ -486,10 +492,54 @@ impl TerminalView {
         cx.emit(Event::Wakeup);
     }
 
+    fn start_idle_timer(&mut self, cx: &mut Context<Self>) {
+        let threshold_secs =
+            TerminalSettings::get_global(cx).awaiting_input_idle_threshold_secs;
+        if threshold_secs == 0 {
+            return;
+        }
+        let threshold = Duration::from_secs(threshold_secs);
+        let awaiting_sound = awaiting_input_sound(
+            TerminalSettings::get_global(cx).sound_on_awaiting_input,
+        );
+        self.idle_timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(threshold).await;
+            this.update(cx, |this, cx| {
+                if !this.has_had_input {
+                    return;
+                }
+                let terminal = this.terminal.read(cx);
+                let is_alternate_screen = terminal.is_alternate_screen();
+                let child_exited = terminal.child_exited().is_some();
+                let at_prompt = terminal.is_at_prompt();
+                let prompt_kind = terminal.interactive_prompt_kind();
+
+                if prompt_kind.is_some() && !at_prompt && !is_alternate_screen && !child_exited {
+                    this.awaiting_input = prompt_kind;
+                    cx.emit(ItemEvent::UpdateTab);
+                    cx.notify();
+
+                    if let Some(sound) = awaiting_sound {
+                        audio::Audio::play_sound(sound, cx);
+                    }
+                }
+            })
+            .ok();
+        });
+    }
+
+    fn clear_awaiting_input(&mut self, cx: &mut Context<Self>) {
+        if self.awaiting_input.is_some() {
+            self.awaiting_input = None;
+            self.has_had_input = false;
+            cx.emit(ItemEvent::UpdateTab);
+            cx.notify();
+        }
+    }
+
     pub fn deploy_context_menu(
         &mut self,
         position: Point<Pixels>,
-        has_selection: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -498,6 +548,13 @@ impl TerminalView {
             .upgrade()
             .and_then(|workspace| workspace.read(cx).panel::<TerminalPanel>(cx))
             .is_some_and(|terminal_panel| terminal_panel.read(cx).assistant_enabled());
+        let has_selection = self
+            .terminal
+            .read(cx)
+            .last_content
+            .selection_text
+            .as_ref()
+            .is_some_and(|text| !text.is_empty());
         let context_menu = ContextMenu::build(window, cx, |menu, _, _| {
             menu.context(self.focus_handle.clone())
                 .action("New Terminal", Box::new(NewTerminal::default()))
@@ -952,6 +1009,9 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<TerminalView>,
     ) {
+        self.awaiting_input = None;
+        self.has_had_input = false;
+        self.idle_timer = Task::ready(());
         self._terminal_subscriptions =
             subscribe_for_terminal_events(&terminal, self.workspace.clone(), window, cx);
         self.terminal = terminal;
@@ -986,6 +1046,21 @@ fn terminal_rerun_override(task: &TaskId) -> zed_actions::Rerun {
     }
 }
 
+fn awaiting_input_sound(setting: settings::AwaitingInputSound) -> Option<audio::Sound> {
+    use settings::AwaitingInputSound;
+    match setting {
+        AwaitingInputSound::Off => None,
+        AwaitingInputSound::AgentDone => Some(audio::Sound::AgentDone),
+        AwaitingInputSound::Mute => Some(audio::Sound::Mute),
+        AwaitingInputSound::Unmute => Some(audio::Sound::Unmute),
+        AwaitingInputSound::JoinedCall => Some(audio::Sound::Joined),
+        AwaitingInputSound::GuestJoinedCall => Some(audio::Sound::GuestJoined),
+        AwaitingInputSound::LeaveCall => Some(audio::Sound::Leave),
+        AwaitingInputSound::StartScreenshare => Some(audio::Sound::StartScreenshare),
+        AwaitingInputSound::StopScreenshare => Some(audio::Sound::StopScreenshare),
+    }
+}
+
 fn subscribe_for_terminal_events(
     terminal: &Entity<Terminal>,
     workspace: WeakEntity<Workspace>,
@@ -1006,6 +1081,14 @@ fn subscribe_for_terminal_events(
 
             match event {
                 Event::Wakeup => {
+                    if terminal_view.awaiting_input.is_some() {
+                        let prompt_kind = terminal.read(cx).interactive_prompt_kind();
+                        if prompt_kind.is_none() {
+                            terminal_view.clear_awaiting_input(cx);
+                        }
+                    } else {
+                        terminal_view.start_idle_timer(cx);
+                    }
                     cx.notify();
                     cx.emit(Event::Wakeup);
                     cx.emit(ItemEvent::UpdateTab);
@@ -1014,9 +1097,6 @@ fn subscribe_for_terminal_events(
 
                 Event::Bell => {
                     terminal_view.has_bell = true;
-                    if let TerminalBell::System = TerminalSettings::get_global(cx).bell {
-                        window.play_system_bell();
-                    }
                     cx.emit(Event::Wakeup);
                 }
 
@@ -1158,6 +1238,8 @@ impl TerminalView {
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_bell(cx);
+        self.clear_awaiting_input(cx);
+        self.has_had_input = true;
         self.pause_cursor_blinking(window, cx);
 
         if self.process_keystroke(&event.keystroke, cx) {
@@ -1166,6 +1248,7 @@ impl TerminalView {
     }
 
     fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_awaiting_input(cx);
         self.terminal.update(cx, |terminal, _| {
             terminal.set_cursor_shape(self.cursor_shape);
             terminal.focus_in();
@@ -1243,21 +1326,12 @@ impl Render for TerminalView {
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     if !this.terminal.read(cx).mouse_mode(event.modifiers.shift) {
-                        let had_selection = this.terminal.read(cx).last_content.selection.is_some();
-                        if !had_selection {
+                        if this.terminal.read(cx).last_content.selection.is_none() {
                             this.terminal.update(cx, |terminal, _| {
                                 terminal.select_word_at_event_position(event);
                             });
-                        }
-                        let has_selection = !had_selection
-                            || this
-                                .terminal
-                                .read(cx)
-                                .last_content
-                                .selection_text
-                                .as_ref()
-                                .is_some_and(|text| !text.is_empty());
-                        this.deploy_context_menu(event.position, has_selection, window, cx);
+                        };
+                        this.deploy_context_menu(event.position, window, cx);
                         cx.notify();
                     }
                 }),
@@ -1307,6 +1381,11 @@ impl Render for TerminalView {
 impl Item for TerminalView {
     type Event = ItemEvent;
 
+    fn activated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
+        self.focus_in(window, cx);
+    }
+
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent> {
         Some(TabTooltipContent::Custom(Box::new(Tooltip::element({
             let terminal = self.terminal().read(cx);
@@ -1337,13 +1416,18 @@ impl Item for TerminalView {
             .cloned()
             .unwrap_or_else(|| terminal.title(true));
 
+        let awaiting_input = self.awaiting_input;
+        let is_awaiting = awaiting_input.is_some();
         let (icon, icon_color, rerun_button) = match terminal.task() {
             Some(terminal_task) => match &terminal_task.status {
-                TaskStatus::Running => (
-                    IconName::PlayFilled,
-                    Color::Disabled,
-                    TerminalView::rerun_button(terminal_task),
-                ),
+                TaskStatus::Running => {
+                    let (icon, color) = if is_awaiting {
+                        (IconName::Return, Color::Accent)
+                    } else {
+                        (IconName::PlayFilled, Color::Disabled)
+                    };
+                    (icon, color, TerminalView::rerun_button(terminal_task))
+                }
                 TaskStatus::Unknown => (
                     IconName::Warning,
                     Color::Warning,
@@ -1359,7 +1443,13 @@ impl Item for TerminalView {
                     }
                 }
             },
-            None => (IconName::Terminal, Color::Muted, None),
+            None => {
+                if is_awaiting {
+                    (IconName::Return, Color::Accent, None)
+                } else {
+                    (IconName::Terminal, Color::Muted, None)
+                }
+            }
         };
 
         let self_handle = self.self_handle.clone();
@@ -1378,11 +1468,26 @@ impl Item for TerminalView {
                 h_flex()
                     .group("term-tab-icon")
                     .child(
-                        div()
-                            .when(rerun_button.is_some(), |this| {
-                                this.hover(|style| style.invisible().w_0())
-                            })
-                            .child(Icon::new(icon).color(icon_color)),
+                        {
+                            let icon_div = div()
+                                .when(rerun_button.is_some(), |this| {
+                                    this.hover(|style| style.invisible().w_0())
+                                })
+                                .child(Icon::new(icon).color(icon_color));
+                            if is_awaiting {
+                                icon_div
+                                    .with_animation(
+                                        "tab-awaiting-pulse",
+                                        Animation::new(Duration::from_secs(2))
+                                            .repeat()
+                                            .with_easing(pulsating_between(0.4, 1.0)),
+                                        |element, delta| element.opacity(delta),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                icon_div.into_any_element()
+                            }
+                        },
                     )
                     .when_some(rerun_button, |this, rerun_button| {
                         this.child(
@@ -1647,8 +1752,27 @@ impl Item for TerminalView {
     fn is_dirty(&self, cx: &App) -> bool {
         match self.terminal.read(cx).task() {
             Some(task) => task.status == TaskStatus::Running,
-            None => self.has_bell(),
+            None => self.has_bell() || self.awaiting_input.is_some(),
         }
+    }
+
+    fn tab_bg_override(&self, is_active: bool, _cx: &App) -> Option<Hsla> {
+        if is_active {
+            // Green background with low alpha to subtly distinguish active terminal tabs
+            Some(hsla(0.38, 0.7, 0.45, 0.15))
+        } else {
+            None
+        }
+    }
+
+    fn is_awaiting_input(&self, _cx: &App) -> bool {
+        self.awaiting_input.is_some()
+    }
+
+    fn awaiting_input_tooltip(&self, _cx: &App) -> &'static str {
+        self.awaiting_input
+            .map(|kind| kind.tooltip_text())
+            .unwrap_or("Terminal awaiting input")
     }
 
     fn has_conflict(&self, _cx: &App) -> bool {
@@ -1982,13 +2106,9 @@ impl SearchableItem for TerminalView {
 }
 
 /// Gets the working directory for the given workspace, respecting the user's settings.
-/// Falls back to home directory when no project directory is available.
-///
-/// For remote projects, local-only resolution (home dir fallback, shell expansion,
-/// local `is_dir` checks) is skipped -- returning `None` lets the remote shell
-/// open in the remote user's home directory by default.
+/// Falls back to the local home directory only for local workspaces.
 pub(crate) fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
-    let is_remote = workspace.project().read(cx).is_remote();
+    let should_fallback_to_local_home = workspace.project().read(cx).is_local();
     let directory = match &TerminalSettings::get_global(cx).working_directory {
         WorkingDirectory::CurrentFileDirectory => workspace
             .project()
@@ -1998,17 +2118,16 @@ pub(crate) fn default_working_directory(workspace: &Workspace, cx: &App) -> Opti
         WorkingDirectory::CurrentProjectDirectory => current_project_directory(workspace, cx),
         WorkingDirectory::FirstProjectDirectory => first_project_directory(workspace, cx),
         WorkingDirectory::AlwaysHome => None,
-        WorkingDirectory::Always { directory } if !is_remote => shellexpand::full(directory)
+        WorkingDirectory::Always { directory } => shellexpand::full(directory)
             .ok()
             .map(|dir| Path::new(&dir.to_string()).to_path_buf())
             .filter(|dir| dir.is_dir()),
-        WorkingDirectory::Always { .. } => None,
     };
 
-    if is_remote {
-        directory
-    } else {
+    if should_fallback_to_local_home {
         directory.or_else(dirs::home_dir)
+    } else {
+        directory
     }
 }
 
