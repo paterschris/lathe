@@ -182,7 +182,6 @@ impl LanguageModelProvider for OpenAiLanguageModelProvider {
                     max_completion_tokens: model.max_completion_tokens,
                     reasoning_effort: model.reasoning_effort,
                     supports_chat_completions: model.capabilities.chat_completions,
-                    supports_images: model.capabilities.images,
                 },
             );
         }
@@ -329,10 +328,11 @@ impl LanguageModel for OpenAiLanguageModel {
             | Model::FivePointFourPro
             | Model::O1
             | Model::O3 => true,
-            Model::ThreePointFiveTurbo | Model::Four | Model::FourTurbo | Model::O3Mini => false,
-            Model::Custom {
-                supports_images, ..
-            } => *supports_images,
+            Model::ThreePointFiveTurbo
+            | Model::Four
+            | Model::FourTurbo
+            | Model::O3Mini
+            | Model::Custom { .. } => false,
         }
     }
 

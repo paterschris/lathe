@@ -25,8 +25,6 @@ pub enum SearchResult {
         ranges: Vec<Range<Anchor>>,
     },
     LimitReached,
-    WaitingForScan,
-    Searching,
 }
 
 #[derive(Clone, Copy, PartialEq)]

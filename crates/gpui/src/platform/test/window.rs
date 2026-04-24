@@ -20,7 +20,6 @@ pub(crate) struct TestWindowState {
     display: Rc<dyn PlatformDisplay>,
     pub(crate) title: Option<String>,
     pub(crate) edited: bool,
-    pub(crate) document_path: Option<std::path::PathBuf>,
     platform: Weak<TestPlatform>,
     // TODO: Replace with `Rc`
     sprite_atlas: Arc<dyn PlatformAtlas>,
@@ -76,7 +75,6 @@ impl TestWindow {
             renderer,
             title: Default::default(),
             edited: false,
-            document_path: None,
             should_close_handler: None,
             hit_test_window_control_callback: None,
             input_callback: None,
@@ -230,10 +228,6 @@ impl PlatformWindow for TestWindow {
 
     fn set_edited(&mut self, edited: bool) {
         self.0.lock().edited = edited;
-    }
-
-    fn set_document_path(&self, path: Option<&std::path::Path>) {
-        self.0.lock().document_path = path.map(|p| p.to_path_buf());
     }
 
     fn show_character_palette(&self) {

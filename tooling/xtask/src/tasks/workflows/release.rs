@@ -58,14 +58,12 @@ pub(crate) fn release() -> Workflow {
     };
 
     let upload_release_assets = upload_release_assets(&[&create_draft_release], &bundle);
-    let validate_release_assets = validate_release_assets(&[&upload_release_assets]);
-    let release_compliance = release_compliance_check(
+    let validate_release_assets = validate_release_assets(
         &[&upload_release_assets, &non_blocking_compliance_run],
         job_output,
     );
 
-    let auto_release_preview =
-        auto_release_preview(&[&validate_release_assets, &release_compliance]);
+    let auto_release_preview = auto_release_preview(&[&validate_release_assets]);
 
     let test_jobs = [
         &macos_tests,
@@ -80,7 +78,6 @@ pub(crate) fn release() -> Workflow {
         &create_draft_release,
         &upload_release_assets,
         &validate_release_assets,
-        &release_compliance,
         &auto_release_preview,
         &test_jobs,
         &bundle,
@@ -111,7 +108,6 @@ pub(crate) fn release() -> Workflow {
         })
         .add_job(upload_release_assets.name, upload_release_assets.job)
         .add_job(validate_release_assets.name, validate_release_assets.job)
-        .add_job(release_compliance.name, release_compliance.job)
         .add_job(auto_release_preview.name, auto_release_preview.job)
         .add_job(push_slack_notification.name, push_slack_notification.job)
 }
@@ -254,11 +250,11 @@ pub(crate) fn add_compliance_steps(
             ComplianceContext::Release {
                 non_blocking_outcome,
             } => Expression::new(format!(
-                "${{{{ failure() || {prior_outcome} != 'success' }}}}",
+                "failure() || {prior_outcome} != 'success'",
                 prior_outcome = non_blocking_outcome.expr()
             )),
             ComplianceContext::Scheduled { .. } | ComplianceContext::ReleaseNonBlocking => {
-                Expression::new("${{ always() }}")
+                Expression::new("always()")
             }
         })
         .add_env(("SLACK_WEBHOOK", vars::SLACK_WEBHOOK_WORKFLOW_FAILURES))
@@ -312,7 +308,7 @@ fn compliance_check() -> (NamedJob, JobOutput) {
     (compliance_job, check_result)
 }
 
-fn validate_release_assets(deps: &[&NamedJob]) -> NamedJob {
+fn validate_release_assets(deps: &[&NamedJob], context_check_result: JobOutput) -> NamedJob {
     let expected_assets: Vec<String> = assets::all().iter().map(|a| format!("\"{a}\"")).collect();
     let expected_assets_json = format!("[{}]", expected_assets.join(", "));
 
@@ -334,16 +330,9 @@ fn validate_release_assets(deps: &[&NamedJob]) -> NamedJob {
         "#,
     };
 
-    named::job(
-        dependant_job(deps).runs_on(runners::LINUX_SMALL).add_step(
-            named::bash(&validation_script).add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)),
-        ),
-    )
-}
-
-fn release_compliance_check(deps: &[&NamedJob], non_blocking_outcome: JobOutput) -> NamedJob {
     let job = dependant_job(deps)
-        .runs_on(runners::LINUX_LARGE)
+        .runs_on(runners::LINUX_SMALL)
+        .add_step(named::bash(&validation_script).add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)))
         .add_step(
             steps::checkout_repo()
                 .with_full_history()
@@ -351,14 +340,15 @@ fn release_compliance_check(deps: &[&NamedJob], non_blocking_outcome: JobOutput)
         )
         .add_step(steps::cache_rust_dependencies_namespace());
 
-    let (job, _) = add_compliance_steps(
-        job,
-        ComplianceContext::Release {
-            non_blocking_outcome,
-        },
-    );
-
-    named::job(job)
+    named::job(
+        add_compliance_steps(
+            job,
+            ComplianceContext::Release {
+                non_blocking_outcome: context_check_result,
+            },
+        )
+        .0,
+    )
 }
 
 fn auto_release_preview(deps: &[&NamedJob]) -> NamedJob {
@@ -451,7 +441,6 @@ pub(crate) fn push_release_update_notification(
     create_draft_release_job: &NamedJob,
     upload_assets_job: &NamedJob,
     validate_assets_job: &NamedJob,
-    compliance_job: &NamedJob,
     auto_release_preview: &NamedJob,
     test_jobs: &[&NamedJob],
     bundle_jobs: &ReleaseBundleJobs,
@@ -480,15 +469,10 @@ pub(crate) fn push_release_update_notification(
             format!("${{{{ needs.{}.result }}}}", validate_assets_job.name),
         ),
         (
-            "COMPLIANCE_RESULT".into(),
-            format!("${{{{ needs.{}.result }}}}", compliance_job.name),
-        ),
-        (
             "AUTO_RELEASE_RESULT".into(),
             format!("${{{{ needs.{}.result }}}}", auto_release_preview.name),
         ),
         ("RUN_URL".into(), CURRENT_ACTION_RUN_URL.to_string()),
-        ("TAG".into(), Context::github().ref_name().to_string()),
     ]
     .into_iter()
     .chain(
@@ -509,6 +493,8 @@ pub(crate) fn push_release_update_notification(
         .join("\n        ");
 
     let notification_script = formatdoc! {r#"
+        TAG="$GITHUB_REF_NAME"
+
         if [ "$DRAFT_RESULT" == "failure" ]; then
             echo "❌ Draft release creation failed for $TAG: $RUN_URL"
         else
@@ -532,11 +518,8 @@ pub(crate) fn push_release_update_notification(
                         echo "❌ Tests for $TAG failed: $RUN_URL"
                     fi
                 fi
-            elif [ "$COMPLIANCE_RESULT" == "failure" ]; then
-                # We already notify within that job
-                echo ""
             elif [ "$VALIDATE_RESULT" == "failure" ]; then
-                echo "❌ Release validation failed for $TAG: missing assets: $RUN_URL"
+                echo "❌ Release asset validation failed for $TAG (missing assets): $RUN_URL"
             elif [ "$AUTO_RELEASE_RESULT" == "success" ]; then
                 echo "✅ Release $TAG was auto-released successfully: $RELEASE_URL"
             elif [ "$AUTO_RELEASE_RESULT" == "failure" ]; then
@@ -552,7 +535,6 @@ pub(crate) fn push_release_update_notification(
         create_draft_release_job,
         upload_assets_job,
         validate_assets_job,
-        compliance_job,
         auto_release_preview,
     ];
     all_deps.extend(test_jobs.iter().copied());
@@ -592,29 +574,15 @@ pub(crate) enum MessageType {
     },
 }
 
-enum MessageSource {
-    String(String),
-    StepOutput(StepOutput),
-}
-
-impl MessageSource {
-    fn message(self) -> String {
-        match self {
-            MessageSource::String(string) => string,
-            MessageSource::StepOutput(output) => output.to_string(),
-        }
-    }
-}
-
 fn notify_slack(message: MessageType) -> Vec<Step<Run>> {
     match message {
-        MessageType::Static(message) => vec![send_slack_message(MessageSource::String(message))],
+        MessageType::Static(message) => vec![send_slack_message(message)],
         MessageType::Evaluated { script, env } => {
             let (generate_step, generated_message) = generate_slack_message(script, env);
 
             vec![
                 generate_step,
-                send_slack_message(MessageSource::StepOutput(generated_message)),
+                send_slack_message(generated_message.to_string()),
             ]
         }
     }
@@ -642,15 +610,10 @@ fn generate_slack_message(
     (generate_step, output)
 }
 
-fn send_slack_message(message_source: MessageSource) -> Step<Run> {
+fn send_slack_message(message: String) -> Step<Run> {
     named::bash(
         r#"curl -X POST -H 'Content-type: application/json' --data "$(jq -n --arg text "$SLACK_MESSAGE" '{"text": $text}')" "$SLACK_WEBHOOK""#
     )
-    .map(|this| match &message_source {
-        MessageSource::String(_) => this,
-        MessageSource::StepOutput(output) => this
-            .if_condition(Expression::new(format!("{message} != ''", message = output.expr()))),
-    })
     .add_env(("SLACK_WEBHOOK", vars::SLACK_WEBHOOK_WORKFLOW_FAILURES))
-    .add_env(("SLACK_MESSAGE", message_source.message()))
+    .add_env(("SLACK_MESSAGE", message))
 }

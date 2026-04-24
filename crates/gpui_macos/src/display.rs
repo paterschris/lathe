@@ -5,7 +5,6 @@ use cocoa::{
     base::{id, nil},
     foundation::{NSArray, NSDictionary},
 };
-use core_foundation::base::CFRelease;
 use core_foundation::uuid::{CFUUIDGetUUIDBytes, CFUUIDRef};
 use core_graphics::display::{CGDirectDisplayID, CGDisplayBounds, CGGetActiveDisplayList};
 use gpui::{Bounds, DisplayId, Pixels, PlatformDisplay, point, px, size};
@@ -84,7 +83,6 @@ impl PlatformDisplay for MacDisplay {
         );
 
         let bytes = unsafe { CFUUIDGetUUIDBytes(cfuuid) };
-        unsafe { CFRelease(cfuuid as _) };
         Ok(Uuid::from_bytes([
             bytes.byte0,
             bytes.byte1,

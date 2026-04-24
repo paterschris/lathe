@@ -4,8 +4,7 @@ use crate::schema::{status_colors_refinement, syntax_overrides, theme_colors_ref
 use crate::{merge_accent_colors, merge_player_colors};
 use collections::HashMap;
 use gpui::{
-    App, Context, Font, FontFallbacks, FontStyle, Global, Pixels, SharedString, Subscription,
-    Window, px,
+    App, Context, Font, FontFallbacks, FontStyle, Global, Pixels, Subscription, Window, px,
 };
 use refineable::Refineable;
 use schemars::JsonSchema;
@@ -56,12 +55,6 @@ pub struct ThemeSettings {
     agent_ui_font_size: Option<Pixels>,
     /// The agent buffer font size. Determines the size of user messages in the agent panel.
     agent_buffer_font_size: Option<Pixels>,
-    /// The font family to use for rendering in the markdown preview.
-    /// Falls back to the UI font family if unset.
-    markdown_preview_font_family: Option<SharedString>,
-    /// The theme to use for the markdown preview.
-    /// Falls back to the main editor theme if unset.
-    pub markdown_preview_theme: Option<ThemeSelection>,
     /// The line height for buffers, and the terminal.
     ///
     /// Changing this may affect the spacing of some UI elements.
@@ -103,17 +96,11 @@ pub(crate) struct UiFontSize(Pixels);
 
 impl Global for UiFontSize {}
 
-/// In-memory override for the UI font size in the agent panel.
+/// In-memory override for the font size in the agent panel.
 #[derive(Default)]
-pub struct AgentUiFontSize(Pixels);
+pub struct AgentFontSize(Pixels);
 
-impl Global for AgentUiFontSize {}
-
-/// In-memory override for the buffer font size in the agent panel.
-#[derive(Default)]
-pub struct AgentBufferFontSize(Pixels);
-
-impl Global for AgentBufferFontSize {}
+impl Global for AgentFontSize {}
 
 /// Represents the selection of a theme, which can be either static or dynamic.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -391,7 +378,7 @@ impl ThemeSettings {
 
     /// Returns the agent panel font size. Falls back to the UI font size if unset.
     pub fn agent_ui_font_size(&self, cx: &App) -> Pixels {
-        cx.try_global::<AgentUiFontSize>()
+        cx.try_global::<AgentFontSize>()
             .map(|size| size.0)
             .or(self.agent_ui_font_size)
             .map(clamp_font_size)
@@ -400,19 +387,11 @@ impl ThemeSettings {
 
     /// Returns the agent panel buffer font size.
     pub fn agent_buffer_font_size(&self, cx: &App) -> Pixels {
-        cx.try_global::<AgentBufferFontSize>()
+        cx.try_global::<AgentFontSize>()
             .map(|size| size.0)
             .or(self.agent_buffer_font_size)
             .map(clamp_font_size)
             .unwrap_or_else(|| self.buffer_font_size(cx))
-    }
-
-    /// Returns the font family to use in the markdown preview,
-    /// falling back to the UI font family when unset.
-    pub fn markdown_preview_font_family(&self) -> &SharedString {
-        self.markdown_preview_font_family
-            .as_ref()
-            .unwrap_or(&self.ui_font.family)
     }
 
     /// Returns the buffer font size, read from the settings.
@@ -564,16 +543,16 @@ pub fn reset_ui_font_size(cx: &mut App) {
 pub fn adjust_agent_ui_font_size(cx: &mut App, f: impl FnOnce(Pixels) -> Pixels) {
     let agent_ui_font_size = ThemeSettings::get_global(cx).agent_ui_font_size(cx);
     let adjusted_size = cx
-        .try_global::<AgentUiFontSize>()
+        .try_global::<AgentFontSize>()
         .map_or(agent_ui_font_size, |adjusted_size| adjusted_size.0);
-    cx.set_global(AgentUiFontSize(clamp_font_size(f(adjusted_size))));
+    cx.set_global(AgentFontSize(clamp_font_size(f(adjusted_size))));
     cx.refresh_windows();
 }
 
 /// Resets the agent response font size in the agent panel to the default value.
 pub fn reset_agent_ui_font_size(cx: &mut App) {
-    if cx.has_global::<AgentUiFontSize>() {
-        cx.remove_global::<AgentUiFontSize>();
+    if cx.has_global::<AgentFontSize>() {
+        cx.remove_global::<AgentFontSize>();
         cx.refresh_windows();
     }
 }
@@ -582,16 +561,16 @@ pub fn reset_agent_ui_font_size(cx: &mut App) {
 pub fn adjust_agent_buffer_font_size(cx: &mut App, f: impl FnOnce(Pixels) -> Pixels) {
     let agent_buffer_font_size = ThemeSettings::get_global(cx).agent_buffer_font_size(cx);
     let adjusted_size = cx
-        .try_global::<AgentBufferFontSize>()
+        .try_global::<AgentFontSize>()
         .map_or(agent_buffer_font_size, |adjusted_size| adjusted_size.0);
-    cx.set_global(AgentBufferFontSize(clamp_font_size(f(adjusted_size))));
+    cx.set_global(AgentFontSize(clamp_font_size(f(adjusted_size))));
     cx.refresh_windows();
 }
 
 /// Resets the user message font size in the agent panel to the default value.
 pub fn reset_agent_buffer_font_size(cx: &mut App) {
-    if cx.has_global::<AgentBufferFontSize>() {
-        cx.remove_global::<AgentBufferFontSize>();
+    if cx.has_global::<AgentFontSize>() {
+        cx.remove_global::<AgentFontSize>();
         cx.refresh_windows();
     }
 }
@@ -645,14 +624,6 @@ impl settings::Settings for ThemeSettings {
             buffer_line_height: content.buffer_line_height.unwrap().into(),
             agent_ui_font_size: content.agent_ui_font_size.map(|s| s.into_gpui()),
             agent_buffer_font_size: content.agent_buffer_font_size.map(|s| s.into_gpui()),
-            markdown_preview_font_family: content
-                .markdown_preview_font_family
-                .as_ref()
-                .map(|f| f.0.clone().into()),
-            markdown_preview_theme: content
-                .markdown_preview_theme
-                .clone()
-                .map(ThemeSelection::from),
             theme: theme_selection,
             experimental_theme_overrides: content.experimental_theme_overrides.clone(),
             theme_overrides: content.theme_overrides.clone(),

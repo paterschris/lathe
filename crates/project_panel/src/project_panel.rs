@@ -525,6 +525,72 @@ pub fn init(cx: &mut App) {
                 panel.update(cx, |panel, cx| panel.delete(action, window, cx));
             }
         });
+
+        workspace.register_action(|workspace, _: &git::FileHistory, window, cx| {
+            // First try to get from project panel if it's focused
+            if let Some(panel) = workspace.panel::<ProjectPanel>(cx) {
+                let maybe_project_path = panel.read(cx).selection.and_then(|selection| {
+                    let project = workspace.project().read(cx);
+                    let worktree = project.worktree_for_id(selection.worktree_id, cx)?;
+                    let entry = worktree.read(cx).entry_for_id(selection.entry_id)?;
+                    if entry.is_file() {
+                        Some(ProjectPath {
+                            worktree_id: selection.worktree_id,
+                            path: entry.path.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(project_path) = maybe_project_path {
+                    let project = workspace.project();
+                    let git_store = project.read(cx).git_store();
+                    if let Some((repo, repo_path)) = git_store
+                        .read(cx)
+                        .repository_and_path_for_project_path(&project_path, cx)
+                    {
+                        git_ui::file_history_view::FileHistoryView::open(
+                            repo_path,
+                            git_store.downgrade(),
+                            repo.downgrade(),
+                            workspace.weak_handle(),
+                            window,
+                            cx,
+                        );
+                        return;
+                    }
+                }
+            }
+
+            // Fallback: try to get from active editor
+            if let Some(active_item) = workspace.active_item(cx)
+                && let Some(editor) = active_item.downcast::<Editor>()
+                && let Some(buffer) = editor.read(cx).buffer().read(cx).as_singleton()
+                && let Some(file) = buffer.read(cx).file()
+            {
+                let worktree_id = file.worktree_id(cx);
+                let project_path = ProjectPath {
+                    worktree_id,
+                    path: file.path().clone(),
+                };
+                let project = workspace.project();
+                let git_store = project.read(cx).git_store();
+                if let Some((repo, repo_path)) = git_store
+                    .read(cx)
+                    .repository_and_path_for_project_path(&project_path, cx)
+                {
+                    git_ui::file_history_view::FileHistoryView::open(
+                        repo_path,
+                        git_store.downgrade(),
+                        repo.downgrade(),
+                        workspace.weak_handle(),
+                        window,
+                        cx,
+                    );
+                }
+            }
+        });
     })
     .detach();
 }
@@ -1053,21 +1119,16 @@ impl ProjectPanel {
                     || (settings.hide_root && visible_worktrees_count == 1));
             let should_show_compare = !is_dir && self.file_abs_paths_to_diff(cx).is_some();
 
-            let (has_git_repo, has_file_history) = {
+            let has_git_repo = !is_dir && {
                 let project_path = project::ProjectPath {
                     worktree_id,
                     path: entry.path.clone(),
                 };
-                let git_store = project.git_store().read(cx);
-                let has_git_repo = git_store
+                project
+                    .git_store()
+                    .read(cx)
                     .repository_and_path_for_project_path(&project_path, cx)
-                    .is_some();
-                let has_file_history = !is_dir
-                    && has_git_repo
-                    && !git_store
-                        .project_path_git_status(&project_path, cx)
-                        .is_some_and(|status| status.is_created());
-                (has_git_repo, has_file_history)
+                    .is_some()
             };
 
             let has_pasteable_content = self.has_pasteable_content(cx);
@@ -1134,18 +1195,15 @@ impl ProjectPanel {
                                 "Copy Relative Path",
                                 Box::new(zed_actions::workspace::CopyRelativePath),
                             )
+                            .when(!is_dir && self.has_git_changes(entry_id), |menu| {
+                                menu.separator().action(
+                                    "Restore File",
+                                    Box::new(git::RestoreFile { skip_prompt: false }),
+                                )
+                            })
                             .when(has_git_repo, |menu| {
                                 menu.separator()
-                                    .when(!is_dir && self.has_git_changes(entry_id), |menu| {
-                                        menu.action(
-                                            "Restore File",
-                                            Box::new(git::RestoreFile { skip_prompt: false }),
-                                        )
-                                    })
-                                    .action("Add to .gitignore", Box::new(git::AddToGitignore))
-                                    .when(has_file_history, |menu| {
-                                        menu.action("View File History", Box::new(git::FileHistory))
-                                    })
+                                    .action("View File History", Box::new(git::FileHistory))
                             })
                             .when(!should_hide_rename, |menu| {
                                 menu.separator().action("Rename", Box::new(Rename))
@@ -2257,52 +2315,6 @@ impl ProjectPanel {
                     })
                     .ok();
 
-                anyhow::Ok(())
-            })
-            .detach_and_log_err(cx);
-
-            Some(())
-        });
-    }
-
-    fn add_to_gitignore(
-        &mut self,
-        _: &git::AddToGitignore,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        maybe!({
-            let selection = self.selection?;
-            let (_, entry) = self.selected_sub_entry(cx)?;
-            let is_dir = entry.is_dir();
-            let project = self.project.read(cx);
-
-            let project_path = project.path_for_entry(selection.entry_id, cx)?;
-
-            let git_store = project.git_store();
-            let (repository, repo_path) = git_store
-                .read(cx)
-                .repository_and_path_for_project_path(&project_path, cx)?;
-
-            let workspace = self.workspace.clone();
-            let receiver =
-                repository.update(cx, |repo, _| repo.add_path_to_gitignore(&repo_path, is_dir));
-
-            cx.spawn(async move |_, cx| {
-                if let Err(e) = receiver.await? {
-                    if let Some(workspace) = workspace.upgrade() {
-                        cx.update(|cx| {
-                            let message = format!("Failed to add to .gitignore: {}", e);
-                            let toast = StatusToast::new(message, cx, |this, _| {
-                                this.icon(Icon::new(IconName::XCircle).color(Color::Error))
-                                    .dismiss_button(true)
-                            });
-                            workspace.update(cx, |workspace, cx| {
-                                workspace.toggle_status_toast(toast, cx);
-                            });
-                        });
-                    }
-                }
                 anyhow::Ok(())
             })
             .detach_and_log_err(cx);
@@ -3789,14 +3801,6 @@ impl ProjectPanel {
     pub fn selected_entry<'a>(&self, cx: &'a App) -> Option<(&'a Worktree, &'a project::Entry)> {
         let (worktree, entry) = self.selected_entry_handle(cx)?;
         Some((worktree.read(cx), entry))
-    }
-
-    pub fn selected_file_project_path(&self, cx: &App) -> Option<ProjectPath> {
-        let (worktree, entry) = self.selected_sub_entry(cx)?;
-        Some(ProjectPath {
-            worktree_id: worktree.read(cx).id(),
-            path: entry.is_file().then(|| entry.path.clone())?,
-        })
     }
 
     /// Compared to selected_entry, this function resolves to the currently
@@ -5318,8 +5322,30 @@ impl ProjectPanel {
             marked_selections: Arc::from(self.marked_entries.clone()),
         };
 
+        let git_bg = (|| {
+            let summary = &details.git_status;
+            let tracked = summary.index + summary.worktree;
+            let colors = cx.theme().colors();
+            let bg = if summary.conflict > 0 {
+                colors.panel_conflict_background
+            } else if tracked.deleted > 0 {
+                colors.panel_deleted_background
+            } else if tracked.modified > 0 {
+                colors.panel_modified_background
+            } else if tracked.added > 0 || summary.untracked > 0 {
+                colors.panel_created_background
+            } else {
+                return None;
+            };
+            (bg != gpui::transparent_black()).then_some(bg)
+        })();
+
         let bg_color = if is_marked {
             item_colors.marked
+        } else if details.is_selected {
+            item_colors.default
+        } else if let Some(git_bg) = git_bg {
+            git_bg
         } else {
             item_colors.default
         };
@@ -6219,7 +6245,7 @@ impl ProjectPanel {
             .copied();
 
         let filename_text_color =
-            entry_git_aware_label_color(git_status, entry.is_ignored, is_marked);
+            entry_git_aware_label_color(git_status, entry.is_ignored, is_marked, cx);
 
         let is_cut = self
             .clipboard
@@ -6683,7 +6709,6 @@ impl Render for ProjectPanel {
                         .on_action(cx.listener(Self::paste))
                         .on_action(cx.listener(Self::duplicate))
                         .on_action(cx.listener(Self::restore_file))
-                        .on_action(cx.listener(Self::add_to_gitignore))
                         .when(!project.is_remote(), |el| {
                             el.on_action(cx.listener(Self::trash))
                         })
@@ -7283,25 +7308,6 @@ impl Panel for ProjectPanel {
 
     fn activation_priority(&self) -> u32 {
         1
-    }
-}
-
-impl ProjectPanel {
-    pub fn select_path_for_test(&mut self, project_path: ProjectPath, cx: &App) {
-        let Some(worktree) = self
-            .project
-            .read(cx)
-            .worktree_for_id(project_path.worktree_id, cx)
-        else {
-            return;
-        };
-        let Some(entry) = worktree.read(cx).entry_for_path(project_path.path.as_ref()) else {
-            return;
-        };
-        self.selection = Some(SelectedEntry {
-            worktree_id: project_path.worktree_id,
-            entry_id: entry.id,
-        });
     }
 }
 

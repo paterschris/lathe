@@ -9,7 +9,6 @@
 mod buffer;
 mod diagnostic;
 mod diagnostic_set;
-mod file_content;
 mod language_registry;
 
 pub mod language_settings;
@@ -37,7 +36,6 @@ use http_client::HttpClient;
 
 pub use language_core::highlight_map::{HighlightId, HighlightMap};
 
-use futures::future::FutureExt as _;
 pub use language_core::{
     BlockCommentConfig, BracketPair, BracketPairConfig, BracketPairContent, BracketsConfig,
     BracketsPatternConfig, CodeLabel, CodeLabelBuilder, DebugVariablesConfig, DebuggerTextObject,
@@ -62,6 +60,7 @@ use regex::Regex;
 use semver::Version;
 use serde_json::Value;
 use settings::WorktreeId;
+use smol::future::FutureExt as _;
 use std::{
     ffi::OsStr,
     fmt::Debug,
@@ -92,7 +91,6 @@ pub use buffer::Operation;
 pub use buffer::*;
 pub use diagnostic::{Diagnostic, DiagnosticSourceKind};
 pub use diagnostic_set::{DiagnosticEntry, DiagnosticEntryRef, DiagnosticGroup};
-pub use file_content::{ByteContent, FILE_ANALYSIS_BYTES, analyze_byte_content};
 pub use language_registry::{
     AvailableLanguage, BinaryStatus, LanguageNotFound, LanguageQueries, LanguageRegistry,
     QUERY_FILENAME_PREFIXES,

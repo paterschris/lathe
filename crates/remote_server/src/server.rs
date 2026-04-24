@@ -41,7 +41,6 @@ use rpc::proto::{self, Envelope, REMOTE_SERVER_PROJECT_ID};
 use rpc::{AnyProtoClient, TypedEnvelope};
 use settings::{Settings, SettingsStore, watch_config_file};
 use smol::{
-    Timer,
     channel::{Receiver, Sender},
     io::AsyncReadExt,
     stream::StreamExt as _,
@@ -108,7 +107,7 @@ pub fn run(command: Commands) -> anyhow::Result<()> {
         Commands::Version => {
             let release_channel = *RELEASE_CHANNEL;
             match release_channel {
-                ReleaseChannel::Stable | ReleaseChannel::Preview => {
+                ReleaseChannel::Stable | ReleaseChannel::Preview | ReleaseChannel::Beta => {
                     println!("{}", env!("ZED_PKG_VERSION"))
                 }
                 ReleaseChannel::Nightly | ReleaseChannel::Dev => {
@@ -128,7 +127,9 @@ pub fn run(command: Commands) -> anyhow::Result<()> {
 }
 
 pub static VERSION: LazyLock<String> = LazyLock::new(|| match *RELEASE_CHANNEL {
-    ReleaseChannel::Stable | ReleaseChannel::Preview => env!("ZED_PKG_VERSION").to_owned(),
+    ReleaseChannel::Stable | ReleaseChannel::Preview | ReleaseChannel::Beta => {
+        env!("ZED_PKG_VERSION").to_owned()
+    }
     ReleaseChannel::Nightly | ReleaseChannel::Dev => {
         let commit_sha = option_env!("ZED_COMMIT_SHA").unwrap_or("missing-zed-commit-sha");
         let build_identifier = option_env!("ZED_BUILD_ID");
@@ -182,7 +183,7 @@ fn init_logging_server(log_file_path: &Path) -> Result<Receiver<Vec<u8>>> {
         .open(log_file_path)
         .context("Failed to open log file in append mode")?;
 
-    let (tx, rx) = async_channel::unbounded();
+    let (tx, rx) = smol::channel::unbounded();
 
     let target = Box::new(MultiWrite {
         file: log_file,
@@ -473,9 +474,6 @@ pub fn execute_run(
         |task| {
             app.background_executor().spawn(task).detach();
         },
-        // we are running outside gpui
-        #[allow(clippy::disallowed_methods)]
-        |duration| FutureExt::map(Timer::after(duration), |_| ()),
     );
     let log_rx = init_logging_server(&log_file)?;
     log::info!(
@@ -731,9 +729,6 @@ pub(crate) fn execute_proxy(
         |task| {
             smol::spawn(task).detach();
         },
-        // we are running outside gpui
-        #[allow(clippy::disallowed_methods)]
-        |duration| FutureExt::map(Timer::after(duration), |_| ()),
     );
 
     log::info!("starting proxy process. PID: {}", std::process::id());
@@ -762,7 +757,7 @@ pub(crate) fn execute_proxy(
                 );
                 kill_running_server(pid, &server_paths)?;
             }
-            gpui::block_on(spawn_server(&server_paths)).map_err(ExecuteProxyError::SpawnServer)?;
+            smol::block_on(spawn_server(&server_paths)).map_err(ExecuteProxyError::SpawnServer)?;
             std::fs::read_to_string(&server_paths.pid_file)
                 .and_then(|contents| {
                     contents.parse::<u32>().map_err(|_| {
@@ -833,7 +828,7 @@ pub(crate) fn execute_proxy(
         }
     });
 
-    if let Err(forwarding_result) = gpui::block_on(async move {
+    if let Err(forwarding_result) = smol::block_on(async move {
         futures::select! {
             result = stdin_task.fuse() => result.map_err(ExecuteProxyError::StdinTask),
             result = stdout_task.fuse() => result.map_err(ExecuteProxyError::StdoutTask),
@@ -841,7 +836,7 @@ pub(crate) fn execute_proxy(
         }
     }) {
         log::error!("encountered error while forwarding messages: {forwarding_result:#}",);
-        if !matches!(gpui::block_on(check_server_running(server_pid)), Ok(true)) {
+        if !matches!(smol::block_on(check_server_running(server_pid)), Ok(true)) {
             log::error!("server exited unexpectedly");
             return Err(ExecuteProxyError::ServerNotRunning(
                 ProxyLaunchError::ServerNotRunning,

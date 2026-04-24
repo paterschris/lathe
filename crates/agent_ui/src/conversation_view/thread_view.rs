@@ -1857,40 +1857,64 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) -> Option<()> {
         let session_id = self.thread.read(cx).session_id().clone();
-        let (returned_session_id, tool_call_id, _) = self
+        let (returned_session_id, tool_call_id, options) = self
             .conversation
             .read(cx)
             .pending_tool_call(&session_id, cx)?;
-        self.authorize_with_granularity(returned_session_id, tool_call_id, is_allow, window, cx)
+        let options = options.clone();
+        self.authorize_with_granularity(
+            returned_session_id,
+            tool_call_id,
+            &options,
+            is_allow,
+            window,
+            cx,
+        )
     }
 
     fn authorize_with_granularity(
         &mut self,
         session_id: acp::SessionId,
         tool_call_id: acp::ToolCallId,
+        options: &PermissionOptions,
         is_allow: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<()> {
-        let selection = self.permission_selections.get(&tool_call_id).cloned();
-        let result = self.conversation.update(cx, |conversation, cx| {
-            conversation.authorize_with_granularity(
-                session_id,
-                tool_call_id,
-                selection.as_ref(),
-                is_allow,
-                cx,
-            )
-        });
-        if self.should_be_following {
-            self.workspace
-                .update(cx, |workspace, cx| {
-                    workspace.follow(CollaboratorId::Agent, window, cx);
-                })
-                .ok();
+        let choices = match options {
+            PermissionOptions::Dropdown(choices) => choices.as_slice(),
+            PermissionOptions::DropdownWithPatterns { choices, .. } => choices.as_slice(),
+            _ => {
+                let kind = if is_allow {
+                    acp::PermissionOptionKind::AllowOnce
+                } else {
+                    acp::PermissionOptionKind::RejectOnce
+                };
+                return self.authorize_pending_tool_call(kind, window, cx);
+            }
+        };
+
+        let selection = self.permission_selections.get(&tool_call_id);
+
+        // When in per-command pattern mode, use the checked patterns.
+        if let Some(PermissionSelection::SelectedPatterns(checked)) = selection {
+            if let Some(outcome) = options.build_outcome_for_checked_patterns(checked, is_allow) {
+                self.authorize_tool_call(session_id, tool_call_id, outcome, window, cx);
+                return Some(());
+            }
         }
-        cx.notify();
-        result
+
+        // Use the selected granularity choice ("Always for terminal" or "Only this time")
+        let selected_index = selection
+            .and_then(|s| s.choice_index())
+            .unwrap_or_else(|| choices.len().saturating_sub(1));
+
+        let selected_choice = choices.get(selected_index).or(choices.last())?;
+        let outcome = selected_choice.build_outcome(is_allow);
+
+        self.authorize_tool_call(session_id, tool_call_id, outcome, window, cx);
+
+        Some(())
     }
 
     // edits
@@ -5910,58 +5934,42 @@ impl ThreadView {
         &self,
         group: SharedString,
         is_preview: bool,
-        command: Entity<Markdown>,
-        window: &Window,
+        command_source: &str,
         cx: &Context<Self>,
     ) -> Div {
-        // The label's markdown source is a fenced code block (```\n...\n```);
-        // strip the fences so the copy button yields just the command text.
-        let command_source = command.read(cx).source();
-        let command_text = command_source
-            .strip_prefix("```\n")
-            .and_then(|s| s.strip_suffix("\n```"))
-            .unwrap_or(&command_source)
-            .to_string();
+        v_flex()
+            .group(group.clone())
+            .p_1p5()
+            .bg(self.tool_card_header_bg(cx))
+            .when(is_preview, |this| {
+                this.pt_1().child(
+                    // Wrapping this label on a container with 24px height to avoid
+                    // layout shift when it changes from being a preview label
+                    // to the actual path where the command will run in
+                    h_flex().h_6().child(
+                        Label::new("Run Command")
+                            .buffer_font(cx)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+                )
+            })
+            .children(command_source.lines().map(|line| {
+                let text: SharedString = if line.is_empty() {
+                    " ".into()
+                } else {
+                    line.to_string().into()
+                };
 
-        let mut style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx).with_buffer_font(cx);
-        style.container_style.text.font_size = Some(rems_from_px(12.).into());
-        style.container_style.text.line_height = Some(rems_from_px(17.).into());
-        style.height_is_multiple_of_line_height = true;
-
-        let header_bg = self.tool_card_header_bg(cx);
-        let run_command_label = if is_preview {
-            Some(
-                h_flex().h_6().child(
-                    Label::new("Run Command")
-                        .buffer_font(cx)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
+                Label::new(text).buffer_font(cx).size(LabelSize::Small)
+            }))
+            .child(
+                div().absolute().top_1().right_1().child(
+                    CopyButton::new("copy-command", command_source.to_string())
+                        .tooltip_label("Copy Command")
+                        .visible_on_hover(group),
                 ),
             )
-        } else {
-            None
-        };
-        // Suppress the code block's built-in copy button so we don't stack two
-        // copy buttons on top of each other; the outer button below is the one
-        // we want, because it copies the unfenced command text.
-        let markdown_element =
-            self.render_markdown(command, style)
-                .code_block_renderer(CodeBlockRenderer::Default {
-                    copy_button_visibility: CopyButtonVisibility::Hidden,
-                    border: false,
-                });
-        let copy_button = CopyButton::new("copy-command", command_text)
-            .tooltip_label("Copy Command")
-            .visible_on_hover(group.clone());
-
-        v_flex()
-            .group(group)
-            .relative()
-            .p_1p5()
-            .bg(header_bg)
-            .when(is_preview, |this| this.pt_1().children(run_command_label))
-            .child(markdown_element)
-            .child(div().absolute().top_1().right_1().child(copy_button))
     }
 
     fn render_terminal_tool_call(
@@ -5977,6 +5985,7 @@ impl ThreadView {
     ) -> AnyElement {
         let terminal_data = terminal.read(cx);
         let working_dir = terminal_data.working_dir();
+        let command = terminal_data.command();
         let started_at = terminal_data.started_at();
 
         let tool_failed = matches!(
@@ -6027,13 +6036,17 @@ impl ThreadView {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "current directory".to_string());
 
-        let command_element = self.render_collapsible_command(
-            header_group.clone(),
-            false,
-            tool_call.label.clone(),
-            window,
-            cx,
-        );
+        // Since the command's source is wrapped in a markdown code block
+        // (```\n...\n```), we need to strip that so we're left with only the
+        // command's content.
+        let command_source = command.read(cx).source();
+        let command_content = command_source
+            .strip_prefix("```\n")
+            .and_then(|s| s.strip_suffix("\n```"))
+            .unwrap_or(&command_source);
+
+        let command_element =
+            self.render_collapsible_command(header_group.clone(), false, command_content, cx);
 
         let is_expanded = self.expanded_tool_calls.contains(&tool_call.id);
 
@@ -6576,11 +6589,11 @@ impl ThreadView {
             })
             .map(|this| {
                 if is_terminal_tool {
+                    let label_source = tool_call.label.read(cx).source();
                     this.child(self.render_collapsible_command(
                         card_header_id.clone(),
                         true,
-                        tool_call.label.clone(),
-                        window,
+                        label_source,
                         cx,
                     ))
                 } else {
@@ -6773,7 +6786,6 @@ impl ThreadView {
                 choices,
                 None,
                 entry_ix,
-                session_id,
                 tool_call_id,
                 focus_handle,
                 cx,
@@ -6787,7 +6799,6 @@ impl ThreadView {
                 choices,
                 Some((patterns, tool_name)),
                 entry_ix,
-                session_id,
                 tool_call_id,
                 focus_handle,
                 cx,
@@ -6801,7 +6812,6 @@ impl ThreadView {
         choices: &[PermissionOptionChoice],
         patterns: Option<(&[PermissionPattern], &str)>,
         entry_ix: usize,
-        session_id: acp::SessionId,
         tool_call_id: acp::ToolCallId,
         focus_handle: &FocusHandle,
         cx: &Context<Self>,
@@ -6875,16 +6885,8 @@ impl ThreadView {
                                 )
                             })
                             .on_click(cx.listener({
-                                let session_id = session_id.clone();
-                                let tool_call_id = tool_call_id.clone();
                                 move |this, _, window, cx| {
-                                    this.authorize_with_granularity(
-                                        session_id.clone(),
-                                        tool_call_id.clone(),
-                                        true,
-                                        window,
-                                        cx,
-                                    );
+                                    this.authorize_pending_with_granularity(true, window, cx);
                                 }
                             })),
                     )
@@ -6908,13 +6910,7 @@ impl ThreadView {
                             })
                             .on_click(cx.listener({
                                 move |this, _, window, cx| {
-                                    this.authorize_with_granularity(
-                                        session_id.clone(),
-                                        tool_call_id.clone(),
-                                        false,
-                                        window,
-                                        cx,
-                                    );
+                                    this.authorize_pending_with_granularity(false, window, cx);
                                 }
                             })),
                     ),

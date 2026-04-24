@@ -125,14 +125,6 @@ impl FollowState {
             *self = FollowState::Tail { is_following: true };
         }
     }
-
-    fn stop_following(&mut self) {
-        if let FollowState::Tail { is_following: true } = self {
-            *self = FollowState::Tail {
-                is_following: false,
-            };
-        }
-    }
 }
 
 /// Whether the list is scrolling from top to bottom or bottom to top.
@@ -472,7 +464,9 @@ impl ListState {
         let state = &mut *self.0.borrow_mut();
 
         if distance < px(0.) {
-            state.follow_state.stop_following();
+            if let FollowState::Tail { is_following } = &mut state.follow_state {
+                *is_following = false;
+            }
         }
 
         let mut cursor = state.items.cursor::<ListItemSummary>(());
@@ -550,7 +544,9 @@ impl ListState {
         }
 
         if scroll_top.item_ix < item_count {
-            state.follow_state.stop_following();
+            if let FollowState::Tail { is_following } = &mut state.follow_state {
+                *is_following = false;
+            }
         }
 
         state.logical_scroll_top = Some(scroll_top);
@@ -731,8 +727,10 @@ impl StateInner {
             });
         }
 
-        if delta.y > px(0.) {
-            self.follow_state.stop_following();
+        if let FollowState::Tail { is_following } = &mut self.follow_state {
+            if delta.y > px(0.) {
+                *is_following = false;
+            }
         }
 
         if let Some(handler) = self.scroll_handler.as_mut() {
@@ -1137,7 +1135,7 @@ impl StateInner {
             content_height - self.scrollbar_drag_start_height.unwrap_or(content_height);
         let new_scroll_top = (point.y - drag_offset).abs().max(px(0.)).min(scroll_max);
 
-        self.follow_state.stop_following();
+        self.follow_state = FollowState::Normal;
 
         if self.alignment == ListAlignment::Bottom && new_scroll_top == scroll_max {
             self.logical_scroll_top = None;
@@ -2016,11 +2014,14 @@ mod test {
         );
     }
 
+    /// Calling `set_follow_mode(FollowState::Normal)` or dragging the scrollbar should
+    /// fully disengage follow_tail — clearing any suspended state so
+    /// follow_tail won’t auto-re-engage.
     #[gpui::test]
-    fn test_follow_tail_reengages_after_scrollbar_disengagement(cx: &mut TestAppContext) {
+    fn test_follow_tail_suspended_state_cleared_by_explicit_actions(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
 
-        // 10 items × 50px = 500px total, 200px viewport, scroll_max = 300px.
+        // 10 items × 50px = 500px total, 200px viewport.
         let state = ListState::new(10, crate::ListAlignment::Top, px(0.)).measure_all();
 
         struct TestView(ListState);
@@ -2037,24 +2038,59 @@ mod test {
         let view = cx.update(|_, cx| cx.new(|_| TestView(state.clone())));
 
         state.set_follow_mode(FollowMode::Tail);
+        // --- Part 1: set_follow_mode(FollowState::Normal) clears suspended state ---
+
         cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, _| {
             view.clone().into_any_element()
         });
-        assert!(state.is_following_tail());
 
-        // Drag the scrollbar up to the middle — follow_tail should suspend.
-        state.set_offset_from_scrollbar(point(px(0.), px(150.)));
+        // Scroll up — suspends follow_tail.
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(50.))),
+            ..Default::default()
+        });
         assert!(!state.is_following_tail());
 
-        // Drag the scrollbar back to the bottom — follow_tail should re-engage
-        // on the next paint.
-        state.set_offset_from_scrollbar(point(px(0.), px(300.)));
+        // Scroll back to the bottom — should re-engage follow_tail.
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10000.))),
+            ..Default::default()
+        });
+
         cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, _| {
-            view.into_any_element()
+            view.clone().into_any_element()
         });
         assert!(
             state.is_following_tail(),
-            "follow_tail should re-engage after scrolling back to the bottom via the scrollbar"
+            "follow_tail should re-engage after scrolling back to the bottom"
+        );
+
+        // --- Part 2: scrollbar drag clears suspended state ---
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, _| {
+            view.clone().into_any_element()
+        });
+
+        // Drag the scrollbar to the middle — should clear suspended state.
+        state.set_offset_from_scrollbar(point(px(0.), px(150.)));
+
+        // Scroll to the bottom.
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10000.))),
+            ..Default::default()
+        });
+
+        // Paint — should NOT re-engage because the scrollbar drag
+        // cleared the suspended state.
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, _| {
+            view.clone().into_any_element()
+        });
+        assert!(
+            !state.is_following_tail(),
+            "follow_tail should not re-engage after scrollbar drag cleared the suspended state"
         );
     }
 }

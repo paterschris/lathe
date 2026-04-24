@@ -601,7 +601,7 @@ impl PickerDelegate for BranchListDelegate {
         match self.state {
             PickerState::List | PickerState::NewRemote | PickerState::NewBranch => {
                 match self.branch_filter {
-                    BranchFilter::All | BranchFilter::Remote => "Switch branch…",
+                    BranchFilter::All | BranchFilter::Remote => "Select branch…",
                 }
             }
             PickerState::CreateRemote(_) => "Enter a name for this remote…",
@@ -627,9 +627,6 @@ impl PickerDelegate for BranchListDelegate {
         let focus_handle = self.focus_handle.clone();
         let editor = editor.as_any().downcast_ref::<Entity<Editor>>().unwrap();
 
-        let show_inline_filter =
-            self.editor_position() == PickerEditorPosition::End || !self.show_footer;
-
         v_flex()
             .when(
                 self.editor_position() == PickerEditorPosition::End,
@@ -642,32 +639,34 @@ impl PickerDelegate for BranchListDelegate {
                     .h_9()
                     .px_2p5()
                     .child(editor.clone())
-                    .when(show_inline_filter, |this| {
-                        let tooltip_label = match self.branch_filter {
-                            BranchFilter::All => "Filter Remote Branches",
-                            BranchFilter::Remote => "Show All Branches",
-                        };
+                    .when(
+                        self.editor_position() == PickerEditorPosition::End,
+                        |this| {
+                            let tooltip_label = match self.branch_filter {
+                                BranchFilter::All => "Filter Remote Branches",
+                                BranchFilter::Remote => "Show All Branches",
+                            };
 
-                        this.gap_1().justify_between().child({
-                            IconButton::new("filter-remotes", IconName::Filter)
-                                .toggle_state(self.branch_filter == BranchFilter::Remote)
-                                .icon_size(IconSize::Small)
-                                .tooltip(move |_, cx| {
-                                    Tooltip::for_action_in(
-                                        tooltip_label,
-                                        &branch_picker::FilterRemotes,
-                                        &focus_handle,
-                                        cx,
-                                    )
-                                })
-                                .on_click(|_click, window, cx| {
-                                    window.dispatch_action(
-                                        branch_picker::FilterRemotes.boxed_clone(),
-                                        cx,
-                                    );
-                                })
-                        })
-                    }),
+                            this.gap_1().justify_between().child({
+                                IconButton::new("filter-remotes", IconName::Filter)
+                                    .toggle_state(self.branch_filter == BranchFilter::Remote)
+                                    .tooltip(move |_, cx| {
+                                        Tooltip::for_action_in(
+                                            tooltip_label,
+                                            &branch_picker::FilterRemotes,
+                                            &focus_handle,
+                                            cx,
+                                        )
+                                    })
+                                    .on_click(|_click, window, cx| {
+                                        window.dispatch_action(
+                                            branch_picker::FilterRemotes.boxed_clone(),
+                                            cx,
+                                        );
+                                    })
+                            })
+                        },
+                    ),
             )
             .when(
                 self.editor_position() == PickerEditorPosition::Start,
@@ -1246,7 +1245,7 @@ impl PickerDelegate for BranchListDelegate {
                         },
                     )
                     .child(
-                        Button::new("switch_branch", "Switch")
+                        Button::new("select_branch", "Select")
                             .key_binding(
                                 KeyBinding::for_action_in(&menu::Confirm, &focus_handle, cx)
                                     .map(|kb| kb.size(rems_from_px(12.))),

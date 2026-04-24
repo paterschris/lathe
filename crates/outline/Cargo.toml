@@ -20,6 +20,7 @@ language.workspace = true
 ordered-float.workspace = true
 picker.workspace = true
 settings.workspace = true
+smol.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
 ui.workspace = true
@@ -39,4 +40,3 @@ rope.workspace = true
 serde_json.workspace = true
 settings = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
-futures.workspace = true

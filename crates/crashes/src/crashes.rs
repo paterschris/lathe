@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::mem;
 
 #[cfg(not(target_os = "windows"))]
-use async_process::Command;
+use smol::process::Command;
 use system_specs::GpuSpecs;
 
 #[cfg(target_os = "macos")]
@@ -57,11 +57,7 @@ fn should_install_crash_handler() -> bool {
 /// The synchronous portion (signal handlers, panic hook) runs inline.
 /// The async keepalive task is passed to `spawn` so the caller decides
 /// which executor to schedule it on.
-pub fn init<F: Future<Output = ()> + Send + Sync + 'static>(
-    crash_init: InitCrashHandler,
-    spawn: impl FnOnce(BoxFuture<'static, ()>),
-    wait_timer: impl (Fn(Duration) -> F) + Send + Sync + 'static,
-) {
+pub fn init(crash_init: InitCrashHandler, spawn: impl FnOnce(BoxFuture<'static, ()>)) {
     if !should_install_crash_handler() {
         let old_hook = panic::take_hook();
         panic::set_hook(Box::new(move |info| {
@@ -106,18 +102,12 @@ pub fn init<F: Future<Output = ()> + Send + Sync + 'static>(
 
     info!("crash signal handlers installed");
 
-    spawn(Box::pin(connect_and_keepalive(
-        crash_init, handler, wait_timer,
-    )));
+    spawn(Box::pin(connect_and_keepalive(crash_init, handler)));
 }
 
 /// Spawn the crash-handler subprocess, connect the IPC client, and run the
 /// keepalive ping loop. Called on a background executor by [`init`].
-async fn connect_and_keepalive<F: Future<Output = ()> + Send + Sync + 'static>(
-    crash_init: InitCrashHandler,
-    handler: CrashHandler,
-    wait_timer: impl (Fn(Duration) -> F) + Send + Sync + 'static,
-) {
+async fn connect_and_keepalive(crash_init: InitCrashHandler, handler: CrashHandler) {
     let exe = env::current_exe().expect("unable to find ourselves");
     let zed_pid = process::id();
     let socket_name = paths::temp_dir().join(format!("zed-crash-handler-{zed_pid}"));
@@ -144,7 +134,9 @@ async fn connect_and_keepalive<F: Future<Output = ()> + Send + Sync + 'static>(
             break;
         }
         elapsed += retry_frequency;
-        wait_timer(retry_frequency).await;
+        // Crash reporting is called outside of gpui in the remote server right now
+        #[allow(clippy::disallowed_methods)]
+        smol::Timer::after(retry_frequency).await;
     }
     let client = maybe_client.unwrap();
     let client = Arc::new(client);
@@ -165,7 +157,9 @@ async fn connect_and_keepalive<F: Future<Output = ()> + Send + Sync + 'static>(
 
     loop {
         client.ping().ok();
-        wait_timer(Duration::from_secs(10)).await;
+        // Crash reporting is called outside of gpui in the remote server right now
+        #[allow(clippy::disallowed_methods)]
+        smol::Timer::after(Duration::from_secs(10)).await;
     }
 }
 

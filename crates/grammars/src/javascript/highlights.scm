@@ -18,6 +18,121 @@
 
 (private_property_identifier) @property
 
+; Alternating chain colors for member access chains (e.g. a.b.c.d)
+; The innermost property in a chain gets chain_1
+(member_expression
+  object: (member_expression
+    property: (property_identifier) @property.chain_1))
+
+(member_expression
+  object: (member_expression
+    property: (private_property_identifier) @property.chain_1))
+
+; Properties whose object is a member_expression get chain_2
+(member_expression
+  object: (member_expression)
+  property: (property_identifier) @property.chain_2)
+
+(member_expression
+  object: (member_expression)
+  property: (private_property_identifier) @property.chain_2)
+
+; Depth 2: override back to chain_1
+(member_expression
+  object: (member_expression
+    object: (member_expression))
+  property: (property_identifier) @property.chain_1)
+
+(member_expression
+  object: (member_expression
+    object: (member_expression))
+  property: (private_property_identifier) @property.chain_1)
+
+; Depth 3: override back to chain_2
+(member_expression
+  object: (member_expression
+    object: (member_expression
+      object: (member_expression)))
+  property: (property_identifier) @property.chain_2)
+
+(member_expression
+  object: (member_expression
+    object: (member_expression
+      object: (member_expression)))
+  property: (private_property_identifier) @property.chain_2)
+
+; Depth 4: override back to chain_1
+(member_expression
+  object: (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (member_expression))))
+  property: (property_identifier) @property.chain_1)
+
+(member_expression
+  object: (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (member_expression))))
+  property: (private_property_identifier) @property.chain_1)
+
+; Depth 5: override back to chain_2
+(member_expression
+  object: (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (member_expression
+          object: (member_expression)))))
+  property: (property_identifier) @property.chain_2)
+
+(member_expression
+  object: (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (member_expression
+          object: (member_expression)))))
+  property: (private_property_identifier) @property.chain_2)
+
+; Depth 6: override back to chain_1
+(member_expression
+  object: (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (member_expression
+          object: (member_expression
+            object: (member_expression))))))
+  property: (property_identifier) @property.chain_1)
+
+(member_expression
+  object: (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (member_expression
+          object: (member_expression
+            object: (member_expression))))))
+  property: (private_property_identifier) @property.chain_1)
+
+; Depth 7: override back to chain_2
+(member_expression
+  object: (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (member_expression
+          object: (member_expression
+            object: (member_expression
+              object: (member_expression)))))))
+  property: (property_identifier) @property.chain_2)
+
+(member_expression
+  object: (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (member_expression
+          object: (member_expression
+            object: (member_expression
+              object: (member_expression)))))))
+  property: (private_property_identifier) @property.chain_2)
+
 ; Function and method calls
 (call_expression
   function: (identifier) @function)
@@ -28,6 +143,68 @@
       (property_identifier)
       (private_property_identifier)
     ] @function.method))
+
+; Chained method calls - inner method of a chain gets chain_1
+(call_expression
+  function: (member_expression
+    object: (call_expression
+      function: (member_expression
+        property: [
+          (property_identifier)
+          (private_property_identifier)
+        ] @function.method.chain_1))))
+
+; Method whose object is a chained call → chain_2
+(call_expression
+  function: (member_expression
+    object: (call_expression
+      function: (member_expression))
+    property: [
+      (property_identifier)
+      (private_property_identifier)
+    ] @function.method.chain_2))
+
+; Depth 2: override back to chain_1
+(call_expression
+  function: (member_expression
+    object: (call_expression
+      function: (member_expression
+        object: (call_expression
+          function: (member_expression))))
+    property: [
+      (property_identifier)
+      (private_property_identifier)
+    ] @function.method.chain_1))
+
+; Depth 3: override back to chain_2
+(call_expression
+  function: (member_expression
+    object: (call_expression
+      function: (member_expression
+        object: (call_expression
+          function: (member_expression
+            object: (call_expression
+              function: (member_expression))))))
+    property: [
+      (property_identifier)
+      (private_property_identifier)
+    ] @function.method.chain_2))
+
+; Depth 4: override back to chain_1
+(call_expression
+  function: (member_expression
+    object: (call_expression
+      function: (member_expression
+        object: (call_expression
+          function: (member_expression
+            object: (call_expression
+              function: (member_expression
+                object: (call_expression
+                  function: (member_expression))))))))
+    property: [
+      (property_identifier)
+      (private_property_identifier)
+    ] @function.method.chain_1))
 
 (new_expression
   constructor: (identifier) @type)
@@ -116,6 +293,105 @@
 
 (arrow_function
   parameter: (identifier) @variable.parameter)
+
+; Rainbow parameter position colors (8-color cycle for declarations)
+(required_parameter
+  (identifier) @variable.parameter.chain_1
+  (#sibling-index-mod? @variable.parameter.chain_1 "8" "0"))
+
+(required_parameter
+  (identifier) @variable.parameter.chain_2
+  (#sibling-index-mod? @variable.parameter.chain_2 "8" "1"))
+
+(required_parameter
+  (identifier) @variable.parameter.chain_3
+  (#sibling-index-mod? @variable.parameter.chain_3 "8" "2"))
+
+(required_parameter
+  (identifier) @variable.parameter.chain_4
+  (#sibling-index-mod? @variable.parameter.chain_4 "8" "3"))
+
+(required_parameter
+  (identifier) @variable.parameter.chain_5
+  (#sibling-index-mod? @variable.parameter.chain_5 "8" "4"))
+
+(required_parameter
+  (identifier) @variable.parameter.chain_6
+  (#sibling-index-mod? @variable.parameter.chain_6 "8" "5"))
+
+(required_parameter
+  (identifier) @variable.parameter.chain_7
+  (#sibling-index-mod? @variable.parameter.chain_7 "8" "6"))
+
+(required_parameter
+  (identifier) @variable.parameter.chain_8
+  (#sibling-index-mod? @variable.parameter.chain_8 "8" "7"))
+
+(optional_parameter
+  (identifier) @variable.parameter.chain_1
+  (#sibling-index-mod? @variable.parameter.chain_1 "8" "0"))
+
+(optional_parameter
+  (identifier) @variable.parameter.chain_2
+  (#sibling-index-mod? @variable.parameter.chain_2 "8" "1"))
+
+(optional_parameter
+  (identifier) @variable.parameter.chain_3
+  (#sibling-index-mod? @variable.parameter.chain_3 "8" "2"))
+
+(optional_parameter
+  (identifier) @variable.parameter.chain_4
+  (#sibling-index-mod? @variable.parameter.chain_4 "8" "3"))
+
+(optional_parameter
+  (identifier) @variable.parameter.chain_5
+  (#sibling-index-mod? @variable.parameter.chain_5 "8" "4"))
+
+(optional_parameter
+  (identifier) @variable.parameter.chain_6
+  (#sibling-index-mod? @variable.parameter.chain_6 "8" "5"))
+
+(optional_parameter
+  (identifier) @variable.parameter.chain_7
+  (#sibling-index-mod? @variable.parameter.chain_7 "8" "6"))
+
+(optional_parameter
+  (identifier) @variable.parameter.chain_8
+  (#sibling-index-mod? @variable.parameter.chain_8 "8" "7"))
+
+; Rainbow parameter reference colors (propagates declaration chain color to references)
+((identifier) @variable.parameter.chain_1
+  (#is-parameter-reference-mod? @variable.parameter.chain_1 "8" "0"))
+
+((identifier) @variable.parameter.chain_2
+  (#is-parameter-reference-mod? @variable.parameter.chain_2 "8" "1"))
+
+((identifier) @variable.parameter.chain_3
+  (#is-parameter-reference-mod? @variable.parameter.chain_3 "8" "2"))
+
+((identifier) @variable.parameter.chain_4
+  (#is-parameter-reference-mod? @variable.parameter.chain_4 "8" "3"))
+
+((identifier) @variable.parameter.chain_5
+  (#is-parameter-reference-mod? @variable.parameter.chain_5 "8" "4"))
+
+((identifier) @variable.parameter.chain_6
+  (#is-parameter-reference-mod? @variable.parameter.chain_6 "8" "5"))
+
+((identifier) @variable.parameter.chain_7
+  (#is-parameter-reference-mod? @variable.parameter.chain_7 "8" "6"))
+
+((identifier) @variable.parameter.chain_8
+  (#is-parameter-reference-mod? @variable.parameter.chain_8 "8" "7"))
+
+; Nested closure depth coloring
+(arrow_function
+  "=>" @function.closure.depth_1
+  (#ancestor-count-is-odd? @function.closure.depth_1))
+
+(arrow_function
+  "=>" @function.closure.depth_2
+  (#ancestor-count-is-even? @function.closure.depth_2))
 
 ; Special identifiers
 ;
@@ -332,18 +608,6 @@
     (member_expression
       object: (identifier) @type @tag.component.jsx
       property: (property_identifier) @type @tag.component.jsx)
-    (member_expression
-      object: (member_expression
-        object: (identifier) @type @tag.component.jsx
-        property: (property_identifier) @type @tag.component.jsx)
-      property: (property_identifier) @type @tag.component.jsx)
-    (member_expression
-      object: (member_expression
-        object: (member_expression
-          object: (identifier) @type @tag.component.jsx
-          property: (property_identifier) @type @tag.component.jsx)
-        property: (property_identifier) @type @tag.component.jsx)
-      property: (property_identifier) @type @tag.component.jsx)
   ])
 
 (jsx_closing_element
@@ -352,18 +616,6 @@
     (member_expression
       object: (identifier) @type @tag.component.jsx
       property: (property_identifier) @type @tag.component.jsx)
-    (member_expression
-      object: (member_expression
-        object: (identifier) @type @tag.component.jsx
-        property: (property_identifier) @type @tag.component.jsx)
-      property: (property_identifier) @type @tag.component.jsx)
-    (member_expression
-      object: (member_expression
-        object: (member_expression
-          object: (identifier) @type @tag.component.jsx
-          property: (property_identifier) @type @tag.component.jsx)
-        property: (property_identifier) @type @tag.component.jsx)
-      property: (property_identifier) @type @tag.component.jsx)
   ])
 
 (jsx_self_closing_element
@@ -371,18 +623,6 @@
     (identifier) @type @tag.component.jsx
     (member_expression
       object: (identifier) @type @tag.component.jsx
-      property: (property_identifier) @type @tag.component.jsx)
-    (member_expression
-      object: (member_expression
-        object: (identifier) @type @tag.component.jsx
-        property: (property_identifier) @type @tag.component.jsx)
-      property: (property_identifier) @type @tag.component.jsx)
-    (member_expression
-      object: (member_expression
-        object: (member_expression
-          object: (identifier) @type @tag.component.jsx
-          property: (property_identifier) @type @tag.component.jsx)
-        property: (property_identifier) @type @tag.component.jsx)
       property: (property_identifier) @type @tag.component.jsx)
   ])
 

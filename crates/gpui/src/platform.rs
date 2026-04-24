@@ -280,6 +280,36 @@ pub enum ThermalState {
     Critical,
 }
 
+/// What kind of on-screen content a [ScreenCaptureSource] represents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceKind {
+    /// An entire physical or virtual display.
+    Display,
+    /// A single application window.
+    Window {
+        /// The owning application's display name when available
+        /// (e.g. "Lathe", "Google Chrome"). Used by picker UIs to
+        /// group windows by app.
+        app_name: Option<SharedString>,
+        /// True if this window belongs to the same process that is
+        /// enumerating sources. Picker UIs can surface these first so
+        /// users can easily share their own app's window.
+        is_own_app: bool,
+    },
+}
+
+impl SourceKind {
+    /// Returns true if this source represents a display.
+    pub fn is_display(&self) -> bool {
+        matches!(self, SourceKind::Display)
+    }
+
+    /// Returns true if this source represents a window.
+    pub fn is_window(&self) -> bool {
+        matches!(self, SourceKind::Window { .. })
+    }
+}
+
 /// Metadata for a given [ScreenCaptureSource]
 #[derive(Clone)]
 pub struct SourceMetadata {
@@ -287,10 +317,14 @@ pub struct SourceMetadata {
     pub id: u64,
     /// Human-readable label for this source.
     pub label: Option<SharedString>,
-    /// Whether this source is the main display.
+    /// Whether this source is the main display. Only meaningful when
+    /// `kind` is [`SourceKind::Display`].
     pub is_main: Option<bool>,
     /// Video resolution of this source.
     pub resolution: Size<DevicePixels>,
+    /// What kind of source this is. Used to distinguish displays from
+    /// individual application windows in picker UI.
+    pub kind: SourceKind,
 }
 
 /// A source of on-screen video content that can be captured.
@@ -651,7 +685,6 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         false
     }
     fn set_edited(&mut self, _edited: bool) {}
-    fn set_document_path(&self, _path: Option<&std::path::Path>) {}
     fn show_character_palette(&self) {}
     fn titlebar_double_click(&self) {}
     fn on_move_tab_to_new_window(&self, _callback: Box<dyn FnMut()>) {}

@@ -210,13 +210,11 @@ fn main() -> Result<(), anyhow::Error> {
                         first_match = Some(time);
                         println!("First match found after {time:?}");
                     }
-                    match match_result {
-                        SearchResult::Buffer { ranges, .. } => {
-                            matched_files += 1;
-                            matched_chunks += ranges.len();
-                        }
-                        SearchResult::LimitReached => break,
-                        SearchResult::WaitingForScan | SearchResult::Searching => continue,
+                    if let SearchResult::Buffer { ranges, .. } = match_result {
+                        matched_files += 1;
+                        matched_chunks += ranges.len();
+                    } else {
+                        break;
                     }
                 }
                 let elapsed = timer.elapsed();

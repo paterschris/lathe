@@ -20,7 +20,6 @@ doctest = false
 acp_tools.workspace = true
 acp_thread.workspace = true
 action_log.workspace = true
-async-channel.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
@@ -44,6 +43,7 @@ reqwest_client = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
+smol.workspace = true
 task.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

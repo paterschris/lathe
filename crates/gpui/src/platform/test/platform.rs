@@ -52,6 +52,7 @@ impl ScreenCaptureSource for TestScreenCaptureSource {
             is_main: None,
             label: None,
             resolution: size(DevicePixels(1), DevicePixels(1)),
+            kind: crate::SourceKind::Display,
         })
     }
 

@@ -433,11 +433,79 @@ pub fn theme_colors_refinement(
             .tab_active_background
             .as_ref()
             .and_then(|color| try_parse_color(color).ok()),
+        tab_modified_foreground: this
+            .tab_modified_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_modified_background: this
+            .tab_modified_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_created_foreground: this
+            .tab_created_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_created_background: this
+            .tab_created_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_deleted_foreground: this
+            .tab_deleted_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_deleted_background: this
+            .tab_deleted_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_conflict_foreground: this
+            .tab_conflict_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_conflict_background: this
+            .tab_conflict_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_error_foreground: this
+            .tab_error_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_error_background: this
+            .tab_error_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_warning_foreground: this
+            .tab_warning_foreground
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_warning_background: this
+            .tab_warning_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        tab_dirty_background: this
+            .tab_dirty_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
         search_match_background,
         search_active_match_background,
         panel_background,
         panel_focused_border: this
             .panel_focused_border
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        panel_modified_background: this
+            .panel_modified_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        panel_created_background: this
+            .panel_created_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        panel_deleted_background: this
+            .panel_deleted_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        panel_conflict_background: this
+            .panel_conflict_background
             .as_ref()
             .and_then(|color| try_parse_color(color).ok()),
         panel_indent_guide: this
@@ -746,6 +814,18 @@ pub fn theme_colors_refinement(
             .as_ref()
             .or(this.version_control_conflict_theirs_background.as_ref())
             .and_then(|color| try_parse_color(color).ok()),
+        gutter_added_background: this
+            .gutter_added_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        gutter_modified_background: this
+            .gutter_modified_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
+        gutter_deleted_background: this
+            .gutter_deleted_background
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok()),
         vim_normal_background: this
             .vim_normal_background
             .as_ref()
@@ -775,11 +855,6 @@ pub fn theme_colors_refinement(
             .as_ref()
             .and_then(|color| try_parse_color(color).ok())
             .or(editor_document_highlight_read_background),
-        vim_helix_jump_label_foreground: this
-            .vim_helix_jump_label_foreground
-            .as_ref()
-            .and_then(|color| try_parse_color(color).ok())
-            .or(status_colors.error),
         vim_helix_normal_background: this
             .vim_helix_normal_background
             .as_ref()
@@ -852,40 +927,4 @@ fn try_parse_color(color: &str) -> anyhow::Result<Hsla> {
     );
 
     Ok(hsla)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn helix_jump_label_color_uses_theme_color_or_status_error() {
-        let status_error = try_parse_color("#e63333").expect("valid color");
-        let override_color = try_parse_color("#00ff00").expect("valid color");
-        let status_colors = StatusColorsRefinement {
-            error: Some(status_error),
-            ..Default::default()
-        };
-
-        let fallback_refinement =
-            theme_colors_refinement(&ThemeColorsContent::default(), &status_colors);
-
-        assert_eq!(
-            fallback_refinement.vim_helix_jump_label_foreground,
-            Some(status_error)
-        );
-
-        let override_refinement = theme_colors_refinement(
-            &ThemeColorsContent {
-                vim_helix_jump_label_foreground: Some("#00ff00".to_string()),
-                ..Default::default()
-            },
-            &status_colors,
-        );
-
-        assert_eq!(
-            override_refinement.vim_helix_jump_label_foreground,
-            Some(override_color)
-        );
-    }
 }

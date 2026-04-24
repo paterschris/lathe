@@ -531,7 +531,7 @@ impl ExtensionImports for WasmState {
                 "download failed with status {}",
                 response.status()
             );
-            let mut body = BufReader::new(response.body_mut());
+            let body = BufReader::new(response.body_mut());
 
             match file_type {
                 DownloadedFileType::Uncompressed => {
@@ -550,14 +550,11 @@ impl ExtensionImports for WasmState {
                         .await?;
                 }
                 DownloadedFileType::GzipTar => {
-                    let mut tar_gz_bytes = Vec::new();
-                    body.read_to_end(&mut tar_gz_bytes).await?;
-                    let decompressed_bytes =
-                        GzipDecoder::new(BufReader::new(tar_gz_bytes.as_slice()));
-                    futures::pin_mut!(decompressed_bytes);
+                    let body = GzipDecoder::new(body);
+                    futures::pin_mut!(body);
                     self.host
                         .fs
-                        .extract_tar_file(&destination_path, Archive::new(decompressed_bytes))
+                        .extract_tar_file(&destination_path, Archive::new(body))
                         .await?;
                 }
                 DownloadedFileType::Zip => {

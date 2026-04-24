@@ -46,6 +46,7 @@ use project::{File, Fs, GitEntry, GitTraversal, Project, ProjectItem};
 use search::{BufferSearchBar, ProjectSearchView};
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
+use smol::channel;
 use theme::SyntaxTheme;
 use theme_settings::ThemeSettings;
 use ui::{
@@ -155,7 +156,7 @@ struct SearchState {
     kind: SearchKind,
     query: String,
     matches: Vec<(Range<editor::Anchor>, Arc<OnceLock<SearchData>>)>,
-    highlight_search_match_tx: async_channel::Sender<HighlightArguments>,
+    highlight_search_match_tx: channel::Sender<HighlightArguments>,
     _search_match_highlighter: Task<()>,
     _search_match_notify: Task<()>,
 }
@@ -176,8 +177,8 @@ impl SearchState {
         window: &mut Window,
         cx: &mut Context<OutlinePanel>,
     ) -> Self {
-        let (highlight_search_match_tx, highlight_search_match_rx) = async_channel::unbounded();
-        let (notify_tx, notify_rx) = async_channel::unbounded::<()>();
+        let (highlight_search_match_tx, highlight_search_match_rx) = channel::unbounded();
+        let (notify_tx, notify_rx) = channel::unbounded::<()>();
         Self {
             kind,
             query,
@@ -2345,7 +2346,7 @@ impl OutlinePanel {
             }) => {
                 let name = self.entry_name(worktree_id, entry, cx);
                 let color =
-                    entry_git_aware_label_color(entry.git_summary, entry.is_ignored, is_active);
+                    entry_git_aware_label_color(entry.git_summary, entry.is_ignored, is_active, cx);
                 let icon = if settings.file_icons {
                     FileIcons::get_icon(entry.path.as_std_path(), cx)
                         .map(|icon_path| Icon::from_path(icon_path).color(color).into_any_element())
@@ -2376,6 +2377,7 @@ impl OutlinePanel {
                     directory.entry.git_summary,
                     directory.entry.is_ignored,
                     is_active,
+                    cx,
                 );
                 let icon = if settings.folder_icons {
                     FileIcons::get_folder_icon(is_expanded, directory.entry.path.as_std_path(), cx)
@@ -2473,7 +2475,7 @@ impl OutlinePanel {
                 .first()
                 .map(|entry| entry.git_summary)
                 .unwrap_or_default();
-            let color = entry_git_aware_label_color(git_status, is_ignored, is_active);
+            let color = entry_git_aware_label_color(git_status, is_ignored, is_active, cx);
             let icon = if settings.folder_icons {
                 FileIcons::get_folder_icon(is_expanded, &Path::new(&name), cx)
             } else {
@@ -5248,7 +5250,6 @@ impl GenerationState {
 #[cfg(test)]
 mod tests {
     use db::indoc;
-    use futures::stream::StreamExt as _;
     use gpui::{TestAppContext, UpdateGlobal, VisualTestContext, WindowHandle};
     use language::{self, FakeLspAdapter, markdown_lang, rust_lang};
     use pretty_assertions::assert_eq;
@@ -5258,6 +5259,7 @@ mod tests {
         project_search::{self, perform_project_search},
     };
     use serde_json::json;
+    use smol::stream::StreamExt as _;
     use util::path;
     use workspace::{MultiWorkspace, OpenOptions, OpenVisible, ToolbarItemView};
 

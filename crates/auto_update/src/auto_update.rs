@@ -273,7 +273,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Zed was installed via a package manager.",
+            "Lathe was installed via a package manager.",
             Some(&message),
             &["Ok"],
             cx,
@@ -301,19 +301,154 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// GitHub API URL for Lathe releases, resolved per channel.
+///
+/// - `LATHE_BETA_UPDATE_URL` is consulted for Beta channel.
+/// - `LATHE_UPDATE_URL` is consulted for Stable/Preview/Beta (as a fallback
+///   for Beta when the channel-specific var is not set).
+///
+/// Both are read from `option_env!` (baked into the binary at build time by
+/// release CI) with a runtime `env::var` fallback for development. Each must
+/// point at a GitHub releases "latest" API endpoint, for example:
+/// `https://api.github.com/repos/paterschris/lathe/releases/latest`.
+/// When unset for a given channel, auto-update is a no-op on that channel.
+pub fn lathe_update_base_url(channel: ReleaseChannel) -> Option<String> {
+    let beta = option_env!("LATHE_BETA_UPDATE_URL")
+        .map(str::to_owned)
+        .or_else(|| env::var("LATHE_BETA_UPDATE_URL").ok())
+        .filter(|s| !s.is_empty());
+    let generic = option_env!("LATHE_UPDATE_URL")
+        .map(str::to_owned)
+        .or_else(|| env::var("LATHE_UPDATE_URL").ok())
+        .filter(|s| !s.is_empty());
+    match channel {
+        ReleaseChannel::Beta => beta.or(generic),
+        ReleaseChannel::Stable | ReleaseChannel::Preview => generic,
+        ReleaseChannel::Nightly | ReleaseChannel::Dev => None,
+    }
+}
+
+/// Optional HTML URL for release notes (e.g. the GitHub releases HTML page).
+/// Falls back to a naive transform of the API URL, then to `None`.
+fn lathe_release_notes_url(channel: ReleaseChannel) -> Option<String> {
+    if let Some(explicit) = option_env!("LATHE_RELEASE_NOTES_URL")
+        .map(str::to_owned)
+        .or_else(|| env::var("LATHE_RELEASE_NOTES_URL").ok())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(explicit);
+    }
+    let api = lathe_update_base_url(channel)?;
+    // api.github.com/repos/OWNER/REPO/releases/... -> github.com/OWNER/REPO/releases
+    api.strip_prefix("https://api.github.com/repos/")
+        .and_then(|rest| rest.split_once("/releases"))
+        .map(|(owner_repo, _)| format!("https://github.com/{owner_repo}/releases"))
+        .or(Some(api))
+}
+
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GitHubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+async fn get_lathe_release_asset(
+    http_client: Arc<HttpClientWithUrl>,
+    api_url: &str,
+    os: &str,
+    arch: &str,
+) -> Result<ReleaseAsset> {
+    let mut response = http_client.get(api_url, Default::default(), true).await?;
+    let mut body = Vec::new();
+    response.body_mut().read_to_end(&mut body).await?;
+
+    anyhow::ensure!(
+        response.status().is_success(),
+        "failed to fetch release from {api_url}: {:?}",
+        String::from_utf8_lossy(&body),
+    );
+
+    let release: GitHubRelease = serde_json::from_slice(&body).with_context(|| {
+        format!(
+            "error deserializing release {:?}",
+            String::from_utf8_lossy(&body),
+        )
+    })?;
+
+    // Asset naming produced by the release workflow:
+    //   macOS:   Lathe-<version>-<arch>-macos.{dmg,zip}    (arch: aarch64 | x86_64)
+    //   Linux:   Lathe-<version>-<arch>-linux.tar.gz
+    //   Windows: Lathe-<version>-<arch>.exe
+    // macOS prefers .dmg when available (used by the in-app installer's
+    // hdiutil mount flow); .zip is accepted as a fallback.
+    let matches = |asset: &GitHubAsset, ext: &str| {
+        asset.name.ends_with(ext)
+            && asset.name.contains(arch)
+            && (os != "linux" || asset.name.contains("linux"))
+    };
+
+    let asset = match os {
+        "macos" => release
+            .assets
+            .iter()
+            .find(|a| matches(a, ".dmg"))
+            .or_else(|| release.assets.iter().find(|a| matches(a, ".zip")))
+            .cloned(),
+        "linux" => release
+            .assets
+            .iter()
+            .find(|a| matches(a, ".tar.gz"))
+            .cloned(),
+        "windows" => release
+            .assets
+            .iter()
+            .find(|a| matches(a, ".exe"))
+            .cloned(),
+        other => anyhow::bail!("unsupported os: {other}"),
+    }
+    .with_context(|| {
+        format!(
+            "no matching asset for os={os} arch={arch} in release {}",
+            release.tag_name
+        )
+    })?;
+
+    // tag_name like "v0.234.7" -> semver "0.234.7".
+    let version = release.tag_name.trim_start_matches('v').to_string();
+
+    Ok(ReleaseAsset {
+        version,
+        url: asset.browser_download_url,
+    })
+}
+
 pub fn release_notes_url(cx: &mut App) -> Option<String> {
     let release_channel = ReleaseChannel::try_global(cx)?;
+    // For Stable/Preview/Beta prefer the Lathe GitHub releases page when a
+    // LATHE_UPDATE_URL (or LATHE_BETA_UPDATE_URL) is baked in. If unset for
+    // Stable/Preview, fall back to the Zed cloud release-notes path.
     let url = match release_channel {
         ReleaseChannel::Stable | ReleaseChannel::Preview => {
-            let auto_updater = AutoUpdater::get(cx)?;
-            let auto_updater = auto_updater.read(cx);
-            let mut current_version = auto_updater.current_version.clone();
-            current_version.pre = semver::Prerelease::EMPTY;
-            current_version.build = semver::BuildMetadata::EMPTY;
-            let release_channel = release_channel.dev_name();
-            let path = format!("/releases/{release_channel}/{current_version}");
-            auto_updater.client.http_client().build_url(&path)
+            if let Some(notes) = lathe_release_notes_url(release_channel) {
+                notes
+            } else {
+                let auto_updater = AutoUpdater::get(cx)?;
+                let auto_updater = auto_updater.read(cx);
+                let mut current_version = auto_updater.current_version.clone();
+                current_version.pre = semver::Prerelease::EMPTY;
+                current_version.build = semver::BuildMetadata::EMPTY;
+                let release_channel = release_channel.dev_name();
+                let path = format!("/releases/{release_channel}/{current_version}");
+                auto_updater.client.http_client().build_url(&path)
+            }
         }
+        ReleaseChannel::Beta => lathe_release_notes_url(release_channel)?,
         ReleaseChannel::Nightly => {
             "https://github.com/zed-industries/zed/commits/nightly/".to_string()
         }
@@ -590,6 +725,10 @@ impl AutoUpdater {
     ) -> Result<ReleaseAsset> {
         let client = this.read_with(cx, |this, _| this.client.clone());
 
+        if let Some(api_url) = lathe_update_base_url(release_channel) {
+            return get_lathe_release_asset(client.http_client(), &api_url, os, arch).await;
+        }
+
         let (system_id, metrics_id, is_staff) = if client.telemetry().metrics_enabled() {
             (
                 client.telemetry().system_id(),
@@ -654,6 +793,19 @@ impl AutoUpdater {
             });
 
         Self::check_dependencies()?;
+
+        if release_channel == ReleaseChannel::Beta
+            && lathe_update_base_url(release_channel).is_none()
+        {
+            log::info!(
+                "Auto Update: Beta channel has no LATHE_BETA_UPDATE_URL or LATHE_UPDATE_URL configured; skipping"
+            );
+            this.update(cx, |this, cx| {
+                this.status = AutoUpdateStatus::Idle;
+                cx.notify();
+            });
+            return Ok(());
+        }
 
         this.update(cx, |this, cx| {
             this.status = AutoUpdateStatus::Checking;
@@ -769,6 +921,12 @@ impl AutoUpdater {
                 let newer_version = should_download
                     .then(|| VersionCheckType::Sha(AppCommitSha::new(fetched_version)));
                 Ok(newer_version)
+            }
+            // Preserve pre-release tags so "0.234.5-beta.2" > "0.234.5-beta.1" is honored.
+            ReleaseChannel::Beta => {
+                let fetched = parsed_fetched_version?;
+                let should_download = fetched > installed_version;
+                Ok(should_download.then(|| VersionCheckType::Semantic(fetched)))
             }
             _ => Self::check_if_fetched_version_is_newer_non_nightly(
                 installed_version,

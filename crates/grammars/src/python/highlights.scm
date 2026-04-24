@@ -4,6 +4,68 @@
 (attribute
   attribute: (identifier) @property)
 
+; Alternating chain colors for attribute access chains (e.g. a.b.c.d)
+; The innermost attribute in a chain gets chain_1
+(attribute
+  object: (attribute
+    attribute: (identifier) @property.chain_1))
+
+; Attributes whose object is an attribute get chain_2
+(attribute
+  object: (attribute)
+  attribute: (identifier) @property.chain_2)
+
+; Depth 2: override back to chain_1
+(attribute
+  object: (attribute
+    object: (attribute))
+  attribute: (identifier) @property.chain_1)
+
+; Depth 3: override back to chain_2
+(attribute
+  object: (attribute
+    object: (attribute
+      object: (attribute)))
+  attribute: (identifier) @property.chain_2)
+
+; Depth 4: override back to chain_1
+(attribute
+  object: (attribute
+    object: (attribute
+      object: (attribute
+        object: (attribute))))
+  attribute: (identifier) @property.chain_1)
+
+; Depth 5: override back to chain_2
+(attribute
+  object: (attribute
+    object: (attribute
+      object: (attribute
+        object: (attribute
+          object: (attribute)))))
+  attribute: (identifier) @property.chain_2)
+
+; Depth 6: override back to chain_1
+(attribute
+  object: (attribute
+    object: (attribute
+      object: (attribute
+        object: (attribute
+          object: (attribute
+            object: (attribute))))))
+  attribute: (identifier) @property.chain_1)
+
+; Depth 7: override back to chain_2
+(attribute
+  object: (attribute
+    object: (attribute
+      object: (attribute
+        object: (attribute
+          object: (attribute
+            object: (attribute
+              object: (attribute)))))))
+  attribute: (identifier) @property.chain_2)
+
 ; CamelCase for classes
 ((identifier) @type.class
   (#match? @type.class "^_*[A-Z][A-Za-z0-9_]*$"))
@@ -41,6 +103,53 @@
 (call
   function: (attribute
     attribute: (identifier) @function.method.call))
+
+; Chained method calls - inner method of a chain gets chain_1
+(call
+  function: (attribute
+    object: (call
+      function: (attribute
+        attribute: (identifier) @function.method.call.chain_1))))
+
+; Method whose object is a chained call → chain_2
+(call
+  function: (attribute
+    object: (call
+      function: (attribute))
+    attribute: (identifier) @function.method.call.chain_2))
+
+; Depth 2: override back to chain_1
+(call
+  function: (attribute
+    object: (call
+      function: (attribute
+        object: (call
+          function: (attribute))))
+    attribute: (identifier) @function.method.call.chain_1))
+
+; Depth 3: override back to chain_2
+(call
+  function: (attribute
+    object: (call
+      function: (attribute
+        object: (call
+          function: (attribute
+            object: (call
+              function: (attribute))))))
+    attribute: (identifier) @function.method.call.chain_2))
+
+; Depth 4: override back to chain_1
+(call
+  function: (attribute
+    object: (call
+      function: (attribute
+        object: (call
+          function: (attribute
+            object: (call
+              function: (attribute
+                object: (call
+                  function: (attribute))))))))
+    attribute: (identifier) @function.method.call.chain_1))
 
 (call
   function: (identifier) @function.call)
@@ -91,6 +200,38 @@
       (typed_default_parameter
         name: (identifier) @variable.parameter) ; Typed default parameters
     ]))
+
+; Alternating parameter position colors
+(function_definition
+  parameters: (parameters
+    (identifier) @variable.parameter.chain_1
+    (#sibling-index-is-even? @variable.parameter.chain_1)))
+
+(function_definition
+  parameters: (parameters
+    (identifier) @variable.parameter.chain_2
+    (#sibling-index-is-odd? @variable.parameter.chain_2)))
+
+(function_definition
+  parameters: (parameters
+    (typed_parameter
+      (identifier) @variable.parameter.chain_1
+      (#sibling-index-is-even? @variable.parameter.chain_1))))
+
+(function_definition
+  parameters: (parameters
+    (typed_parameter
+      (identifier) @variable.parameter.chain_2
+      (#sibling-index-is-odd? @variable.parameter.chain_2))))
+
+; Nested closure depth coloring
+(lambda
+  "lambda" @function.closure.depth_1
+  (#ancestor-count-is-odd? @function.closure.depth_1))
+
+(lambda
+  "lambda" @function.closure.depth_2
+  (#ancestor-count-is-even? @function.closure.depth_2))
 
 ; Keyword arguments
 (call

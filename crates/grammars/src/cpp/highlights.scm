@@ -2,6 +2,68 @@
 
 (field_identifier) @property
 
+; Alternating chain colors for field access chains (e.g. a.b.c.d)
+; The innermost field in a chain gets chain_1
+(field_expression
+  argument: (field_expression
+    field: (field_identifier) @property.chain_1))
+
+; Fields whose argument is a field_expression get chain_2
+(field_expression
+  argument: (field_expression)
+  field: (field_identifier) @property.chain_2)
+
+; Depth 2: override back to chain_1
+(field_expression
+  argument: (field_expression
+    argument: (field_expression))
+  field: (field_identifier) @property.chain_1)
+
+; Depth 3: override back to chain_2
+(field_expression
+  argument: (field_expression
+    argument: (field_expression
+      argument: (field_expression)))
+  field: (field_identifier) @property.chain_2)
+
+; Depth 4: override back to chain_1
+(field_expression
+  argument: (field_expression
+    argument: (field_expression
+      argument: (field_expression
+        argument: (field_expression))))
+  field: (field_identifier) @property.chain_1)
+
+; Depth 5: override back to chain_2
+(field_expression
+  argument: (field_expression
+    argument: (field_expression
+      argument: (field_expression
+        argument: (field_expression
+          argument: (field_expression)))))
+  field: (field_identifier) @property.chain_2)
+
+; Depth 6: override back to chain_1
+(field_expression
+  argument: (field_expression
+    argument: (field_expression
+      argument: (field_expression
+        argument: (field_expression
+          argument: (field_expression
+            argument: (field_expression))))))
+  field: (field_identifier) @property.chain_1)
+
+; Depth 7: override back to chain_2
+(field_expression
+  argument: (field_expression
+    argument: (field_expression
+      argument: (field_expression
+        argument: (field_expression
+          argument: (field_expression
+            argument: (field_expression
+              argument: (field_expression)))))))
+  field: (field_identifier) @property.chain_2)
+
 (namespace_identifier) @namespace
 
 (concept_definition
@@ -59,6 +121,53 @@
 (call_expression
   function: (field_expression
     field: (field_identifier) @function))
+
+; Chained method calls - inner method of a chain gets chain_1
+(call_expression
+  function: (field_expression
+    argument: (call_expression
+      function: (field_expression
+        field: (field_identifier) @function.method.chain_1))))
+
+; Method whose argument is a chained call → chain_2
+(call_expression
+  function: (field_expression
+    argument: (call_expression
+      function: (field_expression))
+    field: (field_identifier) @function.method.chain_2))
+
+; Depth 2: override back to chain_1
+(call_expression
+  function: (field_expression
+    argument: (call_expression
+      function: (field_expression
+        argument: (call_expression
+          function: (field_expression))))
+    field: (field_identifier) @function.method.chain_1))
+
+; Depth 3: override back to chain_2
+(call_expression
+  function: (field_expression
+    argument: (call_expression
+      function: (field_expression
+        argument: (call_expression
+          function: (field_expression
+            argument: (call_expression
+              function: (field_expression))))))
+    field: (field_identifier) @function.method.chain_2))
+
+; Depth 4: override back to chain_1
+(call_expression
+  function: (field_expression
+    argument: (call_expression
+      function: (field_expression
+        argument: (call_expression
+          function: (field_expression
+            argument: (call_expression
+              function: (field_expression
+                argument: (call_expression
+                  function: (field_expression))))))))
+    field: (field_identifier) @function.method.chain_1))
 
 (preproc_function_def
   name: (identifier) @function.special)

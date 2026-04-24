@@ -4,7 +4,7 @@ mod image_viewer_settings;
 use std::path::Path;
 
 use anyhow::Context as _;
-use editor::{EditorSettings, items::entry_git_aware_label_color};
+use editor::{EditorSettings, items::tab_git_aware_label_color};
 use file_icons::FileIcons;
 use gpui::{
     AnyElement, App, Bounds, Context, DispatchPhase, Element, ElementId, Entity, EventEmitter,
@@ -486,7 +486,7 @@ impl Item for ImageView {
                 .read(cx)
                 .entry_for_path(&project_path, cx)
                 .map(|entry| {
-                    entry_git_aware_label_color(git_status, entry.is_ignored, params.selected)
+                    tab_git_aware_label_color(git_status, entry.is_ignored, params.selected, None, cx)
                 })
                 .unwrap_or_else(|| params.text_color())
         } else {

@@ -62,6 +62,11 @@ use util::{
 const NSUTF8StringEncoding: NSUInteger = 4;
 
 const MAC_PLATFORM_IVAR: &str = "platform";
+const INTERNET_EVENT_CLASS: u32 = 0x4755524c; // 'GURL'
+const AE_GET_URL: u32 = 0x4755524c; // 'GURL'
+const CORE_EVENT_CLASS: u32 = 0x61657674; // 'aevt' (kCoreEventClass, AppleEvents.h:73)
+const AE_OPEN_DOCUMENTS: u32 = 0x6f646f63; // 'odoc' (kAEOpenDocuments, AppleEvents.h:79)
+const DIRECT_OBJECT_KEY: u32 = 0x2d2d2d2d; // '----'
 static mut APP_CLASS: *const Class = ptr::null();
 static mut APP_DELEGATE_CLASS: *const Class = ptr::null();
 
@@ -138,6 +143,10 @@ unsafe fn build_classes() {
             decl.add_method(
                 sel!(application:openURLs:),
                 open_urls as extern "C" fn(&mut Object, Sel, id, id),
+            );
+            decl.add_method(
+                sel!(handleOpenDocumentsEvent:withReplyEvent:),
+                handle_open_documents_event as extern "C" fn(&mut Object, Sel, id, id),
             );
 
             decl.add_method(
@@ -1179,7 +1188,7 @@ unsafe fn get_mac_platform(object: &mut Object) -> &MacPlatform {
     }
 }
 
-extern "C" fn will_finish_launching(_this: &mut Object, _: Sel, _: id) {
+extern "C" fn will_finish_launching(this: &mut Object, _: Sel, _: id) {
     unsafe {
         let user_defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
 
@@ -1193,6 +1202,27 @@ extern "C" fn will_finish_launching(_this: &mut Object, _: Sel, _: id) {
             let false_value: id = msg_send![class!(NSNumber), numberWithBool:false];
             let _: () = msg_send![user_defaults, setObject: false_value forKey: name];
         }
+
+        // Register kAEGetURL Apple Event handler so that URL open requests are
+        // delivered synchronously before applicationDidFinishLaunching:, replacing
+        // application:openURLs: which has non-deterministic timing.
+        let event_manager: id = msg_send![class!(NSAppleEventManager), sharedAppleEventManager];
+        let _: () = msg_send![event_manager,
+            setEventHandler: this as id
+            andSelector: sel!(handleGetURLEvent:withReplyEvent:)
+            forEventClass: INTERNET_EVENT_CLASS
+            andEventID: AE_GET_URL
+        ];
+        // Register kAEOpenDocuments so Finder "Open With" events for files
+        // declared in CFBundleDocumentTypes reach the app. Without this, Cocoa
+        // falls through to NSDocumentController, which errors because the app
+        // has no NSDocument class registered for the declared type.
+        let _: () = msg_send![event_manager,
+            setEventHandler: this as id
+            andSelector: sel!(handleOpenDocumentsEvent:withReplyEvent:)
+            forEventClass: CORE_EVENT_CLASS
+            andEventID: AE_OPEN_DOCUMENTS
+        ];
     }
 }
 
@@ -1310,6 +1340,59 @@ extern "C" fn open_urls(this: &mut Object, _: Sel, _: id, urls: id) {
         drop(lock);
         callback(urls);
         platform.0.lock().open_urls.get_or_insert(callback);
+    }
+}
+
+extern "C" fn handle_open_documents_event(this: &mut Object, _: Sel, event: id, _reply: id) {
+    // The direct object of a kAEOpenDocuments event is an AEDescList of file
+    // descriptors. We use NSAppleEventDescriptor.fileURLValue (macOS 10.11+)
+    // to coerce each item to an NSURL, then absoluteString to produce the
+    // percent-encoded "file://…" form that open_listener expects (it strips
+    // the "file://" prefix and URL-decodes via urlencoding::decode). This
+    // matches the exact contract the pre-5be9dc1781 application:openURLs:
+    // handler fed to the same open_urls callback.
+    unsafe {
+        let descriptor: id = msg_send![event, paramDescriptorForKeyword: DIRECT_OBJECT_KEY];
+        if descriptor == nil {
+            return;
+        }
+        let item_count: NSInteger = msg_send![descriptor, numberOfItems];
+        if item_count <= 0 {
+            return;
+        }
+        let mut urls: Vec<String> = Vec::with_capacity(item_count as usize);
+        for index in 1..=item_count {
+            let item: id = msg_send![descriptor, descriptorAtIndex: index];
+            if item == nil {
+                continue;
+            }
+            let file_url: id = msg_send![item, fileURLValue];
+            if file_url == nil {
+                continue;
+            }
+            let absolute: id = msg_send![file_url, absoluteString];
+            if absolute == nil {
+                continue;
+            }
+            let utf8_ptr = absolute.UTF8String() as *mut c_char;
+            if utf8_ptr.is_null() {
+                continue;
+            }
+            match CStr::from_ptr(utf8_ptr).to_str() {
+                Ok(url) => urls.push(url.to_string()),
+                Err(err) => log::error!("error converting file URL to string: {}", err),
+            }
+        }
+        if urls.is_empty() {
+            return;
+        }
+        let platform = get_mac_platform(this);
+        let mut lock = platform.0.lock();
+        if let Some(mut callback) = lock.open_urls.take() {
+            drop(lock);
+            callback(urls);
+            platform.0.lock().open_urls.get_or_insert(callback);
+        }
     }
 }
 
