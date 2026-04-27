@@ -5,6 +5,7 @@ use collections::{BTreeMap, HashMap};
 use context_server::{ContextServerId, client::NotificationSubscription};
 use futures::FutureExt as _;
 use gpui::{App, AppContext, AsyncApp, Context, Entity, EventEmitter, SharedString, Task};
+use language_model::LanguageModelToolResultContent;
 use project::context_server_store::{ContextServerStatus, ContextServerStore};
 use std::sync::Arc;
 use util::ResultExt;
@@ -389,11 +390,13 @@ impl AnyAgentTool for ContextServerTool {
                 return Err(AgentToolOutput::from_error(error_message));
             }
 
-            let mut result = String::new();
+            let mut llm_output = Vec::new();
+            let mut concatenated_text = String::new();
             for content in response.content {
                 match content {
                     context_server::types::ToolResponseContent::Text { text } => {
-                        result.push_str(&text);
+                        concatenated_text.push_str(&text);
+                        llm_output.push(LanguageModelToolResultContent::Text(text.into()));
                     }
                     context_server::types::ToolResponseContent::Image { .. } => {
                         log::warn!("Ignoring image content from tool response");
@@ -406,9 +409,10 @@ impl AnyAgentTool for ContextServerTool {
                     }
                 }
             }
+            let raw_output = serde_json::Value::String(concatenated_text);
             Ok(AgentToolOutput {
-                raw_output: result.clone().into(),
-                llm_output: result.into(),
+                raw_output,
+                llm_output,
             })
         })
     }
