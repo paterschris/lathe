@@ -186,6 +186,13 @@ pub struct AgentDescriptor {
     pub verify_command: &'static [&'static str],
     pub signup_url: &'static str,
     pub brand_accent: BrandAccent,
+    /// Default environment variables injected at ACP spawn time, in addition
+    /// to the per-account `config_dir_env_var`. These are protective defaults
+    /// — e.g. disabling cloud-managed MCP servers that would otherwise block
+    /// thread startup waiting for OAuth. Always applied with entry-or-insert
+    /// semantics so an explicit value upstream of the spawn (workspace
+    /// settings, user shell env) wins.
+    pub default_env: &'static [(&'static str, &'static str)],
 }
 
 pub const CLAUDE_CODE_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
@@ -199,6 +206,19 @@ pub const CLAUDE_CODE_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         light: "#cc6633",
         dark: "#e89968",
     },
+    // Default-off the claude.ai cloud connectors (Gmail/Calendar/Drive that
+    // come down from a Claude Max account) so a user who hasn't OAuth'd
+    // them doesn't get a hung ACP thread on first launch. Opt in by setting
+    // ENABLE_CLAUDEAI_MCP_SERVERS=true in workspace `.zed/settings.json`
+    // under `agent_servers.claude-acp.env`, or in the user's shell env.
+    //
+    // MCP_TIMEOUT is a belt-and-braces 5s cap so any other slow MCP server
+    // can't block thread spawn either — Claude Code gives up after the
+    // timeout and proceeds without that server's tools.
+    default_env: &[
+        ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
+        ("MCP_TIMEOUT", "5000"),
+    ],
 };
 
 pub const GEMINI_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
@@ -212,6 +232,7 @@ pub const GEMINI_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         light: "#4285f4",
         dark: "#7aa9f8",
     },
+    default_env: &[],
 };
 
 pub const CODEX_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
@@ -227,6 +248,7 @@ pub const CODEX_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         light: "#10a37f",
         dark: "#2dc59a",
     },
+    default_env: &[],
 };
 
 pub const TIER_A_DESCRIPTORS: &[AgentDescriptor] = &[
@@ -1032,7 +1054,7 @@ mod tests {
 
     #[test]
     fn descriptor_lookup() {
-        assert_eq!(descriptor_for("claude-acp").map(|d| d.display_name), Some("Claude Code"));
+        assert_eq!(descriptor_for("claude-acp").map(|d| d.display_name), Some("Claude Agent"));
         assert_eq!(descriptor_for("gemini").map(|d| d.display_name), Some("Gemini CLI"));
         assert_eq!(descriptor_for("codex-acp").map(|d| d.display_name), Some("Codex CLI"));
         assert!(descriptor_for("nope").is_none());

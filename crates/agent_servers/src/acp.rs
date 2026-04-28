@@ -727,6 +727,14 @@ impl AcpConnection {
                         }
                     }
                 }
+                // Apply the descriptor's protective defaults (e.g. cloud-MCP
+                // disable, MCP startup timeout) only when the user hasn't
+                // explicitly set the var upstream — workspace settings, shell
+                // env, or a remote-client template all win.
+                for (key, value) in descriptor.default_env {
+                    env.entry(key.to_string())
+                        .or_insert_with(|| value.to_string());
+                }
             }
         }
 

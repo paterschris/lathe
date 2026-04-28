@@ -48,5 +48,19 @@ A new feature for managing multiple subscription-authenticated identities (accou
 ## Caveats per agent
 
 - **Claude Code**: the npm shim hardcodes `~/.claude/` for some local-detection paths (anthropics/claude-code#2986, #3833). Auth and memory both honor `CLAUDE_CONFIG_DIR` so per-account isolation works for our use case, but flag if a future feature regresses.
+
+  Lathe also defaults `ENABLE_CLAUDEAI_MCP_SERVERS=false` and `MCP_TIMEOUT=5000` per ACP spawn so claude.ai-managed cloud connectors (Gmail, Calendar, Drive that come down from a Claude Max account) don't hang thread startup waiting for OAuth that the ACP transport can't surface. To opt in to the cloud connectors, set `ENABLE_CLAUDEAI_MCP_SERVERS=true` in the workspace's `.zed/settings.json`:
+
+  ```json
+  {
+    "agent_servers": {
+      "claude-acp": {
+        "env": { "ENABLE_CLAUDEAI_MCP_SERVERS": "true" }
+      }
+    }
+  }
+  ```
+
+  The upstream issues asking for true lazy/deferred MCP loading (anthropics/claude-code#16254, #13700) were closed inactive — this default-off is the cleanest currently-available workaround.
 - **Gemini CLI**: `GEMINI_CONFIG_DIR` is broken on Windows (google-gemini/gemini-cli#8248). macOS/Linux unaffected. Sessions are scoped by project hash, so resuming requires the same cwd as the original conversation.
 - **Codex CLI**: see implementation note above re: `cli_auth_credentials_store=file`.
