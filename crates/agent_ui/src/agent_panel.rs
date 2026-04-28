@@ -3232,7 +3232,8 @@ impl AgentPanel {
                         .size_full()
                         .gap(DynamicSpacing::Base04.rems(cx))
                         .pl(DynamicSpacing::Base04.rems(cx))
-                        .child(agent_selector_menu),
+                        .child(agent_selector_menu)
+                        .children(self.render_ai_account_chip(window, cx)),
                 )
                 .child(
                     h_flex()
@@ -3276,6 +3277,7 @@ impl AgentPanel {
                         } else {
                             selected_agent.into_any_element()
                         })
+                        .children(self.render_ai_account_chip(window, cx))
                         .child(self.render_title_view(window, cx)),
                 )
                 .child(
@@ -3286,7 +3288,6 @@ impl AgentPanel {
                         .pl_1()
                         .pr_1()
                         .child(new_thread_menu)
-                        .children(self.render_ai_account_chip(window, cx))
                         .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),
                 )
