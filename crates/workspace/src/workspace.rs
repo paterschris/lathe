@@ -5673,6 +5673,19 @@ impl Workspace {
                 }
             }
         }
+        // Also surface panel-level awaiting-input states (e.g. the agent
+        // panel when the active ACP thread has finished generating and is
+        // ready for the next user message). Panels don't expose their
+        // contents through the pane/item walker above.
+        for dock in self.all_docks() {
+            if dock
+                .read(cx)
+                .iter_panels()
+                .any(|panel| panel.is_awaiting_input(cx))
+            {
+                return true;
+            }
+        }
         false
     }
 
@@ -5689,6 +5702,13 @@ impl Workspace {
                 }
             }
         }
+        for dock in self.all_docks() {
+            count += dock
+                .read(cx)
+                .iter_panels()
+                .filter(|panel| panel.is_awaiting_input(cx))
+                .count();
+        }
         count
     }
 
@@ -5702,6 +5722,16 @@ impl Workspace {
                 if item.is_awaiting_input(cx) {
                     return item.awaiting_input_tooltip(cx);
                 }
+            }
+        }
+        for dock in self.all_docks() {
+            if let Some(tooltip) = dock
+                .read(cx)
+                .iter_panels()
+                .find(|panel| panel.is_awaiting_input(cx))
+                .map(|panel| panel.awaiting_input_tooltip(cx))
+            {
+                return tooltip;
             }
         }
         "Terminal awaiting input"
@@ -5725,6 +5755,20 @@ impl Workspace {
             if let Some(index) = awaiting_index {
                 pane.update(cx, |pane, cx| {
                     pane.activate_item(index, true, true, window, cx);
+                });
+                return true;
+            }
+        }
+        // Panel-level fallback: open the first dock panel whose own state
+        // says it's awaiting input.
+        for dock in self.all_docks() {
+            let panel_index = dock
+                .read(cx)
+                .iter_panels()
+                .position(|panel| panel.is_awaiting_input(cx));
+            if let Some(index) = panel_index {
+                dock.update(cx, |dock, cx| {
+                    dock.activate_panel(index, window, cx);
                 });
                 return true;
             }

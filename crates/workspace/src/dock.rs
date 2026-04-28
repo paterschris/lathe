@@ -86,6 +86,19 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn is_agent_panel(&self) -> bool {
         false
     }
+    /// Whether this panel is in a state where it would benefit from the
+    /// title-bar awaiting-input indicator firing — analogous to a terminal
+    /// that's paused at a prompt. Default false so panels that don't have
+    /// the concept (project panel, outline panel, etc.) opt out trivially.
+    fn is_awaiting_input(&self, _cx: &App) -> bool {
+        false
+    }
+    /// Tooltip text when the indicator surfaces this panel. Default-routed
+    /// to "Terminal awaiting input" only matters if `is_awaiting_input`
+    /// returns true, so the default here is just a placeholder.
+    fn awaiting_input_tooltip(&self, _cx: &App) -> &'static str {
+        "Panel awaiting input"
+    }
 }
 
 pub trait PanelHandle: Send + Sync {
@@ -116,6 +129,8 @@ pub trait PanelHandle: Send + Sync {
     fn activation_priority(&self, cx: &App) -> u32;
     fn enabled(&self, cx: &App) -> bool;
     fn is_agent_panel(&self, cx: &App) -> bool;
+    fn is_awaiting_input(&self, cx: &App) -> bool;
+    fn awaiting_input_tooltip(&self, cx: &App) -> &'static str;
     fn move_to_next_position(&self, window: &mut Window, cx: &mut App) {
         let current_position = self.position(window, cx);
         let next_position = [
@@ -243,6 +258,14 @@ where
 
     fn is_agent_panel(&self, cx: &App) -> bool {
         self.read(cx).is_agent_panel()
+    }
+
+    fn is_awaiting_input(&self, cx: &App) -> bool {
+        self.read(cx).is_awaiting_input(cx)
+    }
+
+    fn awaiting_input_tooltip(&self, cx: &App) -> &'static str {
+        self.read(cx).awaiting_input_tooltip(cx)
     }
 }
 
@@ -463,6 +486,14 @@ impl Dock {
         self.panel_entries
             .iter()
             .find_map(|entry| entry.panel.to_any().downcast().ok())
+    }
+
+    /// Iterates this dock's installed panels in registration order. Useful
+    /// for whole-workspace surveys (awaiting-input indicator, panel
+    /// activity audits) that need to consult panel-level state without
+    /// going through the per-pane Item walker.
+    pub fn iter_panels(&self) -> impl Iterator<Item = &Arc<dyn PanelHandle>> {
+        self.panel_entries.iter().map(|entry| &entry.panel)
     }
 
     pub fn panel_index_for_type<T: Panel>(&self) -> Option<usize> {

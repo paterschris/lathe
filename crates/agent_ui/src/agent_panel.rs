@@ -2535,6 +2535,28 @@ impl Panel for AgentPanel {
         true
     }
 
+    fn is_awaiting_input(&self, cx: &App) -> bool {
+        // The agent panel is "awaiting input" when an active ACP thread is
+        // idle and has produced at least one non-user entry — i.e. the agent
+        // finished a turn and is ready for the user's next message. Same
+        // idea as a terminal sitting at a shell prompt.
+        let Some(thread) = self.active_agent_thread(cx) else {
+            return false;
+        };
+        let thread = thread.read(cx);
+        if !matches!(thread.status(), acp_thread::ThreadStatus::Idle) {
+            return false;
+        }
+        thread
+            .entries()
+            .iter()
+            .any(|entry| !matches!(entry, acp_thread::AgentThreadEntry::UserMessage(_)))
+    }
+
+    fn awaiting_input_tooltip(&self, _cx: &App) -> &'static str {
+        "AI agent ready for next message"
+    }
+
     fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
         self.zoomed
     }
