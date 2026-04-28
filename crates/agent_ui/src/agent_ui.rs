@@ -3,6 +3,7 @@ pub mod agent_connection_store;
 mod agent_diff;
 mod agent_model_selector;
 mod agent_panel;
+mod ai_account_chip;
 mod agent_registry_ui;
 mod buffer_codegen;
 mod completion_provider;
@@ -59,7 +60,9 @@ use settings::{LanguageModelSelection, Settings as _, SettingsStore};
 use std::any::TypeId;
 use workspace::Workspace;
 
-use crate::agent_configuration::{ConfigureContextServerModal, ManageProfilesModal};
+use crate::agent_configuration::{
+    AddAiAccountModal, ConfigureContextServerModal, ManageAiAccountsModal, ManageProfilesModal,
+};
 pub use crate::agent_connection_store::{ActiveAcpConnection, AgentConnectionStore};
 pub use crate::agent_panel::{AgentPanel, AgentPanelEvent, MaxIdleRetainedThreads};
 use crate::agent_registry_ui::AgentRegistryPage;
@@ -361,6 +364,25 @@ pub struct ManageProfiles {
     pub customize_tools: Option<AgentProfileId>,
 }
 
+/// Opens the AI account management modal: list, add, modify, and delete the
+/// subscription-authenticated identities (Claude Code, Gemini, Codex) that
+/// each workspace can be bound to.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = agent)]
+#[serde(deny_unknown_fields)]
+pub struct ManageAiAccounts;
+
+/// Opens the Add AI Account modal. When `agent_id` is provided (e.g. from a
+/// per-agent "Add account" button in the Manage modal), the picker is
+/// pre-selected. Otherwise the picker defaults to the first Tier A agent.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = agent)]
+#[serde(deny_unknown_fields)]
+pub struct AddAiAccount {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
 impl ManageProfiles {
     pub fn customize_tools(profile_id: AgentProfileId) -> Self {
         Self {
@@ -473,6 +495,8 @@ pub fn init(
     })
     .detach();
     cx.observe_new(ManageProfilesModal::register).detach();
+    cx.observe_new(ManageAiAccountsModal::register).detach();
+    cx.observe_new(AddAiAccountModal::register).detach();
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(
             |workspace: &mut Workspace,

@@ -278,6 +278,7 @@ dependencies = [
  "acp_thread",
  "action_log",
  "agent-client-protocol",
+ "ai_accounts",
  "anyhow",
  "async-channel 2.5.0",
  "chrono",
@@ -348,6 +349,7 @@ dependencies = [
  "agent-client-protocol",
  "agent_servers",
  "agent_settings",
+ "ai_accounts",
  "ai_onboarding",
  "anyhow",
  "audio",
@@ -474,6 +476,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e60d3430d3a69478ad0993f19238d2df97c507009a52b3c10addcd7f6bcb916"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "ai_accounts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "collections",
+ "paths",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "uuid",
 ]
 
 [[package]]

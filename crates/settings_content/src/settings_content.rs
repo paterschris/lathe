@@ -117,6 +117,12 @@ pub struct SettingsContent {
     pub agent: Option<AgentSettingsContent>,
     pub agent_servers: Option<AllAgentServersSettings>,
 
+    /// Workspace-bound AI agent account selection: maps agent IDs (e.g. `"claude-acp"`)
+    /// to AI account IDs registered in Lathe's accounts index. Used to inject the agent's
+    /// config-dir env var (e.g. `CLAUDE_CONFIG_DIR`) at ACP spawn time so that multiple
+    /// subscription-authenticated identities can be used per-workspace.
+    pub ai_accounts: Option<AiAccountsMap>,
+
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,
 
@@ -249,6 +255,36 @@ impl std::ops::Deref for FeatureFlagsMap {
 }
 
 impl std::ops::DerefMut for FeatureFlagsMap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, MergeFrom)]
+#[serde(transparent)]
+pub struct AiAccountsMap(pub HashMap<String, String>);
+
+impl JsonSchema for AiAccountsMap {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AiAccountsMap".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+        })
+    }
+}
+
+impl std::ops::Deref for AiAccountsMap {
+    type Target = HashMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for AiAccountsMap {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }

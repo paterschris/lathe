@@ -1116,6 +1116,10 @@ impl AgentPanel {
         &self.connection_store
     }
 
+    pub(crate) fn fs(&self) -> Arc<dyn Fs> {
+        self.fs.clone()
+    }
+
     pub fn selected_agent(&self, cx: &App) -> Agent {
         if self.project.read(cx).is_via_collab() {
             Agent::NativeAgent
@@ -3277,6 +3281,7 @@ impl AgentPanel {
                         .pl_1()
                         .pr_1()
                         .child(new_thread_menu)
+                        .children(self.render_ai_account_chip(window, cx))
                         .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),
                 )

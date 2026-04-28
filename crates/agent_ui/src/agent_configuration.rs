@@ -1,8 +1,13 @@
+mod add_ai_account_modal;
 mod add_llm_provider_modal;
 pub mod configure_context_server_modal;
 mod configure_context_server_tools_modal;
+mod manage_ai_accounts_modal;
 mod manage_profiles_modal;
 mod tool_picker;
+
+pub use add_ai_account_modal::AddAiAccountModal;
+pub use manage_ai_accounts_modal::ManageAiAccountsModal;
 
 use std::{ops::Range, rc::Rc, sync::Arc};
 

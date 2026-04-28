@@ -7,9 +7,11 @@ use agent_client_protocol::schema::{self as acp, ErrorCode};
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, JsonRpcResponse, Lines, Responder, SentRequest,
 };
+use ai_accounts::{AiAccountsSettings, descriptor_for, load_index, mark_account_used};
 use anyhow::anyhow;
 use async_channel;
 use collections::HashMap;
+use settings::SettingsStore;
 use feature_flags::{AcpBetaFeatureFlag, FeatureFlagAppExt as _};
 use futures::channel::mpsc;
 use futures::future::Shared;
@@ -668,7 +670,7 @@ impl AcpConnection {
                 .cloned()
         });
         let original_command = command.clone();
-        let (path, args, env) = project
+        let (path, args, mut env) = project
             .read_with(cx, |project, cx| {
                 project.remote_client().and_then(|client| {
                     let template = client
@@ -692,6 +694,41 @@ impl AcpConnection {
                     command.env.unwrap_or_default(),
                 )
             });
+
+        // Inject the AI account's config-dir env var when a Lathe AI account is bound to this
+        // agent in the current workspace. Resolution order is:
+        //   1. workspace `ai_accounts` setting
+        //   2. global default for the agent
+        //   3. implicit single-account default
+        // No injection happens for agents without a known descriptor or when no account resolves.
+        let is_local_project = project.read_with(cx, |project, _| project.is_local());
+        if is_local_project {
+            let agent_id_str = agent_id.0.as_ref();
+            if let Some(descriptor) = descriptor_for(agent_id_str) {
+                let settings = cx.try_read_global::<SettingsStore, _>(|store, _| {
+                    store.get::<AiAccountsSettings>(None).clone()
+                });
+                if let Some(settings) = settings {
+                    let index = load_index();
+                    if let Some(account) = settings.resolve_account(agent_id_str, &index) {
+                        env.insert(
+                            descriptor.config_dir_env_var.to_string(),
+                            account.config_dir.display().to_string(),
+                        );
+                        // Touch last_used_at so the account floats to the top
+                        // of the Manage modal's per-agent list. Failure here
+                        // is benign — drop a log line and keep going rather
+                        // than blocking thread spawn.
+                        if let Err(error) = mark_account_used(&account.id) {
+                            log::warn!(
+                                "ai_accounts: failed to update last_used_at for {}: {error:#}",
+                                account.id
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         let builder = ShellBuilder::new(&Shell::System, cfg!(windows)).non_interactive();
         let mut child = builder.build_std_command(Some(path.clone()), &args);
