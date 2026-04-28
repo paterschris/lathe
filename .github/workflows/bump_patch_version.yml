@@ -10,7 +10,7 @@ on:
         type: string
 jobs:
   run_bump_patch_version:
-    if: github.repository_owner == 'zed-industries'
+    if: github.repository_owner == 'zed-industries' || github.repository_owner == 'paterschris'
     runs-on: namespace-profile-16x32-ubuntu-2204
     steps:
     - id: generate-token

@@ -110,7 +110,7 @@ fn run_bump_patch_version(branch: &WorkflowInput) -> steps::NamedJob {
     named::job(
         Job::default()
             .cond(Expression::new(
-                "github.repository_owner == 'zed-industries'",
+                "github.repository_owner == 'zed-industries' || github.repository_owner == 'paterschris'",
             ))
             .runs_on(runners::LINUX_XL)
             .add_step(authenticate)

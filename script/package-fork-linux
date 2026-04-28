@@ -124,6 +124,10 @@ mkdir -p "${app_dir}/share/applications"
 envsubst < "crates/zed/resources/lathe.desktop.in" > "${app_dir}/share/applications/${app_id}.desktop"
 chmod +x "${app_dir}/share/applications/${app_id}.desktop"
 
+# MIME type for .lathe-workspace files
+mkdir -p "${app_dir}/share/mime/packages"
+cp "crates/zed/resources/lathe-workspace.xml" "${app_dir}/share/mime/packages/lathe-workspace.xml"
+
 # Licenses (if generated)
 if [ -f "assets/licenses.md" ]; then
     cp "assets/licenses.md" "${app_dir}/licenses.md"

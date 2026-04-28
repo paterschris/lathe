@@ -84,6 +84,7 @@ pub(crate) fn release() -> Workflow {
     );
 
     named::workflow()
+        .run_name("Lathe ${{ github.ref_name }}".to_string())
         .on(Event::default().push(Push::default().tags(vec!["v*".to_string()])))
         .concurrency(vars::one_workflow_per_non_main_branch())
         .add_env(("CARGO_TERM_COLOR", "always"))

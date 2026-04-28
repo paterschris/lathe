@@ -64,11 +64,48 @@ else
 fi
 xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
 
+# Symlink the CLI to a directory on PATH so `lathe` works in any terminal.
+cli_src="${dest}/Contents/MacOS/cli"
+cli_link="/usr/local/bin/lathe"
+cli_link_dir="$(dirname "$cli_link")"
+
+echo "Installing \`lathe\` CLI to ${cli_link}..."
+if [ ! -d "$cli_link_dir" ]; then
+    sudo mkdir -p "$cli_link_dir"
+fi
+if ! ln -sf "$cli_src" "$cli_link" 2>/dev/null; then
+    sudo ln -sf "$cli_src" "$cli_link"
+fi
+
+# Clean up a stale /usr/local/bin/zed left behind by older Lathe builds
+# (the in-app "Install CLI" action used to write `zed` instead of `lathe`).
+# Only remove it if it points into a Lathe*.app — leave stock Zed alone.
+if [ -L "/usr/local/bin/zed" ]; then
+    zed_target=$(readlink "/usr/local/bin/zed")
+    case "$zed_target" in
+        */Lathe*.app/*)
+            echo "Removing stale /usr/local/bin/zed (was -> ${zed_target})..."
+            rm -f "/usr/local/bin/zed" 2>/dev/null || sudo rm -f "/usr/local/bin/zed"
+            ;;
+    esac
+fi
+
 echo ""
 echo "=== Installed ==="
-echo "  ${dest}"
+echo "  App: ${dest}"
+echo "  CLI: ${cli_link}"
 echo ""
 echo "Launch from Spotlight or run:"
 echo "  open \"${dest}\""
 echo ""
+echo "From any terminal:"
+echo "  lathe ."
+echo ""
 echo "Note: This fork installs as '${app_name}' and runs alongside stock Zed."
+
+if ! echo "$PATH" | tr ':' '\n' | grep -qx "$cli_link_dir"; then
+    echo ""
+    echo "Warning: ${cli_link_dir} is not on your PATH."
+    echo "Add it with:"
+    echo "  export PATH=\"${cli_link_dir}:\$PATH\""
+fi
