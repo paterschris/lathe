@@ -1120,6 +1120,10 @@ impl AgentPanel {
         self.fs.clone()
     }
 
+    pub(crate) fn currently_selected_agent(&self) -> &Agent {
+        &self.selected_agent
+    }
+
     pub fn selected_agent(&self, cx: &App) -> Agent {
         if self.project.read(cx).is_via_collab() {
             Agent::NativeAgent
@@ -2856,6 +2860,7 @@ impl AgentPanel {
                             .separator()
                             .action("Rules", Box::new(OpenRulesLibrary::default()))
                             .action("Profiles", Box::new(ManageProfiles::default()))
+                            .action("AI Accounts", Box::new(crate::ManageAiAccounts))
                             .action("Settings", Box::new(OpenSettings))
                             .separator()
                             .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));

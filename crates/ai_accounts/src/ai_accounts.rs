@@ -190,7 +190,7 @@ pub struct AgentDescriptor {
 
 pub const CLAUDE_CODE_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     agent_id: "claude-acp",
-    display_name: "Claude Code",
+    display_name: "Claude Agent",
     config_dir_env_var: "CLAUDE_CONFIG_DIR",
     login_flow: LoginFlow::InThread { command: "/login" },
     verify_command: &["claude", "/status"],

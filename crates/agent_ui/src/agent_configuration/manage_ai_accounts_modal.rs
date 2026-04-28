@@ -9,11 +9,11 @@ use ai_accounts::{
 #[cfg(test)]
 use ai_accounts::descriptor_for;
 use gpui::{
-    AnyElement, DismissEvent, EventEmitter, FocusHandle, Focusable, Hsla, Rgba, WeakEntity,
-    WindowAppearance, prelude::*,
+    AnyElement, DismissEvent, EventEmitter, FocusHandle, Focusable, Hsla, Rgba, ScrollHandle,
+    WeakEntity, WindowAppearance, prelude::*, px,
 };
 use notifications::status_toast::StatusToast;
-use ui::{ListItem, ListItemSpacing, ListSeparator, Tooltip, prelude::*};
+use ui::{ListItem, ListItemSpacing, ListSeparator, Tooltip, WithScrollbar, prelude::*};
 use workspace::{ModalView, Workspace};
 
 use crate::{AddAiAccount, ManageAiAccounts};
@@ -23,6 +23,7 @@ pub struct ManageAiAccountsModal {
     index: AiAccountsIndex,
     expanded_accounts: HashSet<String>,
     workspace: WeakEntity<Workspace>,
+    scroll_handle: ScrollHandle,
 }
 
 impl ManageAiAccountsModal {
@@ -45,6 +46,7 @@ impl ManageAiAccountsModal {
             index: load_index(),
             expanded_accounts: HashSet::new(),
             workspace,
+            scroll_handle: ScrollHandle::new(),
         }
     }
 
@@ -466,6 +468,7 @@ impl ManageAiAccountsModal {
         let account_id_for_delete = account.id.clone();
         let account_id_for_toggle = account.id.clone();
         let account_id_for_verify = account.id.clone();
+        let account_id_for_copy = account.id.clone();
         let is_verifying = matches!(account.state, AccountState::Pending);
         let chevron_icon = if is_expanded {
             IconName::ChevronDown
@@ -501,6 +504,24 @@ impl ManageAiAccountsModal {
             .end_slot(
                 h_flex()
                     .gap_1()
+                    .child(
+                        IconButton::new(
+                            SharedString::from(format!("copy-id-{}", account.id)),
+                            IconName::Copy,
+                        )
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(Tooltip::text("Copy account ID"))
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                account_id_for_copy.clone(),
+                            ));
+                            this.toast(
+                                format!("Copied account ID: {account_id_for_copy}"),
+                                cx,
+                            );
+                        })),
+                    )
                     .child(
                         IconButton::new(
                             SharedString::from(format!("verify-{}", account.id)),
@@ -578,6 +599,14 @@ impl Render for ManageAiAccountsModal {
                 .into_any_element()
         };
 
+        // Cap the modal body at most of the viewport so a long history list
+        // (e.g. an imported account with hundreds of conversations) doesn't
+        // push the footer tip off the bottom of the screen. 160px subtracts
+        // the header + footer + chrome budget; 240px is the floor for very
+        // small windows so the body always shows at least a few rows.
+        let viewport_height_px = window.viewport_size().height;
+        let max_body_height = viewport_height_px.max(px(400.)) - px(160.);
+
         div()
             .elevation_3(cx)
             .w(rems(34.))
@@ -592,7 +621,15 @@ impl Render for ManageAiAccountsModal {
             .on_mouse_down_out(cx.listener(|_this, _, _, cx| cx.emit(DismissEvent)))
             .child(header)
             .child(ListSeparator)
-            .child(body)
+            .child(
+                v_flex()
+                    .id("manage-ai-accounts-body")
+                    .max_h(max_body_height)
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
+                    .vertical_scrollbar_for(&self.scroll_handle, window, cx)
+                    .child(body),
+            )
             .child(ListSeparator)
             .child(
                 div().px_3().py_2().child(

@@ -27,8 +27,21 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        let thread = self.active_agent_thread(cx)?;
-        let agent_id_owned = thread.read(cx).connection().agent_id().0.to_string();
+        // Resolve the active agent_id from `selected_agent` first so the chip
+        // is visible for *draft* threads (before any message has spawned the
+        // ACP subprocess). Falls back to the live thread's connection id when
+        // for some reason `selected_agent` isn't a Custom variant — that path
+        // covers existing in-flight threads cleanly.
+        let agent_id_owned: String = match self.currently_selected_agent() {
+            crate::Agent::Custom { id } => id.0.as_ref().to_string(),
+            _ => self
+                .active_agent_thread(cx)?
+                .read(cx)
+                .connection()
+                .agent_id()
+                .0
+                .to_string(),
+        };
         let descriptor: &'static AgentDescriptor = descriptor_for(&agent_id_owned)?;
         let agent_id_static: &'static str = descriptor.agent_id;
 
