@@ -10,7 +10,7 @@ Exec=$APP_CLI $APP_ARGS
 Icon=$APP_ICON
 Categories=Utility;TextEditor;Development;IDE;
 Keywords=lathe;editor;
-MimeType=text/plain;application/x-zerosize;x-scheme-handler/lathe;
+MimeType=text/plain;application/x-zerosize;application/x-lathe-workspace;x-scheme-handler/lathe;
 Actions=NewWorkspace;
 
 [Desktop Action NewWorkspace]

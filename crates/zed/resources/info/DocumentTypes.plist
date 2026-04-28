@@ -3,6 +3,20 @@
     <dict>
         <key>CFBundleTypeIconFile</key>
         <string>Document</string>
+        <key>CFBundleTypeName</key>
+        <string>Lathe Workspace</string>
+        <key>CFBundleTypeRole</key>
+        <string>Editor</string>
+        <key>LSHandlerRank</key>
+        <string>Owner</string>
+        <key>CFBundleTypeExtensions</key>
+        <array>
+            <string>lathe-workspace</string>
+        </array>
+    </dict>
+    <dict>
+        <key>CFBundleTypeIconFile</key>
+        <string>Document</string>
         <key>CFBundleTypeRole</key>
         <string>Editor</string>
         <key>LSHandlerRank</key>

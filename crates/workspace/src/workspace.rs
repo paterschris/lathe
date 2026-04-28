@@ -14,6 +14,7 @@ pub mod path_list {
     pub use util::path_list::{PathList, SerializedPathList};
 }
 mod persistence;
+pub mod portable_workspace;
 pub mod searchable;
 mod security_modal;
 pub mod shared_screen;
@@ -313,6 +314,10 @@ actions!(
         FormatAndSave,
         /// Saves the current file with a new name.
         SaveAs,
+        /// Saves the current workspace (project folder list) as a portable .lathe-workspace file that can be reopened later.
+        SaveWorkspaceAs,
+        /// Saves the current workspace folder list to its existing .lathe-workspace file. Falls back to Save Workspace As when no file is associated yet.
+        SaveWorkspace,
         /// Saves without formatting.
         SaveWithoutFormat,
         /// Shuts down all debug adapters.
@@ -1386,6 +1391,7 @@ pub struct Workspace {
     bounds_save_task_queued: Option<Task<()>>,
     on_prompt_for_new_path: Option<PromptForNewPath>,
     on_prompt_for_open_path: Option<PromptForOpenPath>,
+    portable_workspace_path: Option<PathBuf>,
     terminal_provider: Option<Box<dyn TerminalProvider>>,
     debugger_provider: Option<Arc<dyn DebuggerProvider>>,
     serializable_items_tx: UnboundedSender<Box<dyn SerializableItemHandle>>,
@@ -1822,6 +1828,7 @@ impl Workspace {
             bounds_save_task_queued: None,
             on_prompt_for_new_path: None,
             on_prompt_for_open_path: None,
+            portable_workspace_path: None,
             terminal_provider: None,
             debugger_provider: None,
             serializable_items_tx,
@@ -3907,6 +3914,102 @@ impl Workspace {
                 Ok(())
             }
         })
+    }
+
+    fn collect_portable_workspace_folders(&self, cx: &App) -> Result<Vec<PathBuf>> {
+        let mut local_folder_paths: Vec<PathBuf> = Vec::new();
+        let mut remote_folder_count: usize = 0;
+        for worktree in self.visible_worktrees(cx) {
+            let worktree = worktree.read(cx);
+            if let Some(local) = worktree.as_local() {
+                local_folder_paths.push(local.abs_path().to_path_buf());
+            } else {
+                remote_folder_count += 1;
+            }
+        }
+
+        if remote_folder_count > 0 {
+            anyhow::bail!(
+                "Cannot save portable workspace: {remote_folder_count} remote folder(s) are open. \
+                 Portable workspace files only support local folders for now. \
+                 Close the remote folders, or save them as a workspace from their own session."
+            );
+        }
+        if local_folder_paths.is_empty() {
+            anyhow::bail!("No project folders to save.");
+        }
+        Ok(local_folder_paths)
+    }
+
+    pub fn save_workspace_as(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        use crate::portable_workspace::{
+            PORTABLE_WORKSPACE_EXTENSION, PortableWorkspace,
+            ensure_portable_workspace_extension,
+        };
+
+        let local_folder_paths = match self.collect_portable_workspace_folders(cx) {
+            Ok(paths) => paths,
+            Err(err) => return Task::ready(Err(err)),
+        };
+
+        let suggested_name = local_folder_paths
+            .first()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|n| format!("{n}.{PORTABLE_WORKSPACE_EXTENSION}"));
+
+        let fs = self.app_state.fs.clone();
+        let lister = DirectoryLister::Local(self.project.clone(), fs.clone());
+        let prompt = self.prompt_for_new_path(lister, suggested_name, window, cx);
+
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(chosen) = prompt.await.ok().flatten() else {
+                return Ok(());
+            };
+            let Some(mut path) = chosen.into_iter().next() else {
+                return Ok(());
+            };
+            ensure_portable_workspace_extension(&mut path);
+            PortableWorkspace::save(fs, &path, &local_folder_paths).await?;
+            this.update(cx, move |workspace, _cx| {
+                workspace.portable_workspace_path = Some(path);
+            })?;
+            Ok(())
+        })
+    }
+
+    pub fn save_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        use crate::portable_workspace::PortableWorkspace;
+
+        let Some(path) = self.portable_workspace_path.clone() else {
+            return self.save_workspace_as(window, cx);
+        };
+
+        let local_folder_paths = match self.collect_portable_workspace_folders(cx) {
+            Ok(paths) => paths,
+            Err(err) => return Task::ready(Err(err)),
+        };
+
+        let fs = self.app_state.fs.clone();
+        cx.background_spawn(async move {
+            PortableWorkspace::save(fs, &path, &local_folder_paths).await
+        })
+    }
+
+    pub fn portable_workspace_path(&self) -> Option<&Path> {
+        self.portable_workspace_path.as_deref()
+    }
+
+    pub fn set_portable_workspace_path(&mut self, path: PathBuf) {
+        self.portable_workspace_path = Some(path);
     }
 
     pub fn close_inactive_items_and_panes(
@@ -7250,6 +7353,26 @@ impl Workspace {
                 workspace
                     .save_active_item(SaveIntent::SaveAs, window, cx)
                     .detach_and_prompt_err("Failed to save", window, cx, |_, _, _| None);
+            }))
+            .on_action(cx.listener(|workspace, _: &SaveWorkspaceAs, window, cx| {
+                workspace
+                    .save_workspace_as(window, cx)
+                    .detach_and_prompt_err(
+                        "Failed to save workspace",
+                        window,
+                        cx,
+                        |_, _, _| None,
+                    );
+            }))
+            .on_action(cx.listener(|workspace, _: &SaveWorkspace, window, cx| {
+                workspace
+                    .save_workspace(window, cx)
+                    .detach_and_prompt_err(
+                        "Failed to save workspace",
+                        window,
+                        cx,
+                        |_, _, _| None,
+                    );
             }))
             .on_action(
                 cx.listener(|workspace, _: &ActivatePreviousPane, window, cx| {
@@ -15384,6 +15507,233 @@ mod tests {
                 "panel should still be zoomed after switching back"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn save_workspace_as_writes_visible_local_folder_paths(cx: &mut TestAppContext) {
+        use crate::portable_workspace::PortableWorkspace;
+        use futures::channel::oneshot;
+
+        init_test(cx);
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.workspace.use_system_path_prompts = Some(false);
+                });
+            });
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/work"),
+            json!({
+                "proj-a": {},
+                "proj-b": {},
+            }),
+        )
+        .await;
+
+        let project = Project::test(
+            fs.clone(),
+            [
+                path!("/work/proj-a").as_ref(),
+                path!("/work/proj-b").as_ref(),
+            ],
+            cx,
+        )
+        .await;
+        let (workspace, cx) = cx
+            .add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let chosen = PathBuf::from(path!("/work/saved"));
+        workspace.update_in(cx, {
+            let chosen = chosen.clone();
+            move |workspace, _window, _cx| {
+                workspace.set_prompt_for_new_path(Box::new(
+                    move |_ws, _lister, _suggested, _window, _cx| {
+                        let (tx, rx) = oneshot::channel();
+                        tx.send(Some(vec![chosen.clone()])).ok();
+                        rx
+                    },
+                ));
+            }
+        });
+
+        let task = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.save_workspace_as(window, cx)
+        });
+        task.await.unwrap();
+
+        let expected_file = PathBuf::from(path!("/work/saved.lathe-workspace"));
+        let resolved = PortableWorkspace::load(fs.clone(), &expected_file)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved,
+            vec![
+                PathBuf::from(path!("/work/proj-a")),
+                PathBuf::from(path!("/work/proj-b")),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    async fn save_workspace_reuses_path_after_save_as(cx: &mut TestAppContext) {
+        use crate::portable_workspace::PortableWorkspace;
+        use futures::channel::oneshot;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        init_test(cx);
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.workspace.use_system_path_prompts = Some(false);
+                });
+            });
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/work"), json!({ "proj-a": {}, "proj-b": {} }))
+            .await;
+
+        let project = Project::test(
+            fs.clone(),
+            [
+                path!("/work/proj-a").as_ref(),
+                path!("/work/proj-b").as_ref(),
+            ],
+            cx,
+        )
+        .await;
+        let (workspace, cx) = cx
+            .add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let prompt_call_count = Arc::new(AtomicUsize::new(0));
+        let chosen = PathBuf::from(path!("/work/saved"));
+        workspace.update_in(cx, {
+            let chosen = chosen.clone();
+            let prompt_call_count = prompt_call_count.clone();
+            move |workspace, _window, _cx| {
+                workspace.set_prompt_for_new_path(Box::new(
+                    move |_ws, _lister, _suggested, _window, _cx| {
+                        prompt_call_count.fetch_add(1, Ordering::SeqCst);
+                        let (tx, rx) = oneshot::channel();
+                        tx.send(Some(vec![chosen.clone()])).ok();
+                        rx
+                    },
+                ));
+            }
+        });
+
+        let task = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.save_workspace_as(window, cx)
+        });
+        task.await.unwrap();
+        assert_eq!(prompt_call_count.load(Ordering::SeqCst), 1);
+
+        let saved_file = PathBuf::from(path!("/work/saved.lathe-workspace"));
+        let stored_path = workspace.read_with(cx, |workspace, _| {
+            workspace.portable_workspace_path().map(Path::to_path_buf)
+        });
+        assert_eq!(stored_path, Some(saved_file.clone()));
+
+        // Truncate the file so we can confirm save_workspace actually rewrote
+        // it rather than no-opped against the previous contents.
+        fs.atomic_write(saved_file.clone(), String::new())
+            .await
+            .unwrap();
+
+        let task = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.save_workspace(window, cx)
+        });
+        task.await.unwrap();
+        assert_eq!(
+            prompt_call_count.load(Ordering::SeqCst),
+            1,
+            "save_workspace must not invoke the path prompt when a path is already known",
+        );
+
+        let resolved = PortableWorkspace::load(fs.clone(), &saved_file)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved,
+            vec![
+                PathBuf::from(path!("/work/proj-a")),
+                PathBuf::from(path!("/work/proj-b")),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    async fn save_workspace_falls_back_to_prompt_when_unsaved(cx: &mut TestAppContext) {
+        use futures::channel::oneshot;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        init_test(cx);
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.workspace.use_system_path_prompts = Some(false);
+                });
+            });
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/work"), json!({ "proj-a": {} })).await;
+
+        let project = Project::test(fs.clone(), [path!("/work/proj-a").as_ref()], cx).await;
+        let (workspace, cx) = cx
+            .add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let prompt_call_count = Arc::new(AtomicUsize::new(0));
+        workspace.update_in(cx, {
+            let prompt_call_count = prompt_call_count.clone();
+            move |workspace, _window, _cx| {
+                workspace.set_prompt_for_new_path(Box::new(
+                    move |_ws, _lister, _suggested, _window, _cx| {
+                        prompt_call_count.fetch_add(1, Ordering::SeqCst);
+                        let (tx, rx) = oneshot::channel();
+                        // Simulate the user dismissing the dialog so the test
+                        // does not write any file but we still see the prompt.
+                        tx.send(None).ok();
+                        rx
+                    },
+                ));
+            }
+        });
+
+        let task = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.save_workspace(window, cx)
+        });
+        task.await.unwrap();
+        assert_eq!(
+            prompt_call_count.load(Ordering::SeqCst),
+            1,
+            "save_workspace must prompt when no path has been saved yet",
+        );
+    }
+
+    #[gpui::test]
+    async fn save_workspace_as_errors_when_no_folders(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let (workspace, cx) = cx
+            .add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let task = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.save_workspace_as(window, cx)
+        });
+        let err = task.await.unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("no project folders"),
+            "expected 'no project folders' error, got: {err}"
+        );
     }
 
     fn pane_items_paths(pane: &Entity<Pane>, cx: &App) -> Vec<String> {

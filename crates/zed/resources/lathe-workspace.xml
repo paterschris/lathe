@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-lathe-workspace">
+    <comment>Lathe portable workspace</comment>
+    <comment xml:lang="en">Lathe portable workspace</comment>
+    <glob pattern="*.lathe-workspace"/>
+    <sub-class-of type="application/json"/>
+  </mime-type>
+</mime-info>

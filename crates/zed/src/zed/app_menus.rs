@@ -140,6 +140,8 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("Save", workspace::Save { save_intent: None }),
                 MenuItem::action("Save As…", workspace::SaveAs),
                 MenuItem::action("Save All", workspace::SaveAll { save_intent: None }),
+                MenuItem::action("Save Workspace", workspace::SaveWorkspace),
+                MenuItem::action("Save Workspace As…", workspace::SaveWorkspaceAs),
                 MenuItem::separator(),
                 MenuItem::action(
                     "Close Editor",
