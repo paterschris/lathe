@@ -289,7 +289,59 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     }
 
     if let Some(updater) = AutoUpdater::get(cx) {
+        let already_polling = updater.read(cx).is_polling();
         updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
+
+        // Watch for poll completion and surface "you're already up to date"
+        // feedback when a manual check finishes with no update available. The
+        // existing UI only renders Downloading / Errored / Updated — `Idle`
+        // post-check looks identical to "did nothing" without this.
+        //
+        // Skip if a poll was already in flight when the user clicked Check —
+        // the previously-spawned watcher (if it was a manual one) will fire,
+        // and we don't want a stack of duplicate prompts.
+        if !already_polling {
+            let updater_handle = updater.downgrade();
+            let window_handle = window.window_handle();
+            cx.spawn(async move |cx| {
+                // Cap at 30s (200 × 150ms) so a stuck poll doesn't leave a
+                // task spinning forever. Exits early as soon as is_polling
+                // flips to false.
+                for _ in 0..200 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(150))
+                        .await;
+                    let snapshot = cx.update(|app| {
+                        updater_handle
+                            .upgrade()
+                            .map(|u| (u.read(app).is_polling(), u.read(app).status()))
+                    });
+                    let Some((polling, status)) = snapshot else {
+                        return;
+                    };
+                    if polling {
+                        continue;
+                    }
+                    // Poll complete. `Idle` here means the check succeeded
+                    // and there's no update — show a confirmation prompt.
+                    // Other statuses (Downloading, Errored, Updated, etc.)
+                    // already drive their own UI elsewhere, so leave them.
+                    if matches!(status, AutoUpdateStatus::Idle) {
+                        let _ = window_handle.update(cx, |_, window, app| {
+                            drop(window.prompt(
+                                gpui::PromptLevel::Info,
+                                "Lathe is up to date",
+                                Some("You're already running the latest version."),
+                                &["OK"],
+                                app,
+                            ));
+                        });
+                    }
+                    return;
+                }
+            })
+            .detach();
+        }
     } else {
         drop(window.prompt(
             gpui::PromptLevel::Info,
@@ -629,6 +681,13 @@ impl AutoUpdater {
 
     pub fn status(&self) -> AutoUpdateStatus {
         self.status.clone()
+    }
+
+    /// Whether a poll request is in flight. Used by the manual `Check`
+    /// action's watcher task to know when the check has resolved so it
+    /// can surface "you're already up to date" feedback.
+    pub fn is_polling(&self) -> bool {
+        self.pending_poll.is_some()
     }
 
     pub fn dismiss(&mut self, cx: &mut Context<Self>) -> bool {
