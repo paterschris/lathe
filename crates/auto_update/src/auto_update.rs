@@ -303,15 +303,17 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
 
 /// GitHub API URL for Lathe releases, resolved per channel.
 ///
-/// - `LATHE_BETA_UPDATE_URL` is consulted for Beta channel.
-/// - `LATHE_UPDATE_URL` is consulted for Stable/Preview/Beta (as a fallback
-///   for Beta when the channel-specific var is not set).
+/// - `LATHE_BETA_UPDATE_URL` overrides the URL for Beta builds.
+/// - `LATHE_UPDATE_URL` overrides the URL for Stable/Preview/Beta builds.
 ///
-/// Both are read from `option_env!` (baked into the binary at build time by
-/// release CI) with a runtime `env::var` fallback for development. Each must
-/// point at a GitHub releases "latest" API endpoint, for example:
-/// `https://api.github.com/repos/paterschris/lathe/releases/latest`.
-/// When unset for a given channel, auto-update is a no-op on that channel.
+/// Both are read from `option_env!` (so CI can bake a different URL into the
+/// binary at build time) with a runtime `env::var` fallback for development.
+/// When neither is set, Stable/Preview/Beta default to the Lathe fork's
+/// GitHub releases endpoint so locally built binaries still get update
+/// checks without any environment configuration. Nightly/Dev never poll.
+const LATHE_DEFAULT_UPDATE_URL: &str =
+    "https://api.github.com/repos/paterschris/lathe/releases/latest";
+
 pub fn lathe_update_base_url(channel: ReleaseChannel) -> Option<String> {
     let beta = option_env!("LATHE_BETA_UPDATE_URL")
         .map(str::to_owned)
@@ -322,8 +324,13 @@ pub fn lathe_update_base_url(channel: ReleaseChannel) -> Option<String> {
         .or_else(|| env::var("LATHE_UPDATE_URL").ok())
         .filter(|s| !s.is_empty());
     match channel {
-        ReleaseChannel::Beta => beta.or(generic),
-        ReleaseChannel::Stable | ReleaseChannel::Preview => generic,
+        ReleaseChannel::Beta => Some(
+            beta.or(generic)
+                .unwrap_or_else(|| LATHE_DEFAULT_UPDATE_URL.to_owned()),
+        ),
+        ReleaseChannel::Stable | ReleaseChannel::Preview => {
+            Some(generic.unwrap_or_else(|| LATHE_DEFAULT_UPDATE_URL.to_owned()))
+        }
         ReleaseChannel::Nightly | ReleaseChannel::Dev => None,
     }
 }
@@ -793,19 +800,6 @@ impl AutoUpdater {
             });
 
         Self::check_dependencies()?;
-
-        if release_channel == ReleaseChannel::Beta
-            && lathe_update_base_url(release_channel).is_none()
-        {
-            log::info!(
-                "Auto Update: Beta channel has no LATHE_BETA_UPDATE_URL or LATHE_UPDATE_URL configured; skipping"
-            );
-            this.update(cx, |this, cx| {
-                this.status = AutoUpdateStatus::Idle;
-                cx.notify();
-            });
-            return Ok(());
-        }
 
         this.update(cx, |this, cx| {
             this.status = AutoUpdateStatus::Checking;
