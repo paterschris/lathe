@@ -1285,7 +1285,22 @@ impl ExternalAgentServer for LocalExtensionArchiveAgent {
 
                 if cmd.starts_with("./") || cmd.starts_with(".\\") {
                     // Relative to extraction directory
-                    let cmd_path = version_dir.join(&cmd[2..]);
+                    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+                    let mut cmd_path = version_dir.join(&cmd[2..]);
+                    // npm-installed CLIs on Windows ship as `.cmd` shims (and
+                    // sometimes `.exe`/`.bat`/`.ps1`), not bare executables.
+                    // If the registry-supplied bare name doesn't exist, probe
+                    // for the conventional Windows extensions before failing.
+                    #[cfg(target_os = "windows")]
+                    if cmd_path.extension().is_none() && !fs.is_file(&cmd_path).await {
+                        for ext in ["exe", "cmd", "bat", "ps1"] {
+                            let candidate = cmd_path.with_extension(ext);
+                            if fs.is_file(&candidate).await {
+                                cmd_path = candidate;
+                                break;
+                            }
+                        }
+                    }
                     anyhow::ensure!(
                         fs.is_file(&cmd_path).await,
                         "Missing command {} after extraction",
