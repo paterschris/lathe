@@ -238,8 +238,47 @@ jobs:
           path: target/release/Lathe-*-linux.tar.gz
           if-no-files-found: error
 
+  build-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-2022
+          - arch: aarch64
+            runner: windows-2022
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add target
+        run: rustup target add ${{ matrix.arch }}-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build
+        shell: pwsh
+        run: ./script/build-fork-windows.ps1 -Architecture ${{ matrix.arch }}
+
+      - name: Package
+        shell: pwsh
+        run: ./script/package-fork-windows.ps1 -Architecture ${{ matrix.arch }}
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lathe-windows-${{ matrix.arch }}
+          path: target/release/Lathe-*-${{ matrix.arch }}-windows.zip
+          if-no-files-found: error
+
   create-release:
-    needs: [build-macos, build-linux, validate-macos]
+    needs: [build-macos, build-linux, build-windows, validate-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -294,6 +333,8 @@ jobs:
           cp artifacts/lathe-macos/Lathe-*.zip release-files/
           cp artifacts/lathe-macos/Lathe-*.dmg release-files/
           cp artifacts/lathe-linux/Lathe-*-linux.tar.gz release-files/
+          cp artifacts/lathe-windows-x86_64/Lathe-*-x86_64-windows.zip release-files/
+          cp artifacts/lathe-windows-aarch64/Lathe-*-aarch64-windows.zip release-files/
 
           # Mark any non-stable channel as prerelease so the GitHub UI
           # shows the prerelease badge and `gh release view --latest`

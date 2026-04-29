@@ -1,0 +1,207 @@
+name: Lathe Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'script/*windows*'
+      - 'script/build-fork*'
+      - 'script/package-fork*'
+      - 'script/install-fork*'
+      - 'script/uninstall*'
+      - '.github/workflows/lathe_windows_ci.yml'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  # Cheap: parse the PowerShell scripts so syntax breaks don't escape to
+  # release-time. Runs in seconds and doesn't need Rust.
+  validate-scripts:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scripts = @(
+            'script/build-fork-windows.ps1',
+            'script/package-fork-windows.ps1',
+            'script/install-fork-windows.ps1',
+            'script/uninstall-fork-windows.ps1'
+          )
+          $hasErrors = $false
+          foreach ($s in $scripts) {
+            if (-not (Test-Path $s)) {
+              Write-Output "MISSING: $s"
+              $hasErrors = $true
+              continue
+            }
+            $parseErrors = $null
+            $tokens = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $s).Path, [ref]$tokens, [ref]$parseErrors
+            )
+            if ($parseErrors -and $parseErrors.Count -gt 0) {
+              Write-Output "FAIL: $s"
+              $parseErrors | ForEach-Object { Write-Output "  $($_.Message) at $($_.Extent.StartLineNumber):$($_.Extent.StartColumnNumber)" }
+              $hasErrors = $true
+            } else {
+              Write-Output "OK:   $s"
+            }
+          }
+          if ($hasErrors) { exit 1 }
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        # Best-effort static analysis: lint warnings shouldn't fail the build,
+        # but real problems (parse-survivable but semantically broken) should.
+        run: |
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+            Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+          }
+          $issues = Invoke-ScriptAnalyzer -Path script -IncludeRule @(
+            'PSAvoidUsingCmdletAliases',
+            'PSUseDeclaredVarsMoreThanAssignments',
+            'PSAvoidGlobalVars',
+            'PSPossibleIncorrectComparisonWithNull',
+            'PSAvoidUsingPositionalParameters'
+          ) -Severity Error
+          if ($issues) {
+            $issues | Format-Table -AutoSize
+            exit 1
+          }
+          Write-Output "PSScriptAnalyzer: no errors"
+
+  # Fast feedback: type-check the crates most affected by Windows-specific
+  # cfg branches. Doesn't link, doesn't bundle, doesn't run tests — so it
+  # finishes quickly and catches the common breakage modes (cfg(windows)
+  # blocks that don't compile, missing imports under `target_os`, etc).
+  check-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: lathe-windows-check
+
+      - name: cargo check (Windows-touched crates)
+        shell: pwsh
+        run: |
+          cargo check --target x86_64-pc-windows-msvc `
+            -p workspace `
+            -p project `
+            -p agent_servers `
+            -p util `
+            -p install_cli
+
+      - name: cargo check (full workspace)
+        # Full-tree check is slower but surfaces second-order breakage — a
+        # cfg(windows) error in some leaf crate that the targeted set above
+        # might miss. Keep it after the targeted check so a PR sees the
+        # narrow signal first.
+        shell: pwsh
+        run: cargo check --target x86_64-pc-windows-msvc --workspace
+
+  # Heavy: full build + package on `main` pushes only. Validates that the
+  # fork-windows scripts produce a working zip end-to-end, so any drift in
+  # ConPTY/AGS download URLs or Inno Setup expectations is caught before
+  # release-time. Skipped on PRs to keep merge feedback fast — release_fork.yml
+  # does the same build on workflow_dispatch.
+  build-windows:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    needs: [validate-scripts, check-windows]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: lathe-windows-build
+
+      - name: Build
+        shell: pwsh
+        run: ./script/build-fork-windows.ps1 -Architecture x86_64
+
+      - name: Package
+        shell: pwsh
+        run: ./script/package-fork-windows.ps1 -Architecture x86_64
+
+      - name: Smoke-test install script (extract + PATH update + uninstall)
+        shell: pwsh
+        # Runs the full install/uninstall round-trip in a clean user profile
+        # area. Catches Compress-Archive layout drift, PATH parsing bugs,
+        # and accidentally leaving files behind. Doesn't launch the GUI —
+        # headless agent runners can't drive the editor's run loop.
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # The install script reads RELEASE_CHANNEL from the repo, prompts
+          # interactively if a Lathe process is running, and writes to
+          # %LOCALAPPDATA%\Programs\Lathe. We're on a fresh runner — no
+          # running processes — so non-interactive invocation is safe.
+          $archive = Get-ChildItem target/release -Filter 'Lathe-*-windows.zip' |
+                     Sort-Object LastWriteTime -Descending |
+                     Select-Object -First 1
+          if (-not $archive) { throw "No Lathe-*-windows.zip in target/release" }
+
+          ./script/install-fork-windows.ps1 -ArchivePath $archive.FullName
+
+          $channel = (Get-Content 'crates/zed/RELEASE_CHANNEL').Trim()
+          $suffix = if ($channel -ne 'stable') { "-$channel" } else { '' }
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\Lathe\lathe$suffix"
+          $cliExe = Join-Path $installDir 'bin\lathe.exe'
+          $editorExe = Join-Path $installDir 'libexec\lathe-editor.exe'
+
+          if (-not (Test-Path $cliExe))    { throw "FAIL: missing $cliExe after install" }
+          if (-not (Test-Path $editorExe)) { throw "FAIL: missing $editorExe after install" }
+
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          $binDir = Join-Path $installDir 'bin'
+          if (($userPath -split ';') -notcontains $binDir) {
+            throw "FAIL: $binDir not added to user PATH"
+          }
+
+          Write-Output "Install OK. Now testing uninstall."
+          ./script/uninstall-fork-windows.ps1 -Channel $channel
+
+          if (Test-Path $installDir) { throw "FAIL: $installDir still exists after uninstall" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPath -and (($userPath -split ';') -contains $binDir)) {
+            throw "FAIL: $binDir still on user PATH after uninstall"
+          }
+          Write-Output "Uninstall OK."
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lathe-windows-x86_64-ci
+          path: target/release/Lathe-*-windows.zip
+          if-no-files-found: error
+          retention-days: 7
