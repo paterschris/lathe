@@ -40,7 +40,9 @@ impl PortableWorkspace {
             .iter()
             .map(|abs| {
                 let stored = relativize(abs, &base_dir).unwrap_or_else(|| abs.clone());
-                PortableFolder { path: stored }
+                PortableFolder {
+                    path: to_forward_slash(&stored),
+                }
             })
             .collect();
 
@@ -81,10 +83,11 @@ impl PortableWorkspace {
             .folders
             .into_iter()
             .map(|folder| {
-                if folder.path.is_absolute() {
-                    folder.path
+                let path = from_forward_slash(&folder.path);
+                if path.is_absolute() {
+                    path
                 } else {
-                    base_dir.join(folder.path)
+                    base_dir.join(path)
                 }
             })
             .collect())
@@ -102,6 +105,30 @@ pub fn has_portable_workspace_extension(path: &Path) -> bool {
 pub fn ensure_portable_workspace_extension(path: &mut PathBuf) {
     if !has_portable_workspace_extension(path) {
         path.set_extension(PORTABLE_WORKSPACE_EXTENSION);
+    }
+}
+
+/// Canonicalize stored paths to forward-slash form so `.lathe-workspace` files
+/// round-trip across platforms when checked into git. Windows accepts `/` as a
+/// path separator, so the resulting `PathBuf` is usable in either direction.
+fn to_forward_slash(path: &Path) -> PathBuf {
+    let s: String = path
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c == '\\' { '/' } else { c })
+        .collect();
+    PathBuf::from(s)
+}
+
+/// Inverse defensive conversion at load time: if a file was written before
+/// `to_forward_slash` existed, it may carry literal `\\` separators. Convert
+/// them back to `/` so `Path::components` segments correctly on Unix as well.
+/// On Windows this is a no-op since both separators are already valid.
+fn from_forward_slash(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        path.to_path_buf()
+    } else {
+        to_forward_slash(path)
     }
 }
 
@@ -183,6 +210,35 @@ mod tests {
         let mut p = PathBuf::from("/tmp/foo.LATHE-WORKSPACE");
         ensure_portable_workspace_extension(&mut p);
         assert_eq!(p, PathBuf::from("/tmp/foo.LATHE-WORKSPACE"));
+    }
+
+    #[test]
+    fn to_forward_slash_replaces_backslashes() {
+        // Path containing backslashes (the form Windows would store before
+        // the fix). After normalization, separators are forward-slash so the
+        // file can be read on macOS/Linux.
+        let normalized = to_forward_slash(&PathBuf::from("..\\proj\\src"));
+        assert_eq!(normalized, PathBuf::from("../proj/src"));
+    }
+
+    #[test]
+    fn to_forward_slash_is_noop_for_unix_paths() {
+        let normalized = to_forward_slash(&PathBuf::from("../proj/src"));
+        assert_eq!(normalized, PathBuf::from("../proj/src"));
+    }
+
+    #[test]
+    fn from_forward_slash_handles_legacy_backslash_paths() {
+        // Legacy `.lathe-workspace` files written before to_forward_slash
+        // existed may carry literal backslashes. On non-Windows, we coerce
+        // them to forward slashes so the path resolves correctly.
+        let resolved = from_forward_slash(&PathBuf::from("..\\proj"));
+        if cfg!(windows) {
+            // Windows accepts both separators natively; preserve as-is.
+            assert_eq!(resolved, PathBuf::from("..\\proj"));
+        } else {
+            assert_eq!(resolved, PathBuf::from("../proj"));
+        }
     }
 
     #[cfg(unix)]
