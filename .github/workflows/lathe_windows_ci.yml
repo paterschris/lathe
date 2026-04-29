@@ -93,6 +93,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Enable Windows long paths
+        shell: pwsh
+        run: |
+          # Some cargo dependency checkouts (e.g. python-environment-tools'
+          # pet-conda test fixtures) embed paths past Windows' 260-char
+          # default. Cargo's git checkout fails before any of our code runs.
+          # Set both the Git-level and OS-level long-path flags so cargo +
+          # any subsequent file operations work without truncation errors.
+          git config --system core.longpaths true
+          New-ItemProperty `
+            -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+            -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force | Out-Null
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -133,6 +146,19 @@ jobs:
     needs: [validate-scripts, check-windows]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Enable Windows long paths
+        shell: pwsh
+        run: |
+          # Some cargo dependency checkouts (e.g. python-environment-tools'
+          # pet-conda test fixtures) embed paths past Windows' 260-char
+          # default. Cargo's git checkout fails before any of our code runs.
+          # Set both the Git-level and OS-level long-path flags so cargo +
+          # any subsequent file operations work without truncation errors.
+          git config --system core.longpaths true
+          New-ItemProperty `
+            -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+            -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force | Out-Null
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
