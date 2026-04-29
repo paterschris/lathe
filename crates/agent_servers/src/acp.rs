@@ -776,7 +776,19 @@ impl AcpConnection {
         let (dispatch_tx, dispatch_rx) = mpsc::unbounded::<ForegroundWork>();
         let debug_log = AcpDebugLog::default();
 
-        let incoming_lines = futures::io::BufReader::new(stdout).lines();
+        // Strip trailing `\r` from agent stdout. `AsyncBufReadExt::lines()`
+        // splits on `\n` and removes it but does not strip the leading `\r` of
+        // a CRLF pair. ACP messages are newline-delimited JSON, so a stray
+        // `\r` at end-of-line breaks parsing for any agent that emits CRLF
+        // (common on Windows).
+        let incoming_lines = futures::io::BufReader::new(stdout).lines().map(|result| {
+            result.map(|mut line| {
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+                line
+            })
+        });
         let tapped_incoming = incoming_lines.inspect({
             let debug_log = debug_log.clone();
             move |result| match result {
