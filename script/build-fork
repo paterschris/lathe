@@ -105,7 +105,7 @@ target_triple=${host_line#*: }
 echo "Target: $target_triple"
 echo "Building release binary..."
 
-cargo build --release --package zed --target "$target_triple"
+cargo build --release --package zed --package cli --target "$target_triple"
 
 echo "Creating application bundle..."
 channel=$(<crates/zed/RELEASE_CHANNEL)
@@ -121,6 +121,10 @@ app_path=$(cargo bundle --release --target "$target_triple" --select-workspace-r
 mv Cargo.toml.backup Cargo.toml
 rm -f Cargo.toml.bak
 popd > /dev/null
+
+# The cli binary is what /usr/local/bin/lathe symlinks to once installed.
+# cargo bundle doesn't pick it up, so we copy it in alongside the main exe.
+cp "target/${target_triple}/release/cli" "${app_path}/Contents/MacOS/cli"
 
 echo ""
 echo "=== Bundle created ==="
