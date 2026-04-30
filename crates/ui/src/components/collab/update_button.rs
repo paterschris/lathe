@@ -72,15 +72,15 @@ impl UpdateButton {
     }
 
     pub fn checking() -> Self {
-        Self::new(IconName::ArrowCircle, "Checking for Zed updates…").icon_animate(true)
+        Self::new(IconName::ArrowCircle, "Checking for Lathe updates…").icon_animate(true)
     }
 
     pub fn downloading(version: impl Into<SharedString>) -> Self {
-        Self::new(IconName::Download, "Downloading Zed update…").tooltip(version)
+        Self::new(IconName::Download, "Downloading Lathe update…").tooltip(version)
     }
 
     pub fn installing(version: impl Into<SharedString>) -> Self {
-        Self::new(IconName::ArrowCircle, "Installing Zed update…")
+        Self::new(IconName::ArrowCircle, "Installing Lathe update…")
             .icon_animate(true)
             .tooltip(version)
     }
@@ -92,7 +92,7 @@ impl UpdateButton {
     }
 
     pub fn errored(error: impl Into<SharedString>) -> Self {
-        Self::new(IconName::Warning, "Failed to update Zed")
+        Self::new(IconName::Warning, "Failed to update Lathe")
             .icon_color(Color::Warning)
             .tooltip(error)
             .with_dismiss()
