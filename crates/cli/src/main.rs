@@ -856,10 +856,15 @@ mod linux {
                 let cli = env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
-                // ./zed is for the target directory in development builds.
-                let possible_locations =
-                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zed"];
+                // ../libexec/lathe-editor is Lathe's Linux package layout. The remaining
+                // entries are upstream's: libexec is the standard, lib/zed is for Arch (and
+                // other non-libexec distros), ./zed is the target dir in dev builds.
+                let possible_locations = [
+                    "../libexec/lathe-editor",
+                    "../libexec/zed-editor",
+                    "../lib/zed/zed-editor",
+                    "./zed",
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -1191,9 +1196,15 @@ mod windows {
                 let cli = std::env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
-                // directory in development builds.
-                let possible_locations = ["../Zed.exe", "../lib/zed/zed-editor.exe", "./zed.exe"];
+                // ../libexec/lathe-editor.exe is Lathe's Windows package layout (bin/cli +
+                // libexec/editor, mirrors Linux). ../Zed.exe is upstream Zed's installer
+                // layout, lib/zed is MSYS2, ./zed.exe is the target dir in dev builds.
+                let possible_locations = [
+                    "../libexec/lathe-editor.exe",
+                    "../Zed.exe",
+                    "../lib/zed/zed-editor.exe",
+                    "./zed.exe",
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
