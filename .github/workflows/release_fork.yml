@@ -163,8 +163,7 @@ jobs:
           exts=""
           for i in 0 1 2 3 4 5 6 7 8 9; do
             entry=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:${i}:CFBundleTypeExtensions" "$PLIST" 2>/dev/null) || continue
-            exts="${exts}
-${entry}"
+            exts="${exts}"$'\n'"${entry}"
           done
           # Canary extensions that should always be present. If a future
           # change accidentally drops the extensions array, this catches it.
