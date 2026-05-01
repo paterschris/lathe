@@ -205,6 +205,7 @@ fn main() {
         let release_channel = option_env!("RELEASE_CHANNEL").unwrap_or("dev");
         let icon = match release_channel {
             "stable" => "resources/windows/app-icon.ico",
+            "beta" => "resources/windows/app-icon-beta.ico",
             "preview" => "resources/windows/app-icon-preview.ico",
             "nightly" => "resources/windows/app-icon-nightly.ico",
             "dev" => "resources/windows/app-icon-dev.ico",
