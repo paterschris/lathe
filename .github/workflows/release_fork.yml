@@ -24,6 +24,11 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        # Don't fail the job if the post-step cache save flakes out
+        # (intermittent tar/blob-storage issues on Windows in particular).
+        # The build artifact has already been uploaded by the time the
+        # post-step runs, so a save failure shouldn't block create-release.
+        continue-on-error: true
         with:
           cache-on-failure: true
 
@@ -227,6 +232,11 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        # Don't fail the job if the post-step cache save flakes out
+        # (intermittent tar/blob-storage issues on Windows in particular).
+        # The build artifact has already been uploaded by the time the
+        # post-step runs, so a save failure shouldn't block create-release.
+        continue-on-error: true
         with:
           cache-on-failure: true
 
@@ -275,6 +285,11 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        # Don't fail the job if the post-step cache save flakes out
+        # (intermittent tar/blob-storage issues on Windows in particular).
+        # The build artifact has already been uploaded by the time the
+        # post-step runs, so a save failure shouldn't block create-release.
+        continue-on-error: true
         with:
           cache-on-failure: true
 
