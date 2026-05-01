@@ -15,7 +15,7 @@ Param(
 #   .\script\diag-windows.ps1 -InstallRoot "C:\custom\path\lathe-beta"
 #
 # Safe to run without admin; some Defender cmdlets degrade gracefully if
-# they're unavailable. Output is plain text — paste it back as-is.
+# they're unavailable. Output is plain text -- paste it back as-is.
 
 $ErrorActionPreference = 'Continue'
 
@@ -81,7 +81,7 @@ if (Test-Path $editor) {
         Write-Output "ZoneId present (downloaded-from-internet flag still attached):"
         $zone | ForEach-Object { Write-Output "  $_" }
     } catch {
-        Write-Output "(no Zone.Identifier — file is not flagged as downloaded)"
+        Write-Output "(no Zone.Identifier - file is not flagged as downloaded)"
     }
 } else {
     Write-Output "MISSING: $editor"
