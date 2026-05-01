@@ -155,10 +155,19 @@ jobs:
       - name: Validate expected CFBundleTypeExtensions
         run: |
           PLIST="$APP/Contents/Info.plist"
-          exts=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:1:CFBundleTypeExtensions" "$PLIST")
+          # CFBundleDocumentTypes is a small array of dicts. Some entries
+          # use CFBundleTypeExtensions (file extensions) and others use
+          # LSItemContentTypes (UTIs) — we only care about the former.
+          # Concatenate the extensions from every entry that has them so
+          # this check stays correct if entries are reordered or added.
+          exts=""
+          for i in 0 1 2 3 4 5 6 7 8 9; do
+            entry=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:${i}:CFBundleTypeExtensions" "$PLIST" 2>/dev/null) || continue
+            exts="${exts}
+${entry}"
+          done
           # Canary extensions that should always be present. If a future
-          # change accidentally drops the extensions array or picks up the
-          # wrong CFBundleDocumentTypes index, this catches it.
+          # change accidentally drops the extensions array, this catches it.
           for want in md json js ts rs py toml yaml sh env cjs mjs mdx; do
             echo "$exts" | grep -qw "$want" || { echo "MISSING extension: $want"; exit 1; }
           done
