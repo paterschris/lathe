@@ -125,10 +125,53 @@ try {
     Compress-Archive -Path $appDir -DestinationPath $archivePath
 
     Write-Output ""
-    Write-Output "=== Package created ==="
+    Write-Output "=== Zip created ==="
     Write-Output "  $archivePath"
+
+    # --- Compile Inno Setup installer (.exe) ---
+    # Skipped if ISCC.exe isn't on the machine (e.g. a dev workstation
+    # without Inno Setup installed). On GitHub-hosted windows-2022 it's
+    # pre-installed. Locally: `choco install innosetup` or download from
+    # https://jrsoftware.org/isdl.php.
     Write-Output ""
-    Write-Output "To install locally: script/install-fork-windows.ps1"
+    Write-Output "--- Compiling Inno Setup installer ---"
+    $iscc = $null
+    foreach ($candidate in @(
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    )) {
+        if (Test-Path $candidate) { $iscc = $candidate; break }
+    }
+    if (-not $iscc) {
+        $cmd = Get-Command ISCC -ErrorAction SilentlyContinue
+        if ($cmd) { $iscc = $cmd.Source }
+    }
+
+    if (-not $iscc) {
+        Write-Warning "ISCC.exe not found; skipping installer build."
+        Write-Warning "Install Inno Setup from https://jrsoftware.org/isdl.php or 'choco install innosetup'."
+    } else {
+        Write-Output "  Compiler: $iscc"
+        $outAbs = (Resolve-Path $outDir).Path
+        $issPath = (Resolve-Path 'crates/zed/resources/windows/lathe.iss').Path
+        & $iscc /Qp `
+            "/DLatheChannel=$channel" `
+            "/DLatheVersion=$version" `
+            "/DLatheArch=$Architecture" `
+            "/DStageDir=$appDir" `
+            "/DOutputDir=$outAbs" `
+            $issPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "ISCC.exe failed with exit code $LASTEXITCODE"
+        }
+        $setupExe = Join-Path $outDir "Lathe-$version-$Architecture-windows-setup.exe"
+        Write-Output ""
+        Write-Output "=== Installer created ==="
+        Write-Output "  $setupExe"
+    }
+
+    Write-Output ""
+    Write-Output "To install locally from the zip: script/install-fork-windows.ps1"
 }
 finally {
     Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue

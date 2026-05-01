@@ -305,7 +305,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lathe-windows-${{ matrix.arch }}
-          path: target/release/Lathe-*-${{ matrix.arch }}-windows.zip
+          path: |
+            target/release/Lathe-*-${{ matrix.arch }}-windows.zip
+            target/release/Lathe-*-${{ matrix.arch }}-windows-setup.exe
           if-no-files-found: error
 
   create-release:
@@ -365,7 +367,9 @@ jobs:
           cp artifacts/lathe-macos/Lathe-*.dmg release-files/
           cp artifacts/lathe-linux/Lathe-*-linux.tar.gz release-files/
           cp artifacts/lathe-windows-x86_64/Lathe-*-x86_64-windows.zip release-files/
+          cp artifacts/lathe-windows-x86_64/Lathe-*-x86_64-windows-setup.exe release-files/
           cp artifacts/lathe-windows-aarch64/Lathe-*-aarch64-windows.zip release-files/
+          cp artifacts/lathe-windows-aarch64/Lathe-*-aarch64-windows-setup.exe release-files/
 
           # Mark any non-stable channel as prerelease so the GitHub UI
           # shows the prerelease badge and `gh release view --latest`
