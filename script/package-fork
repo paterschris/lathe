@@ -72,24 +72,40 @@ if $can_sign; then
     echo ""
     echo "--- Signing ---"
 
+    # Apple's notary service requires every nested executable to be signed
+    # with Developer ID, a secure timestamp (--timestamp), and hardened
+    # runtime (--options runtime). Missing any of these on any binary in
+    # the bundle causes notary to return "Invalid". Sign inside-out as
+    # Apple recommends; let codesign errors propagate (set -e is on).
+
     # Sign nested frameworks and dylibs first (no entitlements for these)
     if [ -d "$app_path/Contents/Frameworks" ] || [ -d "$app_path/Contents/MacOS/WebRTC.framework" ]; then
         find "$app_path/Contents/Frameworks" "$app_path/Contents/MacOS/WebRTC.framework" \
             -type f \( -name "*.dylib" -o -name "*.so" -o -perm +111 \) \
             2>/dev/null | while read -r lib; do
-            codesign --force --options runtime \
-                --sign "$signing_identity" "$lib" 2>/dev/null || true
+            codesign --force --timestamp --options runtime \
+                --sign "$signing_identity" "$lib"
         done
     fi
 
     # Sign any nested .app or .framework bundles
     find "$app_path" -depth \( -name "*.framework" -o -name "*.app" \) -not -path "$app_path" -print0 2>/dev/null | while IFS= read -r -d '' bundle; do
-        codesign --force --options runtime \
-            --sign "$signing_identity" "$bundle" 2>/dev/null || true
+        codesign --force --timestamp --options runtime \
+            --sign "$signing_identity" "$bundle"
+    done
+
+    # Sign loose Mach-O executables in Contents/MacOS that aren't covered
+    # by the bundle-level codesign of a framework/.app (e.g. the `cli`
+    # helper that script/build-fork copies in alongside the main exe).
+    for inner_bin in "$app_path/Contents/MacOS/cli"; do
+        if [ -f "$inner_bin" ]; then
+            codesign --force --timestamp --options runtime \
+                --sign "$signing_identity" "$inner_bin"
+        fi
     done
 
     # Sign the main binary with entitlements (must be last)
-    codesign --force --options runtime \
+    codesign --force --timestamp --options runtime \
         --entitlements crates/zed/resources/zed.entitlements \
         --sign "$signing_identity" "$app_path"
     echo "  Signed with: ${signing_identity}"
