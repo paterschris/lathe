@@ -479,7 +479,7 @@ impl AgentConfiguration {
             .w_full()
             .child(self.render_section_title(
                 "LLM Providers",
-                "Add at least one provider to use AI-powered features with Zed's native agent.",
+                "Add at least one provider to use AI-powered features with Lathe's native agent.",
                 popover_menu.into_any_element(),
             ))
             .child(
@@ -579,7 +579,7 @@ impl AgentConfiguration {
             .border_color(cx.theme().colors().border)
             .child(self.render_section_title(
                 "Model Context Protocol (MCP) Servers",
-                "All MCP servers connected directly or via a Zed extension.",
+                "All MCP servers connected directly or via a Lathe extension.",
                 add_server_popover.into_any_element(),
             ))
             .child(

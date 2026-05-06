@@ -157,7 +157,7 @@ impl Component for UpdateButton {
 
     fn description() -> Option<&'static str> {
         Some(
-            "A button component displayed in the title bar to show auto-update status and allow users to restart Zed.",
+            "A button component displayed in the title bar to show auto-update status and allow users to restart Lathe.",
         )
     }
 
