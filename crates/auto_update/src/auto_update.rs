@@ -1253,15 +1253,12 @@ async fn install_release_macos(
         .file_name()
         .with_context(|| format!("invalid running app path {running_app_path:?}"))?;
 
-    let mount_path = temp_dir.path().join("Zed");
-    let mut mounted_app_path: OsString = mount_path.join(running_app_filename).into();
-
-    mounted_app_path.push("/");
+    let mountroot = temp_dir.path();
     let mut cmd = new_command("hdiutil");
     cmd.args(["attach", "-nobrowse"])
         .arg(&downloaded_dmg)
         .arg("-mountroot")
-        .arg(temp_dir.path());
+        .arg(mountroot);
     let output = cmd
         .output()
         .await
@@ -1273,11 +1270,35 @@ async fn install_release_macos(
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Create an MacOsUnmounter that will be dropped (and thus unmount the disk) when this function exits
+    // hdiutil prints one tab-separated line per partition: <dev>\t<scheme>\t<mount-point>.
+    // The mount point is empty for partition-scheme rows, so pick the last non-empty entry
+    // that lives under the mountroot we requested. This is necessary because the volume
+    // name baked into the DMG is channel-specific (e.g. "Lathe", "Lathe Beta") rather than
+    // a fixed string, so we cannot derive the path without consulting hdiutil's output.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mount_path = stdout
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let last = line.split('\t').next_back()?.trim();
+            if last.is_empty() {
+                return None;
+            }
+            let path = PathBuf::from(last);
+            path.starts_with(mountroot).then_some(path)
+        })
+        .with_context(|| {
+            format!("failed to determine DMG mount point from hdiutil output: {stdout}")
+        })?;
+
+    // Create a MacOsUnmounter that will be dropped (and thus unmount the disk) when this function exits
     let _unmounter = MacOsUnmounter {
         mount_path: mount_path.clone(),
         background_executor: cx.background_executor(),
     };
+
+    let mut mounted_app_path: OsString = mount_path.join(running_app_filename).into();
+    mounted_app_path.push("/");
 
     let mut cmd = new_command("rsync");
     cmd.args(["-av", "--delete", "--exclude", "Icon?"])
