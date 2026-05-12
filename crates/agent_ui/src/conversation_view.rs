@@ -542,8 +542,13 @@ impl ConversationView {
 }
 
 enum ServerState {
-    Loading { _loading: Entity<LoadingView> },
-    LoadError { error: LoadError },
+    Loading {
+        _loading: Entity<LoadingView>,
+        draft_editor: Entity<Editor>,
+    },
+    LoadError {
+        error: LoadError,
+    },
     Connected(ConnectedServerState),
 }
 
@@ -789,6 +794,19 @@ impl ConversationView {
 
         let connect_result = connection_entry.read(cx).wait_for_connection();
 
+        let agent_id = agent.agent_id();
+        let agent_server_store = project.read(cx).agent_server_store().clone();
+        let agent_display_name = agent_server_store
+            .read(cx)
+            .agent_display_name(&agent_id)
+            .unwrap_or_else(|| agent_id.0.to_string().into());
+        let draft_placeholder = placeholder_text(agent_display_name.as_ref(), false);
+        let draft_editor = cx.new(|cx| {
+            let mut editor = Editor::auto_height_unbounded(1, window, cx);
+            editor.set_placeholder_text(draft_placeholder.as_str(), window, cx);
+            editor
+        });
+
         let side = match AgentSettings::get_global(cx).sidebar_side() {
             SidebarSide::Left => "left",
             SidebarSide::Right => "right",
@@ -891,6 +909,18 @@ impl ConversationView {
                             conversation
                         });
 
+                        let initial_content_present = initial_content.is_some();
+                        let pending_draft_text = if !initial_content_present {
+                            if let ServerState::Loading { draft_editor, .. } = &this.server_state {
+                                let text = draft_editor.read(cx).text(cx);
+                                if text.is_empty() { None } else { Some(text) }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
                         let current = this.new_thread_view(
                             thread,
                             conversation.clone(),
@@ -899,6 +929,17 @@ impl ConversationView {
                             window,
                             cx,
                         );
+
+                        if let Some(text) = pending_draft_text {
+                            let message_editor = current.read(cx).message_editor.clone();
+                            message_editor.update(cx, |message_editor, cx| {
+                                message_editor.set_message(
+                                    vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
 
                         if this.focus_handle.contains_focused(window, cx) {
                             current
@@ -939,6 +980,7 @@ impl ConversationView {
 
         ServerState::Loading {
             _loading: loading_view,
+            draft_editor,
         }
     }
 
@@ -2720,6 +2762,9 @@ fn placeholder_text(agent_name: &str, has_commands: bool) -> String {
 
 impl Focusable for ConversationView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if let ServerState::Loading { draft_editor, .. } = &self.server_state {
+            return draft_editor.read(cx).focus_handle(cx);
+        }
         match self.active_thread() {
             Some(thread) => thread.read(cx).focus_handle(cx),
             None => self.focus_handle.clone(),
@@ -2761,19 +2806,33 @@ impl Render for ConversationView {
             .size_full()
             .bg(cx.theme().colors().panel_background)
             .child(match &self.server_state {
-                ServerState::Loading { .. } => v_flex()
+                ServerState::Loading { draft_editor, .. } => v_flex()
                     .flex_1()
                     .size_full()
-                    .items_center()
-                    .justify_center()
+                    .justify_end()
                     .child(
-                        Label::new("Loading…").color(Color::Muted).with_animation(
-                            "loading-agent-label",
-                            Animation::new(Duration::from_secs(2))
-                                .repeat()
-                                .with_easing(pulsating_between(0.3, 0.7)),
-                            |label, delta| label.alpha(delta),
-                        ),
+                        h_flex()
+                            .px_3()
+                            .py_2()
+                            .gap_2()
+                            .child(loading_contents_spinner(IconSize::XSmall))
+                            .child(
+                                Label::new("Starting agent…").color(Color::Muted).size(LabelSize::Small).with_animation(
+                                    "loading-agent-label",
+                                    Animation::new(Duration::from_secs(2))
+                                        .repeat()
+                                        .with_easing(pulsating_between(0.3, 0.7)),
+                                    |label, delta| label.alpha(delta),
+                                ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(cx.theme().colors().border)
+                            .child(draft_editor.clone()),
                     )
                     .into_any(),
                 ServerState::LoadError { error: e, .. } => v_flex()
