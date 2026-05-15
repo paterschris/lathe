@@ -108,6 +108,17 @@ pub struct SettingsContent {
 
     pub git_panel: Option<GitPanelSettingsContent>,
 
+    /// Absolute paths to "pinned" external git repositories surfaced in the
+    /// git panel's collapsible Repositories strip below the workspace's own
+    /// repositories. Click-to-open opens each path in a new workspace.
+    pub repository_dashboard_pinned_repos: Option<Vec<String>>,
+
+    /// Settings for the pull request sidebar panel.
+    pub pull_request_panel: Option<PanelSettingsContent>,
+
+    /// Settings for the git activity feed panel (live in-flight git commands).
+    pub git_activity_panel: Option<PanelSettingsContent>,
+
     pub tabs: Option<ItemSettingsContent>,
     pub tab_bar: Option<TabBarSettingsContent>,
     pub status_bar: Option<StatusBarSettingsContent>,

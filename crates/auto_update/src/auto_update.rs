@@ -364,7 +364,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
 /// GitHub releases endpoint so locally built binaries still get update
 /// checks without any environment configuration. Nightly/Dev never poll.
 const LATHE_DEFAULT_UPDATE_URL: &str =
-    "https://api.github.com/repos/paterschris/lathe/releases/latest";
+    "https://api.github.com/repos/paterschris/lathe/releases?per_page=30";
 
 pub fn lathe_update_base_url(channel: ReleaseChannel) -> Option<String> {
     let beta = option_env!("LATHE_BETA_UPDATE_URL")
@@ -408,6 +408,8 @@ fn lathe_release_notes_url(channel: ReleaseChannel) -> Option<String> {
 #[derive(Deserialize)]
 struct GitHubRelease {
     tag_name: String,
+    #[serde(default)]
+    draft: bool,
     assets: Vec<GitHubAsset>,
 }
 
@@ -417,9 +419,37 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
+/// The tag suffix used by the release workflow for each non-stable channel.
+/// Stable has no suffix. Dev has no published releases.
+fn channel_tag_suffix(channel: ReleaseChannel) -> Option<&'static str> {
+    match channel {
+        ReleaseChannel::Stable => Some(""),
+        ReleaseChannel::Preview => Some("-preview"),
+        ReleaseChannel::Beta => Some("-beta"),
+        ReleaseChannel::Nightly => Some("-nightly"),
+        ReleaseChannel::Dev => None,
+    }
+}
+
+fn release_matches_channel(release: &GitHubRelease, channel: ReleaseChannel) -> bool {
+    if release.draft {
+        return false;
+    }
+    let Some(suffix) = channel_tag_suffix(channel) else {
+        return false;
+    };
+    if suffix.is_empty() {
+        // Stable: tag has no `-foo` suffix at all (e.g. `v0.236.0`).
+        !release.tag_name.contains('-')
+    } else {
+        release.tag_name.ends_with(suffix)
+    }
+}
+
 async fn get_lathe_release_asset(
     http_client: Arc<HttpClientWithUrl>,
     api_url: &str,
+    channel: ReleaseChannel,
     os: &str,
     arch: &str,
 ) -> Result<ReleaseAsset> {
@@ -433,12 +463,29 @@ async fn get_lathe_release_asset(
         String::from_utf8_lossy(&body),
     );
 
-    let release: GitHubRelease = serde_json::from_slice(&body).with_context(|| {
-        format!(
-            "error deserializing release {:?}",
-            String::from_utf8_lossy(&body),
-        )
-    })?;
+    // Accept either response shape so old binaries with `/releases/latest`
+    // baked in keep working, while newer binaries can be pointed at the
+    // `/releases` list endpoint to discover prerelease channels (beta,
+    // preview) that `/latest` excludes. List responses are returned newest
+    // first by the GitHub API, so the first match wins.
+    let release: GitHubRelease = if let Ok(single) =
+        serde_json::from_slice::<GitHubRelease>(&body)
+    {
+        single
+    } else {
+        let releases: Vec<GitHubRelease> = serde_json::from_slice(&body).with_context(|| {
+            format!(
+                "error deserializing release(s) {:?}",
+                String::from_utf8_lossy(&body),
+            )
+        })?;
+        releases
+            .into_iter()
+            .find(|r| release_matches_channel(r, channel))
+            .with_context(|| {
+                format!("no release matched channel {:?} at {api_url}", channel)
+            })?
+    };
 
     // Asset naming produced by the release workflow:
     //   macOS:   Lathe-<version>-<arch>-macos.{dmg,zip}    (arch: aarch64 | x86_64)
@@ -792,7 +839,14 @@ impl AutoUpdater {
         let client = this.read_with(cx, |this, _| this.client.clone());
 
         if let Some(api_url) = lathe_update_base_url(release_channel) {
-            return get_lathe_release_asset(client.http_client(), &api_url, os, arch).await;
+            return get_lathe_release_asset(
+                client.http_client(),
+                &api_url,
+                release_channel,
+                os,
+                arch,
+            )
+            .await;
         }
 
         let (system_id, metrics_id, is_staff) = if client.telemetry().metrics_enabled() {

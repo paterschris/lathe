@@ -11,8 +11,9 @@ use git::{
     repository::{
         AskPassDelegate, Branch, CommitData, CommitDataReader, CommitDetails, CommitOptions,
         CreateWorktreeTarget, FetchOptions, GRAPH_CHUNK_SIZE, GitRepository,
-        GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, RefEdit,
-        Remote, RepoPath, ResetMode, SearchCommitArgs, Worktree,
+        GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, MergeOptions,
+        PushOptions, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, RefEdit, ReflogEntry,
+        Remote, RepoPath, ResetMode, SearchCommitArgs, Tag, Worktree,
     },
     stash::GitStash,
     status::{
@@ -318,6 +319,11 @@ impl GitRepository for FakeGitRepository {
                     state.head_contents = snapshot.head_contents;
                 }
                 ResetMode::Mixed => {
+                    state.head_contents = snapshot.head_contents;
+                    state.index_contents = state.head_contents.clone();
+                }
+                ResetMode::Hard => {
+                    // Fake repo doesn't model a separate worktree; behaves like Mixed here.
                     state.head_contents = snapshot.head_contents;
                     state.index_contents = state.head_contents.clone();
                 }
@@ -986,9 +992,26 @@ impl GitRepository for FakeGitRepository {
         unimplemented!()
     }
 
+    fn stash_paths_with_message(
+        &self,
+        _paths: Vec<RepoPath>,
+        _message: String,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        unimplemented!()
+    }
+
     fn stash_pop(
         &self,
         _index: Option<usize>,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        unimplemented!()
+    }
+
+    fn stash_pop_by_message(
+        &self,
+        _message: String,
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
         unimplemented!()
@@ -1005,6 +1028,27 @@ impl GitRepository for FakeGitRepository {
     fn stash_drop(
         &self,
         _index: Option<usize>,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        unimplemented!()
+    }
+
+    fn submodule_update(
+        &self,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        unimplemented!()
+    }
+
+    fn lfs_fetch(
+        &self,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        unimplemented!()
+    }
+
+    fn lfs_pull(
+        &self,
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
         unimplemented!()
@@ -1057,6 +1101,7 @@ impl GitRepository for FakeGitRepository {
         _askpass: AskPassDelegate,
         _env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
+        _progress_tx: Option<git::repository::GitProgressSender>,
     ) -> BoxFuture<'_, Result<git::repository::RemoteCommandOutput>> {
         unimplemented!()
     }
@@ -1069,6 +1114,7 @@ impl GitRepository for FakeGitRepository {
         _askpass: AskPassDelegate,
         _env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
+        _progress_tx: Option<git::repository::GitProgressSender>,
     ) -> BoxFuture<'_, Result<git::repository::RemoteCommandOutput>> {
         unimplemented!()
     }
@@ -1079,6 +1125,7 @@ impl GitRepository for FakeGitRepository {
         _askpass: AskPassDelegate,
         _env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
+        _progress_tx: Option<git::repository::GitProgressSender>,
     ) -> BoxFuture<'_, Result<git::repository::RemoteCommandOutput>> {
         unimplemented!()
     }
@@ -1490,6 +1537,96 @@ impl GitRepository for FakeGitRepository {
 
     fn repair_worktrees(&self) -> BoxFuture<'_, Result<()>> {
         async { Ok(()) }.boxed()
+    }
+
+    fn cherry_pick(
+        &self,
+        _commits: Vec<String>,
+        _no_commit: bool,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { bail!("cherry_pick not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn revert(
+        &self,
+        _commits: Vec<String>,
+        _no_commit: bool,
+        _mainline: Option<u32>,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { bail!("revert not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn merge(
+        &self,
+        _commit: String,
+        _options: MergeOptions,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { bail!("merge not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn rebase(
+        &self,
+        _upstream: String,
+        _options: RebaseOptions,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { bail!("rebase not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn rebase_interactive(
+        &self,
+        _upstream: String,
+        _todo: Vec<RebaseTodoEntry>,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { bail!("rebase_interactive not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn rebase_action(
+        &self,
+        _action: RebaseInProgressAction,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { bail!("rebase_action not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn tag_create(
+        &self,
+        _name: String,
+        _commit: String,
+        _message: Option<String>,
+        _force: bool,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { bail!("tag_create not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn tag_delete(&self, _name: String) -> BoxFuture<'_, Result<()>> {
+        async { bail!("tag_delete not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn list_tags(&self) -> BoxFuture<'_, Result<Vec<Tag>>> {
+        async { Ok(Vec::new()) }.boxed()
+    }
+
+    fn branch_force_update(
+        &self,
+        _name: String,
+        _commit: String,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { bail!("branch_force_update not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn reflog(
+        &self,
+        _ref_name: Option<String>,
+        _limit: Option<usize>,
+    ) -> BoxFuture<'_, Result<Vec<ReflogEntry>>> {
+        async { Ok(Vec::new()) }.boxed()
     }
 
     fn set_trusted(&self, trusted: bool) {

@@ -556,6 +556,7 @@ pub struct Remote {
     pub name: SharedString,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetMode {
     /// Reset the branch pointer, leave index and worktree unchanged (this will make it look like things that were
     /// committed are now staged).
@@ -563,6 +564,8 @@ pub enum ResetMode {
     /// Reset the branch pointer and index, leave worktree unchanged (this makes it look as though things that were
     /// committed are now unstaged).
     Mixed,
+    /// Reset the branch pointer, index, and worktree. Destructive — uncommitted changes are lost.
+    Hard,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -750,6 +753,15 @@ impl LogSource {
 pub struct SearchCommitArgs {
     pub query: SharedString,
     pub case_sensitive: bool,
+    /// If set, restrict results to commits authored by this name or email
+    /// (substring match, passed to `git log --author=<>`).
+    pub author: Option<SharedString>,
+    /// If set, restrict results to commits that touched this path. Passed as a
+    /// pathspec after `--` to `git log`.
+    pub path: Option<SharedString>,
+    /// If set, restrict to commits no older than this. Accepts any value
+    /// recognised by git (absolute dates, `2.weeks`, `yesterday`, …).
+    pub since: Option<SharedString>,
 }
 
 pub trait GitRepository: Send + Sync {
@@ -902,9 +914,30 @@ pub trait GitRepository: Send + Sync {
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
 
+    /// Stash the given paths with a stash message attached. Used by safe
+    /// discard so the resulting stash can be located deterministically via
+    /// `stash_pop_by_message` instead of by index (which races against any
+    /// other stash the user creates in between).
+    fn stash_paths_with_message(
+        &self,
+        paths: Vec<RepoPath>,
+        message: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
     fn stash_pop(
         &self,
         index: Option<usize>,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// Apply the most recent stash whose message matches `message` (regex).
+    /// Resolves the stash via `stash^{/<message>}` so it survives unrelated
+    /// stash entries being pushed on top. Uses `apply` rather than `pop` so
+    /// undoing the undo is still possible.
+    fn stash_pop_by_message(
+        &self,
+        message: String,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
 
@@ -920,6 +953,25 @@ pub trait GitRepository: Send + Sync {
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
 
+    /// Initialize and fetch all submodules recursively.
+    /// (`git submodule update --init --recursive`).
+    fn submodule_update(
+        &self,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// Fetch LFS-tracked content for the current checkout (`git lfs fetch`).
+    fn lfs_fetch(
+        &self,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// Replace placeholder pointers with actual LFS content (`git lfs pull`).
+    fn lfs_pull(
+        &self,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
     fn push(
         &self,
         branch_name: String,
@@ -931,6 +983,9 @@ pub trait GitRepository: Send + Sync {
         // This method takes an AsyncApp to ensure it's invoked on the main thread,
         // otherwise git-credentials-manager won't work.
         cx: AsyncApp,
+        // When `Some`, the implementation streams `--progress` stderr lines
+        // and emits a `GitProgressEvent` per recognised phase.
+        progress_tx: Option<GitProgressSender>,
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>>;
 
     fn pull(
@@ -943,6 +998,7 @@ pub trait GitRepository: Send + Sync {
         // This method takes an AsyncApp to ensure it's invoked on the main thread,
         // otherwise git-credentials-manager won't work.
         cx: AsyncApp,
+        progress_tx: Option<GitProgressSender>,
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>>;
 
     fn fetch(
@@ -953,6 +1009,7 @@ pub trait GitRepository: Send + Sync {
         // This method takes an AsyncApp to ensure it's invoked on the main thread,
         // otherwise git-credentials-manager won't work.
         cx: AsyncApp,
+        progress_tx: Option<GitProgressSender>,
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>>;
 
     fn get_push_remote(&self, branch: String) -> BoxFuture<'_, Result<Option<Remote>>>;
@@ -1041,6 +1098,85 @@ pub trait GitRepository: Send + Sync {
 
     fn repair_worktrees(&self) -> BoxFuture<'_, Result<()>>;
 
+    /// Apply one or more commits onto the current branch. Stops on conflict.
+    fn cherry_pick(
+        &self,
+        commits: Vec<String>,
+        no_commit: bool,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// Revert one or more commits, creating new commits that undo them.
+    /// `mainline` is required when reverting a merge commit (1-indexed parent).
+    fn revert(
+        &self,
+        commits: Vec<String>,
+        no_commit: bool,
+        mainline: Option<u32>,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// Merge a commit into the current branch.
+    fn merge(
+        &self,
+        commit: String,
+        options: MergeOptions,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// Rebase the current branch onto `upstream` (or `options.onto` if set).
+    fn rebase(
+        &self,
+        upstream: String,
+        options: RebaseOptions,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// Start an interactive rebase with a pre-built todo list. The provided
+    /// `todo` replaces what `git rebase -i` would normally open in $EDITOR.
+    fn rebase_interactive(
+        &self,
+        upstream: String,
+        todo: Vec<RebaseTodoEntry>,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// Continue / skip / abort an in-progress rebase.
+    fn rebase_action(
+        &self,
+        action: RebaseInProgressAction,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    fn tag_create(
+        &self,
+        name: String,
+        commit: String,
+        message: Option<String>,
+        force: bool,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    fn tag_delete(&self, name: String) -> BoxFuture<'_, Result<()>>;
+
+    fn list_tags(&self) -> BoxFuture<'_, Result<Vec<Tag>>>;
+
+    /// Force-move a branch ref to point at `commit`. Equivalent to `git branch -f`.
+    /// Refuses to move the currently checked-out branch — use `reset` for that.
+    fn branch_force_update(
+        &self,
+        name: String,
+        commit: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// Read the reflog for `ref_name` (defaults to HEAD). `limit` caps entries.
+    fn reflog(
+        &self,
+        ref_name: Option<String>,
+        limit: Option<usize>,
+    ) -> BoxFuture<'_, Result<Vec<ReflogEntry>>>;
+
     fn set_trusted(&self, trusted: bool);
     fn is_trusted(&self) -> bool;
 }
@@ -1055,6 +1191,140 @@ pub enum DiffType {
 pub enum PushOptions {
     SetUpstream,
     Force,
+}
+
+/// A single progress update from a long-running git operation. Parsed from
+/// `git fetch/push/pull --progress` output on stderr.
+#[derive(Debug, Clone)]
+pub struct GitProgressEvent {
+    /// E.g. "Receiving objects", "Resolving deltas", "Counting objects".
+    pub phase: SharedString,
+    /// Percentage 0..=100 when git reports one. `None` for status lines that
+    /// don't include a percentage (e.g. "Cloning into 'foo'...").
+    pub percent: Option<u8>,
+    /// The raw message after the phase prefix, useful for surfacing transfer
+    /// rates and counts ("(300/635), 1.2 MiB | 500 KiB/s").
+    pub message: SharedString,
+}
+
+impl GitProgressEvent {
+    /// Parse a single line of git progress output. Git emits patterns like:
+    ///
+    /// ```text
+    /// Receiving objects:  47% (300/635), 1.2 MiB | 500 KiB/s
+    /// Resolving deltas: 100% (50/50), done.
+    /// Counting objects: 12, done.
+    /// Cloning into 'foo'...
+    /// ```
+    ///
+    /// Returns `None` for lines that don't fit this shape so the caller can
+    /// safely drop unrecognised stderr noise.
+    pub fn parse(line: &str) -> Option<Self> {
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+        let (phase, rest) = line.split_once(':')?;
+        // Heuristic: phase must look like a label (letters / spaces) and not
+        // contain a path separator — otherwise we'd misinterpret "fatal:" or
+        // ssh URLs as progress.
+        if phase.is_empty() || phase.chars().any(|c| c == '/' || c == '\\') {
+            return None;
+        }
+        let rest = rest.trim_start();
+        let percent = rest
+            .split_once('%')
+            .and_then(|(prefix, _)| prefix.trim_start().parse::<u8>().ok())
+            .filter(|p| *p <= 100);
+        Some(Self {
+            phase: phase.trim().to_string().into(),
+            percent,
+            message: rest.to_string().into(),
+        })
+    }
+}
+
+pub type GitProgressSender = smol::channel::Sender<GitProgressEvent>;
+
+#[derive(Debug, Clone, Default)]
+pub struct MergeOptions {
+    /// Always create a merge commit, even when a fast-forward would be possible.
+    pub no_ff: bool,
+    /// Refuse to merge unless a fast-forward is possible.
+    pub ff_only: bool,
+    /// Squash the merged commits into the index without recording a merge commit.
+    pub squash: bool,
+    /// Optional commit message to use for the merge commit.
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RebaseOptions {
+    /// Rebase onto a different base than the upstream branch.
+    pub onto: Option<String>,
+    /// Autosquash !fixup / !squash commits during rebase.
+    pub autosquash: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseAction {
+    Pick,
+    Reword,
+    Edit,
+    Squash,
+    Fixup,
+    Drop,
+}
+
+impl RebaseAction {
+    pub fn as_command(self) -> &'static str {
+        match self {
+            RebaseAction::Pick => "pick",
+            RebaseAction::Reword => "reword",
+            RebaseAction::Edit => "edit",
+            RebaseAction::Squash => "squash",
+            RebaseAction::Fixup => "fixup",
+            RebaseAction::Drop => "drop",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RebaseTodoEntry {
+    pub action: RebaseAction,
+    /// Commit SHA the action applies to. Ignored for `Drop` if you choose to omit.
+    pub commit: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseInProgressAction {
+    Continue,
+    Skip,
+    Abort,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReflogEntry {
+    /// SHA before the operation that produced this entry.
+    pub old_oid: String,
+    /// SHA after the operation.
+    pub new_oid: String,
+    /// Ref name this entry belongs to (e.g. `refs/heads/main`, `HEAD`).
+    pub ref_name: String,
+    /// Human-readable description (e.g. "commit: foo", "reset: moving to HEAD~").
+    pub message: String,
+    /// Unix timestamp.
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Tag {
+    pub name: SharedString,
+    pub target: Oid,
+    /// True for annotated tags, false for lightweight tags.
+    pub annotated: bool,
+    /// Message for annotated tags. None for lightweight tags.
+    pub message: Option<String>,
 }
 
 impl std::fmt::Debug for dyn GitRepository {
@@ -1414,6 +1684,7 @@ impl GitRepository for RealGitRepository {
             let mode_flag = match mode {
                 ResetMode::Mixed => "--mixed",
                 ResetMode::Soft => "--soft",
+                ResetMode::Hard => "--hard",
             };
 
             let git = git_binary?;
@@ -2311,6 +2582,41 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
+    fn stash_paths_with_message(
+        &self,
+        paths: Vec<RepoPath>,
+        message: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&[
+                        "stash",
+                        "push",
+                        "--quiet",
+                        "--include-untracked",
+                        "-m",
+                        &message,
+                        "--",
+                    ])
+                    .envs(env.iter())
+                    .args(paths.iter().map(|p| p.as_unix_str()))
+                    .output()
+                    .await?;
+
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to stash:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(())
+            })
+            .boxed()
+    }
+
     fn stash_pop(
         &self,
         index: Option<usize>,
@@ -2329,6 +2635,36 @@ impl GitRepository for RealGitRepository {
                 anyhow::ensure!(
                     output.status.success(),
                     "Failed to stash pop:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn stash_pop_by_message(
+        &self,
+        message: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                // `stash^{/<text>}` walks the stash reflog and resolves to the
+                // most recent entry whose message matches the regex. Using
+                // `apply` (not `pop`) keeps the stash entry around so the user
+                // can still redo the undo if they wish.
+                let revspec = format!("stash^{{/{}}}", message);
+                let output = git
+                    .build_command(&["stash", "apply", "--", &revspec])
+                    .envs(env.iter())
+                    .output()
+                    .await?;
+
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to apply stash by message {message:?}:\n{}",
                     String::from_utf8_lossy(&output.stderr)
                 );
                 Ok(())
@@ -2386,6 +2722,75 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
+    fn submodule_update(
+        &self,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&["submodule", "update", "--init", "--recursive"])
+                    .envs(env.iter())
+                    .output()
+                    .await?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to update submodules:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn lfs_fetch(
+        &self,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&["lfs", "fetch"])
+                    .envs(env.iter())
+                    .output()
+                    .await?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to fetch LFS content:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn lfs_pull(
+        &self,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&["lfs", "pull"])
+                    .envs(env.iter())
+                    .output()
+                    .await?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to pull LFS content:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(())
+            })
+            .boxed()
+    }
+
     fn commit(
         &self,
         message: SharedString,
@@ -2424,7 +2829,7 @@ impl GitRepository for RealGitRepository {
                 cmd.arg("--author").arg(&format!("{name} <{email}>"));
             }
 
-            run_git_command(env, ask_pass, cmd, executor).await?;
+            run_git_command(env, ask_pass, cmd, executor, None).await?;
 
             Ok(())
         }
@@ -2459,6 +2864,7 @@ impl GitRepository for RealGitRepository {
         ask_pass: AskPassDelegate,
         env: Arc<HashMap<String, String>>,
         cx: AsyncApp,
+        progress_tx: Option<GitProgressSender>,
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>> {
         let working_directory = self.working_directory();
         let git_directory = self.path();
@@ -2489,8 +2895,11 @@ impl GitRepository for RealGitRepository {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if progress_tx.is_some() {
+                command.arg("--progress");
+            }
 
-            run_git_command(env, ask_pass, command, executor).await
+            run_git_command(env, ask_pass, command, executor, progress_tx).await
         }
         .boxed()
     }
@@ -2503,6 +2912,7 @@ impl GitRepository for RealGitRepository {
         ask_pass: AskPassDelegate,
         env: Arc<HashMap<String, String>>,
         cx: AsyncApp,
+        progress_tx: Option<GitProgressSender>,
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>> {
         let working_directory = self.working_directory();
         let git_directory = self.path();
@@ -2533,8 +2943,11 @@ impl GitRepository for RealGitRepository {
                 .args(branch_name)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if progress_tx.is_some() {
+                command.arg("--progress");
+            }
 
-            run_git_command(env, ask_pass, command, executor).await
+            run_git_command(env, ask_pass, command, executor, progress_tx).await
         }
         .boxed()
     }
@@ -2545,6 +2958,7 @@ impl GitRepository for RealGitRepository {
         ask_pass: AskPassDelegate,
         env: Arc<HashMap<String, String>>,
         cx: AsyncApp,
+        progress_tx: Option<GitProgressSender>,
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>> {
         let working_directory = self.working_directory();
         let git_directory = self.path();
@@ -2569,8 +2983,11 @@ impl GitRepository for RealGitRepository {
                 .envs(env.iter())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if progress_tx.is_some() {
+                command.arg("--progress");
+            }
 
-            run_git_command(env, ask_pass, command, executor).await
+            run_git_command(env, ask_pass, command, executor, progress_tx).await
         }
         .boxed()
     }
@@ -3126,8 +3543,30 @@ impl GitRepository for RealGitRepository {
                 args.push("--regexp-ignore-case");
             }
 
+            let author_arg;
+            if let Some(author) = search_args.author.as_ref() {
+                author_arg = format!("--author={}", author.as_ref());
+                args.push(&author_arg);
+            }
+
+            let since_arg;
+            if let Some(since) = search_args.since.as_ref() {
+                since_arg = format!("--since={}", since.as_ref());
+                args.push(&since_arg);
+            }
+
+            // `--grep` with an empty string would match everything but combined
+            // with --author it would still be useful to filter only by author —
+            // git treats `--grep=` as "match anything" which is the intent.
             args.push("--grep");
             args.push(search_args.query.as_str());
+
+            // A pathspec restriction must come after `--`. Only push the
+            // delimiter when there's actually a path to apply.
+            if let Some(path) = search_args.path.as_ref() {
+                args.push("--");
+                args.push(path.as_ref());
+            }
 
             let mut command = git.build_command(&args);
             command.stdout(Stdio::piped());
@@ -3177,6 +3616,443 @@ impl GitRepository for RealGitRepository {
             request_tx,
             _task: task,
         })
+    }
+
+    fn cherry_pick(
+        &self,
+        commits: Vec<String>,
+        no_commit: bool,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        async move {
+            anyhow::ensure!(!commits.is_empty(), "cherry-pick requires at least one commit");
+            let git = git_binary?;
+            let mut args: Vec<OsString> = vec!["cherry-pick".into()];
+            if no_commit {
+                args.push("--no-commit".into());
+            }
+            for commit in &commits {
+                args.push(commit.into());
+            }
+            let output = git
+                .build_command(&args)
+                .envs(env.iter())
+                .output()
+                .await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Failed to cherry-pick:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn revert(
+        &self,
+        commits: Vec<String>,
+        no_commit: bool,
+        mainline: Option<u32>,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        async move {
+            anyhow::ensure!(!commits.is_empty(), "revert requires at least one commit");
+            let git = git_binary?;
+            let mut args: Vec<OsString> = vec!["revert".into()];
+            if no_commit {
+                args.push("--no-commit".into());
+            }
+            if let Some(parent) = mainline {
+                args.push("-m".into());
+                args.push(parent.to_string().into());
+            }
+            for commit in &commits {
+                args.push(commit.into());
+            }
+            let output = git
+                .build_command(&args)
+                .envs(env.iter())
+                .output()
+                .await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Failed to revert:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn merge(
+        &self,
+        commit: String,
+        options: MergeOptions,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        async move {
+            anyhow::ensure!(
+                !(options.no_ff && options.ff_only),
+                "merge cannot be both --no-ff and --ff-only",
+            );
+            anyhow::ensure!(
+                !(options.squash && options.no_ff),
+                "merge cannot be both --squash and --no-ff",
+            );
+            let git = git_binary?;
+            let mut args: Vec<OsString> = vec!["merge".into()];
+            if options.no_ff {
+                args.push("--no-ff".into());
+            }
+            if options.ff_only {
+                args.push("--ff-only".into());
+            }
+            if options.squash {
+                args.push("--squash".into());
+            }
+            if let Some(message) = options.message.as_deref() {
+                args.push("-m".into());
+                args.push(message.into());
+            }
+            args.push(commit.into());
+            let output = git
+                .build_command(&args)
+                .envs(env.iter())
+                .output()
+                .await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Failed to merge:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn rebase(
+        &self,
+        upstream: String,
+        options: RebaseOptions,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        async move {
+            let git = git_binary?;
+            let mut args: Vec<OsString> = vec!["rebase".into()];
+            if options.autosquash {
+                args.push("--autosquash".into());
+            }
+            if let Some(onto) = options.onto.as_deref() {
+                args.push("--onto".into());
+                args.push(onto.into());
+            }
+            args.push(upstream.into());
+            let output = git
+                .build_command(&args)
+                .envs(env.iter())
+                .output()
+                .await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Failed to rebase:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn rebase_interactive(
+        &self,
+        upstream: String,
+        todo: Vec<RebaseTodoEntry>,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        async move {
+            anyhow::ensure!(!todo.is_empty(), "rebase todo cannot be empty");
+            let git = git_binary?;
+
+            // Render the todo file we want git to use, then point GIT_SEQUENCE_EDITOR
+            // at a small helper that overwrites the todo file git generates.
+            let mut todo_text = String::new();
+            for entry in &todo {
+                todo_text.push_str(entry.action.as_command());
+                todo_text.push(' ');
+                todo_text.push_str(&entry.commit);
+                todo_text.push('\n');
+            }
+
+            let tmp = tempfile::Builder::new()
+                .prefix("lathe-rebase-todo-")
+                .tempfile()
+                .context("creating temp file for rebase todo")?;
+            smol::fs::write(tmp.path(), todo_text.as_bytes())
+                .await
+                .context("writing rebase todo")?;
+
+            // GIT_SEQUENCE_EDITOR is invoked as `$EDITOR <todo-path>`. On unix-like
+            // systems we use `sh -c 'cat OUR_TODO > "$1"' _`. Windows uses cmd's
+            // copy. Both are tested with paths that may contain spaces.
+            let todo_path_str = tmp
+                .path()
+                .to_str()
+                .context("rebase todo path is not utf-8")?
+                .to_owned();
+            #[cfg(windows)]
+            let sequence_editor = format!("cmd /C copy /Y \"{}\"", todo_path_str.replace('/', "\\"));
+            #[cfg(not(windows))]
+            let sequence_editor =
+                format!("sh -c 'cat \"{}\" > \"$1\"' _", todo_path_str.replace('\'', "'\\''"));
+
+            let output = git
+                .build_command(&[
+                    OsString::from("rebase"),
+                    OsString::from("-i"),
+                    OsString::from(upstream),
+                ])
+                .envs(env.iter())
+                .env("GIT_SEQUENCE_EDITOR", sequence_editor)
+                // If a commit needs amending mid-rebase (reword/edit), git would normally
+                // open $EDITOR for the message. Use `true` to keep the existing message
+                // and let the caller drive the reword via a follow-up commit --amend.
+                .env("GIT_EDITOR", "true")
+                .output()
+                .await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Failed to rebase --interactive:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn rebase_action(
+        &self,
+        action: RebaseInProgressAction,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        async move {
+            let flag = match action {
+                RebaseInProgressAction::Continue => "--continue",
+                RebaseInProgressAction::Skip => "--skip",
+                RebaseInProgressAction::Abort => "--abort",
+            };
+            let git = git_binary?;
+            let output = git
+                .build_command(&["rebase", flag])
+                .envs(env.iter())
+                .env("GIT_EDITOR", "true")
+                .output()
+                .await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Failed to {flag}:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn tag_create(
+        &self,
+        name: String,
+        commit: String,
+        message: Option<String>,
+        force: bool,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        async move {
+            let git = git_binary?;
+            let mut args: Vec<OsString> = vec!["tag".into()];
+            if force {
+                args.push("-f".into());
+            }
+            if let Some(message) = message.as_deref() {
+                args.push("-a".into());
+                args.push("-m".into());
+                args.push(message.into());
+            }
+            args.push(name.into());
+            args.push(commit.into());
+            let output = git
+                .build_command(&args)
+                .envs(env.iter())
+                .output()
+                .await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Failed to create tag:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn tag_delete(&self, name: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                git_binary?.run(&["tag", "-d", &name]).await?;
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn list_tags(&self) -> BoxFuture<'_, Result<Vec<Tag>>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                // %(refname:short) <NUL> %(objecttype) <NUL> %(*objectname) <NUL> %(objectname) <NUL> %(contents:subject) <RS>
+                // For annotated tags `*objectname` is the dereferenced commit SHA; for lightweight tags it's empty.
+                let format = "--format=%(refname:short)%00%(objecttype)%00%(*objectname)%00%(objectname)%00%(contents:subject)%1e";
+                let output = git
+                    .build_command(&["for-each-ref", "refs/tags", format])
+                    .output()
+                    .await?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to list tags:\n{}",
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut tags = Vec::new();
+                for record in stdout.split('\x1e') {
+                    let record = record.trim_start_matches('\n');
+                    if record.is_empty() {
+                        continue;
+                    }
+                    let mut fields = record.splitn(5, '\x00');
+                    let name = fields.next().unwrap_or("").to_string();
+                    let object_type = fields.next().unwrap_or("");
+                    let deref_sha = fields.next().unwrap_or("");
+                    let direct_sha = fields.next().unwrap_or("");
+                    let subject = fields.next().unwrap_or("").to_string();
+                    let annotated = object_type == "tag";
+                    let target_sha = if annotated { deref_sha } else { direct_sha };
+                    let Ok(target) = Oid::from_str(target_sha) else {
+                        continue;
+                    };
+                    tags.push(Tag {
+                        name: name.into(),
+                        target,
+                        annotated,
+                        message: if annotated && !subject.is_empty() {
+                            Some(subject)
+                        } else {
+                            None
+                        },
+                    });
+                }
+                Ok(tags)
+            })
+            .boxed()
+    }
+
+    fn branch_force_update(
+        &self,
+        name: String,
+        commit: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let repo = self.repository.clone();
+        let git_binary = self.git_binary();
+        async move {
+            // Refuse to move the currently checked-out branch. The caller should
+            // use `reset` for that, which has explicit Soft/Mixed/Hard semantics.
+            let is_current = {
+                let repo = repo.lock();
+                match repo.head() {
+                    Ok(reference) => reference.shorthand().map(|s| s.to_string()) == Some(name.clone()),
+                    Err(_) => false,
+                }
+            };
+            anyhow::ensure!(
+                !is_current,
+                "Refusing to force-update the current branch `{name}`; use reset instead",
+            );
+            let git = git_binary?;
+            let output = git
+                .build_command(&["branch", "-f", &name, &commit])
+                .envs(env.iter())
+                .output()
+                .await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Failed to force-update branch:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn reflog(
+        &self,
+        ref_name: Option<String>,
+        limit: Option<usize>,
+    ) -> BoxFuture<'_, Result<Vec<ReflogEntry>>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let mut args: Vec<OsString> = vec![
+                    "reflog".into(),
+                    "show".into(),
+                    "--no-abbrev".into(),
+                    "--format=%H%x00%gd%x00%ct%x00%gs".into(),
+                ];
+                if let Some(limit) = limit {
+                    args.push(format!("-n{limit}").into());
+                }
+                let ref_name = ref_name.unwrap_or_else(|| "HEAD".to_string());
+                args.push(ref_name.clone().into());
+                let output = git.build_command(&args).output().await?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to read reflog:\n{}",
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut entries = Vec::new();
+                let mut previous_sha: Option<String> = None;
+                for line in stdout.lines() {
+                    let mut fields = line.splitn(4, '\x00');
+                    let new_oid = fields.next().unwrap_or("").to_string();
+                    let selector = fields.next().unwrap_or("");
+                    let timestamp = fields
+                        .next()
+                        .and_then(|t| t.parse::<i64>().ok())
+                        .unwrap_or_default();
+                    let message = fields.next().unwrap_or("").to_string();
+                    if new_oid.is_empty() {
+                        continue;
+                    }
+                    let old_oid = previous_sha.clone().unwrap_or_default();
+                    previous_sha = Some(new_oid.clone());
+                    entries.push(ReflogEntry {
+                        old_oid,
+                        new_oid,
+                        ref_name: selector.to_string(),
+                        message,
+                        timestamp,
+                    });
+                }
+                Ok(entries)
+            })
+            .boxed()
     }
 
     fn set_trusted(&self, trusted: bool) {
@@ -3532,8 +4408,18 @@ async fn run_git_command(
     ask_pass: AskPassDelegate,
     mut command: util::command::Command,
     executor: BackgroundExecutor,
+    progress_tx: Option<GitProgressSender>,
 ) -> Result<RemoteCommandOutput> {
     if env.contains_key("GIT_ASKPASS") {
+        // Streaming path: when a progress sender is provided, read stderr line
+        // by line so the UI can render live `Receiving objects: 47%` updates.
+        // Without one, fall back to the buffered shape — it's a hair faster
+        // and avoids spawning extra reader tasks.
+        if let Some(progress_tx) = progress_tx {
+            command.stderr(Stdio::piped()).stdout(Stdio::piped());
+            let mut git_process = command.spawn()?;
+            return collect_with_progress(&mut git_process, progress_tx).await;
+        }
         let git_process = command.spawn()?;
         let output = git_process.output().await?;
         anyhow::ensure!(
@@ -3551,38 +4437,125 @@ async fn run_git_command(
             .env("GIT_ASKPASS", ask_pass.script_path())
             .env("SSH_ASKPASS", ask_pass.script_path())
             .env("SSH_ASKPASS_REQUIRE", "force");
+        // Match the no-askpass branch: pipe stdio only when a progress sender
+        // wants live updates. The piped-but-unread case would deadlock, so
+        // both `collect_with_progress` and `output()` must fully drain.
+        if progress_tx.is_some() {
+            command.stderr(Stdio::piped()).stdout(Stdio::piped());
+        }
         let git_process = command.spawn()?;
 
-        run_askpass_command(ask_pass, git_process).await
+        run_askpass_command(ask_pass, git_process, progress_tx).await
     }
+}
+
+/// Read stderr/stdout from a spawned git process while parsing each stderr
+/// line as a [`GitProgressEvent`] and emitting through `progress_tx`. The full
+/// stderr is still gathered for the final [`RemoteCommandOutput`].
+async fn collect_with_progress(
+    git_process: &mut util::command::Child,
+    progress_tx: GitProgressSender,
+) -> Result<RemoteCommandOutput> {
+    let stderr = git_process
+        .stderr
+        .take()
+        .context("stderr was not piped on the git child")?;
+    let stdout = git_process
+        .stdout
+        .take()
+        .context("stdout was not piped on the git child")?;
+
+    let stderr_task = smol::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut accumulated = String::new();
+        let mut buf = Vec::with_capacity(256);
+        loop {
+            buf.clear();
+            // Git emits `\r` for in-place progress overwrites and `\n` only at
+            // phase boundaries. `read_until(b'\n', ...)` collects each phase
+            // chunk; we then split it on `\r` to surface the intermediate
+            // progress updates.
+            let n = reader.read_until(b'\n', &mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            let chunk = String::from_utf8_lossy(&buf);
+            accumulated.push_str(&chunk);
+            for piece in chunk.split(|c: char| c == '\r' || c == '\n') {
+                if let Some(event) = GitProgressEvent::parse(piece) {
+                    // Channel may have been dropped by the UI; ignore.
+                    let _ = progress_tx.try_send(event);
+                }
+            }
+        }
+        Ok::<String, anyhow::Error>(accumulated)
+    });
+
+    let stdout_task = smol::spawn(async move {
+        let mut reader = BufReader::new(stdout);
+        let mut output = String::new();
+        reader.read_to_string(&mut output).await?;
+        Ok::<String, anyhow::Error>(output)
+    });
+
+    let status = git_process.status().await?;
+    let stderr_text = stderr_task.await?;
+    let stdout_text = stdout_task.await?;
+
+    anyhow::ensure!(status.success(), "{stderr_text}");
+    Ok(RemoteCommandOutput {
+        stdout: stdout_text,
+        stderr: stderr_text,
+    })
 }
 
 async fn run_askpass_command(
     mut ask_pass: AskPassSession,
-    git_process: util::command::Child,
+    mut git_process: util::command::Child,
+    progress_tx: Option<GitProgressSender>,
 ) -> anyhow::Result<RemoteCommandOutput> {
-    select_biased! {
-        result = ask_pass.run().fuse() => {
-            match result {
-                AskPassResult::CancelledByUser => {
-                    Err(anyhow!(REMOTE_CANCELLED_BY_USER))?
-                }
-                AskPassResult::Timedout => {
-                    Err(anyhow!("Connecting to host timed out"))?
+    // The askpass arm always races askpass-cancellation against the git
+    // process completing. When the cancellation future wins, `git_process`
+    // (or the borrow held by `collect_with_progress`) is dropped, which
+    // kills the process, so no explicit cleanup is needed in either branch.
+    if let Some(progress_tx) = progress_tx {
+        select_biased! {
+            result = ask_pass.run().fuse() => {
+                match result {
+                    AskPassResult::CancelledByUser => {
+                        Err(anyhow!(REMOTE_CANCELLED_BY_USER))?
+                    }
+                    AskPassResult::Timedout => {
+                        Err(anyhow!("Connecting to host timed out"))?
+                    }
                 }
             }
+            output = collect_with_progress(&mut git_process, progress_tx).fuse() => output,
         }
-        output = git_process.output().fuse() => {
-            let output = output?;
-            anyhow::ensure!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            Ok(RemoteCommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            })
+    } else {
+        select_biased! {
+            result = ask_pass.run().fuse() => {
+                match result {
+                    AskPassResult::CancelledByUser => {
+                        Err(anyhow!(REMOTE_CANCELLED_BY_USER))?
+                    }
+                    AskPassResult::Timedout => {
+                        Err(anyhow!("Connecting to host timed out"))?
+                    }
+                }
+            }
+            output = git_process.output().fuse() => {
+                let output = output?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(RemoteCommandOutput {
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                })
+            }
         }
     }
 }

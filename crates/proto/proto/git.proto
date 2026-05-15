@@ -299,6 +299,7 @@ message GitReset {
   enum ResetMode {
     SOFT = 0;
     MIXED = 1;
+    HARD = 2;
   }
 }
 

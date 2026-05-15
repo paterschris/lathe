@@ -7330,11 +7330,14 @@ dependencies = [
  "db",
  "editor",
  "fs",
+ "futures 0.3.32",
  "git",
  "git_ui",
  "gpui",
  "language",
+ "log",
  "menu",
+ "notifications",
  "project",
  "rand 0.9.3",
  "remote_connection",
@@ -13269,6 +13272,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "pr_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "futures 0.3.32",
+ "git",
+ "gpui",
+ "log",
+ "notifications",
+ "picker",
+ "project",
+ "settings",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
 ]
 
 [[package]]
@@ -22382,7 +22406,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.236.5"
+version = "0.236.6"
 dependencies = [
  "acp_thread",
  "acp_tools",
@@ -22484,6 +22508,7 @@ dependencies = [
  "paths",
  "picker",
  "pkg-config",
+ "pr_ui",
  "pretty_assertions",
  "profiling",
  "project",

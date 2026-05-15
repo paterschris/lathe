@@ -77,10 +77,12 @@ jobs:
 
       - name: Build
         env:
-          # Baked into the binary so the in-app updater can query GitHub
-          # releases for Stable/Preview. Beta also falls back to this URL
-          # when LATHE_BETA_UPDATE_URL is unset.
-          LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases/latest
+          # Baked into the binary so the in-app updater can discover new
+          # releases for every channel (Stable, Preview, Beta) from a single
+          # endpoint. The list endpoint includes prereleases (the `/latest`
+          # endpoint excludes them), and the auto-updater filters the result
+          # by the running binary's channel via tag suffix.
+          LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases?per_page=30
         run: script/build-fork
 
       - name: Verify signing identity

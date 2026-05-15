@@ -44,7 +44,7 @@ use gpui::{
     WeakEntity, actions, anchored, deferred, point, size, uniform_list,
 };
 use itertools::Itertools;
-use language::{Buffer, File};
+use language::{Buffer, File, ToPoint as _};
 use language_model::{
     CompletionIntent, ConfiguredModel, LanguageModelRegistry, LanguageModelRequest,
     LanguageModelRequestMessage, Role,
@@ -67,7 +67,11 @@ use smallvec::SmallVec;
 use std::future::Future;
 use std::ops::Range;
 use std::path::Path;
-use std::{sync::Arc, time::Duration, usize};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+    usize,
+};
 use strum::{IntoEnumIterator, VariantNames};
 use theme_settings::ThemeSettings;
 use time::OffsetDateTime;
@@ -307,6 +311,29 @@ enum GitListEntry {
     TreeStatus(GitTreeStatusEntry),
     Directory(GitTreeDirEntry),
     Header(GitHeaderEntry),
+    /// Per-hunk row inserted below an expanded `Status` row. Carries enough
+    /// metadata to render the line range and to dispatch stage / unstage
+    /// without round-tripping through the buffer cache.
+    Hunk(GitHunkEntry),
+    /// Placeholder while the buffer + diff for an expanded file are loading.
+    HunkLoading { repo_path: RepoPath },
+    /// Surfaced when the load failed — typically because the file is binary
+    /// or has been deleted out from under us.
+    HunkError {
+        repo_path: RepoPath,
+        message: SharedString,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct GitHunkEntry {
+    repo_path: RepoPath,
+    /// Stable identifier within the hunk list so the stage handler can refetch
+    /// the live `DiffHunk` (anchors stay valid across edits but the index in
+    /// the list does not).
+    hunk_index: usize,
+    line_label: SharedString,
+    is_staged: bool,
 }
 
 impl GitListEntry {
@@ -333,6 +360,21 @@ impl GitListEntry {
             _ => 0,
         }
     }
+}
+
+/// Cached buffer + diff for a file whose hunks have been (or are being)
+/// surfaced in the panel. Stored on `GitPanel.hunk_states` keyed by repo path.
+enum HunkLoadState {
+    Loading,
+    Loaded {
+        buffer: Entity<Buffer>,
+        diff: Entity<buffer_diff::BufferDiff>,
+        /// Subscription that listens for changes to the diff (e.g. the user
+        /// stages, unstages, or restores a hunk from the diff view) and
+        /// marks the panel as needing a hunk-row rebuild.
+        _diff_subscription: Subscription,
+    },
+    Failed(SharedString),
 }
 
 enum GitPanelViewMode {
@@ -657,6 +699,23 @@ pub struct GitPanel {
     commit_template: Option<GitCommitTemplate>,
     bulk_staging: Option<BulkStaging>,
     stash_entries: GitStash,
+    /// Whether the multi-repository strip above the header is expanded. When
+    /// the workspace has more than one repository this strip surfaces an
+    /// inline switcher + bulk actions; collapsed by default to keep the panel
+    /// uncluttered for single-repo workspaces.
+    repos_strip_expanded: bool,
+    /// Set whenever a cached `HunkLoadState` BufferDiff emits a change so the
+    /// next render rebuilds visible entries. Required to keep the hunk
+    /// subtree in sync with stage / unstage / restore performed in the diff
+    /// view (which edits the buffer + diff but doesn't otherwise notify the
+    /// panel).
+    pending_hunk_refresh: bool,
+    /// Paths whose hunk subtree is currently expanded in the panel.
+    expanded_files: HashSet<RepoPath>,
+    /// Cached buffer + diff per expanded path. Populated asynchronously the
+    /// first time a path is expanded; subscribed to `BufferDiff` updates so
+    /// the panel re-renders when hunks are staged elsewhere.
+    hunk_states: HashMap<RepoPath, HunkLoadState>,
 
     _settings_subscription: Subscription,
     git_access: GitAccess,
@@ -699,6 +758,65 @@ pub(crate) fn commit_message_editor(
     let placeholder = placeholder.unwrap_or("Enter commit message".into());
     commit_editor.set_placeholder_text(&placeholder, window, cx);
     commit_editor
+}
+
+fn render_tracking_chip(status: UpstreamTrackingStatus) -> impl IntoElement {
+    h_flex()
+        .gap_0p5()
+        .when(status.behind > 0, |this| {
+            this.child(
+                Icon::new(IconName::ArrowDown)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(status.behind.to_string())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+        })
+        .when(status.ahead > 0, |this| {
+            this.child(
+                Icon::new(IconName::ArrowUp)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(status.ahead.to_string())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+        })
+}
+
+fn render_pinned_strip_row(ix: usize, path: String, cx: &Context<GitPanel>) -> AnyElement {
+    let label: SharedString = std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string().into())
+        .unwrap_or_else(|| path.clone().into());
+    let path_buf = std::path::PathBuf::from(&path);
+    h_flex()
+        .id(("git-panel-pinned-row", ix))
+        .h(rems(1.5))
+        .px_2()
+        .gap_1p5()
+        .hover(|this| this.bg(cx.theme().colors().element_hover))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.dispatch_action(
+                zed_actions::OpenWorktreeInNewWindow {
+                    path: path_buf.clone(),
+                }
+                .boxed_clone(),
+                cx,
+            );
+        })
+        .child(
+            Icon::new(IconName::Pin)
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+        )
+        .child(Label::new(label).size(LabelSize::XSmall).truncate())
+        .into_any_element()
 }
 
 impl GitPanel {
@@ -802,7 +920,9 @@ impl GitPanel {
                             .ok();
                     }
                     GitStoreEvent::RepositoryUpdated(_, _, _) => {}
-                    GitStoreEvent::JobsUpdated | GitStoreEvent::ConflictsUpdated => {}
+                    GitStoreEvent::JobsUpdated
+                    | GitStoreEvent::ConflictsUpdated
+                    | GitStoreEvent::UndoLogChanged(_) => {}
                 },
             )
             .detach();
@@ -847,6 +967,10 @@ impl GitPanel {
                 entry_count: 0,
                 bulk_staging: None,
                 stash_entries: Default::default(),
+                repos_strip_expanded: false,
+                pending_hunk_refresh: false,
+                expanded_files: HashSet::default(),
+                hunk_states: HashMap::default(),
                 _settings_subscription,
                 git_access: GitAccess::Yes,
             };
@@ -1594,6 +1718,48 @@ impl GitPanel {
 
             let buffers = futures::future::join_all(tasks).await;
 
+            // Safety net: stash the about-to-be-discarded changes (including
+            // untracked) so they're recoverable via `git stash list`. Only
+            // stash when there is at least one path to operate on; an empty
+            // stash would still succeed and clutter the stash list.
+            //
+            // Tag the stash with a deterministic message so the Undo toast
+            // can locate it later by message, not by index — the index
+            // shifts if the user pushes additional stash entries on top.
+            let stash_paths: Vec<_> = entries
+                .iter()
+                .map(|entry| entry.repo_path.clone())
+                .collect();
+            let stash_message = format!(
+                "lathe-discard/{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            );
+            let stash_task = active_repository.update(cx, |repo, cx| {
+                repo.stash_entries_with_message(
+                    stash_paths.clone(),
+                    stash_message.clone(),
+                    cx,
+                )
+            });
+            let stash_ok = match stash_task.await {
+                Ok(()) => true,
+                Err(error) => {
+                    // Stashing failed (no tracked content here, or running
+                    // against a remote/collab repo where message-tagged
+                    // stashes aren't supported). Log but continue: the user
+                    // explicitly asked to discard. Undo will be skipped.
+                    log::warn!(
+                        "lathe-discard stash failed for {} path(s): {error:?}",
+                        stash_paths.len()
+                    );
+                    false
+                }
+            };
+            let discarded_count = stash_paths.len();
+
             this.update_in(cx, |this, window, cx| {
                 let task = active_repository.update(cx, |repo, cx| {
                     repo.checkout_files(
@@ -1623,6 +1789,63 @@ impl GitPanel {
             })?;
 
             futures::future::join_all(tasks).await;
+
+            // Record undo for the discard so the toast's "Undo" button can
+            // pop the stash we just created. Skipped if stashing failed
+            // (nothing to undo) or if no files were discarded.
+            if stash_ok && discarded_count > 0 {
+                let workspace_for_toast = workspace.clone();
+                let repo_id = active_repository.read_with(cx, |r, _| r.id);
+                {
+                    let git_store = workspace.update(cx, |workspace, cx| {
+                        workspace.project().read(cx).git_store().clone()
+                    })?;
+                    let label: SharedString =
+                        format!("Discarded {discarded_count} file(s)").into();
+                    let toast_label = label.clone();
+                    cx.update(|_, cx| {
+                        let undo_id = git_store.update(cx, |store, cx| {
+                            store.record_undo(
+                                repo_id,
+                                label,
+                                project::git_store::undo_log::UndoAction::PopStashByMessage {
+                                    message: stash_message.clone(),
+                                },
+                                cx,
+                            )
+                        });
+                        workspace_for_toast
+                            .update(cx, |workspace, cx| {
+                                let store = git_store.clone();
+                                let toast = notifications::status_toast::StatusToast::new(
+                                    toast_label,
+                                    cx,
+                                    move |this, _cx| {
+                                        let store = store.clone();
+                                        this.icon(
+                                            ui::Icon::new(ui::IconName::Undo)
+                                                .size(ui::IconSize::Small)
+                                                .color(ui::Color::Muted),
+                                        )
+                                        .action(
+                                            "Undo discard",
+                                            move |_window, cx| {
+                                                store
+                                                    .update(cx, |store, cx| {
+                                                        store.undo(undo_id, cx)
+                                                    })
+                                                    .detach();
+                                            },
+                                        )
+                                        .dismiss_button(true)
+                                    },
+                                );
+                                workspace.toggle_status_toast(toast, cx);
+                            })
+                            .ok();
+                    })?;
+                }
+            }
 
             Ok(())
         });
@@ -1968,6 +2191,11 @@ impl GitPanel {
                         .collect::<Vec<_>>();
                     (goal_stage, entries)
                 }
+                // Hunk rows have their own stage flow (`toggle_hunk_stage`);
+                // the file-level toggle does not apply.
+                GitListEntry::Hunk(_)
+                | GitListEntry::HunkLoading { .. }
+                | GitListEntry::HunkError { .. } => return,
             }
         };
         if let Some(anchor) = clear_anchor {
@@ -2936,6 +3164,219 @@ impl GitPanel {
             .detach_and_log_err(cx);
     }
 
+    /// Run `git fetch` against every repository in the workspace concurrently.
+    /// Shows a single summary toast with success/failure counts when all
+    /// in-flight fetches complete. Individual progress still streams into each
+    /// repo's job indicator via the existing progress relay.
+    pub(crate) fn fetch_all_repositories(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_push_and_pull(cx) {
+            return;
+        }
+        let workspace = self.workspace.clone();
+        let project = self.project.clone();
+
+        let repo_entities: Vec<_> = project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .repositories()
+            .values()
+            .cloned()
+            .collect();
+
+        if repo_entities.is_empty() {
+            return;
+        }
+        telemetry::event!("Git Fetched All Repositories");
+
+        let total = repo_entities.len();
+        let mut fetch_tasks = Vec::with_capacity(total);
+        for repo in repo_entities {
+            let askpass = self.askpass_delegate("git fetch", window, cx);
+            let receiver = repo.update(cx, |repo, cx| {
+                repo.fetch(FetchOptions::All, askpass, cx)
+            });
+            fetch_tasks.push(receiver);
+        }
+
+        cx.spawn_in(window, async move |this, cx| {
+            let results = futures::future::join_all(fetch_tasks).await;
+            let mut succeeded = 0usize;
+            let mut failed_with_errors = Vec::new();
+            for result in results {
+                match result {
+                    Ok(Ok(_)) => succeeded += 1,
+                    Ok(Err(error)) => failed_with_errors.push(format!("{error}")),
+                    Err(_canceled) => {
+                        failed_with_errors.push("cancelled".to_string());
+                    }
+                }
+            }
+
+            let summary: SharedString = if failed_with_errors.is_empty() {
+                format!("Fetched {succeeded}/{total} repositories").into()
+            } else {
+                format!(
+                    "Fetched {succeeded}/{total} repositories — {} failed",
+                    failed_with_errors.len()
+                )
+                .into()
+            };
+
+            this.update_in(cx, |_, _window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        let toast = StatusToast::new(summary.clone(), cx, |this, _cx| {
+                            this.icon(
+                                ui::Icon::new(ui::IconName::Download)
+                                    .size(ui::IconSize::Small)
+                                    .color(ui::Color::Muted),
+                            )
+                            .dismiss_button(true)
+                        });
+                        workspace.toggle_status_toast(toast, cx);
+                    })
+                    .ok();
+            })
+            .ok();
+
+            let _ = project;
+            Ok::<(), anyhow::Error>(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    pub(crate) fn pull_all_repositories(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_push_and_pull(cx) {
+            return;
+        }
+        let workspace = self.workspace.clone();
+        let project = self.project.clone();
+
+        let repo_entities: Vec<_> = project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .repositories()
+            .values()
+            .cloned()
+            .collect();
+
+        if repo_entities.is_empty() {
+            return;
+        }
+        telemetry::event!("Git Pulled All Repositories");
+
+        let total = repo_entities.len();
+        let mut pull_tasks = Vec::new();
+        let mut skipped_no_upstream = 0usize;
+        for repo in repo_entities {
+            // Per-repo: only pull when the current branch has a tracked
+            // upstream we can derive a remote from. Anything else (detached
+            // HEAD, no branch, upstream gone, no upstream at all) is skipped
+            // so we don't prompt for input mid-bulk.
+            let pull_args = repo.read_with(cx, |repo, _| {
+                let branch = repo.branch.as_ref()?;
+                let upstream = branch.upstream.as_ref()?;
+                if upstream.tracking.is_gone() {
+                    return None;
+                }
+                let remote = upstream.remote_name()?.to_string();
+                Some(remote)
+            });
+            let Some(remote) = pull_args else {
+                skipped_no_upstream += 1;
+                continue;
+            };
+            let askpass = self.askpass_delegate(format!("git pull {remote}"), window, cx);
+            let receiver = repo.update(cx, |repo, cx| {
+                repo.pull(None, remote.into(), false, askpass, cx)
+            });
+            pull_tasks.push(receiver);
+        }
+
+        if pull_tasks.is_empty() {
+            // Nothing to pull: tell the user why up front instead of silently
+            // doing nothing.
+            cx.spawn_in(window, async move |_, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        let summary: SharedString = format!(
+                            "Pulled 0/{total} repositories; {skipped_no_upstream} skipped (no upstream)"
+                        )
+                        .into();
+                        let toast = StatusToast::new(summary, cx, |this, _cx| {
+                            this.icon(
+                                ui::Icon::new(ui::IconName::ArrowCircle)
+                                    .size(ui::IconSize::Small)
+                                    .color(ui::Color::Muted),
+                            )
+                            .dismiss_button(true)
+                        });
+                        workspace.toggle_status_toast(toast, cx);
+                    })
+                    .ok();
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+            let _ = project;
+            return;
+        }
+
+        cx.spawn_in(window, async move |this, cx| {
+            let results = futures::future::join_all(pull_tasks).await;
+            let mut succeeded = 0usize;
+            let mut failed_with_errors = Vec::new();
+            for result in results {
+                match result {
+                    Ok(Ok(_)) => succeeded += 1,
+                    Ok(Err(error)) => failed_with_errors.push(format!("{error}")),
+                    Err(_canceled) => {
+                        failed_with_errors.push("cancelled".to_string());
+                    }
+                }
+            }
+
+            let mut summary = format!("Pulled {succeeded}/{total} repositories");
+            if skipped_no_upstream > 0 {
+                summary.push_str(&format!("; {skipped_no_upstream} skipped (no upstream)"));
+            }
+            if !failed_with_errors.is_empty() {
+                summary.push_str(&format!(", {} failed", failed_with_errors.len()));
+            }
+            let summary: SharedString = summary.into();
+
+            this.update_in(cx, |_, _window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        let toast = StatusToast::new(summary.clone(), cx, |this, _cx| {
+                            this.icon(
+                                ui::Icon::new(ui::IconName::ArrowCircle)
+                                    .size(ui::IconSize::Small)
+                                    .color(ui::Color::Muted),
+                            )
+                            .dismiss_button(true)
+                        });
+                        workspace.toggle_status_toast(toast, cx);
+                    })
+                    .ok();
+            })
+            .ok();
+
+            let _ = project;
+            Ok::<(), anyhow::Error>(())
+        })
+        .detach_and_log_err(cx);
+    }
+
     pub(crate) fn git_clone(&mut self, repo: String, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
 
@@ -3813,12 +4254,27 @@ impl GitPanel {
                     for (entry, is_visible) in
                         tree_state.build_tree_entries(section, entries, &mut seen_directories)
                     {
+                        let hunk_target = entry
+                            .status_entry()
+                            .filter(|status| self.expanded_files.contains(&status.repo_path))
+                            .map(|status| status.repo_path.clone());
                         push_entry(
                             self,
                             entry,
                             is_visible,
                             Some(&mut tree_state.logical_indices),
                         );
+                        if let Some(path) = hunk_target {
+                            let hunk_entries = self.build_hunk_list_entries(&path, cx);
+                            for h in hunk_entries {
+                                push_entry(
+                                    self,
+                                    h,
+                                    true,
+                                    Some(&mut tree_state.logical_indices),
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -3843,7 +4299,14 @@ impl GitPanel {
                     }
 
                     for entry in entries {
+                        let path = entry.repo_path.clone();
                         push_entry(self, GitListEntry::Status(entry), true, None);
+                        if self.expanded_files.contains(&path) {
+                            let hunk_entries = self.build_hunk_list_entries(&path, cx);
+                            for h in hunk_entries {
+                                push_entry(self, h, true, None);
+                            }
+                        }
                     }
                 }
             }
@@ -4097,6 +4560,11 @@ impl GitPanel {
                 Some(Self::item_width_estimate(0, dir.name.len(), dir.depth))
             }
             GitListEntry::Header(_) => None,
+            // Hunk rows are tucked under their parent file and never need to
+            // drive the panel's column width.
+            GitListEntry::Hunk(_)
+            | GitListEntry::HunkLoading { .. }
+            | GitListEntry::HunkError { .. } => None,
         }
     }
 
@@ -4360,6 +4828,251 @@ impl GitPanel {
                 })
                 .ok();
         })
+    }
+
+    /// Compact multi-repository strip shown above the panel header. Renders a
+    /// single header row (chevron, label, Fetch all / Pull all / Graph icons);
+    /// when expanded, an inline list of repos lets the user switch active
+    /// repo, with per-row Fetch / Pull / Open in terminal under `⋯`. Pinned
+    /// external repos from `repository_dashboard_pinned_repos` render below
+    /// the workspace repos with a pin icon and click-to-open-new-workspace.
+    fn render_repos_strip(&self, cx: &mut Context<Self>) -> AnyElement {
+        let project = self.project.clone();
+        let git_store = project.read(cx).git_store().clone();
+        let store_ref = git_store.read(cx);
+        let mut repos: Vec<Entity<Repository>> = store_ref.repositories().values().cloned().collect();
+        repos.sort_by(|a, b| {
+            a.read(cx)
+                .display_name()
+                .to_lowercase()
+                .cmp(&b.read(cx).display_name().to_lowercase())
+        });
+        let active_id = store_ref.active_repository().map(|r| r.read(cx).id);
+
+        let pinned = crate::new_panel_settings::RepositoryDashboardPanelSettings::get_global(cx)
+            .pinned_repos
+            .clone();
+        let count = repos.len();
+        let has_pinned = !pinned.is_empty();
+        let expanded = self.repos_strip_expanded;
+
+        let header = h_flex()
+            .h(rems(1.75))
+            .px_2()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .justify_between()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .id("git-panel-repos-strip-toggle")
+                    .child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new("Repositories")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(format!("({count})"))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.repos_strip_expanded = !this.repos_strip_expanded;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .child(
+                        IconButton::new("git-panel-fetch-all", IconName::Download)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Fetch all repositories"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    git::FetchAllRepositories.boxed_clone(),
+                                    cx,
+                                );
+                            }),
+                    )
+                    .child(
+                        IconButton::new("git-panel-pull-all", IconName::ArrowCircle)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Pull all repositories"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    git::PullAllRepositories.boxed_clone(),
+                                    cx,
+                                );
+                            }),
+                    )
+                    .child(
+                        IconButton::new("git-panel-open-graph", IconName::GitBranch)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Open commit graph"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Open.boxed_clone(), cx);
+                            }),
+                    ),
+            );
+
+        let body = if expanded {
+            let mut list = v_flex().py_0p5();
+            for (ix, repo) in repos.iter().enumerate() {
+                list = list.child(self.render_repo_strip_row(ix, repo.clone(), active_id, cx));
+            }
+            if has_pinned {
+                list = list
+                    .child(
+                        Label::new("Pinned")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .children(pinned.iter().enumerate().map(|(ix, path)| {
+                        render_pinned_strip_row(ix, path.clone(), cx)
+                    }));
+            }
+            Some(
+                list.border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
+        v_flex()
+            .child(header)
+            .when_some(body, |this, body| this.child(body))
+            .into_any_element()
+    }
+
+    fn render_repo_strip_row(
+        &self,
+        ix: usize,
+        repo: Entity<Repository>,
+        active_id: Option<RepositoryId>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let repo_ref = repo.read(cx);
+        let id = repo_ref.id;
+        let is_active = active_id == Some(id);
+        let display_name = repo_ref.display_name();
+        let branch_label: SharedString = repo_ref
+            .branch
+            .as_ref()
+            .map(|branch| branch.name().to_string().into())
+            .unwrap_or_else(|| "(detached)".into());
+        let tracking = repo_ref
+            .branch
+            .as_ref()
+            .and_then(|branch| branch.tracking_status());
+        let dirty_count = repo_ref.status_summary().count;
+        let work_dir = repo_ref.snapshot().work_directory_abs_path.to_path_buf();
+
+        let row_bg = is_active.then(|| cx.theme().colors().ghost_element_selected);
+
+        h_flex()
+            .id(("git-panel-repo-strip-row", ix))
+            .h(rems(1.5))
+            .px_2()
+            .gap_2()
+            .when_some(row_bg, |this, color| this.bg(color))
+            .hover(|this| this.bg(cx.theme().colors().element_hover))
+            .on_mouse_down(MouseButton::Left, {
+                let repo = repo.clone();
+                move |_, _window, cx| {
+                    repo.update(cx, |repo, cx| repo.set_as_active_repository(cx));
+                }
+            })
+            .child(
+                Icon::new(if is_active {
+                    IconName::FolderOpen
+                } else {
+                    IconName::Folder
+                })
+                .size(IconSize::XSmall)
+                .color(if is_active { Color::Accent } else { Color::Muted }),
+            )
+            .child(
+                Label::new(display_name)
+                    .size(LabelSize::XSmall)
+                    .truncate(),
+            )
+            .child(
+                Label::new(branch_label)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .when_some(tracking, |this, status| {
+                this.child(render_tracking_chip(status))
+            })
+            .when(dirty_count > 0, |this| {
+                this.child(
+                    Label::new(format!("{dirty_count}"))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Modified),
+                )
+            })
+            .child(
+                PopoverMenu::new(("git-panel-repo-strip-menu", ix))
+                    .trigger(
+                        IconButton::new(
+                            ("git-panel-repo-strip-menu-trigger", ix),
+                            IconName::Ellipsis,
+                        )
+                        .shape(ui::IconButtonShape::Square)
+                        .icon_size(IconSize::XSmall),
+                    )
+                    .menu(move |window, cx| {
+                        let repo = repo.clone();
+                        let work_dir = work_dir.clone();
+                        Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                            menu.entry("Fetch this repository", None, {
+                                let repo = repo.clone();
+                                move |window, cx| {
+                                    repo.update(cx, |repo, cx| {
+                                        repo.set_as_active_repository(cx)
+                                    });
+                                    window.dispatch_action(git::Fetch.boxed_clone(), cx);
+                                }
+                            })
+                            .entry("Pull this repository", None, {
+                                let repo = repo.clone();
+                                move |window, cx| {
+                                    repo.update(cx, |repo, cx| {
+                                        repo.set_as_active_repository(cx)
+                                    });
+                                    window.dispatch_action(git::Pull.boxed_clone(), cx);
+                                }
+                            })
+                            .entry("Open in terminal", None, {
+                                move |window, cx| {
+                                    window.dispatch_action(
+                                        workspace::OpenTerminal {
+                                            working_directory: work_dir.clone(),
+                                            local: false,
+                                        }
+                                        .boxed_clone(),
+                                        cx,
+                                    );
+                                }
+                            })
+                        }))
+                    }),
+            )
+            .into_any_element()
     }
 
     fn render_panel_header(
@@ -5053,6 +5766,30 @@ impl GitPanel {
                                                 cx,
                                             ));
                                         }
+                                        Some(GitListEntry::Hunk(hunk)) => {
+                                            items.push(this.render_hunk_entry(
+                                                ix,
+                                                hunk,
+                                                has_write_access,
+                                                cx,
+                                            ));
+                                        }
+                                        Some(GitListEntry::HunkLoading { .. }) => {
+                                            items.push(this.render_hunk_placeholder(
+                                                ix,
+                                                "Loading hunks…",
+                                                Color::Muted,
+                                                cx,
+                                            ));
+                                        }
+                                        Some(GitListEntry::HunkError { message, .. }) => {
+                                            items.push(this.render_hunk_placeholder(
+                                                ix,
+                                                message.clone(),
+                                                Color::Error,
+                                                cx,
+                                            ));
+                                        }
                                         None => {}
                                     }
                                 }
@@ -5303,6 +6040,336 @@ impl GitPanel {
         cx.notify();
     }
 
+    /// Build the `GitListEntry::Hunk*` rows to insert under an expanded file.
+    /// Reads from the cached `(buffer, diff)` if loaded, otherwise emits a
+    /// loading placeholder. Hunk anchors are not stored on the entry because
+    /// they can move across edits — the stage handler looks up the live hunk
+    /// by index against the current diff state.
+    fn build_hunk_list_entries(
+        &self,
+        repo_path: &RepoPath,
+        cx: &Context<Self>,
+    ) -> Vec<GitListEntry> {
+        let Some(state) = self.hunk_states.get(repo_path) else {
+            return vec![GitListEntry::HunkLoading {
+                repo_path: repo_path.clone(),
+            }];
+        };
+        match state {
+            HunkLoadState::Loading => vec![GitListEntry::HunkLoading {
+                repo_path: repo_path.clone(),
+            }],
+            HunkLoadState::Failed(message) => vec![GitListEntry::HunkError {
+                repo_path: repo_path.clone(),
+                message: message.clone(),
+            }],
+            HunkLoadState::Loaded { buffer, diff, .. } => {
+                let buffer_snapshot = buffer.read(cx).snapshot();
+                let diff_snapshot = diff.read(cx).snapshot(cx);
+                diff_snapshot
+                    .hunks(&buffer_snapshot.text)
+                    .enumerate()
+                    .map(|(idx, hunk)| {
+                        let start = hunk
+                            .buffer_range
+                            .start
+                            .to_point(&buffer_snapshot.text)
+                            .row
+                            + 1;
+                        let end = hunk
+                            .buffer_range
+                            .end
+                            .to_point(&buffer_snapshot.text)
+                            .row
+                            + 1;
+                        let line_label: SharedString = if start == end {
+                            format!("Line {start}").into()
+                        } else {
+                            format!("Lines {start}-{end}").into()
+                        };
+                        GitListEntry::Hunk(GitHunkEntry {
+                            repo_path: repo_path.clone(),
+                            hunk_index: idx,
+                            line_label,
+                            is_staged: !hunk.status().has_secondary_hunk(),
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Flip the expanded state for a file's hunk subtree. When expanding for
+    /// the first time, kicks off an async load of the buffer + unstaged diff;
+    /// the panel rebuilds entries when the load completes (via the BufferDiff
+    /// subscription installed in `ensure_hunks_loaded`).
+    fn toggle_file_expansion(
+        &mut self,
+        repo_path: RepoPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.expanded_files.contains(&repo_path) {
+            self.expanded_files.remove(&repo_path);
+            self.hunk_states.remove(&repo_path);
+            self.update_visible_entries(window, cx);
+            return;
+        }
+        self.expanded_files.insert(repo_path.clone());
+        self.ensure_hunks_loaded(repo_path, window, cx);
+        self.update_visible_entries(window, cx);
+    }
+
+    fn ensure_hunks_loaded(
+        &mut self,
+        repo_path: RepoPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.hunk_states.get(&repo_path), Some(HunkLoadState::Loaded { .. })) {
+            return;
+        }
+        self.hunk_states
+            .insert(repo_path.clone(), HunkLoadState::Loading);
+        let Some(repo) = self.active_repository.clone() else {
+            return;
+        };
+        let project = self.project.clone();
+        let git_store = project.read(cx).git_store().clone();
+        let Some(project_path) = repo
+            .read(cx)
+            .repo_path_to_project_path(&repo_path, cx)
+        else {
+            self.hunk_states.insert(
+                repo_path,
+                HunkLoadState::Failed("no project path for repo path".into()),
+            );
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            // `project` and `git_store` are strong handles; `Entity::update`
+            // via `AppContext` returns the closure value directly (no Result
+            // wrapper), so we don't `?` after these calls.
+            let open_task = project
+                .update(cx, |project, cx| project.open_buffer(project_path, cx));
+            let buffer = match open_task.await {
+                Ok(buffer) => buffer,
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.hunk_states.insert(
+                            repo_path.clone(),
+                            HunkLoadState::Failed(format!("open buffer failed: {err}").into()),
+                        );
+                        cx.notify();
+                    })
+                    .ok();
+                    return anyhow::Ok(());
+                }
+            };
+            // `open_uncommitted_diff` returns a BufferDiff whose
+            // `secondary_diff` is wired up to the unstaged diff — required for
+            // `stage_or_unstage_hunks` to compute a new index text. The plain
+            // `open_unstaged_diff` returns a diff with `secondary_diff = None`,
+            // which makes the stage/unstage call a no-op.
+            let diff_task = git_store
+                .update(cx, |store, cx| {
+                    store.open_uncommitted_diff(buffer.clone(), cx)
+                });
+            let diff = match diff_task.await {
+                Ok(diff) => diff,
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.hunk_states.insert(
+                            repo_path.clone(),
+                            HunkLoadState::Failed(format!("load diff failed: {err}").into()),
+                        );
+                        cx.notify();
+                    })
+                    .ok();
+                    return anyhow::Ok(());
+                }
+            };
+            this.update_in(cx, |this, window, cx| {
+                let subscription = cx.subscribe(&diff, |this, _diff, _event, cx| {
+                    this.pending_hunk_refresh = true;
+                    cx.notify();
+                });
+                this.hunk_states.insert(
+                    repo_path.clone(),
+                    HunkLoadState::Loaded {
+                        buffer,
+                        diff,
+                        _diff_subscription: subscription,
+                    },
+                );
+                this.update_visible_entries(window, cx);
+            })
+            .ok();
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Discard a single hunk: replace its buffer range with the original
+    /// content from the diff base (HEAD for uncommitted diffs). Mirrors the
+    /// editor's `restore_diff_hunks` flow — also unstages the hunk so the
+    /// discard is reflected in both worktree and index. No-op if the file is
+    /// newly created (no diff base to revert to).
+    fn discard_hunk(
+        &mut self,
+        repo_path: &RepoPath,
+        hunk_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(HunkLoadState::Loaded { buffer, diff, .. }) = self.hunk_states.get(repo_path)
+        else {
+            return;
+        };
+        let buffer = buffer.clone();
+        let diff = diff.clone();
+        let buffer_snapshot = buffer.read(cx).snapshot();
+        let file_exists = buffer_snapshot
+            .file()
+            .is_some_and(|file| file.disk_state().exists());
+        let diff_snapshot = diff.read(cx).snapshot(cx);
+        let hunks: Vec<_> = diff_snapshot.hunks(&buffer_snapshot.text).collect();
+        let Some(hunk) = hunks.get(hunk_index).cloned() else {
+            return;
+        };
+
+        // Newly-created files have no base text to revert to; the equivalent
+        // is "delete this hunk's lines from the buffer", which is what
+        // `restore_diff_hunks` skips in the editor. We do the same.
+        if hunk.diff_base_byte_range.is_empty()
+            && hunk.buffer_range.start == hunk.buffer_range.end
+        {
+            return;
+        }
+
+        let original = diff_snapshot
+            .base_text()
+            .as_rope()
+            .slice(hunk.diff_base_byte_range.clone())
+            .to_string();
+
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(hunk.buffer_range.clone(), original)], None, cx);
+        });
+
+        // Also unstage the hunk so the discard is reflected in the index.
+        diff.update(cx, |diff, cx| {
+            diff.stage_or_unstage_hunks(false, &[hunk], &buffer_snapshot, file_exists, cx);
+        });
+        cx.notify();
+    }
+
+    /// Apply (or revert) a single hunk's edit against the buffer's index via
+    /// the existing `BufferDiff::stage_or_unstage_hunks` primitive. Refetches
+    /// the live `DiffHunk` so any edits between expanding the row and clicking
+    /// the button are reflected.
+    fn toggle_hunk_stage(
+        &mut self,
+        repo_path: &RepoPath,
+        hunk_index: usize,
+        stage: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(HunkLoadState::Loaded { buffer, diff, .. }) = self.hunk_states.get(repo_path)
+        else {
+            return;
+        };
+        let buffer = buffer.clone();
+        let diff = diff.clone();
+        let buffer_snapshot = buffer.read(cx).snapshot();
+        let file_exists = buffer_snapshot
+            .file()
+            .is_some_and(|file| file.disk_state().exists());
+        let diff_snapshot = diff.read(cx).snapshot(cx);
+        let hunks: Vec<_> = diff_snapshot.hunks(&buffer_snapshot.text).collect();
+        let Some(hunk) = hunks.get(hunk_index).cloned() else {
+            return;
+        };
+        diff.update(cx, |diff, cx| {
+            diff.stage_or_unstage_hunks(stage, &[hunk], &buffer_snapshot, file_exists, cx);
+        });
+        cx.notify();
+    }
+
+    fn render_hunk_entry(
+        &self,
+        ix: usize,
+        hunk: &GitHunkEntry,
+        has_write_access: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let label = hunk.line_label.clone();
+        let is_staged = hunk.is_staged;
+        let repo_path = hunk.repo_path.clone();
+        let repo_path_for_discard = hunk.repo_path.clone();
+        let hunk_index = hunk.hunk_index;
+        let action_label = if is_staged { "Unstage hunk" } else { "Stage hunk" };
+
+        h_flex()
+            .id(("git-hunk-row", ix))
+            .h(rems(1.5))
+            .pl(px(28.))
+            .pr_2()
+            .gap_2()
+            .child(
+                Icon::new(IconName::Hash)
+                    .size(IconSize::XSmall)
+                    .color(if is_staged { Color::Accent } else { Color::Muted }),
+            )
+            .child(
+                Label::new(label)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Button::new(("hunk-toggle", ix), action_label)
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .disabled(!has_write_access)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.toggle_hunk_stage(&repo_path, hunk_index, !is_staged, cx);
+                    })),
+            )
+            .child(
+                Button::new(("hunk-discard", ix), "Discard")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .color(Color::Error)
+                    .disabled(!has_write_access)
+                    .tooltip(Tooltip::text(
+                        "Revert this hunk to its HEAD content (also unstages)",
+                    ))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.discard_hunk(&repo_path_for_discard, hunk_index, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_hunk_placeholder(
+        &self,
+        ix: usize,
+        message: impl Into<SharedString>,
+        color: Color,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .id(("git-hunk-placeholder", ix))
+            .h(rems(1.5))
+            .pl(px(28.))
+            .pr_2()
+            .child(
+                Label::new(message.into())
+                    .size(LabelSize::XSmall)
+                    .color(color),
+            )
+            .into_any_element()
+    }
+
     fn render_status_entry(
         &self,
         ix: usize,
@@ -5400,10 +6467,27 @@ impl GitPanel {
             )
         };
 
+        let is_expanded = self.expanded_files.contains(&entry.repo_path);
+        let chevron_path = entry.repo_path.clone();
+        let chevron = IconButton::new(
+            ElementId::Name(format!("hunk_chevron_{ix}").into()),
+            if is_expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            },
+        )
+        .icon_size(IconSize::XSmall)
+        .icon_color(Color::Muted)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.toggle_file_expansion(chevron_path.clone(), window, cx);
+        }));
+
         let name_row = h_flex()
             .min_w_0()
             .flex_1()
             .gap_1()
+            .child(chevron)
             .when(settings.file_icons, |this| {
                 this.child(
                     file_icon
@@ -5979,6 +7063,16 @@ impl Render for GitPanel {
             .child(
                 v_flex()
                     .size_full()
+                    .child(self.render_repos_strip(cx))
+                    .map(|this| {
+                        if self.pending_hunk_refresh {
+                            self.pending_hunk_refresh = false;
+                            cx.defer_in(window, |this, window, cx| {
+                                this.update_visible_entries(window, cx);
+                            });
+                        }
+                        this
+                    })
                     .children(self.render_panel_header(window, cx))
                     .map(|this| {
                         if let Some(repo) = self.active_repository.clone()

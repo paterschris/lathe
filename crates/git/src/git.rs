@@ -84,6 +84,20 @@ actions!(
         Fetch,
         /// Fetches changes from a specific remote.
         FetchFrom,
+        /// Fetches every repository in the workspace concurrently.
+        FetchAllRepositories,
+        /// Pulls every repository in the workspace concurrently. Repositories
+        /// whose current branch has no tracked upstream are skipped.
+        PullAllRepositories,
+        /// Initializes and updates every submodule recursively in the active repo.
+        SubmoduleUpdate,
+        /// Fetches LFS-tracked content for the active repo.
+        LfsFetch,
+        /// Pulls LFS-tracked content for the active repo (fetch + checkout).
+        LfsPull,
+        /// Opens a picker listing pull requests for the active repository's
+        /// hosting provider.
+        ListPullRequests,
         /// Creates a new commit with staged changes.
         Commit,
         /// Amends the last commit with staged changes.

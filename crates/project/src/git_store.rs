@@ -2,6 +2,7 @@ pub mod branch_diff;
 mod conflict_set;
 pub mod git_traversal;
 pub mod pending_op;
+pub mod undo_log;
 
 use crate::{
     ProjectEnvironment, ProjectItem, ProjectPath,
@@ -34,10 +35,11 @@ use git::{
     parse_git_remote_url,
     repository::{
         Branch, CommitData, CommitDetails, CommitDiff, CommitFile, CommitOptions,
-        CreateWorktreeTarget, DiffType, FetchOptions, GitCommitTemplate, GitRepository,
-        GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote,
-        RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, UpstreamTrackingStatus,
-        Worktree as GitWorktree,
+        CreateWorktreeTarget, DiffType, FetchOptions, GitCommitTemplate, GitProgressEvent,
+        GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource,
+        MergeOptions, PushOptions, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry,
+        ReflogEntry, Remote, RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, Tag,
+        UpstreamTrackingStatus, Worktree as GitWorktree,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -106,6 +108,7 @@ pub struct GitStore {
         HashMap<(BufferId, DiffKind), Shared<Task<Result<Entity<BufferDiff>, Arc<anyhow::Error>>>>>,
     diffs: HashMap<BufferId, Entity<BufferGitState>>,
     shared_diffs: HashMap<proto::PeerId, HashMap<BufferId, SharedDiffs>>,
+    undo_log: undo_log::GitUndoLog,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -492,6 +495,9 @@ pub enum GitStoreEvent {
     JobsUpdated,
     ConflictsUpdated,
     GlobalConfigurationUpdated,
+    /// The undo log gained an entry or had one consumed. UI surfaces (toasts,
+    /// recent-ops list) re-render in response.
+    UndoLogChanged(RepositoryId),
 }
 
 impl EventEmitter<RepositoryEvent> for Repository {}
@@ -615,6 +621,7 @@ impl GitStore {
             loading_diffs: HashMap::default(),
             shared_diffs: HashMap::default(),
             diffs: HashMap::default(),
+            undo_log: undo_log::GitUndoLog::default(),
         }
     }
 
@@ -1927,6 +1934,90 @@ impl GitStore {
         &self.repositories
     }
 
+    pub fn undo_log(&self) -> &undo_log::GitUndoLog {
+        &self.undo_log
+    }
+
+    /// Record a destructive operation in the undo log and emit a change event.
+    /// Callers should invoke this only after the underlying git operation has
+    /// succeeded — recording before success would leave a phantom entry that
+    /// cannot be undone.
+    pub fn record_undo(
+        &mut self,
+        repository_id: RepositoryId,
+        label: impl Into<SharedString>,
+        action: undo_log::UndoAction,
+        cx: &mut Context<Self>,
+    ) -> undo_log::UndoId {
+        let id = self.undo_log.record(repository_id, label, action);
+        cx.emit(GitStoreEvent::UndoLogChanged(repository_id));
+        id
+    }
+
+    /// Pop a specific undo entry from the log and run its undo action.
+    pub fn undo(
+        &mut self,
+        undo_id: undo_log::UndoId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(entry) = self.undo_log.take(undo_id) else {
+            return Task::ready(Err(anyhow!("undo entry not found")));
+        };
+        cx.emit(GitStoreEvent::UndoLogChanged(entry.repository_id));
+
+        let Some(repository) = self.repositories.get(&entry.repository_id).cloned() else {
+            return Task::ready(Err(anyhow!("repository for undo entry is gone")));
+        };
+        let action = entry.action;
+        cx.spawn(async move |_, cx| {
+            let receiver = repository.update(cx, |repo, cx| match action {
+                undo_log::UndoAction::RestoreBranchTip {
+                    branch: _,
+                    sha,
+                    is_current,
+                } if is_current => {
+                    // Cannot force-update the current branch — use reset --hard
+                    // to point HEAD back at the prior tip.
+                    repo.reset(sha, ResetMode::Hard, cx)
+                }
+                undo_log::UndoAction::RestoreBranchTip { branch, sha, .. } => {
+                    repo.branch_force_update(branch, sha)
+                }
+                undo_log::UndoAction::DeleteTag { name } => repo.tag_delete(name),
+                undo_log::UndoAction::RecreateBranch { name, sha } => {
+                    repo.branch_force_update(name, sha)
+                }
+                undo_log::UndoAction::RenameBranch { from, to } => repo.rename_branch(from, to),
+                undo_log::UndoAction::PopStashByMessage { message } => {
+                    // stash_pop_by_message returns Task<Result<()>>; bridge to
+                    // the Receiver shape every other arm produces.
+                    let task = repo.stash_pop_by_message(message, cx);
+                    let (tx, rx) = futures::channel::oneshot::channel();
+                    cx.foreground_executor()
+                        .spawn(async move {
+                            let _ = tx.send(task.await);
+                        })
+                        .detach();
+                    rx
+                }
+            });
+            receiver.await?
+        })
+    }
+
+    /// Undo the most recent destructive operation on the given repository.
+    pub fn undo_latest(
+        &mut self,
+        repository_id: RepositoryId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(latest) = self.undo_log.latest_for(repository_id) else {
+            return Task::ready(Err(anyhow!("nothing to undo")));
+        };
+        let id = latest.id;
+        self.undo(id, cx)
+    }
+
     /// Returns the original (main) repository working directory for the given worktree.
     /// For normal checkouts this equals the worktree's own path; for linked
     /// worktrees it points back to the original repo.
@@ -3085,6 +3176,7 @@ impl GitStore {
         let mode = match envelope.payload.mode() {
             git_reset::ResetMode::Soft => ResetMode::Soft,
             git_reset::ResetMode::Mixed => ResetMode::Mixed,
+            git_reset::ResetMode::Hard => ResetMode::Hard,
         };
 
         repository_handle
@@ -4895,6 +4987,7 @@ impl Repository {
                             mode: match reset_mode {
                                 ResetMode::Soft => git_reset::ResetMode::Soft.into(),
                                 ResetMode::Mixed => git_reset::ResetMode::Mixed.into(),
+                                ResetMode::Hard => git_reset::ResetMode::Hard.into(),
                             },
                         })
                         .await?;
@@ -5867,6 +5960,67 @@ impl Repository {
         })
     }
 
+    /// Variant of `stash_entries` that attaches a stash message so the
+    /// resulting stash entry can later be located via `stash_pop_by_message`.
+    /// Only supported for local repositories; remote (collab) repos return an
+    /// error so the caller can skip recording an undo entry.
+    pub fn stash_entries_with_message(
+        &mut self,
+        entries: Vec<RepoPath>,
+        message: String,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        cx.spawn(async move |this, cx| {
+            this.update(cx, |this, _| {
+                this.send_job(None, move |git_repo, _cx| async move {
+                    match git_repo {
+                        RepositoryState::Local(LocalRepositoryState {
+                            backend,
+                            environment,
+                            ..
+                        }) => {
+                            backend
+                                .stash_paths_with_message(entries, message, environment)
+                                .await
+                        }
+                        RepositoryState::Remote(_) => Err(anyhow!(
+                            "stash with message is not supported on remote repositories"
+                        )),
+                    }
+                })
+            })?
+            .await??;
+            Ok(())
+        })
+    }
+
+    /// Apply the most recent stash entry whose message matches `message`.
+    /// Local-only — see `stash_entries_with_message`.
+    pub fn stash_pop_by_message(
+        &mut self,
+        message: String,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        cx.spawn(async move |this, cx| {
+            this.update(cx, |this, _| {
+                this.send_job(None, move |git_repo, _cx| async move {
+                    match git_repo {
+                        RepositoryState::Local(LocalRepositoryState {
+                            backend,
+                            environment,
+                            ..
+                        }) => backend.stash_pop_by_message(message, environment).await,
+                        RepositoryState::Remote(_) => Err(anyhow!(
+                            "stash pop by message is not supported on remote repositories"
+                        )),
+                    }
+                })
+            })?
+            .await??;
+            Ok(())
+        })
+    }
+
     pub fn stash_pop(
         &mut self,
         index: Option<usize>,
@@ -6074,6 +6228,60 @@ impl Repository {
         })
     }
 
+    pub fn submodule_update(&mut self) -> oneshot::Receiver<anyhow::Result<()>> {
+        self.send_job(
+            Some("git submodule update --init --recursive".into()),
+            move |git_repo, _cx| async move {
+                match git_repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => backend.submodule_update(environment).await,
+                    RepositoryState::Remote(_) => {
+                        bail!("submodule update is not supported on remote repositories")
+                    }
+                }
+            },
+        )
+    }
+
+    pub fn lfs_fetch(&mut self) -> oneshot::Receiver<anyhow::Result<()>> {
+        self.send_job(
+            Some("git lfs fetch".into()),
+            move |git_repo, _cx| async move {
+                match git_repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => backend.lfs_fetch(environment).await,
+                    RepositoryState::Remote(_) => {
+                        bail!("git lfs fetch is not supported on remote repositories")
+                    }
+                }
+            },
+        )
+    }
+
+    pub fn lfs_pull(&mut self) -> oneshot::Receiver<anyhow::Result<()>> {
+        self.send_job(
+            Some("git lfs pull".into()),
+            move |git_repo, _cx| async move {
+                match git_repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => backend.lfs_pull(environment).await,
+                    RepositoryState::Remote(_) => {
+                        bail!("git lfs pull is not supported on remote repositories")
+                    }
+                }
+            },
+        )
+    }
+
     pub fn fetch(
         &mut self,
         fetch_options: FetchOptions,
@@ -6083,14 +6291,25 @@ impl Repository {
         let askpass_delegates = self.askpass_delegates.clone();
         let askpass_id = util::post_inc(&mut self.latest_askpass_id);
         let id = self.id;
+        let this_weak = self.this.clone();
 
         self.send_job(Some("git fetch".into()), move |git_repo, cx| async move {
+            // Channel for live `--progress` updates from the spawned git process.
+            // When the operation completes the sender is dropped, which closes the
+            // channel and lets the receiver task exit cleanly.
+            let (progress_tx, progress_rx) = smol::channel::unbounded();
+            spawn_progress_relay("git fetch", this_weak.clone(), progress_rx, cx.clone());
+
             match git_repo {
                 RepositoryState::Local(LocalRepositoryState {
                     backend,
                     environment,
                     ..
-                }) => backend.fetch(fetch_options, askpass, environment, cx).await,
+                }) => {
+                    backend
+                        .fetch(fetch_options, askpass, environment, cx, Some(progress_tx))
+                        .await
+                }
                 RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                     askpass_delegates.lock().insert(askpass_id, askpass);
                     let _defer = util::defer(|| {
@@ -6155,6 +6374,13 @@ impl Repository {
                         environment,
                         ..
                     }) => {
+                        let (progress_tx, progress_rx) = smol::channel::unbounded();
+                        spawn_progress_relay(
+                            "git push",
+                            this.clone(),
+                            progress_rx,
+                            cx.clone(),
+                        );
                         let result = backend
                             .push(
                                 branch.to_string(),
@@ -6164,6 +6390,7 @@ impl Repository {
                                 askpass,
                                 environment.clone(),
                                 cx.clone(),
+                                Some(progress_tx),
                             )
                             .await;
                         // TODO would be nice to not have to do this manually
@@ -6229,6 +6456,7 @@ impl Repository {
         let askpass_delegates = self.askpass_delegates.clone();
         let askpass_id = util::post_inc(&mut self.latest_askpass_id);
         let id = self.id;
+        let this_weak = self.this.clone();
 
         let mut status = "git pull".to_string();
         if rebase {
@@ -6246,6 +6474,8 @@ impl Repository {
                     environment,
                     ..
                 }) => {
+                    let (progress_tx, progress_rx) = smol::channel::unbounded();
+                    spawn_progress_relay("git pull", this_weak.clone(), progress_rx, cx.clone());
                     backend
                         .pull(
                             branch.as_ref().map(|b| b.to_string()),
@@ -6254,6 +6484,7 @@ impl Repository {
                             askpass,
                             environment.clone(),
                             cx,
+                            Some(progress_tx),
                         )
                         .await
                 }
@@ -7109,6 +7340,228 @@ impl Repository {
         )
     }
 
+    pub fn cherry_pick(
+        &mut self,
+        commits: Vec<String>,
+        no_commit: bool,
+    ) -> oneshot::Receiver<Result<()>> {
+        let label = format!("git cherry-pick {}", commits.join(" "));
+        self.send_job(Some(label.into()), move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => backend.cherry_pick(commits, no_commit, environment).await,
+                RepositoryState::Remote(_) => {
+                    bail!("cherry-pick is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
+    pub fn revert(
+        &mut self,
+        commits: Vec<String>,
+        no_commit: bool,
+        mainline: Option<u32>,
+    ) -> oneshot::Receiver<Result<()>> {
+        let label = format!("git revert {}", commits.join(" "));
+        self.send_job(Some(label.into()), move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => {
+                    backend
+                        .revert(commits, no_commit, mainline, environment)
+                        .await
+                }
+                RepositoryState::Remote(_) => {
+                    bail!("revert is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
+    pub fn merge(
+        &mut self,
+        commit: String,
+        options: MergeOptions,
+    ) -> oneshot::Receiver<Result<()>> {
+        let label = format!("git merge {commit}");
+        self.send_job(Some(label.into()), move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => backend.merge(commit, options, environment).await,
+                RepositoryState::Remote(_) => {
+                    bail!("merge is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
+    pub fn rebase(
+        &mut self,
+        upstream: String,
+        options: RebaseOptions,
+    ) -> oneshot::Receiver<Result<()>> {
+        let label = format!("git rebase {upstream}");
+        self.send_job(Some(label.into()), move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => backend.rebase(upstream, options, environment).await,
+                RepositoryState::Remote(_) => {
+                    bail!("rebase is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
+    pub fn rebase_interactive(
+        &mut self,
+        upstream: String,
+        todo: Vec<RebaseTodoEntry>,
+    ) -> oneshot::Receiver<Result<()>> {
+        let label: SharedString = format!("git rebase -i {upstream}").into();
+        self.send_job(Some(label), move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => {
+                    backend
+                        .rebase_interactive(upstream, todo, environment)
+                        .await
+                }
+                RepositoryState::Remote(_) => {
+                    bail!("interactive rebase is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
+    pub fn rebase_action(
+        &mut self,
+        action: RebaseInProgressAction,
+    ) -> oneshot::Receiver<Result<()>> {
+        let label: SharedString = match action {
+            RebaseInProgressAction::Continue => "git rebase --continue".into(),
+            RebaseInProgressAction::Skip => "git rebase --skip".into(),
+            RebaseInProgressAction::Abort => "git rebase --abort".into(),
+        };
+        self.send_job(Some(label), move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => backend.rebase_action(action, environment).await,
+                RepositoryState::Remote(_) => {
+                    bail!("rebase actions are not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
+    pub fn tag_create(
+        &mut self,
+        name: String,
+        commit: String,
+        message: Option<String>,
+        force: bool,
+    ) -> oneshot::Receiver<Result<()>> {
+        let label: SharedString = format!("git tag {name} {commit}").into();
+        self.send_job(Some(label), move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => {
+                    backend
+                        .tag_create(name, commit, message, force, environment)
+                        .await
+                }
+                RepositoryState::Remote(_) => {
+                    bail!("tag creation is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
+    pub fn tag_delete(&mut self, name: String) -> oneshot::Receiver<Result<()>> {
+        let label: SharedString = format!("git tag -d {name}").into();
+        self.send_job(Some(label), move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.tag_delete(name).await
+                }
+                RepositoryState::Remote(_) => {
+                    bail!("tag deletion is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
+    pub fn list_tags(&mut self) -> oneshot::Receiver<Result<Vec<Tag>>> {
+        self.send_job(None, move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.list_tags().await
+                }
+                RepositoryState::Remote(_) => {
+                    bail!("listing tags is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
+    pub fn branch_force_update(
+        &mut self,
+        name: String,
+        commit: String,
+    ) -> oneshot::Receiver<Result<()>> {
+        let label: SharedString = format!("git branch -f {name} {commit}").into();
+        self.send_job(Some(label), move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => backend.branch_force_update(name, commit, environment).await,
+                RepositoryState::Remote(_) => {
+                    bail!("branch force-update is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
+    pub fn reflog(
+        &mut self,
+        ref_name: Option<String>,
+        limit: Option<usize>,
+    ) -> oneshot::Receiver<Result<Vec<ReflogEntry>>> {
+        self.send_job(None, move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.reflog(ref_name, limit).await
+                }
+                RepositoryState::Remote(_) => {
+                    bail!("reading the reflog is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
     pub fn check_for_pushed_commits(&mut self) -> oneshot::Receiver<Result<Vec<SharedString>>> {
         let id = self.id;
         self.send_job(None, move |repo, _cx| async move {
@@ -7681,6 +8134,15 @@ impl Repository {
         self.active_jobs.values().next().cloned()
     }
 
+    /// All in-flight git jobs for this repository. Returned sorted by start
+    /// time so the activity feed renders in a stable order even when the
+    /// underlying map iteration order changes.
+    pub fn active_jobs(&self) -> Vec<JobInfo> {
+        let mut jobs: Vec<_> = self.active_jobs.values().cloned().collect();
+        jobs.sort_by_key(|job| job.start);
+        jobs
+    }
+
     pub fn barrier(&mut self) -> oneshot::Receiver<()> {
         self.send_job(None, |_, _| async {})
     }
@@ -7898,6 +8360,43 @@ async fn remove_empty_managed_worktree_ancestors(fs: &dyn Fs, child_path: &Path,
 
         current = parent;
     }
+}
+
+/// Spawn a detached background task that reads `GitProgressEvent`s from
+/// `progress_rx` and surfaces them through the matching repository's
+/// `active_jobs` entry, so the existing job indicator UI shows live progress.
+///
+/// The task terminates naturally when the sender side of the channel is dropped
+/// (i.e. when the originating `fetch`/`pull`/`push` op completes).
+fn spawn_progress_relay(
+    op_prefix: &'static str,
+    repository: WeakEntity<Repository>,
+    progress_rx: smol::channel::Receiver<GitProgressEvent>,
+    cx: AsyncApp,
+) {
+    let foreground = cx.foreground_executor().clone();
+    foreground
+        .spawn(async move {
+            let mut cx = cx;
+            while let Ok(event) = progress_rx.recv().await {
+                let message: SharedString = match event.percent {
+                    Some(percent) => format!("{op_prefix} — {} {percent}%", event.phase).into(),
+                    None => format!("{op_prefix} — {}", event.phase).into(),
+                };
+                repository
+                    .update(&mut cx, |repo, cx| {
+                        for info in repo.active_jobs.values_mut() {
+                            if info.message.starts_with(op_prefix) {
+                                info.message = message.clone();
+                            }
+                        }
+                        cx.emit(JobsUpdated);
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        })
+        .detach();
 }
 
 /// Returns a short name for a linked worktree suitable for UI display

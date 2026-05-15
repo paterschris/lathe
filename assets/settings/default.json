@@ -920,6 +920,26 @@
     // Default width of the collaboration panel.
     "default_width": 240,
   },
+  // Absolute paths to external git repositories pinned in the git panel's
+  // Repositories strip. Each one renders as an extra row beneath the
+  // workspace's own repositories; clicking opens the path as a new workspace.
+  "repository_dashboard_pinned_repos": [],
+  "pull_request_panel": {
+    // Whether to show the pull request panel button in the status bar.
+    "button": true,
+    // Where to dock the pull request panel. Can be 'left' or 'right'.
+    "dock": "right",
+    // Default width of the pull request panel.
+    "default_width": 360,
+  },
+  "git_activity_panel": {
+    // Whether to show the git activity panel button in the status bar.
+    "button": true,
+    // Where to dock the git activity panel.
+    "dock": "bottom",
+    // Default width of the git activity panel (when docked left/right).
+    "default_width": 360,
+  },
   "git_panel": {
     // Whether to show the git panel button in the status bar.
     "button": true,

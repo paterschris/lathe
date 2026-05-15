@@ -13,7 +13,9 @@ use urlencoding::encode;
 
 use git::{
     BuildCommitPermalinkParams, BuildPermalinkParams, GitHostingProvider, ParsedGitRemote,
-    PullRequest, RemoteUrl,
+    PullRequest, PullRequestDetail, PullRequestListFilter, PullRequestMergeMethod,
+    PullRequestReviewComment, PullRequestReviewVerdict, PullRequestState, PullRequestSummary,
+    RemoteUrl,
 };
 
 use crate::get_host_from_git_remote_url;
@@ -62,6 +64,79 @@ struct User {
     pub avatar_url: String,
 }
 
+/// Raw shape of a single PR entry from the GitHub REST API; parsed into the
+/// provider-agnostic [`PullRequestSummary`].
+#[derive(Debug, Deserialize)]
+struct GithubPullRequest {
+    number: u32,
+    title: String,
+    state: String,
+    #[serde(default)]
+    merged_at: Option<String>,
+    html_url: String,
+    updated_at: String,
+    #[serde(default)]
+    draft: bool,
+    user: GithubPullRequestUser,
+    head: GithubPullRequestRef,
+    base: GithubPullRequestRef,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubPullRequestUser {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubPullRequestRef {
+    #[serde(rename = "ref")]
+    ref_name: String,
+    #[serde(default)]
+    sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubPullRequestDetail {
+    number: u32,
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+    state: String,
+    #[serde(default)]
+    merged_at: Option<String>,
+    html_url: String,
+    updated_at: String,
+    #[serde(default)]
+    draft: bool,
+    user: GithubPullRequestUser,
+    head: GithubPullRequestRef,
+    base: GithubPullRequestRef,
+    #[serde(default)]
+    mergeable: Option<bool>,
+    #[serde(default)]
+    additions: u32,
+    #[serde(default)]
+    deletions: u32,
+    #[serde(default)]
+    changed_files: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubReviewComment {
+    id: u64,
+    body: String,
+    path: String,
+    /// GitHub returns `line` for current-position comments and `original_line`
+    /// for comments left on an outdated diff. Either one is fine for the UI.
+    #[serde(default)]
+    line: Option<u32>,
+    #[serde(default)]
+    original_line: Option<u32>,
+    created_at: String,
+    html_url: String,
+    user: GithubPullRequestUser,
+}
+
 #[derive(Debug)]
 pub struct Github {
     name: String,
@@ -106,6 +181,58 @@ impl Github {
             "GitHub Self-Hosted",
             Url::parse(&format!("https://{}", host))?,
         ))
+    }
+
+    /// Return the REST API root for this GitHub instance. Public `github.com`
+    /// lives under `api.github.com`; GitHub Enterprise exposes the same shape
+    /// under `/api/v3`.
+    fn api_root(&self) -> Result<String> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("github base url has no host")?;
+        Ok(if host == "github.com" {
+            "https://api.github.com".to_string()
+        } else {
+            format!("https://{host}/api/v3")
+        })
+    }
+
+    /// Build a GET request against the GitHub API with the right headers and
+    /// the `GITHUB_TOKEN` bearer attached when present.
+    fn build_api_request(
+        &self,
+        url: &str,
+        accept: &str,
+    ) -> http_client::http::request::Builder {
+        let mut request = Request::get(url)
+            .header("Accept", accept)
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .follow_redirects(http_client::RedirectPolicy::FollowAll);
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        request
+    }
+
+    /// Same auth + headers as `build_api_request`, but for write methods that
+    /// take a JSON body. `method` is `"POST"`, `"PUT"`, `"PATCH"`, etc.
+    fn build_api_write(
+        &self,
+        method: &str,
+        url: &str,
+    ) -> http_client::http::request::Builder {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(url)
+            .header("Accept", "application/vnd.github+json")
+            .header("Content-Type", "application/json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .follow_redirects(http_client::RedirectPolicy::FollowAll);
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        request
     }
 
     async fn fetch_github_commit_author(
@@ -282,6 +409,336 @@ impl GitHostingProvider for Github {
             })
             .transpose()?;
         Ok(avatar_url)
+    }
+
+    async fn list_pull_requests(
+        &self,
+        remote: &ParsedGitRemote,
+        filter: PullRequestListFilter,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestSummary>> {
+        let api_root = self.api_root()?;
+
+        // Map the abstract filter to GitHub's `?state=open|closed|all`. Merged
+        // PRs share the `closed` bucket and are disambiguated by `merged_at`.
+        let state_param = match filter.states.as_deref() {
+            None | Some([]) => "all",
+            Some(states)
+                if states.iter().all(|s| matches!(s, PullRequestState::Open)) =>
+            {
+                "open"
+            }
+            Some(states)
+                if states
+                    .iter()
+                    .all(|s| matches!(s, PullRequestState::Closed | PullRequestState::Merged)) =>
+            {
+                "closed"
+            }
+            _ => "all",
+        };
+
+        let per_page = filter.limit.unwrap_or(30).clamp(1, 100);
+        let ParsedGitRemote { owner, repo } = remote;
+        let url = format!(
+            "{api_root}/repos/{owner}/{repo}/pulls?state={state_param}&per_page={per_page}&sort=updated&direction=desc",
+        );
+
+        let request = self.build_api_request(&url, "application/vnd.github+json");
+
+        let mut response = http_client
+            .send(request.body(AsyncBody::default())?)
+            .await
+            .with_context(|| format!("error fetching pull requests at {url:?}"))?;
+
+        let mut body = Vec::new();
+        response.body_mut().read_to_end(&mut body).await?;
+
+        if !response.status().is_success() {
+            let text = String::from_utf8_lossy(body.as_slice());
+            bail!(
+                "GitHub returned status {}: {text:?}",
+                response.status().as_u16(),
+            );
+        }
+
+        let raw: Vec<GithubPullRequest> = serde_json::from_slice(&body)
+            .context("failed to deserialize GitHub pull request list")?;
+
+        let author_filter = filter.author.as_ref().map(|s| s.as_ref().to_lowercase());
+
+        let summaries = raw
+            .into_iter()
+            .filter(|pr| match author_filter.as_deref() {
+                Some(needle) => pr.user.login.to_lowercase().contains(needle),
+                None => true,
+            })
+            .filter_map(|pr| {
+                let state = match (pr.state.as_str(), pr.merged_at.as_deref()) {
+                    ("open", _) => PullRequestState::Open,
+                    ("closed", Some(_)) => PullRequestState::Merged,
+                    ("closed", None) => PullRequestState::Closed,
+                    _ => return None,
+                };
+                if let Some(wanted) = filter.states.as_ref()
+                    && !wanted.is_empty()
+                    && !wanted.contains(&state)
+                {
+                    return None;
+                }
+                let url = Url::parse(&pr.html_url).ok()?;
+                Some(PullRequestSummary {
+                    number: pr.number,
+                    title: pr.title.into(),
+                    author_login: pr.user.login.into(),
+                    state,
+                    source_branch: pr.head.ref_name.into(),
+                    target_branch: pr.base.ref_name.into(),
+                    url,
+                    updated_at: pr.updated_at.into(),
+                    is_draft: pr.draft,
+                })
+            })
+            .collect();
+
+        Ok(summaries)
+    }
+
+    async fn get_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<PullRequestDetail> {
+        let api_root = self.api_root()?;
+        let ParsedGitRemote { owner, repo } = remote;
+        let url = format!("{api_root}/repos/{owner}/{repo}/pulls/{number}");
+        let request = self.build_api_request(&url, "application/vnd.github+json");
+        let mut response = http_client
+            .send(request.body(AsyncBody::default())?)
+            .await
+            .with_context(|| format!("error fetching PR detail at {url:?}"))?;
+        let mut body = Vec::new();
+        response.body_mut().read_to_end(&mut body).await?;
+        if !response.status().is_success() {
+            let text = String::from_utf8_lossy(body.as_slice());
+            bail!(
+                "GitHub returned status {}: {text:?}",
+                response.status().as_u16(),
+            );
+        }
+        let raw: GithubPullRequestDetail = serde_json::from_slice(&body)
+            .context("failed to deserialize GitHub PR detail")?;
+
+        let state = match (raw.state.as_str(), raw.merged_at.as_deref()) {
+            ("open", _) => PullRequestState::Open,
+            ("closed", Some(_)) => PullRequestState::Merged,
+            ("closed", None) => PullRequestState::Closed,
+            other => bail!("unexpected GitHub PR state `{}`", other.0),
+        };
+        let url = Url::parse(&raw.html_url).context("parsing PR html_url")?;
+
+        Ok(PullRequestDetail {
+            number: raw.number,
+            title: raw.title.into(),
+            body: raw.body.unwrap_or_default().into(),
+            state,
+            author_login: raw.user.login.into(),
+            source_branch: raw.head.ref_name.into(),
+            target_branch: raw.base.ref_name.into(),
+            head_sha: raw.head.sha.into(),
+            base_sha: raw.base.sha.into(),
+            url,
+            updated_at: raw.updated_at.into(),
+            is_draft: raw.draft,
+            is_mergeable: raw.mergeable,
+            additions: raw.additions,
+            deletions: raw.deletions,
+            changed_files: raw.changed_files,
+        })
+    }
+
+    async fn get_pull_request_diff(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<String> {
+        let api_root = self.api_root()?;
+        let ParsedGitRemote { owner, repo } = remote;
+        let url = format!("{api_root}/repos/{owner}/{repo}/pulls/{number}");
+        // The same endpoint with the `application/vnd.github.v3.diff` Accept
+        // header returns a unified diff rather than JSON.
+        let request = self.build_api_request(&url, "application/vnd.github.v3.diff");
+        let mut response = http_client
+            .send(request.body(AsyncBody::default())?)
+            .await
+            .with_context(|| format!("error fetching PR diff at {url:?}"))?;
+        let mut body = Vec::new();
+        response.body_mut().read_to_end(&mut body).await?;
+        if !response.status().is_success() {
+            let text = String::from_utf8_lossy(body.as_slice());
+            bail!(
+                "GitHub returned status {}: {text:?}",
+                response.status().as_u16(),
+            );
+        }
+        Ok(String::from_utf8(body).context("PR diff was not valid UTF-8")?)
+    }
+
+    async fn merge_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        method: PullRequestMergeMethod,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let api_root = self.api_root()?;
+        let ParsedGitRemote { owner, repo } = remote;
+        let url = format!("{api_root}/repos/{owner}/{repo}/pulls/{number}/merge");
+        let merge_method = match method {
+            PullRequestMergeMethod::Merge => "merge",
+            PullRequestMergeMethod::Squash => "squash",
+            PullRequestMergeMethod::Rebase => "rebase",
+        };
+        // PUT body shape per GitHub REST docs.
+        let body = format!(r#"{{"merge_method":"{merge_method}"}}"#);
+        let request = self.build_api_write("PUT", &url);
+        let mut response = http_client
+            .send(request.body(AsyncBody::from(body))?)
+            .await
+            .with_context(|| format!("error merging PR at {url:?}"))?;
+        let mut response_body = Vec::new();
+        response.body_mut().read_to_end(&mut response_body).await?;
+        if !response.status().is_success() {
+            let text = String::from_utf8_lossy(response_body.as_slice());
+            bail!(
+                "GitHub returned status {} when merging: {text:?}",
+                response.status().as_u16(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn post_review_comment(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        in_reply_to: u64,
+        body: SharedString,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let api_root = self.api_root()?;
+        let ParsedGitRemote { owner, repo } = remote;
+        // GitHub exposes a dedicated "reply to a review comment" endpoint that
+        // only needs the body; the parent comment supplies path / line / commit.
+        let url = format!(
+            "{api_root}/repos/{owner}/{repo}/pulls/{number}/comments/{in_reply_to}/replies"
+        );
+        let body_payload = body.replace('\\', "\\\\").replace('"', "\\\"");
+        let request_body = format!(r#"{{"body":"{body_payload}"}}"#);
+        let request = self.build_api_write("POST", &url);
+        let mut response = http_client
+            .send(request.body(AsyncBody::from(request_body))?)
+            .await
+            .with_context(|| format!("error posting review comment at {url:?}"))?;
+        let mut response_body = Vec::new();
+        response.body_mut().read_to_end(&mut response_body).await?;
+        if !response.status().is_success() {
+            let text = String::from_utf8_lossy(response_body.as_slice());
+            bail!(
+                "GitHub returned status {} when posting review comment: {text:?}",
+                response.status().as_u16(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn submit_review(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        verdict: PullRequestReviewVerdict,
+        body: Option<SharedString>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let api_root = self.api_root()?;
+        let ParsedGitRemote { owner, repo } = remote;
+        let url = format!("{api_root}/repos/{owner}/{repo}/pulls/{number}/reviews");
+        let event = match verdict {
+            PullRequestReviewVerdict::Approve => "APPROVE",
+            PullRequestReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+            PullRequestReviewVerdict::Comment => "COMMENT",
+        };
+        // GitHub rejects REQUEST_CHANGES and COMMENT reviews without a body, so
+        // we always include the field even when empty for APPROVE.
+        let body_payload = body
+            .as_deref()
+            .map(|b| b.replace('\\', "\\\\").replace('"', "\\\""))
+            .unwrap_or_default();
+        let request_body = format!(r#"{{"event":"{event}","body":"{body_payload}"}}"#);
+        let request = self.build_api_write("POST", &url);
+        let mut response = http_client
+            .send(request.body(AsyncBody::from(request_body))?)
+            .await
+            .with_context(|| format!("error submitting review at {url:?}"))?;
+        let mut response_body = Vec::new();
+        response.body_mut().read_to_end(&mut response_body).await?;
+        if !response.status().is_success() {
+            let text = String::from_utf8_lossy(response_body.as_slice());
+            bail!(
+                "GitHub returned status {} when submitting review: {text:?}",
+                response.status().as_u16(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn get_pull_request_comments(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestReviewComment>> {
+        let api_root = self.api_root()?;
+        let ParsedGitRemote { owner, repo } = remote;
+        // `per_page=100` is the GitHub maximum; PRs with more reviews need
+        // pagination, which a future caller can layer on top.
+        let url = format!("{api_root}/repos/{owner}/{repo}/pulls/{number}/comments?per_page=100");
+        let request = self.build_api_request(&url, "application/vnd.github+json");
+        let mut response = http_client
+            .send(request.body(AsyncBody::default())?)
+            .await
+            .with_context(|| format!("error fetching PR comments at {url:?}"))?;
+        let mut body = Vec::new();
+        response.body_mut().read_to_end(&mut body).await?;
+        if !response.status().is_success() {
+            let text = String::from_utf8_lossy(body.as_slice());
+            bail!(
+                "GitHub returned status {}: {text:?}",
+                response.status().as_u16(),
+            );
+        }
+        let raw: Vec<GithubReviewComment> = serde_json::from_slice(&body)
+            .context("failed to deserialize GitHub review comments")?;
+
+        let comments = raw
+            .into_iter()
+            .filter_map(|c| {
+                let url = Url::parse(&c.html_url).ok()?;
+                let line = c.line.or(c.original_line);
+                Some(PullRequestReviewComment {
+                    id: c.id,
+                    author_login: c.user.login.into(),
+                    body: c.body.into(),
+                    path: c.path.into(),
+                    line,
+                    created_at: c.created_at.into(),
+                    url,
+                })
+            })
+            .collect();
+        Ok(comments)
     }
 }
 

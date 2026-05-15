@@ -39,13 +39,22 @@ pub mod commit_view;
 mod conflict_view;
 pub mod file_diff_view;
 pub mod file_history_view;
+pub mod git_activity_panel;
+pub mod git_flow;
 pub mod git_panel;
+pub mod interactive_rebase_modal;
+pub mod merge_editor_view;
+// PR view + panel live in the dedicated `pr_ui` crate now; zed.rs takes care
+// of registration. We intentionally do NOT re-export from here to avoid a
+// reverse dependency on `pr_ui`.
 mod git_panel_settings;
+pub mod new_panel_settings;
 pub mod git_picker;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
 pub(crate) mod remote_output;
+// `repository_dashboard_panel` was folded into the git panel's repos strip.
 pub mod repository_selector;
 pub mod stash_picker;
 pub mod text_diff_view;
@@ -69,8 +78,12 @@ pub fn init(cx: &mut App) {
         ProjectDiff::register(workspace, cx);
         CommitModal::register(workspace);
         git_panel::register(workspace);
+        git_activity_panel::register(workspace);
+        git_flow::register(workspace);
+        // Repository dashboard now lives inline in the git panel's repos strip.
         repository_selector::register(workspace);
         git_picker::register(workspace);
+        // PR panel + picker are registered from zed.rs (in the `pr_ui` crate).
 
         workspace.register_action(
             |workspace, action: &zed_actions::CreateWorktree, window, cx| {
@@ -159,6 +172,53 @@ pub fn init(cx: &mut App) {
                 panel.update(cx, |panel, cx| {
                     panel.fetch(false, window, cx);
                 });
+            });
+            workspace.register_action(
+                |workspace, _: &git::FetchAllRepositories, window, cx| {
+                    let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
+                        return;
+                    };
+                    panel.update(cx, |panel, cx| {
+                        panel.fetch_all_repositories(window, cx);
+                    });
+                },
+            );
+            workspace.register_action(
+                |workspace, _: &git::PullAllRepositories, window, cx| {
+                    let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
+                        return;
+                    };
+                    panel.update(cx, |panel, cx| {
+                        panel.pull_all_repositories(window, cx);
+                    });
+                },
+            );
+            workspace.register_action(|workspace, _: &git::SubmoduleUpdate, _window, cx| {
+                if let Some(repo) = workspace.project().read(cx).active_repository(cx) {
+                    let receiver = repo.update(cx, |repo, _| repo.submodule_update());
+                    cx.spawn(async move |_, _| {
+                        let _ = receiver.await;
+                    })
+                    .detach();
+                }
+            });
+            workspace.register_action(|workspace, _: &git::LfsFetch, _window, cx| {
+                if let Some(repo) = workspace.project().read(cx).active_repository(cx) {
+                    let receiver = repo.update(cx, |repo, _| repo.lfs_fetch());
+                    cx.spawn(async move |_, _| {
+                        let _ = receiver.await;
+                    })
+                    .detach();
+                }
+            });
+            workspace.register_action(|workspace, _: &git::LfsPull, _window, cx| {
+                if let Some(repo) = workspace.project().read(cx).active_repository(cx) {
+                    let receiver = repo.update(cx, |repo, _| repo.lfs_pull());
+                    cx.spawn(async move |_, _| {
+                        let _ = receiver.await;
+                    })
+                    .detach();
+                }
             });
             workspace.register_action(|workspace, _: &git::Push, window, cx| {
                 let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {

@@ -187,6 +187,9 @@ impl VsCodeSettings {
             file_finder: None,
             git: self.git_settings_content(),
             git_panel: self.git_panel_settings_content(),
+            repository_dashboard_pinned_repos: None,
+            pull_request_panel: None,
+            git_activity_panel: None,
             global_lsp_settings: skip_default(GlobalLspSettingsContent {
                 semantic_token_rules: self.semantic_token_rules(),
                 ..GlobalLspSettingsContent::default()

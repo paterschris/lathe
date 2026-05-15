@@ -17,6 +17,103 @@ pub struct PullRequest {
     pub url: Url,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestState {
+    Open,
+    Closed,
+    Merged,
+}
+
+/// Lightweight summary of a pull request, enough to populate a PR list panel
+/// without round-tripping the full review payload (comments, diffs, etc.).
+#[derive(Debug, Clone)]
+pub struct PullRequestSummary {
+    pub number: u32,
+    pub title: SharedString,
+    pub author_login: SharedString,
+    pub state: PullRequestState,
+    pub source_branch: SharedString,
+    pub target_branch: SharedString,
+    pub url: Url,
+    /// ISO-8601 timestamp string as returned by the host; downstream UI parses
+    /// it lazily when sorting / displaying.
+    pub updated_at: SharedString,
+    pub is_draft: bool,
+}
+
+/// Filter applied when listing pull requests from a host.
+#[derive(Debug, Clone, Default)]
+pub struct PullRequestListFilter {
+    /// `None` = all states. `Some` restricts to the listed states.
+    pub states: Option<Vec<PullRequestState>>,
+    /// Restrict to PRs authored by this login (substring match).
+    pub author: Option<SharedString>,
+    /// Cap on returned PRs. `None` = whatever the provider's default is.
+    pub limit: Option<u32>,
+}
+
+/// The full picture of a pull request — enough for a PR detail view to render
+/// the header, body, branch refs, mergeability, and check whether the local
+/// repository is in sync.
+#[derive(Debug, Clone)]
+pub struct PullRequestDetail {
+    pub number: u32,
+    pub title: SharedString,
+    pub body: SharedString,
+    pub state: PullRequestState,
+    pub author_login: SharedString,
+    pub source_branch: SharedString,
+    pub target_branch: SharedString,
+    pub head_sha: SharedString,
+    pub base_sha: SharedString,
+    pub url: Url,
+    pub updated_at: SharedString,
+    pub is_draft: bool,
+    /// `Some(true)` if the host can fast-forward or auto-merge; `Some(false)`
+    /// if there's a known conflict; `None` if the host hasn't computed it yet.
+    pub is_mergeable: Option<bool>,
+    pub additions: u32,
+    pub deletions: u32,
+    pub changed_files: u32,
+}
+
+/// How a pull request should be combined into the target branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestMergeMethod {
+    /// Create a merge commit (`git merge --no-ff` semantics).
+    Merge,
+    /// Squash all commits into one before applying.
+    Squash,
+    /// Rebase the head onto the base, no merge commit.
+    Rebase,
+}
+
+/// The action a reviewer is taking when submitting a review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestReviewVerdict {
+    /// Approve the PR (allowing merge if the host requires approval).
+    Approve,
+    /// Block the PR until changes are made.
+    RequestChanges,
+    /// Leave overall feedback without approving or blocking.
+    Comment,
+}
+
+/// A single inline review comment posted on a pull request.
+#[derive(Debug, Clone)]
+pub struct PullRequestReviewComment {
+    pub id: u64,
+    pub author_login: SharedString,
+    pub body: SharedString,
+    /// Repo-relative path the comment is anchored to.
+    pub path: SharedString,
+    /// 1-indexed line in the file the comment is anchored to, when the host
+    /// reports one. `None` for file-level comments that don't pin a line.
+    pub line: Option<u32>,
+    pub created_at: SharedString,
+    pub url: Url,
+}
+
 #[derive(Clone)]
 pub struct GitRemote {
     pub host: Arc<dyn GitHostingProvider + Send + Sync + 'static>,
@@ -144,6 +241,93 @@ pub trait GitHostingProvider {
         _http_client: Arc<dyn HttpClient>,
     ) -> Result<Option<Url>> {
         Ok(None)
+    }
+
+    /// List pull requests on the host for the given remote. The default
+    /// implementation returns an empty list — providers that support the
+    /// concept (GitHub, GitLab, Bitbucket, etc.) override it with the relevant
+    /// HTTP call. Errors surface as `Err`; callers typically render them
+    /// inline in the PR panel.
+    async fn list_pull_requests(
+        &self,
+        _remote: &ParsedGitRemote,
+        _filter: PullRequestListFilter,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestSummary>> {
+        Ok(Vec::new())
+    }
+
+    /// Fetch the full detail for a single pull request by number. Default
+    /// implementation reports "not supported" so the PR panel can fall back to
+    /// just opening the host URL.
+    async fn get_pull_request(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<PullRequestDetail> {
+        anyhow::bail!("pull request detail not supported by this hosting provider")
+    }
+
+    /// Fetch the unified-diff representation of a pull request. Returned as a
+    /// raw string so callers can hand it to the existing diff plumbing without
+    /// imposing a structured shape here.
+    async fn get_pull_request_diff(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<String> {
+        anyhow::bail!("pull request diff not supported by this hosting provider")
+    }
+
+    /// Fetch every inline review comment on a pull request.
+    async fn get_pull_request_comments(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestReviewComment>> {
+        Ok(Vec::new())
+    }
+
+    /// Combine the pull request into its target branch using the host's API.
+    async fn merge_pull_request(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _method: PullRequestMergeMethod,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        anyhow::bail!("merging pull requests is not supported by this hosting provider")
+    }
+
+    /// Submit a review with the given verdict, optionally accompanied by a
+    /// summary body. Hosts that don't model reviews (e.g. unauthenticated
+    /// clients) return an error here so the UI can render a clear toast.
+    async fn submit_review(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _verdict: PullRequestReviewVerdict,
+        _body: Option<SharedString>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        anyhow::bail!("submitting reviews is not supported by this hosting provider")
+    }
+
+    /// Post a reply to an existing inline review comment. `in_reply_to` is the
+    /// id of the parent `PullRequestReviewComment`. Hosts that don't model
+    /// threaded review replies report "not supported".
+    async fn post_review_comment(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _in_reply_to: u64,
+        _body: SharedString,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        anyhow::bail!("posting review comments is not supported by this hosting provider")
     }
 }
 
