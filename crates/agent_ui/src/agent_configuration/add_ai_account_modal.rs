@@ -23,7 +23,7 @@ use ui_input::InputField;
 use workspace::{ModalView, Workspace};
 
 use crate::ai_account_chip::bind_account;
-use crate::{Agent, AddAiAccount, NewExternalAgentThread};
+use crate::{AddAiAccount, NewExternalAgentThread};
 
 pub struct AddAiAccountModal {
     name_input: Entity<InputField>,
@@ -169,9 +169,7 @@ impl AddAiAccountModal {
                 // user message would require deeper thread integration.
                 window.dispatch_action(
                     Box::new(NewExternalAgentThread {
-                        agent: Some(Agent::Custom {
-                            id: AgentId::new(descriptor.agent_id.to_string()),
-                        }),
+                        agent: AgentId::new(descriptor.agent_id.to_string()),
                     }),
                     cx,
                 );

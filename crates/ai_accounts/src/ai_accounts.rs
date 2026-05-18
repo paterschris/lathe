@@ -643,7 +643,7 @@ fn list_claude_conversations(config_dir: &Path) -> Vec<ConversationSummary> {
         }
     }
 
-    summaries.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.last_modified));
     summaries
 }
 
@@ -690,7 +690,7 @@ fn list_codex_conversations(config_dir: &Path) -> Vec<ConversationSummary> {
             summaries.push(summary);
         }
     });
-    summaries.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.last_modified));
     summaries
 }
 
@@ -848,7 +848,7 @@ fn list_gemini_conversations(config_dir: &Path) -> Vec<ConversationSummary> {
         }
     }
 
-    summaries.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.last_modified));
     summaries
 }
 

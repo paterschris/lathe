@@ -289,7 +289,7 @@ fn finish_current_branch(
         // Delete the merged feature/release/hotfix branch. Best-effort —
         // failures are logged but don't abort the flow.
         let receiver = repo_for_task.update(cx, |repo, _| {
-            repo.delete_branch(false, current_branch.clone())
+            repo.delete_branch(false, current_branch.clone(), false)
         });
         let _ = receiver.await;
 

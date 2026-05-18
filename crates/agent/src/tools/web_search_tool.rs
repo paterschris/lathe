@@ -83,7 +83,7 @@ impl AgentTool for WebSearchTool {
                 .recv()
                 .await
                 .map_err(|e| WebSearchToolOutput::Error {
-                    error: format!("Failed to receive tool input: {e}"),
+                    error: e.to_string(),
                 })?;
 
             let (authorize, search_task) = cx.update(|cx| {

@@ -657,6 +657,12 @@ pub fn theme_colors_refinement(
             .and_then(|color| try_parse_color(color).ok())
             // Fall back to `editor.document_highlight.read_background`, for backwards compatibility.
             .or(editor_document_highlight_read_background),
+        editor_diff_hunk_added_background: None,
+        editor_diff_hunk_added_hollow_background: None,
+        editor_diff_hunk_added_hollow_border: None,
+        editor_diff_hunk_deleted_background: None,
+        editor_diff_hunk_deleted_hollow_background: None,
+        editor_diff_hunk_deleted_hollow_border: None,
         terminal_background: this
             .terminal_background
             .as_ref()
@@ -845,6 +851,7 @@ pub fn theme_colors_refinement(
             .gutter_deleted_background
             .as_ref()
             .and_then(|color| try_parse_color(color).ok()),
+        vim_helix_jump_label_foreground: None,
         vim_normal_background: this
             .vim_normal_background
             .as_ref()

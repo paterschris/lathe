@@ -3,8 +3,9 @@ use crate::SendImmediately;
 use crate::{
     ChatWithFollow,
     completion_provider::{
-        PromptCompletionProvider, PromptCompletionProviderDelegate, PromptContextAction,
-        PromptContextType, SlashCommandCompletion,
+        AgentContextSelection, AvailableCommand, AvailableSkill, PromptCompletionProvider,
+        PromptCompletionProviderDelegate, PromptContextAction, PromptContextType,
+        SlashCommandCompletion,
     },
     mention_set::{Mention, MentionImage, MentionSet, insert_crease_for_mention},
 };
@@ -13,14 +14,15 @@ use agent::ThreadStore;
 use agent_client_protocol::schema as acp;
 use anyhow::{Result, anyhow};
 use editor::{
-    Addon, AnchorRangeExt, ContextMenuOptions, Editor, EditorElement, EditorEvent, EditorMode,
-    EditorStyle, Inlay, MultiBuffer, MultiBufferOffset, MultiBufferSnapshot, ToOffset,
-    actions::Paste, code_context_menus::CodeContextMenu, scroll::Autoscroll,
+    Addon, AnchorRangeExt, ContextMenuOptions, CreaseId, CreaseSnapshot, Editor, EditorElement,
+    EditorEvent, EditorMode, EditorStyle, Inlay, MultiBuffer, MultiBufferOffset,
+    MultiBufferSnapshot, ToOffset, actions::Paste, code_context_menus::CodeContextMenu,
+    scroll::Autoscroll,
 };
 use futures::{FutureExt as _, future::join_all};
 use gpui::{
-    AppContext, ClipboardEntry, Context, Entity, EventEmitter, FocusHandle, Focusable, ImageFormat,
-    KeyContext, SharedString, Subscription, Task, TextStyle, WeakEntity,
+    AppContext, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, ImageFormat, KeyContext, SharedString, Subscription, Task, TextStyle, WeakEntity,
 };
 use language::{Buffer, language_settings::InlayHintKind};
 use parking_lot::RwLock;
@@ -43,17 +45,27 @@ use zed_actions::agent::{Chat, PasteRaw};
 pub struct SessionCapabilities {
     prompt_capabilities: acp::PromptCapabilities,
     available_commands: Vec<acp::AvailableCommand>,
+    available_skills: Vec<AvailableSkill>,
 }
 
 impl SessionCapabilities {
     pub fn new(
         prompt_capabilities: acp::PromptCapabilities,
         available_commands: Vec<acp::AvailableCommand>,
+        available_skills: Vec<AvailableSkill>,
     ) -> Self {
         Self {
             prompt_capabilities,
             available_commands,
+            available_skills,
         }
+    }
+
+    pub fn from_acp_commands(
+        prompt_capabilities: acp::PromptCapabilities,
+        available_commands: Vec<acp::AvailableCommand>,
+    ) -> Self {
+        Self::new(prompt_capabilities, available_commands, Vec::new())
     }
 
     pub fn supports_images(&self) -> bool {
@@ -66,6 +78,14 @@ impl SessionCapabilities {
 
     pub fn available_commands(&self) -> &[acp::AvailableCommand] {
         &self.available_commands
+    }
+
+    pub fn available_skills(&self) -> &[AvailableSkill] {
+        &self.available_skills
+    }
+
+    pub fn has_slash_completions(&self) -> bool {
+        !self.available_commands.is_empty() || !self.available_skills.is_empty()
     }
 
     fn supported_modes(&self, has_thread_store: bool) -> Vec<PromptContextType> {
@@ -84,15 +104,20 @@ impl SessionCapabilities {
         supported
     }
 
-    pub fn completion_commands(&self) -> Vec<crate::completion_provider::AvailableCommand> {
+    pub fn completion_commands(&self) -> Vec<AvailableCommand> {
         self.available_commands
             .iter()
-            .map(|cmd| crate::completion_provider::AvailableCommand {
-                name: cmd.name.clone().into(),
-                description: cmd.description.clone().into(),
-                requires_argument: cmd.input.is_some(),
+            .map(|command| AvailableCommand {
+                name: command.name.clone().into(),
+                description: command.description.clone().into(),
+                requires_argument: command.input.is_some(),
+                source: None,
             })
             .collect()
+    }
+
+    pub fn completion_skills(&self) -> Vec<AvailableSkill> {
+        self.available_skills.clone()
     }
 
     pub fn set_prompt_capabilities(&mut self, prompt_capabilities: acp::PromptCapabilities) {
@@ -101,6 +126,10 @@ impl SessionCapabilities {
 
     pub fn set_available_commands(&mut self, available_commands: Vec<acp::AvailableCommand>) {
         self.available_commands = available_commands;
+    }
+
+    pub fn set_available_skills(&mut self, available_skills: Vec<AvailableSkill>) {
+        self.available_skills = available_skills;
     }
 }
 
@@ -123,8 +152,26 @@ impl PromptCompletionProviderDelegate for MessageEditorCompletionDelegate {
             .supported_modes(self.has_thread_store)
     }
 
-    fn available_commands(&self, _cx: &App) -> Vec<crate::completion_provider::AvailableCommand> {
+    fn available_commands(&self, _cx: &App) -> Vec<AvailableCommand> {
         self.session_capabilities.read().completion_commands()
+    }
+
+    fn available_skills(&self, _cx: &App) -> Vec<AvailableSkill> {
+        self.session_capabilities.read().completion_skills()
+    }
+
+    fn slash_autocomplete_invoked(&self, cx: &mut App) {
+        // This may be called synchronously from inside a `MessageEditor`
+        // update (e.g. when pasting a slash command triggers completions),
+        // so we defer the emit to avoid a reentrant update panic.
+        let Some(editor) = self.message_editor.upgrade() else {
+            return;
+        };
+        cx.defer(move |cx| {
+            editor.update(cx, |_editor, cx| {
+                cx.emit(MessageEditorEvent::SlashAutocompleteOpened);
+            });
+        });
     }
 
     fn confirm_command(&self, cx: &mut App) {
@@ -144,14 +191,24 @@ pub struct MessageEditor {
 }
 
 #[derive(Clone, Debug)]
+pub enum InputAttempt {
+    Text(Arc<str>),
+    Paste(ClipboardItem),
+}
+
+#[derive(Clone, Debug)]
 pub enum MessageEditorEvent {
     Send,
     SendImmediately,
     Cancel,
     Focus,
     LostFocus,
+    /// Emitted when the user opens slash-command autocomplete in this
+    /// editor. Used by `ThreadView` to fire the global-skills scan
+    /// trigger; see `NativeAgent::ensure_skills_scan_started`.
+    SlashAutocompleteOpened,
     InputAttempted {
-        text: Arc<str>,
+        attempt: InputAttempt,
         cursor_offset: usize,
     },
 }
@@ -492,7 +549,7 @@ impl MessageEditor {
                         .to_offset(&editor.buffer().read(cx).snapshot(cx))
                         .0;
                     cx.emit(MessageEditorEvent::InputAttempted {
-                        text: text.clone(),
+                        attempt: InputAttempt::Text(text.clone()),
                         cursor_offset,
                     });
                 }
@@ -577,7 +634,7 @@ impl MessageEditor {
         let command_name = parsed_command.command?;
         let available_command = available_commands
             .iter()
-            .find(|command| command.name == command_name)?;
+            .find(|available_command| available_command.name == command_name)?;
 
         let acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput {
             mut hint,
@@ -668,7 +725,7 @@ impl MessageEditor {
     }
 
     pub fn is_empty(&self, cx: &App) -> bool {
-        self.editor.read(cx).is_empty(cx)
+        self.editor.read(cx).text(cx).trim().is_empty()
     }
 
     pub fn is_completions_menu_visible(&self, cx: &App) -> bool {
@@ -688,34 +745,91 @@ impl MessageEditor {
     fn validate_slash_commands(
         text: &str,
         available_commands: &[acp::AvailableCommand],
+        available_skills: &[AvailableSkill],
         agent_id: &AgentId,
     ) -> Result<()> {
         if let Some(parsed_command) = SlashCommandCompletion::try_parse(text, 0) {
+            if parsed_command.source_range.start != 0 {
+                return Ok(());
+            }
             if let Some(command_name) = parsed_command.command {
-                // Check if this command is in the list of available commands from the server
-                let is_supported = available_commands
+                // Two acceptance paths:
+                //
+                // 1. Direct name match. Covers bare slash commands
+                //    (`/help`), MCP prompts that were prefixed at the
+                //    agent because of a server-name collision
+                //    (`/github.create_pr`), and skills (whose bare name
+                //    is registered for the unqualified `/<name>` form).
+                //
+                // 2. Trusted native skill scope qualifier `/<scope>:<name>`. The popup
+                //    inserts this colon-separated form to disambiguate
+                //    same-named skills, so the validator splits on the
+                //    LAST `:` to recover scope + bare name. Skill
+                //    names are restricted to `[a-z0-9-]+` (no colons),
+                //    so the rightmost colon is always the scope/name
+                //    boundary — this lets scope labels (e.g. worktree
+                //    root names) themselves contain colons. The
+                //    scope is allowed to be empty: `/:<name>` is the
+                //    qualified form for a global skill (see
+                //    `SkillSource::scope_prefix`). The validator then
+                //    checks the `available_skills` slice for an entry
+                //    whose `skill.name` matches the bare name and
+                //    whose `skill.source` equals the typed scope
+                //    (including empty for globals). Without this
+                //    branch, every autocomplete pick of a same-named
+                //    skill would be rejected as "not supported"
+                //    before reaching the resolver.
+                let direct_match = available_commands
                     .iter()
-                    .any(|cmd| cmd.name == command_name);
+                    .any(|available_command| available_command.name == command_name)
+                    || available_skills
+                        .iter()
+                        .any(|skill| skill.name.as_ref() == command_name);
+                let scope_match = !direct_match
+                    && command_name.rsplit_once(':').is_some_and(|(scope, bare)| {
+                        !bare.is_empty()
+                            && available_skills.iter().any(|skill| {
+                                skill.name.as_ref() == bare && skill.source.as_ref() == scope
+                            })
+                    });
 
-                if !is_supported {
-                    return Err(anyhow!(
-                        "The /{} command is not supported by {}.\n\nAvailable commands: {}",
-                        command_name,
-                        agent_id,
-                        if available_commands.is_empty() {
-                            "none".to_string()
-                        } else {
-                            available_commands
-                                .iter()
-                                .map(|cmd| format!("/{}", cmd.name))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        }
-                    ));
+                if !direct_match && !scope_match {
+                    return Err(anyhow!(indoc::formatdoc!(
+                        "/{command_name} is not a recognized command in {agent_id}. \
+                         Messages that start with `/` are interpreted as commands.
+
+                         If you are trying to send a message and not run a command, \
+                         try preceding the `/` with a space.
+
+                         Available commands for {agent_id}: {commands}",
+                        commands =
+                            Self::format_available_commands(available_commands, available_skills),
+                    )));
                 }
             }
         }
         Ok(())
+    }
+
+    /// Render the available-commands list for error messages. Trusted native skills
+    /// are shown in their qualified `/<scope>:<name>` form so users
+    /// see the exact text the popup would insert — otherwise the
+    /// listing would contain confusing duplicates like `/foo, /foo`
+    /// when both a global and a project-local skill share a name.
+    /// Globals carry an empty scope and so render as `/:<name>`.
+    fn format_available_commands(
+        commands: &[acp::AvailableCommand],
+        skills: &[AvailableSkill],
+    ) -> String {
+        if commands.is_empty() && skills.is_empty() {
+            return "none".to_string();
+        }
+        skills
+            .iter()
+            .map(|skill| format!("/{}:{}", skill.source, skill.name))
+            .chain(commands.iter().map(|command| format!("/{}", command.name)))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     pub fn contents(
@@ -724,16 +838,23 @@ impl MessageEditor {
         cx: &mut Context<Self>,
     ) -> Task<Result<(Vec<acp::ContentBlock>, Vec<Entity<Buffer>>)>> {
         let text = self.editor.read(cx).text(cx);
-        let available_commands = self
-            .session_capabilities
-            .read()
-            .available_commands()
-            .to_vec();
+        let (available_commands, available_skills) = {
+            let session_capabilities = self.session_capabilities.read();
+            (
+                session_capabilities.available_commands().to_vec(),
+                session_capabilities.available_skills().to_vec(),
+            )
+        };
         let agent_id = self.agent_id.clone();
         let build_task = self.build_content_blocks(full_mention_content, cx);
 
         cx.spawn(async move |_, _cx| {
-            Self::validate_slash_commands(&text, &available_commands, &agent_id)?;
+            Self::validate_slash_commands(
+                &text,
+                &available_commands,
+                &available_skills,
+                &agent_id,
+            )?;
             build_task.await
         })
     }
@@ -759,88 +880,44 @@ impl MessageEditor {
             self.session_capabilities.read().supports_embedded_context();
 
         cx.spawn(async move |_, cx| {
-            let contents = contents.await?;
-            let mut all_tracked_buffers = Vec::new();
-
-            let result = editor.update(cx, |editor, cx| {
+            let mut contents = contents.await?;
+            Ok(editor.update(cx, |editor, cx| {
+                let crease_snapshot = editor.display_map.read(cx).crease_snapshot();
+                let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
                 let text = editor.text(cx);
-                let (mut ix, _) = text
-                    .char_indices()
-                    .find(|(_, c)| !c.is_whitespace())
-                    .unwrap_or((0, '\0'));
-                let mut chunks: Vec<acp::ContentBlock> = Vec::new();
-                editor.display_map.update(cx, |map, cx| {
-                    let snapshot = map.snapshot(cx);
-                    for (crease_id, crease) in snapshot.crease_snapshot.creases() {
-                        let Some((uri, mention)) = contents.get(&crease_id) else {
-                            continue;
-                        };
-
-                        let crease_range = crease.range().to_offset(&snapshot.buffer_snapshot());
-                        if crease_range.start.0 > ix {
-                            let chunk = text[ix..crease_range.start.0].into();
-                            chunks.push(chunk);
-                        }
-                        let chunk = match mention {
-                            Mention::Text {
-                                content,
-                                tracked_buffers,
-                            } => {
-                                all_tracked_buffers.extend(tracked_buffers.iter().cloned());
-                                if supports_embedded_context {
-                                    acp::ContentBlock::Resource(acp::EmbeddedResource::new(
-                                        acp::EmbeddedResourceResource::TextResourceContents(
-                                            acp::TextResourceContents::new(
-                                                content.clone(),
-                                                uri.to_uri().to_string(),
-                                            ),
-                                        ),
-                                    ))
-                                } else {
-                                    acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
-                                        uri.name(),
-                                        uri.to_uri().to_string(),
-                                    ))
-                                }
-                            }
-                            Mention::Image(mention_image) => acp::ContentBlock::Image(
-                                acp::ImageContent::new(
-                                    mention_image.data.clone(),
-                                    mention_image.format.mime_type(),
-                                )
-                                .uri(match uri {
-                                    MentionUri::File { .. } => Some(uri.to_uri().to_string()),
-                                    MentionUri::PastedImage { .. } => {
-                                        Some(uri.to_uri().to_string())
-                                    }
-                                    other => {
-                                        debug_panic!(
-                                            "unexpected mention uri for image: {:?}",
-                                            other
-                                        );
-                                        None
-                                    }
-                                }),
-                            ),
-                            Mention::Link => acp::ContentBlock::ResourceLink(
-                                acp::ResourceLink::new(uri.name(), uri.to_uri().to_string()),
-                            ),
-                        };
-                        chunks.push(chunk);
-                        ix = crease_range.end.0;
-                    }
-
-                    if ix < text.len() {
-                        let last_chunk = text[ix..].trim_end().to_owned();
-                        if !last_chunk.is_empty() {
-                            chunks.push(last_chunk.into());
-                        }
-                    }
-                });
-                anyhow::Ok((chunks, all_tracked_buffers))
-            })?;
-            Ok(result)
+                build_chunks_from_creases(
+                    &text,
+                    &crease_snapshot,
+                    &buffer_snapshot,
+                    supports_embedded_context,
+                    |crease_id| {
+                        contents
+                            .remove(crease_id)
+                            .map(|(uri, mention)| (uri, Some(mention)))
+                    },
+                )
+            }))
         })
+    }
+
+    /// Snapshots the editor's current draft into a list of `ContentBlock`s
+    /// without awaiting any pending mention resolution.
+    pub fn draft_content_blocks_snapshot(&self, cx: &App) -> Vec<acp::ContentBlock> {
+        let editor = self.editor.read(cx);
+        let crease_snapshot = editor.display_map.read(cx).crease_snapshot();
+        let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+        let text = editor.text(cx);
+        let mention_set = self.mention_set.read(cx);
+        let supports_embedded_context =
+            self.session_capabilities.read().supports_embedded_context();
+        let (chunks, _tracked_buffers) = build_chunks_from_creases(
+            &text,
+            &crease_snapshot,
+            &buffer_snapshot,
+            supports_embedded_context,
+            |crease_id| mention_set.resolved_mention_for_crease(crease_id),
+        );
+        chunks
     }
 
     pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -952,18 +1029,47 @@ impl MessageEditor {
         cx.emit(MessageEditorEvent::Cancel)
     }
 
-    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+
+        if self.editor.read(cx).read_only(cx) {
+            let editor = self.editor.read(cx);
+            let cursor_offset = editor
+                .selections
+                .newest_anchor()
+                .head()
+                .to_offset(&editor.buffer().read(cx).snapshot(cx))
+                .0;
+            cx.emit(MessageEditorEvent::InputAttempted {
+                attempt: InputAttempt::Paste(clipboard),
+                cursor_offset,
+            });
+            cx.stop_propagation();
+            return;
+        }
+
+        cx.stop_propagation();
+        self.paste_item(&clipboard, window, cx);
+    }
+
+    pub fn paste_item(
+        &mut self,
+        clipboard: &ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let editor_clipboard_selections = cx.read_from_clipboard().and_then(|item| {
-            item.entries().iter().find_map(|entry| match entry {
+        let editor_clipboard_selections =
+            clipboard.entries().iter().find_map(|entry| match entry {
                 ClipboardEntry::String(text) => {
                     text.metadata_json::<Vec<editor::ClipboardSelection>>()
                 }
                 _ => None,
-            })
-        });
+            });
 
         // Insert creases for pasted clipboard selections that:
         // 1. Contain exactly one selection
@@ -995,7 +1101,6 @@ impl MessageEditor {
         .unwrap_or(false);
 
         if should_insert_creases && let Some(selections) = editor_clipboard_selections {
-            cx.stop_propagation();
             let snapshot = self.editor.read(cx).buffer().read(cx).snapshot(cx);
             let (insertion_target, _) = snapshot
                 .anchor_to_buffer_anchor(self.editor.read(cx).selections.newest_anchor().start)
@@ -1083,14 +1188,12 @@ impl MessageEditor {
         }
         // Handle text paste with potential markdown mention links before
         // clipboard context entries so markdown text still pastes as text.
-        if let Some(clipboard_text) = cx.read_from_clipboard().and_then(|item| {
-            item.entries().iter().find_map(|entry| match entry {
-                ClipboardEntry::String(text) => Some(text.text().to_string()),
-                _ => None,
-            })
-        }) {
+        let clipboard_text = clipboard.entries().iter().find_map(|entry| match entry {
+            ClipboardEntry::String(text) => Some(text.text().to_string()),
+            _ => None,
+        });
+        if let Some(clipboard_text) = clipboard_text.as_deref() {
             if clipboard_text.contains("[@") {
-                cx.stop_propagation();
                 let selections_before = self.editor.update(cx, |editor, cx| {
                     let snapshot = editor.buffer().read(cx).snapshot(cx);
                     editor
@@ -1107,7 +1210,7 @@ impl MessageEditor {
                 });
 
                 self.editor.update(cx, |editor, cx| {
-                    editor.insert(&clipboard_text, window, cx);
+                    editor.insert(clipboard_text, window, cx);
                 });
 
                 let snapshot = self.editor.read(cx).buffer().read(cx).snapshot(cx);
@@ -1178,12 +1281,13 @@ impl MessageEditor {
             }
         }
 
-        if self.handle_pasted_context(window, cx) {
+        if self.handle_pasted_context(clipboard, window, cx) {
             return;
         }
 
-        // Fall through to default editor paste
-        cx.propagate();
+        self.editor.update(cx, |editor, cx| {
+            editor.paste_item(clipboard, window, cx);
+        });
     }
 
     fn paste_raw(&mut self, _: &PasteRaw, window: &mut Window, cx: &mut Context<Self>) {
@@ -1193,11 +1297,12 @@ impl MessageEditor {
         });
     }
 
-    fn handle_pasted_context(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            return false;
-        };
-
+    fn handle_pasted_context(
+        &mut self,
+        clipboard: &ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if matches!(
             clipboard.entries().first(),
             Some(ClipboardEntry::String(_)) | None
@@ -1217,9 +1322,7 @@ impl MessageEditor {
         let editor = self.editor.clone();
         let mention_set = self.mention_set.clone();
         let workspace = self.workspace.clone();
-        let entries = clipboard.into_entries().collect::<Vec<_>>();
-
-        cx.stop_propagation();
+        let entries = clipboard.clone().into_entries().collect::<Vec<_>>();
 
         window
             .spawn(cx, async move |mut cx| {
@@ -1363,7 +1466,12 @@ impl MessageEditor {
             .detach_and_log_err(cx);
     }
 
-    pub fn insert_selections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn insert_selections(
+        &mut self,
+        selection: AgentContextSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let editor = self.editor.read(cx);
         let editor_buffer = editor.buffer().read(cx);
         let Some(buffer) = editor_buffer.as_singleton() else {
@@ -1374,17 +1482,13 @@ impl MessageEditor {
         let anchor = buffer.update(cx, |buffer, _cx| {
             buffer.anchor_before(cursor_offset.0.min(buffer.len()))
         });
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
         let Some(completion) =
             PromptCompletionProvider::<MessageEditorCompletionDelegate>::completion_for_action(
                 PromptContextAction::AddSelections,
                 anchor..anchor,
                 self.editor.downgrade(),
                 self.mention_set.downgrade(),
-                &workspace,
-                cx,
+                Some(selection),
             )
         else {
             return;
@@ -1758,6 +1862,92 @@ impl Addon for MessageEditorAddon {
     }
 }
 
+/// Walks the editor's creases in order, interleaving plain-text chunks from
+/// `text` with mention blocks produced from `resolve`.
+fn build_chunks_from_creases(
+    text: &str,
+    crease_snapshot: &CreaseSnapshot,
+    buffer_snapshot: &MultiBufferSnapshot,
+    supports_embedded_context: bool,
+    mut resolve: impl FnMut(&CreaseId) -> Option<(MentionUri, Option<Mention>)>,
+) -> (Vec<acp::ContentBlock>, Vec<Entity<Buffer>>) {
+    let mut ix = text
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+        .map_or(text.len(), |(i, _)| i);
+    let mut chunks = Vec::new();
+    let mut tracked_buffers = Vec::new();
+
+    for (crease_id, crease) in crease_snapshot.creases() {
+        let Some((uri, mention)) = resolve(&crease_id) else {
+            continue;
+        };
+        let crease_range = crease.range().to_offset(buffer_snapshot);
+        if crease_range.start.0 > ix {
+            chunks.push(text[ix..crease_range.start.0].into());
+        }
+        chunks.push(mention_to_content_block(
+            &uri,
+            mention.as_ref(),
+            supports_embedded_context,
+            &mut tracked_buffers,
+        ));
+        ix = crease_range.end.0;
+    }
+
+    if ix < text.len() {
+        let last_chunk = text[ix..].trim_end().to_owned();
+        if !last_chunk.is_empty() {
+            chunks.push(last_chunk.into());
+        }
+    }
+    (chunks, tracked_buffers)
+}
+
+fn mention_to_content_block(
+    uri: &MentionUri,
+    mention: Option<&Mention>,
+    supports_embedded_context: bool,
+    tracked_buffers: &mut Vec<Entity<Buffer>>,
+) -> acp::ContentBlock {
+    match mention {
+        Some(Mention::Text {
+            content,
+            tracked_buffers: mention_tracked_buffers,
+        }) => {
+            tracked_buffers.extend(mention_tracked_buffers.iter().cloned());
+            if supports_embedded_context {
+                acp::ContentBlock::Resource(acp::EmbeddedResource::new(
+                    acp::EmbeddedResourceResource::TextResourceContents(
+                        acp::TextResourceContents::new(content.clone(), uri.to_uri().to_string()),
+                    ),
+                ))
+            } else {
+                acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+                    uri.name(),
+                    uri.to_uri().to_string(),
+                ))
+            }
+        }
+        Some(Mention::Image(mention_image)) => acp::ContentBlock::Image(
+            acp::ImageContent::new(mention_image.data.clone(), mention_image.format.mime_type())
+                .uri(match uri {
+                    MentionUri::File { .. } | MentionUri::PastedImage { .. } => {
+                        Some(uri.to_uri().to_string())
+                    }
+                    other => {
+                        debug_panic!("unexpected mention uri for image: {:?}", other);
+                        None
+                    }
+                }),
+        ),
+        _ => acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+            uri.name(),
+            uri.to_uri().to_string(),
+        )),
+    }
+}
+
 /// Parses markdown mention links in the format `[@name](uri)` from text.
 /// Returns a vector of (range, MentionUri) pairs where range is the byte range in the text.
 fn parse_mention_links(text: &str, path_style: PathStyle) -> Vec<(Range<usize>, MentionUri)> {
@@ -1843,19 +2033,141 @@ mod tests {
     use language_model::LanguageModelRegistry;
     use lsp::{CompletionContext, CompletionTriggerKind};
     use parking_lot::RwLock;
-    use project::{CompletionIntent, Project, ProjectPath};
+    use project::{AgentId, CompletionIntent, Project, ProjectPath};
     use serde_json::{Value, json};
 
     use text::Point;
     use ui::{App, Context, IntoElement, Render, SharedString, Window};
     use util::{path, paths::PathStyle, rel_path::rel_path};
-    use workspace::{AppState, Item, MultiWorkspace};
+    use workspace::{AppState, Item, MultiWorkspace, Workspace};
 
-    use crate::completion_provider::PromptContextType;
+    use crate::completion_provider::{AgentContextSelection, AvailableSkill, PromptContextType};
     use crate::{
         conversation_view::tests::init_test,
-        message_editor::{Mention, MessageEditor, SessionCapabilities, parse_mention_links},
+        message_editor::{
+            Mention, MessageEditor, MessageEditorEvent, SessionCapabilities, parse_mention_links,
+        },
     };
+
+    #[test]
+    fn test_session_capabilities_keep_commands_and_skills_separate() {
+        let skill_file_path = PathBuf::from("/tmp/SKILL.md");
+        let skill = AvailableSkill {
+            name: "deploy".into(),
+            description: "Deploy the app".into(),
+            source: "".into(),
+            skill_file_path: skill_file_path.clone(),
+        };
+        let session_capabilities = SessionCapabilities::new(
+            acp::PromptCapabilities::default(),
+            vec![acp::AvailableCommand::new("help", "Get help")],
+            vec![skill],
+        );
+
+        assert_eq!(session_capabilities.completion_commands().len(), 1);
+        let skills = session_capabilities.completion_skills();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name.as_ref(), "deploy");
+        assert_eq!(skills[0].skill_file_path, skill_file_path);
+    }
+
+    #[test]
+    fn test_validate_slash_commands_accepts_scope_qualified_skill() {
+        let agent_id = AgentId::from("Zed");
+        let make_skill = |name: &str, source: &str| AvailableSkill {
+            name: name.into(),
+            description: "desc".into(),
+            source: source.into(),
+            skill_file_path: PathBuf::from(format!("/tmp/{source}-{name}/SKILL.md")),
+        };
+
+        // Global skills carry an empty scope (so the popup inserts
+        // `/:<name>`); project-local skills carry their worktree root
+        // name. The empty-scope encoding means a worktree literally
+        // named `global` no longer collides with the global source.
+        let commands = vec![acp::AvailableCommand::new("help", "Get help")];
+        let skills = vec![make_skill("deploy", ""), make_skill("deploy", "zed")];
+        let no_skills = Vec::new();
+
+        // Bare name still works (current behavior — the resolver
+        // applies project-overrides-global for unqualified commands).
+        MessageEditor::validate_slash_commands("/deploy", &commands, &skills, &agent_id)
+            .expect("bare /deploy should validate when a skill named `deploy` exists");
+        MessageEditor::validate_slash_commands("/zed:deploy", &commands, &no_skills, &agent_id)
+            .expect_err("scope-qualified skills should require a first-class available skill");
+
+        // Scope-qualified forms both validate, each pointing at the
+        // matching source. `/:<name>` is the qualified form for a
+        // global skill; `/<worktree>:<name>` is the qualified form
+        // for a project-local skill.
+        MessageEditor::validate_slash_commands("/:deploy", &commands, &skills, &agent_id)
+            .expect("/:deploy should validate when a global skill named `deploy` exists");
+        MessageEditor::validate_slash_commands("/zed:deploy", &commands, &skills, &agent_id).expect(
+            "/zed:deploy should validate when a project skill named `deploy` exists in the `zed` worktree",
+        );
+
+        // Hand-typed `/global:<name>` is NOT an alias for `/:<name>`.
+        // It looks for a project-local skill from a worktree named
+        // `global`, and fails when no such worktree skill exists.
+        MessageEditor::validate_slash_commands("/global:deploy", &commands, &skills, &agent_id)
+            .expect_err(
+                "/global:deploy should fail when no worktree named `global` has a `deploy` skill",
+            );
+
+        // The `:` separator is what distinguishes a skill scope from
+        // an MCP server prefix — the dotted form `/zed.deploy` is an
+        // MCP-style lookup, which doesn't match here.
+        MessageEditor::validate_slash_commands("/zed.deploy", &commands, &skills, &agent_id)
+            .expect_err("/zed.deploy (dotted) should be treated as an MCP-style prefix and fail");
+
+        // Wrong scope is rejected so the resolver doesn't silently
+        // fall through when the user meant a skill. `zed:help` looks
+        // like a skill scope qualifier but no skill named `help`
+        // exists in the `zed` worktree (it's an MCP command).
+        let err =
+            MessageEditor::validate_slash_commands("/zed:help", &commands, &skills, &agent_id)
+                .expect_err(
+                    "/zed:help should fail — `help` is an MCP command, not a worktree skill",
+                );
+        let err_message = err.to_string();
+        assert!(
+            err_message.contains("/zed:help"),
+            "error should mention the typed command: {err_message}"
+        );
+        // Error listing shows qualified forms for skills so users see
+        // the exact text the popup would have inserted. Globals
+        // render with an empty scope as `/:<name>`.
+        assert!(
+            err_message.contains("/:deploy"),
+            "error listing should show qualified global form: {err_message}"
+        );
+        assert!(
+            err_message.contains("/zed:deploy"),
+            "error listing should show qualified worktree form: {err_message}"
+        );
+        assert!(
+            err_message.contains("/help"),
+            "error listing should still show bare MCP commands: {err_message}"
+        );
+
+        // Slashes that appear mid-text (paths, URLs, pasted logs)
+        // should NOT be validated as commands.
+        MessageEditor::validate_slash_commands(
+            "check /docs for info",
+            &commands,
+            &skills,
+            &agent_id,
+        )
+        .expect("mid-text /docs should not be treated as a slash command");
+
+        MessageEditor::validate_slash_commands(
+            "see /usr/local/bin/foo",
+            &commands,
+            &skills,
+            &agent_id,
+        )
+        .expect("file paths containing slashes should not trigger validation");
+    }
 
     #[test]
     fn test_parse_mention_links() {
@@ -2055,7 +2367,7 @@ mod tests {
 
         let project = Project::test(fs.clone(), ["/test".as_ref()], cx).await;
         let thread_store = None;
-        let session_capabilities = Arc::new(RwLock::new(SessionCapabilities::new(
+        let session_capabilities = Arc::new(RwLock::new(SessionCapabilities::from_acp_commands(
             acp::PromptCapabilities::default(),
             vec![],
         )));
@@ -2097,8 +2409,8 @@ mod tests {
         // Should fail because available_commands is empty (no commands supported)
         assert!(contents_result.is_err());
         let error_message = contents_result.unwrap_err().to_string();
-        assert!(error_message.contains("not supported by Claude Agent"));
-        assert!(error_message.contains("Available commands: none"));
+        assert!(error_message.contains("is not a recognized command in Claude Agent"));
+        assert!(error_message.contains("Available commands for Claude Agent: none"));
 
         // Now simulate Claude providing its list of available commands (which doesn't include file)
         session_capabilities
@@ -2116,9 +2428,9 @@ mod tests {
 
         assert!(contents_result.is_err());
         let error_message = contents_result.unwrap_err().to_string();
-        assert!(error_message.contains("not supported by Claude Agent"));
+        assert!(error_message.contains("is not a recognized command in Claude Agent"));
         assert!(error_message.contains("/file"));
-        assert!(error_message.contains("Available commands: /help"));
+        assert!(error_message.contains("Available commands for Claude Agent: /help"));
 
         // Test that supported commands work fine
         editor.update_in(cx, |editor, window, cx| {
@@ -2217,7 +2529,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
 
         let thread_store = None;
-        let session_capabilities = Arc::new(RwLock::new(SessionCapabilities::new(
+        let session_capabilities = Arc::new(RwLock::new(SessionCapabilities::from_acp_commands(
             acp::PromptCapabilities::default(),
             vec![
                 acp::AvailableCommand::new("quick-math", "2 + 2 = 4 - 1 = 3"),
@@ -2365,6 +2677,102 @@ mod tests {
         });
     }
 
+    /// Opening slash-command autocomplete must emit
+    /// [`MessageEditorEvent::SlashAutocompleteOpened`]. `ThreadView`
+    /// subscribes to that event to fire the global-skills scan trigger
+    /// (see `NativeAgent::ensure_skills_scan_started`); without the
+    /// event the trigger never runs and lazily-discovered skills never
+    /// appear in autocomplete.
+    #[gpui::test]
+    async fn test_slash_autocomplete_emits_opened_event(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let app_state = cx.update(AppState::test);
+
+        cx.update(|cx| {
+            editor::init(cx);
+            workspace::init(app_state.clone(), cx);
+        });
+
+        let project = Project::test(app_state.fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+
+        let session_capabilities = Arc::new(RwLock::new(SessionCapabilities::from_acp_commands(
+            acp::PromptCapabilities::default(),
+            vec![acp::AvailableCommand::new("hello", "Say hello")],
+        )));
+
+        // Track every event emitted by the message editor across the
+        // lifetime of the test. We expect to see Focus (from the focus
+        // call below) and SlashAutocompleteOpened (from typing "/").
+        let received_events: Arc<parking_lot::Mutex<Vec<MessageEditorEvent>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        let editor = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let workspace_handle = cx.weak_entity();
+            let message_editor = cx.new(|cx| {
+                MessageEditor::new(
+                    workspace_handle,
+                    project.downgrade(),
+                    None,
+                    None,
+                    session_capabilities.clone(),
+                    "Test Agent".into(),
+                    "Test",
+                    EditorMode::AutoHeight {
+                        max_lines: None,
+                        min_lines: 1,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.add_item(
+                    Box::new(cx.new(|_| MessageEditorItem(message_editor.clone()))),
+                    true,
+                    true,
+                    None,
+                    window,
+                    cx,
+                );
+            });
+
+            let received_events = received_events.clone();
+            cx.subscribe(
+                &message_editor,
+                move |_editor: &mut Workspace, _, event: &MessageEditorEvent, _cx| {
+                    received_events.lock().push(event.clone());
+                },
+            )
+            .detach();
+
+            message_editor.read(cx).focus_handle(cx).focus(window, cx);
+            message_editor.read(cx).editor().clone()
+        });
+
+        cx.simulate_input("/");
+
+        editor.update_in(&mut cx, |editor, _window, cx| {
+            assert_eq!(editor.text(cx), "/");
+            assert!(editor.has_visible_completions_menu());
+        });
+
+        let events = received_events.lock();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, MessageEditorEvent::SlashAutocompleteOpened)),
+            "expected SlashAutocompleteOpened to have been emitted; saw events: {events:?}",
+        );
+    }
+
     #[gpui::test]
     async fn test_context_completion_provider_mentions(cx: &mut TestAppContext) {
         init_test(cx);
@@ -2450,7 +2858,7 @@ mod tests {
         }
 
         let thread_store = cx.new(|cx| ThreadStore::new(cx));
-        let session_capabilities = Arc::new(RwLock::new(SessionCapabilities::new(
+        let session_capabilities = Arc::new(RwLock::new(SessionCapabilities::from_acp_commands(
             acp::PromptCapabilities::default(),
             vec![],
         )));
@@ -3571,11 +3979,17 @@ mod tests {
             })
         });
 
-        // Now let's insert the selection in the Agent Panel's editor and
-        // confirm that, after the insertion, the cursor is now in the visible
-        // range.
+        let text_editor_selection = editor.update(&mut cx, |editor, cx| {
+            let multibuffer = editor.buffer().read(cx);
+            let buffer = multibuffer.as_singleton().unwrap();
+            let buffer_snapshot = buffer.read(cx).snapshot();
+            let start = buffer_snapshot.anchor_before(0);
+            let end = buffer_snapshot.anchor_after(5);
+            AgentContextSelection::Editor(vec![(buffer, start..end)])
+        });
+
         message_editor.update_in(&mut cx, |message_editor, window, cx| {
-            message_editor.insert_selections(window, cx);
+            message_editor.insert_selections(text_editor_selection, window, cx);
         });
 
         cx.run_until_parked();

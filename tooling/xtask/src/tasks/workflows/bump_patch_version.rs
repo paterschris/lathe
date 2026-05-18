@@ -28,7 +28,7 @@ fn run_bump_patch_version(branch: &WorkflowInput) -> steps::NamedJob {
             .with_ref(branch.to_string())
     }
 
-    fn bump_version() -> Step<Run> {
+    fn read_channel() -> Step<Run> {
         named::bash(indoc::indoc! {r#"
             channel="$(cat crates/zed/RELEASE_CHANNEL)"
 
@@ -44,10 +44,22 @@ fn run_bump_patch_version(branch: &WorkflowInput) -> steps::NamedJob {
                 exit 1
                 ;;
             esac
-            which cargo-set-version > /dev/null || cargo install cargo-edit -f --no-default-features --features "set-version"
+
+            version=$(script/get-crate-version zed)
+
+            {
+                echo "channel=$channel"
+                echo "version=$version"
+                echo "tag_suffix=$tag_suffix"
+            } >> "$GITHUB_OUTPUT"
+        "#})
+        .id("channel")
+    }
+
+    fn bump_version() -> Step<Run> {
+        named::bash(indoc::indoc! {r#"
             version="$(cargo set-version -p zed --bump patch 2>&1 | sed 's/.* //')"
             echo "version=$version" >> "$GITHUB_OUTPUT"
-            echo "tag_suffix=$tag_suffix" >> "$GITHUB_OUTPUT"
         "#})
         .id("bump-version")
     }
@@ -101,9 +113,10 @@ fn run_bump_patch_version(branch: &WorkflowInput) -> steps::NamedJob {
     }
 
     let (authenticate, token) = steps::authenticate_as_zippy().into();
+    let channel_step = read_channel();
+    let tag_suffix = StepOutput::new(&channel_step, "tag_suffix");
     let bump_version_step = bump_version();
     let version = StepOutput::new(&bump_version_step, "version");
-    let tag_suffix = StepOutput::new(&bump_version_step, "tag_suffix");
     let commit_step = commit_changes(&version, &token, branch);
     let commit_sha = StepOutput::new_unchecked(&commit_step, "commit");
 
@@ -115,6 +128,8 @@ fn run_bump_patch_version(branch: &WorkflowInput) -> steps::NamedJob {
             .runs_on(runners::LINUX_XL)
             .add_step(authenticate)
             .add_step(checkout_branch(branch, &token))
+            .add_step(channel_step)
+            .add_step(steps::install_cargo_edit())
             .add_step(bump_version_step)
             .add_step(commit_step)
             .add_step(create_version_tag(

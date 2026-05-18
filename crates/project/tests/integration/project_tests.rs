@@ -1,5 +1,6 @@
 #![allow(clippy::format_collect)]
 
+mod agent_registry_store;
 mod bookmark_store;
 mod color_extractor;
 mod context_server_store;
@@ -10487,7 +10488,7 @@ fn merge_pending_ops_snapshots(
                     t_ops.ops.push(s_op);
                 }
             }
-            t_ops.ops.sort_by(|l, r| l.id.cmp(&r.id));
+            t_ops.ops.sort_by_key(|op| op.id);
         } else {
             target.push(s_ops);
         }
@@ -12035,8 +12036,8 @@ async fn test_git_worktrees_and_submodules(cx: &mut gpui::TestAppContext) {
             Path::new(path!("/project/some-worktree")).into(),
         );
         pretty_assertions::assert_eq!(
-            repo.read(cx).original_repo_abs_path,
-            Path::new(path!("/project")).into(),
+            repo.read(cx).main_worktree_abs_path(),
+            Some(Path::new(path!("/project"))),
         );
         assert!(
             repo.read(cx).linked_worktree_path().is_some(),
@@ -12088,8 +12089,8 @@ async fn test_git_worktrees_and_submodules(cx: &mut gpui::TestAppContext) {
             Path::new(path!("/project/subdir/some-submodule")).into(),
         );
         pretty_assertions::assert_eq!(
-            repo.read(cx).original_repo_abs_path,
-            Path::new(path!("/project/subdir/some-submodule")).into(),
+            repo.read(cx).main_worktree_abs_path(),
+            Some(Path::new(path!("/project/subdir/some-submodule"))),
         );
         assert!(
             repo.read(cx).linked_worktree_path().is_none(),

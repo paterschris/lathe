@@ -47,7 +47,7 @@ actions!(
         /// Shows git blame information for the current file.
         #[action(deprecated_aliases = ["editor::ToggleGitBlame"])]
         Blame,
-        /// Shows the git history for the current file.
+        /// Shows the git history for the selected file, folder, or project.
         FileHistory,
         /// Stages the current file.
         StageFile,
@@ -108,6 +108,9 @@ actions!(
         Cancel,
         /// Expands the commit message editor.
         ExpandCommitEditor,
+        /// Toggles whether the commit message editor fills all the available
+        /// vertical space within the git panel.
+        ToggleFillCommitEditor,
         /// Generates a commit message using AI.
         GenerateCommitMessage,
         /// Initializes a new git repository.

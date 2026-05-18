@@ -12,7 +12,8 @@ use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, ClipboardEntry, DismissEvent, Entity,
     EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, Hsla, KeyContext, KeyDownEvent,
     Keystroke, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Styled,
-    Subscription, Task, WeakEntity, actions, anchored, deferred, div, hsla, pulsating_between,
+    Subscription, Task, TaskExt, WeakEntity, actions, anchored, deferred, div, hsla,
+    pulsating_between,
 };
 use itertools::Itertools;
 use menu;
@@ -20,7 +21,9 @@ use persistence::TerminalDb;
 use project::{Project, ProjectEntryId, search::SearchQuery};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use settings::{Settings, SettingsStore, TerminalBlink, WorkingDirectory};
+use settings::{
+    SeedQuerySetting, Settings, SettingsStore, TerminalBlink, WorkingDirectory,
+};
 use std::{
     any::Any,
     cmp,
@@ -33,8 +36,9 @@ use std::{
 use task::TaskId;
 use terminal::{
     Clear, Copy, Event, HoveredWord, InteractivePromptKind, MaybeNavigationTarget, Paste,
-    ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    ShowCharacterPalette, TaskState, TaskStatus, Terminal, TerminalBounds, ToggleViMode,
+    PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom,
+    ScrollToTop, ShowCharacterPalette, TaskState, TaskStatus, Terminal, TerminalBounds,
+    ToggleViMode,
     alacritty_terminal::{
         index::Point as AlacPoint,
         term::{TermMode, point_to_viewport, search::RegexSearch},
@@ -565,6 +569,7 @@ impl TerminalView {
                 .separator()
                 .action("Copy", Box::new(Copy))
                 .action("Paste", Box::new(Paste))
+                .action("Paste Text", Box::new(PasteText))
                 .action("Select All", Box::new(SelectAll))
                 .action("Clear", Box::new(Clear))
                 .when(assistant_enabled, |menu| {
@@ -868,7 +873,7 @@ impl TerminalView {
     }
 
     ///Attempt to paste the clipboard into the terminal
-    fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
@@ -877,12 +882,27 @@ impl TerminalView {
             Some(ClipboardEntry::Image(image)) if !image.bytes.is_empty() => {
                 self.forward_ctrl_v(cx);
             }
+            Some(ClipboardEntry::ExternalPaths(paths)) => {
+                self.add_paths_to_terminal(paths.paths(), window, cx);
+            }
             _ => {
                 if let Some(text) = clipboard.text() {
                     self.terminal
                         .update(cx, |terminal, _cx| terminal.paste(&text));
                 }
             }
+        }
+    }
+
+    ///Attempt to paste the clipboard text into the terminal
+    fn paste_text(&mut self, _: &PasteText, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+
+        if let Some(text) = clipboard.text() {
+            self.terminal
+                .update(cx, |terminal, _cx| terminal.paste(&text));
         }
     }
 
@@ -1309,6 +1329,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(TerminalView::send_keystroke))
             .on_action(cx.listener(TerminalView::copy))
             .on_action(cx.listener(TerminalView::paste))
+            .on_action(cx.listener(TerminalView::paste_text))
             .on_action(cx.listener(TerminalView::clear))
             .on_action(cx.listener(TerminalView::scroll_line_up))
             .on_action(cx.listener(TerminalView::scroll_line_down))
@@ -1353,12 +1374,13 @@ impl Render for TerminalView {
                         self.mode.clone(),
                     ))
                     .when(self.content_mode(window, cx).is_scrollable(), |div| {
+                        let colors = cx.theme().colors();
                         div.custom_scrollbars(
                             Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
                                 .show_along(ScrollAxes::Vertical)
-                                .with_track_along(
+                                .with_stable_track_along(
                                     ScrollAxes::Vertical,
-                                    cx.theme().colors().editor_background,
+                                    colors.editor_background,
                                 )
                                 .tracked_scroll_handle(&self.scroll_handle),
                             window,
@@ -1984,7 +2006,7 @@ impl SearchableItem for TerminalView {
     /// Returns the selection content to pre-load into this search
     fn query_suggestion(
         &mut self,
-        _ignore_settings: bool,
+        _seed_query_override: Option<SeedQuerySetting>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> String {
@@ -2106,9 +2128,13 @@ impl SearchableItem for TerminalView {
 }
 
 /// Gets the working directory for the given workspace, respecting the user's settings.
-/// Falls back to the local home directory only for local workspaces.
-pub(crate) fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
-    let should_fallback_to_local_home = workspace.project().read(cx).is_local();
+/// Falls back to home directory when no project directory is available.
+///
+/// For remote projects, local-only resolution (home dir fallback, shell expansion,
+/// local `is_dir` checks) is skipped, returning `None` lets the remote shell
+/// open in the remote user's home directory by default.
+pub fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
+    let is_remote = workspace.project().read(cx).is_remote();
     let directory = match &TerminalSettings::get_global(cx).working_directory {
         WorkingDirectory::CurrentFileDirectory => workspace
             .project()
@@ -2118,16 +2144,17 @@ pub(crate) fn default_working_directory(workspace: &Workspace, cx: &App) -> Opti
         WorkingDirectory::CurrentProjectDirectory => current_project_directory(workspace, cx),
         WorkingDirectory::FirstProjectDirectory => first_project_directory(workspace, cx),
         WorkingDirectory::AlwaysHome => None,
-        WorkingDirectory::Always { directory } => shellexpand::full(directory)
+        WorkingDirectory::Always { directory } if !is_remote => shellexpand::full(directory)
             .ok()
             .map(|dir| Path::new(&dir.to_string()).to_path_buf())
             .filter(|dir| dir.is_dir()),
+        WorkingDirectory::Always { .. } => None,
     };
 
-    if should_fallback_to_local_home {
-        directory.or_else(dirs::home_dir)
-    } else {
+    if is_remote {
         directory
+    } else {
+        directory.or_else(dirs::home_dir)
     }
 }
 

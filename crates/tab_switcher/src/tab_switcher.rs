@@ -3,13 +3,13 @@ mod tab_switcher_tests;
 
 use collections::{HashMap, HashSet};
 use editor::items::{
-    entry_diagnostic_aware_icon_decoration_and_color, tab_git_aware_label_color,
+    entry_diagnostic_aware_icon_decoration_and_color, entry_git_aware_label_color,
 };
 use fuzzy_nucleo::StringMatchCandidate;
 use gpui::{
     Action, AnyElement, App, Context, DismissEvent, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, Modifiers, ModifiersChangedEvent, MouseButton, MouseUpEvent, ParentElement, Point,
-    Render, Styled, Task, WeakEntity, Window, actions, rems,
+    Render, Styled, Task, TaskExt, WeakEntity, Window, actions, rems,
 };
 use picker::{Picker, PickerDelegate};
 use project::Project;
@@ -267,6 +267,24 @@ impl TabMatch {
         let icon = self.item.tab_icon(window, cx)?;
         let item_settings = ItemSettings::get_global(cx);
         let show_diagnostics = item_settings.show_diagnostics;
+        let git_status_color = item_settings
+            .git_status
+            .then(|| {
+                let path = self.item.project_path(cx)?;
+                let project = project.read(cx);
+                let entry = project.entry_for_path(&path, cx)?;
+                let git_status = project
+                    .project_path_git_status(&path, cx)
+                    .map(|status| status.summary())
+                    .unwrap_or_default();
+                Some(entry_git_aware_label_color(
+                    git_status,
+                    entry.is_ignored,
+                    selected,
+                ))
+            })
+            .flatten();
+        let colored_icon = icon.color(git_status_color.unwrap_or_default());
 
         let most_severe_diagnostic_level = if show_diagnostics == ShowDiagnostics::Off {
             None
@@ -285,27 +303,6 @@ impl TabMatch {
                     .min()
             })
         };
-
-        let git_status_color = item_settings
-            .git_status
-            .then(|| {
-                let path = self.item.project_path(cx)?;
-                let project = project.read(cx);
-                let entry = project.entry_for_path(&path, cx)?;
-                let git_status = project
-                    .project_path_git_status(&path, cx)
-                    .map(|status| status.summary())
-                    .unwrap_or_default();
-                Some(tab_git_aware_label_color(
-                    git_status,
-                    entry.is_ignored,
-                    selected,
-                    most_severe_diagnostic_level,
-                    cx,
-                ))
-            })
-            .flatten();
-        let colored_icon = icon.color(git_status_color.unwrap_or_default());
 
         let decorations =
             entry_diagnostic_aware_icon_decoration_and_color(most_severe_diagnostic_level)

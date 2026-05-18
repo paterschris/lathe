@@ -6,9 +6,9 @@ edition.workspace = true
 license = "GPL-3.0-or-later"
 
 [dependencies]
+async-process.workspace = true
 cfg-if.workspace = true
 crash-handler.workspace = true
-futures.workspace = true
 log.workspace = true
 minidumper.workspace = true
 parking_lot.workspace = true

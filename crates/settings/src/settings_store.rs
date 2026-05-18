@@ -1777,6 +1777,32 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_default_settings_release_channel_overrides(cx: &mut App) {
+        // The test deals with overrides and should ignore the other set-ups (Preview and Stable runs)
+        if *release_channel::RELEASE_CHANNEL != release_channel::ReleaseChannel::Dev {
+            return;
+        }
+
+        let mut defaults: serde_json::Value =
+            crate::parse_json_with_comments(&default_settings()).unwrap();
+        let root = defaults
+            .as_object_mut()
+            .expect("default settings must be a JSON object");
+        root.insert("dev".into(), serde_json::json!({ "auto_update": false }));
+        root.insert("stable".into(), serde_json::json!({ "auto_update": true }));
+        let defaults_with_overrides = serde_json::to_string(&defaults).unwrap();
+
+        let mut store = SettingsStore::new(cx, &defaults_with_overrides);
+        store.register_setting::<AutoUpdateSetting>();
+
+        assert_eq!(
+            store.get::<AutoUpdateSetting>(None),
+            &AutoUpdateSetting { auto_update: false },
+            "dev override from default settings should apply",
+        );
+    }
+
+    #[gpui::test]
     fn test_settings_store_basic(cx: &mut App) {
         let mut store = SettingsStore::new(cx, &default_settings());
         store.register_setting::<AutoUpdateSetting>();

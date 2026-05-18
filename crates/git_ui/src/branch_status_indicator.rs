@@ -1,8 +1,8 @@
 use gpui::{
-    Context, Empty, Entity, Focusable, IntoElement, Render, Subscription, WeakEntity, Window,
+    App, Context, Empty, Entity, Focusable, IntoElement, Render, Subscription, WeakEntity, Window,
 };
 use project::git_store::{GitStore, GitStoreEvent, Repository};
-use workspace::{StatusItemView, Workspace, item::ItemHandle};
+use workspace::{HideStatusItem, StatusItemView, Workspace, item::ItemHandle};
 
 use crate::render_remote_button;
 
@@ -79,5 +79,9 @@ impl StatusItemView for BranchStatusIndicator {
         _: &mut Window,
         _: &mut Context<Self>,
     ) {
+    }
+
+    fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
+        None
     }
 }

@@ -62,10 +62,7 @@ impl AgentTool for StreamingEchoTool {
     ) -> Task<Result<String, String>> {
         let wait_until_complete_rx = self.wait_until_complete_rx.lock().unwrap().take();
         cx.spawn(async move |_cx| {
-            let input = input
-                .recv()
-                .await
-                .map_err(|e| format!("Failed to receive tool input: {e}"))?;
+            let input = input.recv().await.map_err(|e| e.to_string())?;
             if let Some(rx) = wait_until_complete_rx {
                 rx.await.ok();
             }
@@ -128,7 +125,7 @@ impl AgentTool for StreamingJsonErrorContextTool {
                         ));
                     }
                     Err(error) => {
-                        return Err(format!("Failed to receive tool input: {error}"));
+                        return Err(error.to_string());
                     }
                 }
             }
@@ -221,10 +218,7 @@ impl AgentTool for EchoTool {
         cx: &mut App,
     ) -> Task<Result<String, String>> {
         cx.spawn(async move |_cx| {
-            let input = input
-                .recv()
-                .await
-                .map_err(|e| format!("Failed to receive tool input: {e}"))?;
+            let input = input.recv().await.map_err(|e| e.to_string())?;
             Ok(input.text)
         })
     }
@@ -272,10 +266,7 @@ impl AgentTool for DelayTool {
     {
         let executor = cx.background_executor().clone();
         cx.foreground_executor().spawn(async move {
-            let input = input
-                .recv()
-                .await
-                .map_err(|e| format!("Failed to receive tool input: {e}"))?;
+            let input = input.recv().await.map_err(|e| e.to_string())?;
             executor.timer(Duration::from_millis(input.ms)).await;
             Ok("Ding".to_string())
         })
@@ -312,10 +303,7 @@ impl AgentTool for ToolRequiringPermission {
         cx: &mut App,
     ) -> Task<Result<String, String>> {
         cx.spawn(async move |cx| {
-            let _input = input
-                .recv()
-                .await
-                .map_err(|e| format!("Failed to receive tool input: {e}"))?;
+            let _input = input.recv().await.map_err(|e| e.to_string())?;
 
             let decision = cx.update(|cx| {
                 decide_permission_from_settings(
@@ -377,10 +365,7 @@ impl AgentTool for InfiniteTool {
         cx: &mut App,
     ) -> Task<Result<String, String>> {
         cx.foreground_executor().spawn(async move {
-            let _input = input
-                .recv()
-                .await
-                .map_err(|e| format!("Failed to receive tool input: {e}"))?;
+            let _input = input.recv().await.map_err(|e| e.to_string())?;
             future::pending::<()>().await;
             unreachable!()
         })
@@ -433,10 +418,7 @@ impl AgentTool for CancellationAwareTool {
         cx: &mut App,
     ) -> Task<Result<String, String>> {
         cx.foreground_executor().spawn(async move {
-            let _input = input
-                .recv()
-                .await
-                .map_err(|e| format!("Failed to receive tool input: {e}"))?;
+            let _input = input.recv().await.map_err(|e| e.to_string())?;
             // Wait for cancellation - this tool does nothing but wait to be cancelled
             event_stream.cancelled_by_user().await;
             self.was_cancelled.store(true, Ordering::SeqCst);
@@ -492,10 +474,7 @@ impl AgentTool for WordListTool {
         cx: &mut App,
     ) -> Task<Result<String, String>> {
         cx.spawn(async move |_cx| {
-            let _input = input
-                .recv()
-                .await
-                .map_err(|e| format!("Failed to receive tool input: {e}"))?;
+            let _input = input.recv().await.map_err(|e| e.to_string())?;
             Ok("ok".to_string())
         })
     }

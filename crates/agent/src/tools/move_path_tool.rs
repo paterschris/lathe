@@ -103,7 +103,7 @@ impl AgentTool for MovePathTool {
             let input = input
                 .recv()
                 .await
-                .map_err(|e| format!("Failed to receive tool input: {e}"))?;
+                .map_err(|e| e.to_string())?;
             let paths = vec![input.source_path.clone(), input.destination_path.clone()];
             let decision = cx.update(|cx| {
                 decide_permission_for_paths(Self::NAME, &paths, AgentSettings::get_global(cx))
@@ -126,13 +126,18 @@ impl AgentTool for MovePathTool {
                     )
                 });
 
-            let sensitive_kind =
-                sensitive_settings_kind(Path::new(&input.source_path), fs.as_ref())
-                    .await
-                    .or(
-                        sensitive_settings_kind(Path::new(&input.destination_path), fs.as_ref())
-                            .await,
-                    );
+            let sensitive_kind = sensitive_settings_kind(
+                Path::new(&input.source_path),
+                &canonical_roots,
+                fs.as_ref(),
+            )
+            .await
+            .or(sensitive_settings_kind(
+                Path::new(&input.destination_path),
+                &canonical_roots,
+                fs.as_ref(),
+            )
+            .await);
 
             let needs_confirmation = matches!(decision, ToolPermissionDecision::Confirm)
                 || (matches!(decision, ToolPermissionDecision::Allow) && sensitive_kind.is_some());
@@ -157,6 +162,9 @@ impl AgentTool for MovePathTool {
                     let title = match sensitive_kind {
                         Some(SensitiveSettingsKind::Local) => format!("{title} (local settings)"),
                         Some(SensitiveSettingsKind::Global) => format!("{title} (settings)"),
+                        Some(SensitiveSettingsKind::AgentSkills) => {
+                            format!("{title} (agent skills)")
+                        }
                         None => title,
                     };
                     event_stream.authorize(title, context, cx)

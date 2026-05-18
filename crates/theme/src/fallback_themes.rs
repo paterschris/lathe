@@ -72,11 +72,23 @@ pub(crate) fn zed_default_dark() -> Theme {
     let teal = hsla(187. / 360., 47. / 100., 55. / 100., 1.0);
     let yellow = hsla(39. / 360., 67. / 100., 69. / 100., 1.0);
 
+    const ADDED_COLOR: Hsla = Hsla {
+        h: 134. / 360.,
+        s: 0.55,
+        l: 0.40,
+        a: 1.0,
+    };
     const WORD_ADDED_COLOR: Hsla = Hsla {
         h: 134. / 360.,
         s: 0.55,
         l: 0.40,
         a: 0.35,
+    };
+    const REMOVED_COLOR: Hsla = Hsla {
+        h: 350. / 360.,
+        s: 0.88,
+        l: 0.25,
+        a: 1.0,
     };
     const WORD_DELETED_COLOR: Hsla = Hsla {
         h: 350. / 360.,
@@ -180,6 +192,12 @@ pub(crate) fn zed_default_dark() -> Theme {
                 ),
                 editor_document_highlight_write_background: gpui::red(),
                 editor_document_highlight_bracket_background: gpui::green(),
+                editor_diff_hunk_added_background: ADDED_COLOR.opacity(0.12),
+                editor_diff_hunk_added_hollow_background: ADDED_COLOR.opacity(0.06),
+                editor_diff_hunk_added_hollow_border: ADDED_COLOR.opacity(0.36),
+                editor_diff_hunk_deleted_background: REMOVED_COLOR.opacity(0.12),
+                editor_diff_hunk_deleted_hollow_background: REMOVED_COLOR.opacity(0.06),
+                editor_diff_hunk_deleted_hollow_border: REMOVED_COLOR.opacity(0.36),
 
                 terminal_background: bg,
                 // todo("Use one colors for terminal")
@@ -256,6 +274,7 @@ pub(crate) fn zed_default_dark() -> Theme {
                 gutter_modified_background: gpui::transparent_black(),
                 gutter_deleted_background: gpui::transparent_black(),
 
+                vim_helix_jump_label_foreground: SystemColors::default().transparent,
                 vim_normal_background: SystemColors::default().transparent,
                 vim_insert_background: SystemColors::default().transparent,
                 vim_replace_background: SystemColors::default().transparent,

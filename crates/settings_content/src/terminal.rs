@@ -350,6 +350,28 @@ pub enum CursorShapeContent {
 }
 
 #[derive(
+    Clone,
+    Copy,
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalBell {
+    /// Play an OS-specific alert sound.
+    #[default]
+    System,
+    /// Do not play any sound.
+    Off,
+}
+
+#[derive(
     Copy,
     Clone,
     Debug,

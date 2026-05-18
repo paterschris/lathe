@@ -8,11 +8,23 @@ pub(crate) fn neutral() -> ColorScaleSet {
     sand()
 }
 
+const ADDED_COLOR: Hsla = Hsla {
+    h: 134. / 360.,
+    s: 0.55,
+    l: 0.40,
+    a: 1.0,
+};
 const WORD_ADDED_COLOR: Hsla = Hsla {
     h: 134. / 360.,
     s: 0.55,
     l: 0.40,
     a: 0.35,
+};
+const REMOVED_COLOR: Hsla = Hsla {
+    h: 350. / 360.,
+    s: 0.88,
+    l: 0.25,
+    a: 1.0,
 };
 const WORD_DELETED_COLOR: Hsla = Hsla {
     h: 350. / 360.,
@@ -146,6 +158,12 @@ impl ThemeColors {
             editor_document_highlight_read_background: neutral().light_alpha().step_3(),
             editor_document_highlight_write_background: neutral().light_alpha().step_4(),
             editor_document_highlight_bracket_background: green().light_alpha().step_5(),
+            editor_diff_hunk_added_background: ADDED_COLOR.opacity(0.16),
+            editor_diff_hunk_added_hollow_background: ADDED_COLOR.opacity(0.08),
+            editor_diff_hunk_added_hollow_border: ADDED_COLOR.opacity(0.48),
+            editor_diff_hunk_deleted_background: REMOVED_COLOR.opacity(0.16),
+            editor_diff_hunk_deleted_hollow_background: REMOVED_COLOR.opacity(0.08),
+            editor_diff_hunk_deleted_hollow_border: REMOVED_COLOR.opacity(0.48),
             terminal_background: neutral().light().step_1(),
             terminal_foreground: black().light().step_12(),
             terminal_bright_foreground: black().light().step_11(),
@@ -186,6 +204,7 @@ impl ThemeColors {
             version_control_word_deleted: WORD_DELETED_COLOR,
             version_control_conflict_marker_ours: green().light().step_10().alpha(0.5),
             version_control_conflict_marker_theirs: blue().light().step_10().alpha(0.5),
+            vim_helix_jump_label_foreground: system.transparent,
             vim_normal_background: system.transparent,
             vim_insert_background: system.transparent,
             vim_replace_background: system.transparent,
@@ -312,6 +331,12 @@ impl ThemeColors {
             editor_document_highlight_read_background: neutral().dark_alpha().step_4(),
             editor_document_highlight_write_background: neutral().dark_alpha().step_4(),
             editor_document_highlight_bracket_background: green().dark_alpha().step_6(),
+            editor_diff_hunk_added_background: ADDED_COLOR.opacity(0.12),
+            editor_diff_hunk_added_hollow_background: ADDED_COLOR.opacity(0.06),
+            editor_diff_hunk_added_hollow_border: ADDED_COLOR.opacity(0.36),
+            editor_diff_hunk_deleted_background: REMOVED_COLOR.opacity(0.12),
+            editor_diff_hunk_deleted_hollow_background: REMOVED_COLOR.opacity(0.06),
+            editor_diff_hunk_deleted_hollow_border: REMOVED_COLOR.opacity(0.36),
             terminal_background: neutral().dark().step_1(),
             terminal_ansi_background: neutral().dark().step_1(),
             terminal_foreground: white().dark().step_12(),
@@ -352,6 +377,7 @@ impl ThemeColors {
             version_control_word_deleted: WORD_DELETED_COLOR,
             version_control_conflict_marker_ours: green().dark().step_10().alpha(0.5),
             version_control_conflict_marker_theirs: blue().dark().step_10().alpha(0.5),
+            vim_helix_jump_label_foreground: system.transparent,
             vim_normal_background: system.transparent,
             vim_insert_background: system.transparent,
             vim_replace_background: system.transparent,

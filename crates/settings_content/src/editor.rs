@@ -22,10 +22,6 @@ pub struct EditorSettingsContent {
     ///
     /// Default: bar
     pub cursor_shape: Option<CursorShape>,
-    /// Determines when the mouse cursor should be hidden in an editor or input box.
-    ///
-    /// Default: on_typing_and_movement
-    pub hide_mouse: Option<HideMouseMode>,
     /// Determines how snippets are sorted relative to other completion items.
     ///
     /// Default: inline
@@ -192,6 +188,9 @@ pub struct EditorSettingsContent {
     /// Default: FindAllReferences
     pub go_to_definition_fallback: Option<GoToDefinitionFallback>,
 
+    /// How to scroll the target into view when navigating to a definition or reference.
+    pub go_to_definition_scroll_strategy: Option<GoToDefinitionScrollStrategy>,
+
     /// Jupyter REPL settings.
     pub jupyter: Option<JupyterContent>,
 
@@ -242,6 +241,16 @@ pub struct EditorSettingsContent {
     ///
     /// Default: left
     pub completion_detail_alignment: Option<CompletionDetailAlignment>,
+
+    /// How to display the LSP item kind (function, method, variable, etc.)
+    /// of each entry in the completions menu.
+    ///
+    /// - "off": do not display item kinds (default).
+    /// - "symbol": display a single-letter badge, colorized based on the
+    ///   active syntax theme.
+    ///
+    /// Default: off
+    pub completion_menu_item_kind: Option<CompletionMenuItemKind>,
 
     /// How to display diffs in the editor.
     ///
@@ -296,6 +305,27 @@ pub enum CompletionDetailAlignment {
     #[default]
     Left,
     Right,
+}
+
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionMenuItemKind {
+    #[default]
+    Off,
+    Symbol,
 }
 
 impl RelativeLineNumbers {
@@ -825,6 +855,37 @@ pub enum HideMouseMode {
     /// Hide on both typing and cursor movement
     #[default]
     OnTypingAndMovement,
+}
+
+/// How to scroll the target into view when navigating to a definition or reference.
+///
+/// Default: center
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GoToDefinitionScrollStrategy {
+    /// Vertically center the target in the viewport.
+    #[default]
+    Center,
+    /// Scroll the minimum amount needed to make the target visible.
+    Minimum,
+    /// Scroll so the target appears near the top of the viewport.
+    Top,
+    /// Preserve the cursor's vertical position within the viewport, falling
+    /// back to centering when the cursor is offscreen.
+    Preserve,
 }
 
 /// Determines how snippets are sorted relative to other completion items.

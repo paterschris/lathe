@@ -18,7 +18,7 @@ use gpui::{
     DismissEvent, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, HighlightStyle,
     InteractiveElement, IntoElement, KeyContext, ListHorizontalSizingBehavior, ListSizingBehavior,
     MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollStrategy,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled, Subscription, Task, TaskExt,
     UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, div, point, px, size,
     uniform_list,
 };
@@ -2346,7 +2346,7 @@ impl OutlinePanel {
             }) => {
                 let name = self.entry_name(worktree_id, entry, cx);
                 let color =
-                    entry_git_aware_label_color(entry.git_summary, entry.is_ignored, is_active, cx);
+                    entry_git_aware_label_color(entry.git_summary, entry.is_ignored, is_active);
                 let icon = if settings.file_icons {
                     FileIcons::get_icon(entry.path.as_std_path(), cx)
                         .map(|icon_path| Icon::from_path(icon_path).color(color).into_any_element())
@@ -2377,7 +2377,6 @@ impl OutlinePanel {
                     directory.entry.git_summary,
                     directory.entry.is_ignored,
                     is_active,
-                    cx,
                 );
                 let icon = if settings.folder_icons {
                     FileIcons::get_folder_icon(is_expanded, directory.entry.path.as_std_path(), cx)
@@ -2475,7 +2474,7 @@ impl OutlinePanel {
                 .first()
                 .map(|entry| entry.git_summary)
                 .unwrap_or_default();
-            let color = entry_git_aware_label_color(git_status, is_ignored, is_active, cx);
+            let color = entry_git_aware_label_color(git_status, is_ignored, is_active);
             let icon = if settings.folder_icons {
                 FileIcons::get_folder_icon(is_expanded, &Path::new(&name), cx)
             } else {
@@ -4964,6 +4963,12 @@ impl Panel for OutlinePanel {
 
     fn activation_priority(&self) -> u32 {
         6
+    }
+
+    fn hide_button_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        Some(workspace::HideStatusItem::new(|settings| {
+            settings.outline_panel.get_or_insert_default().button = Some(false);
+        }))
     }
 }
 

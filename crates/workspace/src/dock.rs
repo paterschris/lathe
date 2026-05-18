@@ -1,5 +1,6 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::persistence::model::DockData;
+use crate::status_bar::HideStatusItem;
 use crate::{DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings};
 use crate::{Workspace, status_bar::StatusItemView};
 use anyhow::Context as _;
@@ -13,7 +14,7 @@ use gpui::{
     px,
 };
 use serde::{Deserialize, Serialize};
-use settings::{Settings, SettingsStore};
+use settings::{Settings, SettingsStore, TerminalDockPosition};
 use std::sync::Arc;
 use ui::{
     ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tooltip, prelude::*,
@@ -87,7 +88,7 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
         false
     }
     /// Whether this panel is in a state where it would benefit from the
-    /// title-bar awaiting-input indicator firing — analogous to a terminal
+    /// title-bar awaiting-input indicator firing, analogous to a terminal
     /// that's paused at a prompt. Default false so panels that don't have
     /// the concept (project panel, outline panel, etc.) opt out trivially.
     fn is_awaiting_input(&self, _cx: &App) -> bool {
@@ -98,6 +99,12 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     /// returns true, so the default here is just a placeholder.
     fn awaiting_input_tooltip(&self, _cx: &App) -> &'static str {
         "Panel awaiting input"
+    }
+    /// Returns metadata describing how to hide this panel's button from the
+    /// status bar by writing to user settings. Implementors should return
+    /// `None` if the panel button cannot be hidden through settings.
+    fn hide_button_setting(&self, _: &App) -> Option<HideStatusItem> {
+        None
     }
 }
 
@@ -131,6 +138,7 @@ pub trait PanelHandle: Send + Sync {
     fn is_agent_panel(&self, cx: &App) -> bool;
     fn is_awaiting_input(&self, cx: &App) -> bool;
     fn awaiting_input_tooltip(&self, cx: &App) -> &'static str;
+    fn hide_button_setting(&self, cx: &App) -> Option<HideStatusItem>;
     fn move_to_next_position(&self, window: &mut Window, cx: &mut App) {
         let current_position = self.position(window, cx);
         let next_position = [
@@ -267,6 +275,10 @@ where
     fn awaiting_input_tooltip(&self, cx: &App) -> &'static str {
         self.read(cx).awaiting_input_tooltip(cx)
     }
+
+    fn hide_button_setting(&self, cx: &App) -> Option<HideStatusItem> {
+        self.read(cx).hide_button_setting(cx)
+    }
 }
 
 impl From<&dyn PanelHandle> for AnyView {
@@ -320,6 +332,16 @@ impl Into<settings::DockPosition> for DockPosition {
             Self::Left => settings::DockPosition::Left,
             Self::Bottom => settings::DockPosition::Bottom,
             Self::Right => settings::DockPosition::Right,
+        }
+    }
+}
+
+impl From<TerminalDockPosition> for DockPosition {
+    fn from(value: TerminalDockPosition) -> Self {
+        match value {
+            TerminalDockPosition::Left => DockPosition::Left,
+            TerminalDockPosition::Bottom => DockPosition::Bottom,
+            TerminalDockPosition::Right => DockPosition::Right,
         }
     }
 }
@@ -1279,6 +1301,7 @@ impl Render for PanelButtons {
                                 DockPosition::Bottom,
                             ];
 
+                            let panel_hide = panel.hide_button_setting(cx);
                             ContextMenu::build(window, cx, |mut menu, _, cx| {
                                 let mut has_position_entries = false;
                                 for position in POSITIONS {
@@ -1350,6 +1373,12 @@ impl Render for PanelButtons {
                                         },
                                     );
                                 }
+                                if let Some(hide) = panel_hide {
+                                    menu = crate::status_bar::add_hide_button_entry(
+                                        menu.separator(),
+                                        hide,
+                                    );
+                                }
                                 menu
                             })
                         })
@@ -1415,6 +1444,12 @@ impl StatusItemView for PanelButtons {
         _cx: &mut Context<Self>,
     ) {
         // Nothing to do, panel buttons don't depend on the active center item
+    }
+
+    fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
+        // Panel buttons are hidden on a per-panel basis through each panel
+        // button's own context menu.
+        None
     }
 }
 

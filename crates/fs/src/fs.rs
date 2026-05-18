@@ -1070,9 +1070,13 @@ impl Fs for RealFs {
         use util::{ResultExt as _, paths::SanitizedPath};
         let executor = self.executor.clone();
 
-        let (tx, rx) = smol::channel::unbounded();
+        let (tx, rx) = async_channel::unbounded();
         let pending_paths: Arc<Mutex<Vec<PathEvent>>> = Default::default();
-        let watcher = Arc::new(fs_watcher::FsWatcher::new(tx, pending_paths.clone()));
+        let watcher = Arc::new(fs_watcher::FsWatcher::new(
+            tx,
+            pending_paths.clone(),
+            fs_watcher::WatcherMode::Native,
+        ));
 
         // If the path doesn't exist yet (e.g. settings.json), watch the parent dir to learn when it's created.
         if let Err(e) = watcher.add(path)
