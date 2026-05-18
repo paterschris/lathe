@@ -1544,12 +1544,16 @@ mod tests {
         cx.background_executor.advance_clock(POLL_INTERVAL);
         cx.background_executor.run_until_parked();
 
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
-            cx.background_executor.timer(Duration::from_millis(0)).await;
+            cx.background_executor.timer(Duration::from_millis(10)).await;
             cx.run_until_parked();
             let status = auto_updater.read_with(cx, |updater, _| updater.status());
             if !matches!(status, AutoUpdateStatus::Idle) {
                 break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("timed out waiting for status to leave Idle (current: {status:?})");
             }
         }
         let status = auto_updater.read_with(cx, |updater, _| updater.status());
@@ -1574,12 +1578,16 @@ mod tests {
             })));
         });
 
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
-            cx.background_executor.timer(Duration::from_millis(0)).await;
+            cx.background_executor.timer(Duration::from_millis(10)).await;
             cx.run_until_parked();
             let status = auto_updater.read_with(cx, |updater, _| updater.status());
             if !matches!(status, AutoUpdateStatus::Downloading { .. }) {
                 break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("timed out waiting for status to leave Downloading (current: {status:?})");
             }
         }
         let status = auto_updater.read_with(cx, |updater, _| updater.status());
