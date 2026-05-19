@@ -915,7 +915,7 @@ impl X11Client {
                     let paths: SmallVec<[_; 2]> = file_list
                         .lines()
                         .filter_map(|path| Url::parse(path).log_err())
-                        .filter_map(|url| url.to_file_path().log_err())
+                        .filter_map(|url| url.to_file_path().ok())
                         .collect();
                     let input = PlatformInput::FileDrop(FileDropEvent::Entered {
                         position: state.xdnd_state.position,

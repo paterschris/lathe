@@ -2307,7 +2307,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                             let paths: SmallVec<[_; 2]> = file_list
                                 .lines()
                                 .filter_map(|path| Url::parse(path).log_err())
-                                .filter_map(|url| url.to_file_path().log_err())
+                                .filter_map(|url| url.to_file_path().ok())
                                 .collect();
                             let position = Point::new(x.into(), y.into());
 
