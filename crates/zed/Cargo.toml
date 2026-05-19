@@ -237,6 +237,9 @@ gpui = { workspace = true, features = [
 [build-dependencies]
 windows_resources = { path = "../windows_resources" }
 
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 gpui = { workspace = true, features = [
     "input-latency-histogram",
