@@ -209,8 +209,14 @@ jobs:
           # the sandboxed runner home.
           xattr -dr com.apple.quarantine "$APP" || true
           BIN="$APP/Contents/MacOS/zed"
-          open -n "$APP"
-          sleep 8
+          # Pass a workspace path so the app has a window to keep open;
+          # without one, AppKit's automatic termination quits zed within
+          # a second of finishing startup (no windows, nothing to restore).
+          WS_DIR=$(mktemp -d)
+          echo "smoke test workspace" > "$WS_DIR/README.md"
+
+          open -n -a "$APP" "$WS_DIR"
+          sleep 10
           # Match the process by the Contents/MacOS/zed tail so the check
           # is channel-agnostic (the parent .app name varies per channel).
           if pgrep -f "Contents/MacOS/zed" > /dev/null; then
@@ -227,14 +233,16 @@ jobs:
             done
             echo "--- system log: zed process (last 5 min) ---"
             log show --last 5m --predicate 'process == "zed" OR senderImagePath CONTAINS "/MacOS/zed"' --style compact 2>/dev/null | tail -80 || true
-            echo "--- direct invocation: zed --version ---"
-            "$BIN" --version 2>&1 || echo "(exit=$?)"
-            echo "--- direct invocation: zed --foreground (5s) ---"
-            ( "$BIN" --foreground 2>&1 ) &
+            echo "--- direct invocation with workspace (5s, stderr captured) ---"
+            "$BIN" "$WS_DIR" > /tmp/lathe-launch.stdout 2> /tmp/lathe-launch.stderr &
             FG_PID=$!
             sleep 5
             kill "$FG_PID" 2>/dev/null || true
             wait "$FG_PID" 2>/dev/null || true
+            echo "stdout:"
+            cat /tmp/lathe-launch.stdout 2>/dev/null || true
+            echo "stderr:"
+            cat /tmp/lathe-launch.stderr 2>/dev/null || true
             exit 1
           fi
 
