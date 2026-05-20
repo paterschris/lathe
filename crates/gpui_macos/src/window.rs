@@ -1715,12 +1715,20 @@ impl PlatformWindow for MacWindow {
     }
 
     fn start_window_move(&self) {
-        let this = self.0.lock();
-        let window = this.native_window;
+        let (window, event) = {
+            let mut this = self.0.lock();
+            // Cancel any in-flight synthetic auto-scroll drag so it can't fire
+            // synthetic MouseMove events at the title bar coordinates while the
+            // OS-level window drag is in progress (which would scroll the terminal
+            // or editor as if the user were drag-selecting past the top edge).
+            this.synthetic_drag_counter = this.synthetic_drag_counter.wrapping_add(1);
+            let window = this.native_window;
+            let app = unsafe { NSApplication::sharedApplication(nil) };
+            let event: id = unsafe { msg_send![app, currentEvent] };
+            (window, event)
+        };
 
         unsafe {
-            let app = NSApplication::sharedApplication(nil);
-            let event: id = msg_send![app, currentEvent];
             let _: () = msg_send![window, performWindowDragWithEvent: event];
         }
     }
