@@ -22471,7 +22471,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.236.8"
+version = "0.236.9"
 dependencies = [
  "acp_thread",
  "acp_tools",
@@ -22634,6 +22634,7 @@ dependencies = [
  "which_key",
  "windows 0.61.3",
  "windows_resources",
+ "winresource",
  "workspace",
  "zed-reqwest",
  "zed_actions",
