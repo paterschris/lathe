@@ -193,20 +193,6 @@ pub fn cargo_install_nextest() -> Step<Use> {
     )
 }
 
-pub fn install_cargo_edit() -> Step<Use> {
-    taiki_install_action("cargo-edit")
-}
-
-pub fn taiki_install_action(tool: &str) -> Step<Use> {
-    Step::new(named::function_name(1))
-        .uses(
-            "taiki-e",
-            "install-action",
-            "02cc5f8ca9f2301050c0c099055816a41ee05507", // v2
-        )
-        .add_with(("tool", tool))
-}
-
 pub fn setup_cargo_config(platform: Platform) -> Step<Run> {
     match platform {
         Platform::Windows => named::pwsh(indoc::indoc! {r#"
