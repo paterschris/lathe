@@ -142,8 +142,12 @@ jobs:
             ls -la artifacts/app
             exit 1
           fi
-          echo "APP=artifacts/app/${APP_NAME}" >> "$GITHUB_ENV"
-          echo "Resolved APP=artifacts/app/${APP_NAME}"
+          # Resolve to absolute path so later steps (notably the smoke
+          # test's `open -n -a`) treat $APP as a path rather than an
+          # application name lookup against LaunchServices.
+          APP_ABS="$(cd "$(dirname "artifacts/app/${APP_NAME}")" && pwd)/${APP_NAME}"
+          echo "APP=${APP_ABS}" >> "$GITHUB_ENV"
+          echo "Resolved APP=${APP_ABS}"
 
       - name: Validate Info.plist is well-formed
         run: |
