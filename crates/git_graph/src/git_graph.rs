@@ -420,6 +420,10 @@ actions!(
         ScrollUp,
         /// Scrolls the commit graph down.
         ScrollDown,
+        /// Moves focus to the next tab stop within the git graph.
+        FocusNextTabStop,
+        /// Moves focus to the previous tab stop within the git graph.
+        FocusPreviousTabStop,
     ]
 );
 
@@ -1329,7 +1333,7 @@ impl GitGraph {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let focus_handle = cx.focus_handle();
+        let focus_handle = cx.focus_handle().tab_stop(true);
         cx.on_focus(&focus_handle, window, |_, _, cx| cx.notify())
             .detach();
 
@@ -4325,6 +4329,12 @@ impl Render for GitGraph {
                 this.search_state
                     .editor
                     .update(cx, |editor, cx| editor.focus_handle(cx).focus(window, cx));
+            }))
+            .on_action(cx.listener(|_, _: &FocusNextTabStop, window, cx| {
+                window.focus_next(cx);
+            }))
+            .on_action(cx.listener(|_, _: &FocusPreviousTabStop, window, cx| {
+                window.focus_prev(cx);
             }))
             .on_action(cx.listener(Self::select_first))
             .on_action(cx.listener(Self::select_prev))
