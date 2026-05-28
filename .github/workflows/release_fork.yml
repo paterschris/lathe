@@ -205,15 +205,14 @@ jobs:
           xcrun stapler validate "$APP"
 
       - name: Smoke test launch
-        # Diagnostic only: reports whether the bundle reaches its run
-        # loop on a clean runner, but does not block the release. The
-        # earlier signed/notarized/Apple-Event-symbols checks are the
-        # real gates. Two prior iterations of this step (open -n -a
-        # with relative path, then absolute path) failed for unrelated
-        # reasons specific to LaunchServices behaviour on headless CI,
-        # so the launch path now bypasses LaunchServices entirely and
-        # the step is non-blocking.
-        continue-on-error: true
+        # Proves the app reaches its run loop on a clean runner. Catches
+        # missing dylibs, dyld errors, and startup panics (such as a
+        # built-in keymap referencing an action that no longer exists)
+        # that the signed/notarized/Apple-Event-symbols checks can't see.
+        # Launch path bypasses LaunchServices (see the run block) because
+        # `open -n -a` triggered AppKit's automatic termination on the
+        # headless runner; direct binary invocation keeps the process
+        # observable by pgrep.
         run: |
           # Strip quarantine so Gatekeeper doesn't block on first launch in
           # the sandboxed runner home.
