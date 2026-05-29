@@ -113,6 +113,12 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        # Cache restore/save is an optimization, not a correctness gate.
+        # GitHub's Actions cache backend has intermittent blob-storage
+        # flakes on Windows that can fail the step with no error printed.
+        # Don't let a transient cache hiccup mask the real signal from the
+        # cargo check steps below.
+        continue-on-error: true
         with:
           cache-on-failure: true
           shared-key: lathe-windows-check
@@ -167,6 +173,11 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        # Cache restore/save is an optimization, not a correctness gate.
+        # GitHub's Actions cache backend has intermittent blob-storage
+        # flakes on Windows that can fail the step with no error printed.
+        # Don't let a transient cache hiccup skip the build + smoke test.
+        continue-on-error: true
         with:
           cache-on-failure: true
           shared-key: lathe-windows-build
