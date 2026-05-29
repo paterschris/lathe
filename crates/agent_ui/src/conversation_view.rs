@@ -685,6 +685,7 @@ impl ConversationView {
                 connection_store,
                 connection_key,
                 resume_session_id,
+                thread_id,
                 work_dirs,
                 title,
                 project,
@@ -746,6 +747,7 @@ impl ConversationView {
             self.connection_store.clone(),
             self.connection_key.clone(),
             resume_session_id,
+            self.thread_id,
             work_dirs,
             title,
             self.project.clone(),
@@ -771,6 +773,7 @@ impl ConversationView {
         connection_store: Entity<AgentConnectionStore>,
         connection_key: Agent,
         resume_session_id: Option<acp::SessionId>,
+        thread_id: ThreadId,
         work_dirs: Option<PathList>,
         title: Option<SharedString>,
         project: Entity<Project>,
@@ -852,6 +855,8 @@ impl ConversationView {
             );
 
             let mut resumed_without_history = false;
+            let attempted_resume = resume_session_id.is_some();
+            let fallback_work_dirs = session_work_dirs.clone();
             let result = if let Some(session_id) = resume_session_id.clone() {
                 cx.update(|_, cx| {
                     if connection.supports_load_session() {
@@ -907,7 +912,53 @@ impl ConversationView {
                         .log_err();
                         return;
                     }
-                    Err(err) => Err(err),
+                    Err(err) => {
+                        // If the agent reports the stored session_id is gone
+                        // (ACP code -32002), the local ThreadMetadata is
+                        // pointing at a session the agent's own store no
+                        // longer has (auth rotation, agent reinstall, agent
+                        // upgrade that changed session format). Clear the
+                        // stale id and start a fresh session so the panel is
+                        // usable instead of stuck on a permanent load error.
+                        let stale_session = attempted_resume
+                            && err
+                                .downcast_ref::<acp::Error>()
+                                .is_some_and(|e| e.code == acp::ErrorCode::ResourceNotFound);
+                        if stale_session {
+                            log::warn!(
+                                "agent server reported stored session_id missing; \
+                                 clearing stale metadata and starting a fresh session"
+                            );
+                            cx.update(|_, cx| {
+                                if let Some(store) = ThreadMetadataStore::try_global(cx) {
+                                    store.update(cx, |store, cx| {
+                                        if let Some(entry) = store.entry(thread_id) {
+                                            let mut updated = entry.clone();
+                                            updated.session_id = None;
+                                            store.save(updated, cx);
+                                        }
+                                    });
+                                }
+                            })
+                            .log_err();
+                            resumed_without_history = false;
+                            let retry = cx
+                                .update(|_, cx| {
+                                    connection.clone().new_session(
+                                        project.clone(),
+                                        fallback_work_dirs,
+                                        cx,
+                                    )
+                                })
+                                .log_err();
+                            match retry {
+                                Some(task) => task.await,
+                                None => Err(err),
+                            }
+                        } else {
+                            Err(err)
+                        }
+                    }
                 },
                 Ok(thread) => Ok(thread),
             };
