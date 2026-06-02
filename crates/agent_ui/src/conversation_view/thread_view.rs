@@ -8823,30 +8823,97 @@ impl ThreadView {
         }
 
         let project = self.project.upgrade()?;
-        let worktree_count = project.read(cx).visible_worktrees(cx).count();
-        if worktree_count <= 1 {
+        let worktree_roots: Vec<(SharedString, PathBuf)> = project
+            .read(cx)
+            .visible_worktrees(cx)
+            .filter_map(|worktree| {
+                let worktree = worktree.read(cx);
+                let abs = worktree.abs_path();
+                let path = if worktree.is_single_file() {
+                    abs.parent()?.to_path_buf()
+                } else {
+                    abs.to_path_buf()
+                };
+                let name: SharedString = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned())
+                    .into();
+                Some((name, path))
+            })
+            .collect();
+
+        if worktree_roots.len() <= 1 {
             return None;
         }
 
         let work_dirs = self.thread.read(cx).work_dirs()?;
-        let active_dir = work_dirs
-            .ordered_paths()
-            .next()
+        let active_path: Option<PathBuf> = work_dirs.ordered_paths().next().cloned();
+        let active_name: SharedString = active_path
+            .as_ref()
             .and_then(|p| p.file_name())
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "one folder".to_string());
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "one folder".to_string())
+            .into();
 
-        let description = format!(
-            "This agent only operates on \"{}\". Other folders in this workspace are not accessible to it.",
-            active_dir
-        );
+        let workspace = self.workspace.clone();
+        let thread = self.thread.downgrade();
+        let menu_entries = worktree_roots;
+        let active_for_menu = active_path;
+
+        let trigger = ButtonLike::new("worktree-picker-trigger")
+            .child(
+                Label::new(active_name)
+                    .size(LabelSize::Small)
+                    .color(Color::Default),
+            )
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            );
+
+        let picker = PopoverMenu::new("worktree-picker")
+            .trigger_with_tooltip(trigger, Tooltip::text("Switch active folder"))
+            .menu(move |window, cx| {
+                let workspace = workspace.clone();
+                let thread = thread.clone();
+                let entries = menu_entries.clone();
+                let active = active_for_menu.clone();
+                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
+                    menu = menu.header("Switch active folder");
+                    for (name, path) in &entries {
+                        let name = name.clone();
+                        let path = path.clone();
+                        let is_selected = active.as_deref() == Some(path.as_path());
+                        let entry = ContextMenuEntry::new(name.clone())
+                            .toggleable(IconPosition::End, is_selected);
+                        let workspace = workspace.clone();
+                        let thread = thread.clone();
+                        menu.push_item(entry.handler(move |window, cx| {
+                            if is_selected {
+                                return;
+                            }
+                            switch_external_agent_worktree(
+                                workspace.clone(),
+                                thread.clone(),
+                                path.clone(),
+                                name.clone(),
+                                window,
+                                cx,
+                            );
+                        }));
+                    }
+                    menu
+                }))
+            });
 
         Some(
             Callout::new()
-                .severity(Severity::Warning)
-                .icon(IconName::Warning)
-                .title("External Agents currently don't support multi-root workspaces")
-                .description(description)
+                .severity(Severity::Info)
+                .icon(IconName::FolderOpen)
+                .title("Working folder")
+                .actions_slot(picker)
                 .border_position(ui::BorderPosition::Bottom)
                 .dismiss_action(
                     IconButton::new("dismiss-multi-root-callout", IconName::Close)
@@ -9297,6 +9364,55 @@ impl Render for ThreadView {
             .children(self.render_token_limit_callout(cx))
             .child(self.render_message_editor(window, cx))
     }
+}
+
+fn switch_external_agent_worktree(
+    workspace: WeakEntity<Workspace>,
+    thread: WeakEntity<AcpThread>,
+    path: PathBuf,
+    display_name: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let has_messages = thread
+        .read_with(cx, |thread, _| !thread.entries().is_empty())
+        .unwrap_or(false);
+
+    let do_switch = move |window: &mut Window, cx: &mut App| {
+        let work_dirs = PathList::new(std::slice::from_ref(&path));
+        workspace
+            .update(cx, |workspace, cx| {
+                if let Some(panel) = workspace.panel::<crate::AgentPanel>(cx) {
+                    panel.update(cx, |panel, cx| {
+                        panel.switch_external_agent_worktree(work_dirs, window, cx);
+                    });
+                }
+            })
+            .ok();
+    };
+
+    if !has_messages {
+        do_switch(window, cx);
+        return;
+    }
+
+    let prompt = window.prompt(
+        gpui::PromptLevel::Info,
+        &format!("Start a new thread in \"{display_name}\"?"),
+        Some(
+            "External agents can't switch folders mid-thread. \
+             The current conversation stays open in the sidebar.",
+        ),
+        &["Start New Thread", "Cancel"],
+        cx,
+    );
+    window
+        .spawn(cx, async move |cx| {
+            if let Ok(Some(0)) = prompt.await.map(Some) {
+                cx.update(|window, cx| do_switch(window, cx)).ok();
+            }
+        })
+        .detach();
 }
 
 pub(crate) fn open_link(

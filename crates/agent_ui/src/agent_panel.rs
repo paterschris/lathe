@@ -826,6 +826,11 @@ pub struct AgentPanel {
     _active_draft_reclaim_observation: Option<Subscription>,
     _thread_metadata_store_subscription: Subscription,
     is_active: bool,
+    /// Per-thread entry count at which the user last dismissed the
+    /// awaiting-input indicator (by clicking into the panel or typing). The
+    /// indicator stays hidden until the thread grows past this count, i.e.
+    /// the agent produces a new entry, which re-arms it on its own.
+    dismissed_awaiting_input: HashMap<ThreadId, usize>,
 }
 
 impl AgentPanel {
@@ -1159,6 +1164,7 @@ impl AgentPanel {
             _active_draft_reclaim_observation: None,
             _thread_metadata_store_subscription,
             is_active: false,
+            dismissed_awaiting_input: HashMap::default(),
         };
 
         // Initial sync of agent servers from extensions
@@ -2545,6 +2551,31 @@ impl AgentPanel {
         self.set_base_view(thread.into(), focus, window, cx);
     }
 
+    /// Starts a fresh agent thread bound to a specific subset of the
+    /// workspace's worktrees. Used by the multi-root worktree picker to
+    /// switch which folder an external agent operates on; external agents
+    /// fix their working directory at session init, so the only way to
+    /// change it is to start a new session.
+    pub(crate) fn switch_external_agent_worktree(
+        &mut self,
+        work_dirs: PathList,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let agent = self.selected_agent(cx);
+        self.external_thread(
+            Some(agent),
+            None,
+            Some(work_dirs),
+            None,
+            None,
+            true,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+    }
+
     fn deploy_rules_library(
         &mut self,
         action: &OpenRulesLibrary,
@@ -3079,6 +3110,31 @@ impl AgentPanel {
                 conversation_view.read(cx).root_thread(cx)
             }
             _ => None,
+        }
+    }
+
+    /// Hide the awaiting-input indicator for the active thread until the
+    /// agent produces new output. Called when the user clicks into the panel
+    /// or starts typing, mirroring how the terminal clears its indicator on
+    /// keystroke/focus.
+    fn dismiss_awaiting_input(&mut self, cx: &mut Context<Self>) {
+        // No-op unless the indicator is actually showing, so routine clicks
+        // and keystrokes don't churn state or trigger re-renders.
+        if !self.is_awaiting_input(cx) {
+            return;
+        }
+        let Some(thread_id) = self.active_thread_id(cx) else {
+            return;
+        };
+        let Some(thread) = self.active_agent_thread(cx) else {
+            return;
+        };
+        let entry_count = thread.read(cx).entries().len();
+        self.dismissed_awaiting_input.insert(thread_id, entry_count);
+        // The awaiting-input indicator lives in the title bar, which observes
+        // the workspace — notify it so the indicator clears immediately.
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |_, cx| cx.notify());
         }
     }
 
@@ -3812,10 +3868,23 @@ impl Panel for AgentPanel {
         if !matches!(thread.status(), acp_thread::ThreadStatus::Idle) {
             return false;
         }
-        thread
-            .entries()
+        let entries = thread.entries();
+        let has_agent_output = entries
             .iter()
-            .any(|entry| !matches!(entry, acp_thread::AgentThreadEntry::UserMessage(_)))
+            .any(|entry| !matches!(entry, acp_thread::AgentThreadEntry::UserMessage(_)));
+        if !has_agent_output {
+            return false;
+        }
+        // Once the user acknowledges this idle turn (by clicking into the
+        // panel or typing), stay quiet until the agent produces a new entry.
+        // The marker is keyed per thread and by entry count, so a fresh turn
+        // (which grows the entry count) re-arms the indicator on its own.
+        if let Some(thread_id) = self.active_thread_id(cx)
+            && self.dismissed_awaiting_input.get(&thread_id) == Some(&entries.len())
+        {
+            return false;
+        }
+        true
     }
 
     fn awaiting_input_tooltip(&self, _cx: &App) -> &'static str {
@@ -4996,6 +5065,17 @@ impl Render for AgentPanel {
             .size_full()
             .justify_between()
             .bg(cx.theme().colors().panel_background)
+            // Clear the awaiting-input indicator as soon as the user engages
+            // with the panel — clicking anywhere in it or pressing a key.
+            // Capture phase so we still see the event even though the message
+            // editor consumes it; the handler is a no-op unless the indicator
+            // is showing and never stops propagation.
+            .capture_any_mouse_down(cx.listener(|this, _, _window, cx| {
+                this.dismiss_awaiting_input(cx);
+            }))
+            .capture_key_down(cx.listener(|this, _, _window, cx| {
+                this.dismiss_awaiting_input(cx);
+            }))
             .on_action(cx.listener(|this, action: &NewThread, window, cx| {
                 this.new_thread(action, window, cx);
             }))
