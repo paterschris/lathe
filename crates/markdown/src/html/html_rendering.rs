@@ -556,6 +556,8 @@ mod tests {
         });
     }
 
+    use crate::WrapButtonVisibility;
+
     fn render_markdown_text(markdown: &str, cx: &mut TestAppContext) -> crate::RenderedText {
         struct TestWindow;
 
@@ -577,6 +579,7 @@ mod tests {
                 MarkdownElement::new(markdown, MarkdownStyle::default()).code_block_renderer(
                     CodeBlockRenderer::Default {
                         copy_button_visibility: CopyButtonVisibility::Hidden,
+                        wrap_button_visibility: WrapButtonVisibility::Hidden,
                         border: false,
                     },
                 )
@@ -637,6 +640,7 @@ mod tests {
                 MarkdownElement::new(markdown, MarkdownStyle::default()).code_block_renderer(
                     CodeBlockRenderer::Default {
                         copy_button_visibility: CopyButtonVisibility::Hidden,
+                        wrap_button_visibility: WrapButtonVisibility::Hidden,
                         border: false,
                     },
                 )

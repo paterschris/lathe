@@ -667,6 +667,7 @@ impl AcpTools {
                                     } else {
                                         CopyButtonVisibility::Hidden
                                     },
+                                    wrap_button_visibility: markdown::WrapButtonVisibility::Hidden,
                                     border: false,
                                 },
                             ),
@@ -801,7 +802,7 @@ impl Render for AcpTools {
                     } else {
                         div()
                             .size_full()
-                            .flex_grow()
+                            .flex_grow_1()
                             .child(
                                 list(
                                     connection.list_state.clone(),
