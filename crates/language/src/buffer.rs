@@ -11,7 +11,7 @@ use crate::{
         MAX_BYTES_TO_QUERY, SyntaxLayer, SyntaxMap, SyntaxMapCapture, SyntaxMapCaptures,
         SyntaxMapMatch, SyntaxMapMatches, SyntaxSnapshot, ToTreeSitterPoint,
     },
-    task_context::RunnableRange,
+    runnable::RunnableRange,
     text_diff::text_diff,
     unified_diff_with_offsets,
 };
@@ -138,6 +138,11 @@ pub struct Buffer {
     encoding: &'static Encoding,
     has_bom: bool,
     reload_with_encoding_txns: HashMap<TransactionId, (&'static Encoding, bool)>,
+    /// Source attribution for the next BufferEvent::Edited the buffer emits.
+    /// Set by [`Buffer::end_transaction_with_source`] to mark a transaction as
+    /// originating from an agent. Cleared after the next emission, falling
+    /// back to [`BufferEditSource::User`] for unattributed local edits.
+    pending_edit_source: Option<BufferEditSource>,
 }
 
 #[derive(Debug)]
@@ -297,6 +302,25 @@ pub enum Operation {
     },
 }
 
+/// Identifies who initiated a buffer edit. Mirrors the upstream Zed
+/// enum so that multi_buffer, project, and other downstream code can
+/// match on the `source` field after the merge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferEditSource {
+    /// The local user typed or pasted into the buffer.
+    User,
+    /// An AI agent edit applied via tool calls.
+    Agent,
+    /// An edit replayed from a remote collaborator.
+    Remote,
+}
+
+impl BufferEditSource {
+    pub fn is_local(self) -> bool {
+        !matches!(self, Self::Remote)
+    }
+}
+
 /// An event that occurs in a buffer.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BufferEvent {
@@ -307,7 +331,7 @@ pub enum BufferEvent {
         is_local: bool,
     },
     /// The buffer was edited.
-    Edited { is_local: bool },
+    Edited { source: BufferEditSource },
     /// The buffer's `dirty` bit changed.
     DirtyChanged,
     /// The buffer was saved.
@@ -1124,6 +1148,7 @@ impl Buffer {
             encoding: encoding_rs::UTF_8,
             has_bom: false,
             reload_with_encoding_txns: HashMap::default(),
+            pending_edit_source: None,
         }
     }
 
@@ -2428,6 +2453,19 @@ impl Buffer {
         self.end_transaction_at(Instant::now(), cx)
     }
 
+    /// Terminates the current transaction and marks the next emitted
+    /// [`BufferEvent::Edited`] with the given source. Used by agent-driven
+    /// edits so that downstream listeners (multi-buffer, project, edit
+    /// prediction, etc.) can distinguish them from user keystrokes.
+    pub fn end_transaction_with_source(
+        &mut self,
+        source: BufferEditSource,
+        cx: &mut Context<Self>,
+    ) -> Option<TransactionId> {
+        self.pending_edit_source = Some(source);
+        self.end_transaction_at(Instant::now(), cx)
+    }
+
     /// Terminates the current transaction, providing the current time. Subsequent transactions
     /// that occur within a short period of time will be grouped together. This
     /// is controlled by the buffer's undo grouping duration.
@@ -2849,7 +2887,12 @@ impl Buffer {
         }
 
         self.reparse(cx, true);
-        cx.emit(BufferEvent::Edited { is_local });
+        let source = if is_local {
+            self.pending_edit_source.take().unwrap_or(BufferEditSource::User)
+        } else {
+            BufferEditSource::Remote
+        };
+        cx.emit(BufferEvent::Edited { source });
         let is_dirty = self.is_dirty();
         if was_dirty != is_dirty {
             cx.emit(BufferEvent::DirtyChanged);
@@ -5201,6 +5244,7 @@ impl BufferSnapshot {
                                         let _ = run_range.insert(capture.node.byte_range());
                                         None
                                     }
+                                    RunnableCapture::RunItem => None,
                                 })
                         }));
                     let run_range = run_range?;
@@ -5845,6 +5889,27 @@ impl IndentSize {
         Self {
             len: 1,
             kind: IndentKind::Tab,
+        }
+    }
+
+    /// Returns the number of indentation characters to remove when outdenting
+    /// to the previous editor tab stop.
+    pub fn outdent_len(self, tab_size: std::num::NonZeroU32) -> u32 {
+        if self.len == 0 {
+            return 0;
+        }
+
+        match self.kind {
+            IndentKind::Space => {
+                let tab_size = tab_size.get();
+                let columns_to_prev_tab_stop = self.len % tab_size;
+                if columns_to_prev_tab_stop == 0 {
+                    tab_size
+                } else {
+                    columns_to_prev_tab_stop
+                }
+            }
+            IndentKind::Tab => 1,
         }
     }
 

@@ -2,9 +2,7 @@ use std::mem;
 
 use anyhow::{Result, anyhow, bail};
 use futures::{AsyncBufReadExt, AsyncReadExt, StreamExt, io::BufReader, stream::BoxStream};
-use http_client::{
-    AsyncBody, CustomHeaders, HttpClient, Method, Request as HttpRequest, RequestBuilderExt,
-};
+use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 pub use language_model_core::ModelMode as GoogleModelMode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub mod completion;
@@ -16,7 +14,6 @@ pub async fn stream_generate_content(
     api_url: &str,
     api_key: &str,
     mut request: GenerateContentRequest,
-    extra_headers: &CustomHeaders,
 ) -> Result<BoxStream<'static, Result<GenerateContentResponse>>> {
     let api_key = api_key.trim();
     validate_generate_content_request(&request)?;
@@ -27,12 +24,12 @@ pub async fn stream_generate_content(
     let uri =
         format!("{api_url}/v1beta/models/{model_id}:streamGenerateContent?alt=sse&key={api_key}",);
 
-    let request = HttpRequest::builder()
+    let request_builder = HttpRequest::builder()
         .method(Method::POST)
         .uri(uri)
-        .header("Content-Type", "application/json")
-        .extra_headers(extra_headers)
-        .body(AsyncBody::from(serde_json::to_string(&request)?))?;
+        .header("Content-Type", "application/json");
+
+    let request = request_builder.body(AsyncBody::from(serde_json::to_string(&request)?))?;
     let mut response = client.send(request).await?;
     if response.status().is_success() {
         let reader = BufReader::new(response.into_body());
@@ -169,24 +166,17 @@ pub enum Role {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Part {
+    TextPart(TextPart),
+    InlineDataPart(InlineDataPart),
     FunctionCallPart(FunctionCallPart),
     FunctionResponsePart(FunctionResponsePart),
-    InlineDataPart(InlineDataPart),
-    TextPart(TextPart),
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
+    ThoughtPart(ThoughtPart),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextPart {
     pub text: String,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub thought: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -216,6 +206,13 @@ pub struct FunctionCallPart {
 #[serde(rename_all = "camelCase")]
 pub struct FunctionResponsePart {
     pub function_response: FunctionResponse,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThoughtPart {
+    pub thought: bool,
+    pub thought_signature: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -264,54 +261,10 @@ pub struct UsageMetadata {
     pub total_token_count: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThinkingConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_budget: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_level: Option<ThinkingLevel>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_thoughts: Option<bool>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum ThinkingLevel {
-    Minimal,
-    Low,
-    Medium,
-    High,
-}
-
-impl ThinkingLevel {
-    pub fn from_effort(effort: &str) -> Option<Self> {
-        match effort.to_lowercase().as_str() {
-            "minimal" => Some(Self::Minimal),
-            "low" => Some(Self::Low),
-            "medium" => Some(Self::Medium),
-            "high" => Some(Self::High),
-            _ => None,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Minimal => "Minimal",
-            Self::Low => "Low",
-            Self::Medium => "Medium",
-            Self::High => "High",
-        }
-    }
-
-    pub fn value(self) -> &'static str {
-        match self {
-            Self::Minimal => "minimal",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
+    pub thinking_budget: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -399,16 +352,12 @@ pub struct SafetyRating {
 pub struct FunctionCall {
     pub name: String,
     pub args: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FunctionResponse {
     pub name: String,
     pub response: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -520,8 +469,6 @@ pub enum Model {
     Gemini31FlashLite,
     #[serde(rename = "gemini-3-flash-preview")]
     Gemini3Flash,
-    #[serde(rename = "gemini-3.5-flash")]
-    Gemini35Flash,
     #[serde(rename = "gemini-3.1-pro-preview", alias = "gemini-3-pro-preview")]
     Gemini31Pro,
     #[serde(rename = "custom")]
@@ -547,7 +494,6 @@ impl Model {
             Self::Gemini25Pro => "gemini-2.5-pro",
             Self::Gemini31FlashLite => "gemini-3.1-flash-lite",
             Self::Gemini3Flash => "gemini-3-flash-preview",
-            Self::Gemini35Flash => "gemini-3.5-flash",
             Self::Gemini31Pro => "gemini-3.1-pro-preview",
             Self::Custom { name, .. } => name,
         }
@@ -559,7 +505,6 @@ impl Model {
             Self::Gemini25Pro => "gemini-2.5-pro",
             Self::Gemini31FlashLite => "gemini-3.1-flash-lite",
             Self::Gemini3Flash => "gemini-3-flash-preview",
-            Self::Gemini35Flash => "gemini-3.5-flash",
             Self::Gemini31Pro => "gemini-3.1-pro-preview",
             Self::Custom { name, .. } => name,
         }
@@ -572,7 +517,6 @@ impl Model {
             Self::Gemini25Pro => "Gemini 2.5 Pro",
             Self::Gemini31FlashLite => "Gemini 3.1 Flash Lite",
             Self::Gemini3Flash => "Gemini 3 Flash",
-            Self::Gemini35Flash => "Gemini 3.5 Flash",
             Self::Gemini31Pro => "Gemini 3.1 Pro",
             Self::Custom {
                 name, display_name, ..
@@ -587,7 +531,6 @@ impl Model {
             | Self::Gemini25Pro
             | Self::Gemini31FlashLite
             | Self::Gemini3Flash
-            | Self::Gemini35Flash
             | Self::Gemini31Pro => 1_048_576,
             Self::Custom { max_tokens, .. } => *max_tokens,
         }
@@ -600,7 +543,6 @@ impl Model {
             | Model::Gemini25Pro
             | Model::Gemini31FlashLite
             | Model::Gemini3Flash
-            | Model::Gemini35Flash
             | Model::Gemini31Pro => Some(65_536),
             Model::Custom { .. } => None,
         }
@@ -614,50 +556,6 @@ impl Model {
         true
     }
 
-    pub fn supports_thinking(&self) -> bool {
-        matches!(
-            self,
-            Self::Gemini25FlashLite
-                | Self::Gemini25Flash
-                | Self::Gemini25Pro
-                | Self::Gemini31FlashLite
-                | Self::Gemini3Flash
-                | Self::Gemini35Flash
-                | Self::Gemini31Pro
-                | Self::Custom {
-                    mode: GoogleModelMode::Thinking { .. },
-                    ..
-                }
-        )
-    }
-
-    pub fn supported_thinking_levels(&self) -> &'static [ThinkingLevel] {
-        match self {
-            Self::Gemini31FlashLite | Self::Gemini3Flash | Self::Gemini35Flash => &[
-                ThinkingLevel::Minimal,
-                ThinkingLevel::Low,
-                ThinkingLevel::Medium,
-                ThinkingLevel::High,
-            ],
-            Self::Gemini31Pro => &[
-                ThinkingLevel::Low,
-                ThinkingLevel::Medium,
-                ThinkingLevel::High,
-            ],
-            _ => &[],
-        }
-    }
-
-    pub fn default_thinking_level(&self) -> Option<ThinkingLevel> {
-        match self {
-            Self::Gemini31FlashLite => Some(ThinkingLevel::Minimal),
-            Self::Gemini3Flash => Some(ThinkingLevel::High),
-            Self::Gemini35Flash => Some(ThinkingLevel::Medium),
-            Self::Gemini31Pro => Some(ThinkingLevel::High),
-            _ => None,
-        }
-    }
-
     pub fn mode(&self) -> GoogleModelMode {
         match self {
             Self::Gemini25FlashLite | Self::Gemini25Flash | Self::Gemini25Pro => {
@@ -667,10 +565,9 @@ impl Model {
                     budget_tokens: None,
                 }
             }
-            Self::Gemini31FlashLite
-            | Self::Gemini3Flash
-            | Self::Gemini35Flash
-            | Self::Gemini31Pro => GoogleModelMode::Thinking {
+            Self::Gemini3Flash => GoogleModelMode::Default,
+            Self::Gemini31FlashLite => GoogleModelMode::Default,
+            Self::Gemini31Pro => GoogleModelMode::Thinking {
                 budget_tokens: None,
             },
             Self::Custom { mode, .. } => *mode,
@@ -695,7 +592,6 @@ mod tests {
             function_call: FunctionCall {
                 name: "test_function".to_string(),
                 args: json!({"arg": "value"}),
-                id: None,
             },
             thought_signature: Some("test_signature".to_string()),
         };
@@ -713,7 +609,6 @@ mod tests {
             function_call: FunctionCall {
                 name: "test_function".to_string(),
                 args: json!({"arg": "value"}),
-                id: None,
             },
             thought_signature: None,
         };
@@ -763,7 +658,6 @@ mod tests {
             function_call: FunctionCall {
                 name: "test_function".to_string(),
                 args: json!({"arg": "value", "nested": {"key": "val"}}),
-                id: None,
             },
             thought_signature: Some("round_trip_signature".to_string()),
         };
@@ -782,7 +676,6 @@ mod tests {
             function_call: FunctionCall {
                 name: "test_function".to_string(),
                 args: json!({"arg": "value"}),
-                id: None,
             },
             thought_signature: Some("".to_string()),
         };

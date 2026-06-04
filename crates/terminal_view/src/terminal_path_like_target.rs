@@ -210,7 +210,8 @@ mod tests {
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use terminal::{
-        HoveredWord, Point, Range, TerminalBuilder,
+        HoveredWord, TerminalBuilder,
+        alacritty_terminal::index::{Column, Line, Point as AlacPoint},
         terminal_settings::{AlternateScroll, CursorShape},
     };
     use util::path;
@@ -257,6 +258,7 @@ mod tests {
                 cx.background_executor(),
                 PathStyle::local(),
             )
+            .unwrap()
             .subscribe(cx)
         });
 
@@ -327,7 +329,7 @@ mod tests {
         let (hover_target, open_target) = test_path_like(
             HoveredWord {
                 word: maybe_path.to_string(),
-                word_match: Range::new(Point::new(0, 0), Point::new(0, 0)),
+                word_match: AlacPoint::new(Line(0), Column(0))..=AlacPoint::new(Line(0), Column(0)),
                 id: 0,
             },
             PathLikeTarget {

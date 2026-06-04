@@ -2,6 +2,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use acp_thread::{AgentModelIcon, AgentModelInfo, AgentModelSelector};
+use agent_servers::AgentServer;
 use fs::Fs;
 use gpui::{Entity, FocusHandle};
 use picker::popover_menu::PickerPopoverMenu;
@@ -18,7 +19,7 @@ pub struct ModelSelectorPopover {
 impl ModelSelectorPopover {
     pub(crate) fn new(
         selector: Rc<dyn AgentModelSelector>,
-        agent_server: Rc<dyn agent_servers::AgentServer>,
+        agent_server: Rc<dyn AgentServer>,
         fs: Arc<dyn Fs>,
         menu_handle: PopoverMenuHandle<ModelSelector>,
         focus_handle: FocusHandle,
@@ -27,7 +28,14 @@ impl ModelSelectorPopover {
     ) -> Self {
         Self {
             selector: cx.new(move |cx| {
-                acp_model_selector(selector, agent_server, fs, focus_handle.clone(), window, cx)
+                acp_model_selector(
+                    selector,
+                    agent_server,
+                    fs,
+                    focus_handle.clone(),
+                    window,
+                    cx,
+                )
             }),
             menu_handle,
         }

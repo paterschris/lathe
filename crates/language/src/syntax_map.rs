@@ -104,8 +104,6 @@ struct SyntaxMapCapturesLayer<'a> {
     captures: QueryCaptures<'a, 'a, TextProvider<'a>, &'a [u8]>,
     next_capture: Option<QueryCapture<'a>>,
     grammar_index: usize,
-    query: &'a Query,
-    text: &'a Rope,
     _query_cursor: QueryCursorHandle,
 }
 
@@ -117,7 +115,6 @@ struct SyntaxMapMatchesLayer<'a> {
     has_next: bool,
     matches: QueryMatches<'a, 'a, TextProvider<'a>, &'a [u8]>,
     query: &'a Query,
-    text: &'a Rope,
     grammar_index: usize,
     _query_cursor: QueryCursorHandle,
 }
@@ -226,7 +223,7 @@ impl ParseStepLanguage {
     fn name(&self) -> SharedString {
         match self {
             ParseStepLanguage::Loaded { language } => language.name().0,
-            ParseStepLanguage::Pending { name } => name.into(),
+            ParseStepLanguage::Pending { name } => name.clone().into(),
         }
     }
 
@@ -1142,8 +1139,6 @@ impl<'a> SyntaxMapCaptures<'a> {
                 grammar_index,
                 next_capture: None,
                 captures,
-                query,
-                text,
                 _query_cursor: query_cursor,
             };
 
@@ -1289,7 +1284,6 @@ impl<'a> SyntaxMapMatches<'a> {
                 grammar_index,
                 matches,
                 query,
-                text,
                 next_pattern_index: 0,
                 next_captures: Vec::new(),
                 has_next: false,
@@ -1372,11 +1366,7 @@ impl<'a> SyntaxMapMatches<'a> {
 
 impl SyntaxMapCapturesLayer<'_> {
     fn advance(&mut self) {
-        self.next_capture = self
-            .captures
-            .by_ref()
-            .find(|(mat, _)| satisfies_custom_predicates(self.query, mat, self.text))
-            .map(|(mat, ix)| mat.captures[*ix]);
+        self.next_capture = self.captures.next().map(|(mat, ix)| mat.captures[*ix]);
     }
 
     fn sort_key(&self) -> (usize, Reverse<usize>, usize) {
@@ -1393,7 +1383,7 @@ impl SyntaxMapMatchesLayer<'_> {
     fn advance(&mut self) {
         loop {
             if let Some(mat) = self.matches.next() {
-                if !satisfies_custom_predicates(self.query, mat, self.text) {
+                if !satisfies_custom_predicates(self.query, mat) {
                     continue;
                 }
                 self.next_captures.clear();
@@ -1433,25 +1423,11 @@ impl<'a> Iterator for SyntaxMapCaptures<'a> {
     }
 }
 
-fn satisfies_custom_predicates(query: &Query, mat: &QueryMatch, text: &Rope) -> bool {
+fn satisfies_custom_predicates(query: &Query, mat: &QueryMatch) -> bool {
     for predicate in query.general_predicates(mat.pattern_index) {
         let satisfied = match predicate.operator.as_ref() {
             "has-parent?" => has_parent(&predicate.args, mat),
             "not-has-parent?" => !has_parent(&predicate.args, mat),
-            "sibling-index-is-odd?" => sibling_index_parity(&predicate.args, mat, true),
-            "sibling-index-is-even?" => sibling_index_parity(&predicate.args, mat, false),
-            "ancestor-count-is-odd?" => ancestor_count_parity(&predicate.args, mat, true),
-            "ancestor-count-is-even?" => ancestor_count_parity(&predicate.args, mat, false),
-            "is-parameter-reference-odd?" => {
-                is_parameter_reference(&predicate.args, mat, text, true)
-            }
-            "is-parameter-reference-even?" => {
-                is_parameter_reference(&predicate.args, mat, text, false)
-            }
-            "sibling-index-mod?" => sibling_index_mod(&predicate.args, mat),
-            "is-parameter-reference-mod?" => {
-                is_parameter_reference_mod(&predicate.args, mat, text)
-            }
             _ => true,
         };
         if !satisfied {
@@ -1461,258 +1437,23 @@ fn satisfies_custom_predicates(query: &Query, mat: &QueryMatch, text: &Rope) -> 
     true
 }
 
-fn resolve_capture<'a>(
-    args: &[QueryPredicateArg],
-    mat: &QueryMatch<'a, 'a>,
-) -> Option<QueryCapture<'a>> {
-    let QueryPredicateArg::Capture(capture_ix) = args.first()? else {
-        return None;
-    };
-    mat.captures.iter().find(|c| c.index == *capture_ix).copied()
-}
-
 fn has_parent(args: &[QueryPredicateArg], mat: &QueryMatch) -> bool {
-    let Some(QueryPredicateArg::String(parent_kind)) = args.get(1) else {
+    let (
+        Some(QueryPredicateArg::Capture(capture_ix)),
+        Some(QueryPredicateArg::String(parent_kind)),
+    ) = (args.first(), args.get(1))
+    else {
         return false;
     };
-    let Some(capture) = resolve_capture(args, mat) else {
+
+    let Some(capture) = mat.captures.iter().find(|c| c.index == *capture_ix) else {
         return false;
     };
+
     capture
         .node
         .parent()
         .is_some_and(|p| p.kind() == parent_kind.as_ref())
-}
-
-fn sibling_index_parity(args: &[QueryPredicateArg], mat: &QueryMatch, want_odd: bool) -> bool {
-    let Some(capture) = resolve_capture(args, mat) else {
-        return false;
-    };
-    let node = capture.node;
-    let Some(parent) = node.parent() else {
-        return false;
-    };
-    let Some(grandparent) = parent.parent() else {
-        return false;
-    };
-    let mut cursor = grandparent.walk();
-    for (index, child) in grandparent.named_children(&mut cursor).enumerate() {
-        if child.id() == parent.id() {
-            return (index % 2 != 0) == want_odd;
-        }
-    }
-    false
-}
-
-/// General modular sibling index predicate: `(#sibling-index-mod? @capture modulus remainder)`
-/// Returns true when the parent's sibling index % modulus == remainder.
-fn sibling_index_mod(args: &[QueryPredicateArg], mat: &QueryMatch) -> bool {
-    let Some(capture) = resolve_capture(args, mat) else {
-        return false;
-    };
-    let (Some(QueryPredicateArg::String(modulus_str)), Some(QueryPredicateArg::String(remainder_str))) =
-        (args.get(1), args.get(2))
-    else {
-        return false;
-    };
-    let Ok(modulus) = modulus_str.parse::<usize>() else {
-        return false;
-    };
-    let Ok(remainder) = remainder_str.parse::<usize>() else {
-        return false;
-    };
-    if modulus == 0 {
-        return false;
-    }
-
-    let node = capture.node;
-    let Some(parent) = node.parent() else {
-        return false;
-    };
-    let Some(grandparent) = parent.parent() else {
-        return false;
-    };
-    let mut cursor = grandparent.walk();
-    for (index, child) in grandparent.named_children(&mut cursor).enumerate() {
-        if child.id() == parent.id() {
-            return index % modulus == remainder;
-        }
-    }
-    false
-}
-
-/// General modular parameter reference predicate: `(#is-parameter-reference-mod? @capture modulus remainder)`
-/// For an identifier that references a parameter of the enclosing function, checks if that
-/// parameter's position % modulus == remainder.
-fn is_parameter_reference_mod(
-    args: &[QueryPredicateArg],
-    mat: &QueryMatch,
-    text: &Rope,
-) -> bool {
-    let Some(capture) = resolve_capture(args, mat) else {
-        return false;
-    };
-    let (Some(QueryPredicateArg::String(modulus_str)), Some(QueryPredicateArg::String(remainder_str))) =
-        (args.get(1), args.get(2))
-    else {
-        return false;
-    };
-    let Ok(modulus) = modulus_str.parse::<usize>() else {
-        return false;
-    };
-    let Ok(remainder) = remainder_str.parse::<usize>() else {
-        return false;
-    };
-    if modulus == 0 {
-        return false;
-    }
-
-    let node = capture.node;
-    if node.kind() != "identifier" {
-        return false;
-    }
-
-    let reference_name: String = text.chunks_in_range(node.byte_range()).collect();
-
-    let mut current = node.parent();
-    while let Some(ancestor) = current {
-        match ancestor.kind() {
-            "arrow_function" | "function_declaration" | "function_expression"
-            | "method_definition" | "function" | "generator_function"
-            | "generator_function_declaration" => {
-                return function_parameter_index(ancestor, &reference_name, text)
-                    .is_some_and(|index| index % modulus == remainder);
-            }
-            _ => {
-                current = ancestor.parent();
-            }
-        }
-    }
-
-    false
-}
-
-fn ancestor_count_parity(args: &[QueryPredicateArg], mat: &QueryMatch, want_odd: bool) -> bool {
-    let Some(capture) = resolve_capture(args, mat) else {
-        return false;
-    };
-    let node = capture.node;
-    let kind = node.kind();
-    let mut count = 0;
-    let mut current = node.parent();
-    while let Some(ancestor) = current {
-        if ancestor.kind() == kind {
-            count += 1;
-        }
-        current = ancestor.parent();
-    }
-    count > 0 && (count % 2 != 0) == want_odd
-}
-
-/// Checks if the captured identifier is a reference to a parameter of the enclosing function,
-/// and whether that parameter is at an even or odd position in the parameter list.
-/// This allows parameter references in function bodies to inherit the chain color
-/// from their corresponding parameter declaration.
-fn is_parameter_reference(
-    args: &[QueryPredicateArg],
-    mat: &QueryMatch,
-    text: &Rope,
-    want_odd: bool,
-) -> bool {
-    let Some(capture) = resolve_capture(args, mat) else {
-        return false;
-    };
-    let node = capture.node;
-
-    // Only applies to identifier nodes
-    if node.kind() != "identifier" {
-        return false;
-    }
-
-    // Get the text of this identifier
-    let reference_name: String = text.chunks_in_range(node.byte_range()).collect();
-
-    // Walk up the tree to find the enclosing function (arrow_function, function_declaration,
-    // function_expression, method_definition, function)
-    let mut current = node.parent();
-    while let Some(ancestor) = current {
-        match ancestor.kind() {
-            "arrow_function" | "function_declaration" | "function_expression"
-            | "method_definition" | "function" | "generator_function"
-            | "generator_function_declaration" => {
-                // Found the enclosing function — check its parameters
-                return function_parameter_index(ancestor, &reference_name, text)
-                    .is_some_and(|index| (index % 2 != 0) == want_odd);
-            }
-            _ => {
-                current = ancestor.parent();
-            }
-        }
-    }
-
-    false
-}
-
-/// Given a function node, find the index of a parameter with the given name.
-/// Returns None if no parameter matches.
-fn function_parameter_index(
-    function_node: tree_sitter::Node,
-    param_name: &str,
-    text: &Rope,
-) -> Option<usize> {
-    // Find the formal_parameters child
-    let params_node = (0..function_node.named_child_count() as u32)
-        .filter_map(|i| function_node.named_child(i))
-        .find(|child| child.kind() == "formal_parameters")?;
-
-    let mut cursor = params_node.walk();
-    let mut index = 0;
-    for child in params_node.named_children(&mut cursor) {
-        match child.kind() {
-            "required_parameter" | "optional_parameter" => {
-                // The parameter name is an identifier child (in the pattern or name field)
-                if let Some(name_node) = find_parameter_identifier(child) {
-                    let name: String = text.chunks_in_range(name_node.byte_range()).collect();
-                    if name == param_name {
-                        return Some(index);
-                    }
-                }
-                index += 1;
-            }
-            // Simple parameter (no type annotation) — just an identifier
-            "identifier" => {
-                let name: String = text.chunks_in_range(child.byte_range()).collect();
-                if name == param_name {
-                    return Some(index);
-                }
-                index += 1;
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-/// Find the identifier node within a required_parameter or optional_parameter node.
-fn find_parameter_identifier(param_node: tree_sitter::Node) -> Option<tree_sitter::Node> {
-    // Try the "pattern" field first (TypeScript required_parameter uses this)
-    if let Some(pattern) = param_node.child_by_field_name("pattern") {
-        if pattern.kind() == "identifier" {
-            return Some(pattern);
-        }
-    }
-    // Try the "name" field (used by tuple_parameter aliased to required_parameter)
-    if let Some(name) = param_node.child_by_field_name("name") {
-        if name.kind() == "identifier" {
-            return Some(name);
-        }
-    }
-    // Fallback: first identifier child
-    let mut cursor = param_node.walk();
-    param_node
-        .named_children(&mut cursor)
-        .find(|&child| child.kind() == "identifier")
 }
 
 fn join_ranges(

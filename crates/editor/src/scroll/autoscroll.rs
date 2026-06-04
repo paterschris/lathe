@@ -1,7 +1,8 @@
 use crate::{
-    DisplayPoint, DisplayRow, Editor, EditorMode, EditorSettings, GoToDefinitionScrollStrategy,
-    LineWithInvisibles, RowExt, SelectionEffects,
+    DisplayPoint, DisplayRow, Editor, EditorMode, EditorSettings, LineWithInvisibles, RowExt,
+    SelectionEffects,
     display_map::{DisplaySnapshot, ToDisplayPoint},
+    editor_settings::GoToDefinitionScrollStrategy,
     scroll::{ScrollOffset, WasScrolled},
 };
 use gpui::{App, Bounds, Context, Pixels, Window};

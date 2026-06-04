@@ -377,6 +377,10 @@ pub struct GraphDataResponse<'a> {
 pub struct Repository {
     this: WeakEntity<Self>,
     snapshot: RepositorySnapshot,
+    /// Most recent error returned by the platform git binary while listing
+    /// branches. Surfaced by the branch picker so the user can tell the list
+    /// is stale and why. `None` when the last list call succeeded.
+    pub branch_list_error: Option<SharedString>,
     commit_message_buffer: Option<Entity<Buffer>>,
     git_store: WeakEntity<GitStore>,
     // For a local repository, holds paths that have had worktree events since the last status scan completed,
@@ -3003,6 +3007,7 @@ impl GitStore {
                 .into_iter()
                 .map(|branch| branch_to_proto(&branch))
                 .collect::<Vec<_>>(),
+            error: None,
         })
     }
     async fn handle_get_default_branch(
@@ -4286,6 +4291,7 @@ impl RepositorySnapshot {
     fn initial_update(&self, project_id: u64) -> proto::UpdateRepository {
         proto::UpdateRepository {
             branch_summary: self.branch.as_ref().map(branch_to_proto),
+            branch_list_error: None,
             head_commit_details: self.head_commit.as_ref().map(commit_details_to_proto),
             updated_statuses: self
                 .statuses_by_path
@@ -4377,6 +4383,7 @@ impl RepositorySnapshot {
 
         proto::UpdateRepository {
             branch_summary: self.branch.as_ref().map(branch_to_proto),
+            branch_list_error: None,
             head_commit_details: self.head_commit.as_ref().map(commit_details_to_proto),
             updated_statuses,
             removed_statuses,
@@ -4711,6 +4718,7 @@ impl Repository {
             commit_data: Default::default(),
             commit_data_handler: CommitDataHandlerState::Closed,
             refetch_repo_state,
+            branch_list_error: None,
         }
     }
 
@@ -4764,6 +4772,7 @@ impl Repository {
             commit_data: Default::default(),
             commit_data_handler: CommitDataHandlerState::Closed,
             refetch_repo_state,
+            branch_list_error: None,
         }
     }
 
@@ -5326,6 +5335,29 @@ impl Repository {
         path: RepoPath,
     ) -> oneshot::Receiver<Result<git::repository::FileHistory>> {
         self.file_history_paginated(path, 0, None)
+    }
+
+    pub fn file_history_changed_files(
+        &mut self,
+        paths: Vec<RepoPath>,
+        commit_limit: usize,
+    ) -> oneshot::Receiver<Result<Vec<git::repository::FileHistoryChangedFileSets>>> {
+        self.send_job(
+            "file_history_changed_files",
+            None,
+            move |git_repo, _cx| async move {
+                match git_repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend
+                            .file_history_changed_files(paths, commit_limit)
+                            .await
+                    }
+                    RepositoryState::Remote(_) => {
+                        anyhow::bail!("file history changed files is only supported locally")
+                    }
+                }
+            },
+        )
     }
 
     pub fn file_history_paginated(

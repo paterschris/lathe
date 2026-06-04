@@ -87,6 +87,7 @@ pub(crate) fn compose_terminal_thread_title(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn terminal_title_without_prefix(title: &str) -> &str {
     terminal_title_prefix(title)
         .map(|prefix| &title[prefix.len()..])
@@ -592,7 +593,8 @@ impl Column for TerminalThreadMetadata {
 
         Ok((
             TerminalThreadMetadata {
-                terminal_id: TerminalId::from_key_string(&terminal_id)?,
+                terminal_id: TerminalId::from_key_string(&terminal_id)
+                    .context("parse terminal id")?,
                 title: SharedString::from(title),
                 custom_title: custom_title
                     .filter(|title| !title.trim().is_empty())

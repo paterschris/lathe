@@ -561,12 +561,6 @@ fn wasm_engine(executor: &BackgroundExecutor) -> wasmtime::Engine {
             // back to the executor at regular intervals.
             config.epoch_interruption(true);
 
-            // Use Mach ports for trap handling on macOS instead of signal handlers.
-            // This is required for compatibility with hardened runtime and macOS code
-            // signing validation of JIT-compiled code pages.
-            #[cfg(target_os = "macos")]
-            config.macos_use_mach_ports(true);
-
             let engine = wasmtime::Engine::new(&config).unwrap();
 
             // It might be safer to do this on a non-async thread to make sure it makes progress

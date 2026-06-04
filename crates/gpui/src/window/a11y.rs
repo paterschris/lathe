@@ -86,6 +86,13 @@
 //! [`NodeId`]: accesskit::NodeId
 //! [`Drawable::prepaint`]: crate::Drawable::prepaint
 
+// The fork has not yet ported the platform-side AccessKit adapter, so most
+// of the machinery in this module sits dormant: the active flag never flips
+// to true, no tree updates ever leave the window, and no incoming actions
+// ever dispatch. Suppress dead_code at the module level until the platform
+// integration lands.
+#![allow(dead_code)]
+
 use crate::{App, Bounds, FocusId, Pixels, Window};
 use accesskit::{Action, NodeId, TreeUpdate};
 use collections::{FxHashMap, FxHashSet};
@@ -106,6 +113,7 @@ pub(crate) type A11yActionListener =
 ///
 /// Manages the AccessKit tree that is built each frame and the mappings
 /// needed to dispatch incoming action requests back to the right elements.
+#[allow(dead_code, reason = "fork has not yet ported the platform-side AccessKit adapter, so the active flag stays false and most fields are unread until that lands")]
 pub(crate) struct A11y {
     /// Whether accessibility has been [forcibly disabled] for this window.
     ///

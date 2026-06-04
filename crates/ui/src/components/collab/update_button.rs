@@ -172,17 +172,14 @@ impl Component for UpdateButton {
         "UpdateButton"
     }
 
-    fn description() -> Option<&'static str> {
-        Some(
-            "A button component displayed in the title bar to show auto-update status and allow users to restart Lathe.",
-        )
+    fn description() -> &'static str {
+        "A button component displayed in the title bar to show auto-update status and allow users to restart Lathe."
     }
 
-    fn preview(_window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
+    fn preview(_window: &mut Window, _cx: &mut App) -> AnyElement {
         let version = "1.3.0+stable.2025051";
 
-        Some(
-            v_flex()
+        v_flex()
                 .gap_6()
                 .children(vec![
                     example_group_with_title(
@@ -213,7 +210,6 @@ impl Component for UpdateButton {
                         ],
                     ),
                 ])
-                .into_any_element(),
-        )
+                .into_any_element()
     }
 }

@@ -360,28 +360,6 @@ fn render_conflict_buttons(
                     }
                 }),
         )
-        .child(Divider::vertical())
-        .child(
-            Button::new("open-merge-editor", "Open merge editor")
-                .label_size(LabelSize::Small)
-                .start_icon(
-                    Icon::new(IconName::GitBranch)
-                        .size(IconSize::Small)
-                        .color(Color::Muted),
-                )
-                .on_click({
-                    let editor = editor.clone();
-                    let conflict = conflict.clone();
-                    move |_, window, cx| {
-                        open_merge_editor_for_conflict(
-                            editor.clone(),
-                            conflict.clone(),
-                            window,
-                            cx,
-                        );
-                    }
-                }),
-        )
         .when(is_ai_enabled, |this| {
             this.child(Divider::vertical()).child(
                 Button::new("resolve-with-agent", "Resolve with Agent")
@@ -440,6 +418,12 @@ fn collect_conflicted_file_paths(project: &Project, cx: &App) -> Vec<String> {
     for repo in git_store.repositories().values() {
         let snapshot = repo.read(cx).snapshot();
         for (repo_path, _) in snapshot.merge.merge_heads_by_conflicted_path.iter() {
+            let is_currently_conflicted = snapshot
+                .status_for_path(repo_path)
+                .is_some_and(|entry| entry.status.is_conflicted());
+            if !is_currently_conflicted {
+                continue;
+            }
             if let Some(project_path) = repo.read(cx).repo_path_to_project_path(repo_path, cx) {
                 paths.push(
                     project_path
@@ -453,30 +437,6 @@ fn collect_conflicted_file_paths(project: &Project, cx: &App) -> Vec<String> {
     }
 
     paths
-}
-
-/// Open the dedicated merge editor as a workspace item for the buffer that
-/// owns this conflict. We resolve the buffer and its `ConflictSet` from the
-/// caller's editor + addon, then hand them to `MergeEditorView`.
-fn open_merge_editor_for_conflict(
-    editor: WeakEntity<Editor>,
-    conflict: ConflictRegion,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let resolved = editor.update(cx, |editor, cx| {
-        let workspace = editor.workspace()?;
-        let multibuffer = editor.buffer().clone();
-        let buffer_id = conflict.ours.end.buffer_id;
-        let buffer = multibuffer.read(cx).buffer(buffer_id)?;
-        let addon = editor.addon::<ConflictAddon>()?;
-        let conflict_set = addon.conflict_set(buffer.read(cx).remote_id())?;
-        Some((workspace.downgrade(), buffer, conflict_set))
-    });
-    let Some(Some((workspace, buffer, conflict_set))) = resolved.ok() else {
-        return;
-    };
-    crate::merge_editor_view::open_merge_editor(workspace, buffer, conflict_set, window, cx);
 }
 
 pub(crate) fn resolve_conflict(

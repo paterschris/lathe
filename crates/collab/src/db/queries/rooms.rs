@@ -789,6 +789,7 @@ impl Database {
                             removed_statuses,
                             current_merge_conflicts,
                             branch_summary,
+                            branch_list_error: None,
                             head_commit_details,
                             project_id: project_id.to_proto(),
                             id: db_repository.id as u64,
@@ -822,6 +823,7 @@ impl Database {
                 server: proto::LanguageServer {
                     id: language_server.id as u64,
                     name: language_server.name,
+                    language_name: language_server.language_name,
                     worktree_id: language_server.worktree_id.map(|id| id as u64),
                 },
                 capabilities: language_server.capabilities,

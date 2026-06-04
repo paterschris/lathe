@@ -1536,7 +1536,7 @@ impl PickerDelegate for RecentProjectsDelegate {
                             h_flex()
                                 .id("project_info_container")
                                 .gap_3()
-                                .flex_grow()
+                                .flex_grow(1.0)
                                 .when(self.has_any_non_local_projects, |this| {
                                     this.child(Icon::new(icon).color(Color::Muted))
                                 })

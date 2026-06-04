@@ -203,7 +203,7 @@ impl ThemeCustomizer {
 
         let mut list = v_flex()
             .id("color-list")
-            .flex_grow()
+            .flex_grow(1.0)
             .overflow_y_scroll()
             .px_1()
             .py_1();
@@ -239,7 +239,7 @@ impl ThemeCustomizer {
                     .child(color_swatch(color, px(20.0), cx))
                     .child(
                         v_flex()
-                            .flex_grow()
+                            .flex_grow(1.0)
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -282,7 +282,7 @@ impl ThemeCustomizer {
     fn render_color_editor(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(field) = self.selected_field else {
             return v_flex()
-                .flex_grow()
+                .flex_grow(1.0)
                 .items_center()
                 .justify_center()
                 .child(
@@ -299,7 +299,7 @@ impl ThemeCustomizer {
 
         v_flex()
             .id("color-editor")
-            .flex_grow()
+            .flex_grow(1.0)
             .p_3()
             .gap_3()
             .overflow_y_scroll()
@@ -454,7 +454,7 @@ impl ThemeCustomizer {
                     .child(
                         div()
                             .relative()
-                            .flex_grow()
+                            .flex_grow(1.0)
                             .h(px(28.0))
                             .rounded_md()
                             .border_1()
@@ -487,7 +487,7 @@ impl ThemeCustomizer {
                                                 "seg-{label}-{i}"
                                             )))
                                             .h_full()
-                                            .flex_grow()
+                                            .flex_grow(1.0)
                                             .cursor_pointer()
                                             .bg(bg_color)
                                             .when(is_thumb_here, |this| {
@@ -686,7 +686,7 @@ impl Render for ThemeCustomizer {
             .child(
                 // Right panel: color editor
                 v_flex()
-                    .flex_grow()
+                    .flex_grow(1.0)
                     .h_full()
                     .child(
                         h_flex()

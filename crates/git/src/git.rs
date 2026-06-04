@@ -59,6 +59,8 @@ actions!(
         UnstageAll,
         /// Stashes all changes in the repository, including untracked files.
         StashAll,
+        /// Stashes the currently selected file's changes.
+        StashFile,
         /// Pops the most recent stash.
         StashPop,
         /// Apply the most recent stash.
@@ -214,6 +216,13 @@ impl Oid {
 
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.format.byte_len()]
+    }
+
+    /// Convert this [`Oid`] to a libgit2 [`git2::Oid`]. The fork's libgit2-backed
+    /// repository implementation still consumes raw libgit2 oids; upstream
+    /// removed git2 from its dependency tree but the fork keeps it.
+    pub fn to_git2(&self) -> git2::Oid {
+        git2::Oid::from_bytes(self.as_bytes()).expect("Oid bytes are a valid SHA")
     }
 
     pub(crate) fn is_zero(&self) -> bool {

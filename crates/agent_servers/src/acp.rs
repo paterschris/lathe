@@ -2978,6 +2978,7 @@ mod tests {
                     acp_thread::AgentThreadEntry::AssistantMessage(_) => "assistant",
                     acp_thread::AgentThreadEntry::ToolCall(_) => "tool_call",
                     acp_thread::AgentThreadEntry::CompletedPlan(_) => "plan",
+                    acp_thread::AgentThreadEntry::ContextCompaction => "compaction",
                 })
                 .collect::<Vec<_>>()
         });
@@ -3227,6 +3228,7 @@ fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpS
                     url,
                     headers,
                     timeout: _,
+                    oauth: _,
                 } => Some(acp::McpServer::Http(
                     acp::McpServerHttp::new(id.0.to_string(), url.to_string()).headers(
                         headers

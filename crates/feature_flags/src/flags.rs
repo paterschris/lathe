@@ -163,6 +163,18 @@ impl FeatureFlag for AutoWatchFeatureFlag {
 }
 register_feature_flag!(AutoWatchFeatureFlag);
 
+pub struct SkillsFeatureFlag;
+
+impl FeatureFlag for SkillsFeatureFlag {
+    const NAME: &'static str = "skills";
+    type Value = PresenceFlag;
+
+    fn enabled_for_staff() -> bool {
+        true
+    }
+}
+register_feature_flag!(SkillsFeatureFlag);
+
 /// Wraps agent-run terminal commands in an OS-level sandbox where supported
 /// (currently macOS Seatbelt only). When off, terminal commands run with the
 /// agent's full ambient permissions, as they always have.

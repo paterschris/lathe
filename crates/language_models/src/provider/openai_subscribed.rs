@@ -4,16 +4,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use credentials_provider::CredentialsProvider;
 use futures::{FutureExt, StreamExt, future::BoxFuture, future::Shared};
 use gpui::{AnyView, App, AsyncApp, Context, Entity, SharedString, Task, Window};
-use http_client::{
-    AsyncBody, CustomHeaders, HttpClient, Method, Request as HttpRequest,
-    http::{HeaderName, HeaderValue},
-};
+use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 use language_model::{
-    AuthenticateError, FastModeConfirmation, IconOrSvg, LanguageModel,
-    LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelEffortLevel,
-    LanguageModelId, LanguageModelName, LanguageModelProvider, LanguageModelProviderId,
-    LanguageModelProviderName, LanguageModelProviderState, LanguageModelRequest,
-    LanguageModelToolChoice, RateLimiter,
+    AuthenticateError, IconOrSvg, LanguageModel, LanguageModelCompletionError,
+    LanguageModelCompletionEvent, LanguageModelEffortLevel, LanguageModelId, LanguageModelName,
+    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
+    LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice, RateLimiter,
 };
 use open_ai::{ReasoningEffort, responses::stream_response};
 use rand::RngCore as _;
@@ -255,16 +251,6 @@ impl LanguageModelProvider for OpenAiSubscribedProvider {
     fn reset_credentials(&self, cx: &mut App) -> Task<Result<()>> {
         self.sign_out(cx)
     }
-
-    fn fast_mode_confirmation(&self, _cx: &App) -> Option<FastModeConfirmation> {
-        Some(FastModeConfirmation {
-            title: "Enable Fast Mode for OpenAI?".into(),
-            message: "Fast mode sends requests using OpenAI's Priority processing tier, which \
-                targets significantly lower latency than the standard tier and is billed at a \
-                premium per-token rate."
-                .into(),
-        })
-    }
 }
 
 //
@@ -359,13 +345,6 @@ impl ChatGptModel {
     fn supports_prompt_cache_key(&self) -> bool {
         true
     }
-
-    fn supports_priority(&self) -> bool {
-        match self {
-            Self::Gpt55 | Self::Gpt54 => true,
-            Self::Gpt54Mini | Self::Gpt53Codex | Self::Gpt52 => false,
-        }
-    }
 }
 
 struct OpenAiSubscribedLanguageModel {
@@ -413,10 +392,6 @@ impl LanguageModel for OpenAiSubscribedLanguageModel {
         true
     }
 
-    fn supports_fast_mode(&self) -> bool {
-        self.model.supports_priority()
-    }
-
     fn supported_effort_levels(&self) -> Vec<LanguageModelEffortLevel> {
         let default_effort = self.model.default_reasoning_effort();
         self.model
@@ -456,7 +431,7 @@ impl LanguageModel for OpenAiSubscribedLanguageModel {
 
     fn stream_completion(
         &self,
-        mut request: LanguageModelRequest,
+        request: LanguageModelRequest,
         cx: &AsyncApp,
     ) -> BoxFuture<
         'static,
@@ -468,10 +443,6 @@ impl LanguageModel for OpenAiSubscribedLanguageModel {
             LanguageModelCompletionError,
         >,
     > {
-        if !self.model.supports_priority() {
-            request.speed = None;
-        }
-
         // The Codex backend rejects `max_output_tokens` (`Unsupported parameter`),
         // unlike the public OpenAI Responses API. Pass `None` so the field is
         // omitted from the serialized request body entirely.
@@ -513,24 +484,15 @@ impl LanguageModel for OpenAiSubscribedLanguageModel {
         let future = cx.spawn(async move |cx| {
             let creds = get_fresh_credentials(&state, &http_client, cx).await?;
 
-            let mut header_pairs: Vec<(HeaderName, HeaderValue)> = vec![
-                (
-                    HeaderName::from_static("originator"),
-                    HeaderValue::from_static("zed"),
-                ),
-                (
-                    HeaderName::from_static("openai-beta"),
-                    HeaderValue::from_static("responses=experimental"),
-                ),
+            let mut extra_headers: Vec<(String, String)> = vec![
+                ("originator".into(), "zed".into()),
+                ("OpenAI-Beta".into(), "responses=experimental".into()),
             ];
             if let Some(ref id) = creds.account_id {
                 if !id.is_empty() {
-                    if let Ok(value) = HeaderValue::from_str(id) {
-                        header_pairs.push((HeaderName::from_static("chatgpt-account-id"), value));
-                    }
+                    extra_headers.push(("ChatGPT-Account-Id".into(), id.clone()));
                 }
             }
-            let extra_headers = CustomHeaders::new(header_pairs);
 
             let access_token = creds.access_token.clone();
             request_limiter
@@ -541,7 +503,7 @@ impl LanguageModel for OpenAiSubscribedLanguageModel {
                         CODEX_BASE_URL,
                         &access_token,
                         responses_request,
-                        &extra_headers,
+                        extra_headers,
                     )
                     .await
                     .map_err(LanguageModelCompletionError::from)
@@ -1053,7 +1015,6 @@ impl Render for ConfigurationView {
                 .unwrap_or_else(|| "Signed in".to_string());
 
             let weak_state = self.state.downgrade();
-
             return v_flex()
                 .child(
                     ConfiguredApiCard::new(SharedString::from(label))
@@ -1065,52 +1026,30 @@ impl Render for ConfigurationView {
                 .into_any_element();
         }
 
+        if state.is_signing_in() {
+            return v_flex()
+                .child(Label::new("Signing in…").color(Color::Muted))
+                .into_any_element();
+        }
+
         let last_auth_error = state.last_auth_error.clone();
         let provider_state = self.state.clone();
         let http_client = self.http_client.clone();
 
-        let is_signing_in = state.is_signing_in();
-        let button_label = if is_signing_in {
-            "Signing in…"
-        } else {
-            "Sign in to use ChatGPT Subscription"
-        };
-
         v_flex()
             .gap_2()
+            .when_some(last_auth_error, |this, error| {
+                this.child(Label::new(error).color(Color::Error))
+            })
             .child(Label::new(
                 "Sign in with your ChatGPT Plus or Pro subscription to use OpenAI models in Zed's agent.",
             ))
             .child(
-                Button::new("sign-in", button_label)
-                    .full_width()
-                    .style(ButtonStyle::Outlined)
-                    .loading(is_signing_in)
-                    .disabled(is_signing_in)
-                    .when(!is_signing_in, |this| {
-                        this.start_icon(
-                            Icon::new(IconName::AiOpenAi)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                    })
+                Button::new("sign-in", "Sign in with ChatGPT")
                     .on_click(move |_, _window, cx| {
                         do_sign_in(&provider_state, &http_client, cx);
                     }),
             )
-            .when_some(last_auth_error, |this, error| {
-                this.child(
-                    h_flex()
-                        .gap_1()
-                        .justify_center()
-                        .child(
-                            Icon::new(IconName::XCircle)
-                                .color(Color::Error)
-                                .size(IconSize::Small),
-                        )
-                        .child(Label::new(error).color(Color::Muted)),
-                )
-            })
             .into_any_element()
     }
 }

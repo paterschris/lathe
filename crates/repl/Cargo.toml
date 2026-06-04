@@ -49,6 +49,7 @@ settings.workspace = true
 shlex.workspace = true
 smol.workspace = true
 telemetry.workspace = true
+alacritty_terminal.workspace = true
 terminal.workspace = true
 terminal_view.workspace = true
 theme.workspace = true

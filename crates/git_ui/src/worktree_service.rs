@@ -77,6 +77,10 @@ pub fn resolve_worktree_branch_target(branch_target: &NewWorktreeBranchTarget) -
     match branch_target {
         NewWorktreeBranchTarget::CurrentBranch => None,
         NewWorktreeBranchTarget::ExistingBranch { name } => Some(name.clone()),
+        NewWorktreeBranchTarget::RemoteBranch {
+            remote_name,
+            branch_name,
+        } => Some(format!("{remote_name}/{branch_name}")),
     }
 }
 

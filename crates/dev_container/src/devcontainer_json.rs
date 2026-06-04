@@ -211,7 +211,7 @@ pub(crate) struct DevContainer {
     #[serde(rename = "updateRemoteUserUID")]
     pub(crate) update_remote_user_uid: Option<bool>,
     user_env_probe: Option<UserEnvProbe>,
-    pub(crate) override_command: Option<bool>,
+    override_command: Option<bool>,
     shutdown_action: Option<ShutdownAction>,
     init: Option<bool>,
     pub(crate) privileged: Option<bool>,
@@ -232,7 +232,7 @@ pub(crate) struct DevContainer {
     #[serde(default, deserialize_with = "deserialize_string_or_array")]
     pub(crate) docker_compose_file: Option<Vec<String>>,
     pub(crate) service: Option<String>,
-    pub(crate) run_services: Option<Vec<String>>,
+    run_services: Option<Vec<String>>,
     pub(crate) initialize_command: Option<LifecycleScript>,
     pub(crate) on_create_command: Option<LifecycleScript>,
     pub(crate) update_content_command: Option<LifecycleScript>,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use cloud_api_types::OrganizationId;
 use smol::lock::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
+use cloud_api_types::OrganizationId;
 
 use crate::{ClientApiError, CloudApiClient};
 
@@ -40,6 +40,10 @@ impl LlmApiToken {
         organization_id: Option<OrganizationId>,
     ) -> Result<String, ClientApiError> {
         Self::fetch(self.0.write().await, client, system_id, organization_id).await
+    }
+
+    pub async fn clear(&self) {
+        *self.0.write().await = None;
     }
 
     /// Clears the existing token before attempting to fetch a new one.

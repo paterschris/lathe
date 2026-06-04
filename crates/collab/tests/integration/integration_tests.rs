@@ -7142,7 +7142,6 @@ async fn test_remote_git_branches(
     let new_branch = branches[2];
 
     let branches_b = branches_b
-        .branches
         .into_iter()
         .map(|branch| branch.name().to_string())
         .collect::<HashSet<_>>();

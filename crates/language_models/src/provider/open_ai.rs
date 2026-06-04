@@ -3,13 +3,13 @@ use collections::BTreeMap;
 use credentials_provider::CredentialsProvider;
 use futures::{FutureExt, StreamExt, future::BoxFuture};
 use gpui::{AnyView, App, AsyncApp, Context, Entity, SharedString, Task, TaskExt, Window};
-use http_client::{CustomHeaders, HttpClient};
+use http_client::HttpClient;
 use language_model::{
-    ApiKeyState, AuthenticateError, EnvVar, FastModeConfirmation, IconOrSvg, LanguageModel,
-    LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelEffortLevel,
-    LanguageModelId, LanguageModelName, LanguageModelProvider, LanguageModelProviderId,
-    LanguageModelProviderName, LanguageModelProviderState, LanguageModelRequest,
-    LanguageModelToolChoice, OPEN_AI_PROVIDER_ID, OPEN_AI_PROVIDER_NAME, RateLimiter, env_var,
+    ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, LanguageModel, LanguageModelCompletionError,
+    LanguageModelCompletionEvent, LanguageModelEffortLevel, LanguageModelId, LanguageModelName,
+    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
+    LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice, OPEN_AI_PROVIDER_ID,
+    OPEN_AI_PROVIDER_NAME, RateLimiter, env_var,
 };
 use menu;
 use open_ai::{
@@ -38,7 +38,6 @@ static API_KEY_ENV_VAR: LazyLock<EnvVar> = env_var!(API_KEY_ENV_VAR_NAME);
 pub struct OpenAiSettings {
     pub api_url: String,
     pub available_models: Vec<AvailableModel>,
-    pub custom_headers: CustomHeaders,
 }
 
 pub struct OpenAiLanguageModelProvider {
@@ -216,16 +215,6 @@ impl LanguageModelProvider for OpenAiLanguageModelProvider {
         self.state
             .update(cx, |state, cx| state.set_api_key(None, cx))
     }
-
-    fn fast_mode_confirmation(&self, _cx: &App) -> Option<FastModeConfirmation> {
-        Some(FastModeConfirmation {
-            title: "Enable Fast Mode for OpenAI?".into(),
-            message: "Fast mode sends requests using OpenAI's Priority processing tier, which \
-                targets significantly lower latency than the standard tier and is billed at a \
-                premium per-token rate."
-                .into(),
-        })
-    }
 }
 
 fn default_thinking_reasoning_effort(model: &open_ai::Model) -> Option<open_ai::ReasoningEffort> {
@@ -346,12 +335,9 @@ impl OpenAiLanguageModel {
     {
         let http_client = self.http_client.clone();
 
-        let (api_key, api_url, extra_headers) = self.state.read_with(cx, |state, cx| {
+        let (api_key, api_url) = self.state.read_with(cx, |state, cx| {
             let api_url = OpenAiLanguageModelProvider::api_url(cx);
-            let extra_headers = OpenAiLanguageModelProvider::settings(cx)
-                .custom_headers
-                .clone();
-            (state.api_key_state.key(&api_url), api_url, extra_headers)
+            (state.api_key_state.key(&api_url), api_url)
         });
 
         let future = self.request_limiter.stream(async move {
@@ -365,7 +351,6 @@ impl OpenAiLanguageModel {
                 &api_url,
                 &api_key,
                 request,
-                &extra_headers,
             );
             let response = request.await?;
             Ok(response)
@@ -382,12 +367,9 @@ impl OpenAiLanguageModel {
     {
         let http_client = self.http_client.clone();
 
-        let (api_key, api_url, extra_headers) = self.state.read_with(cx, |state, cx| {
+        let (api_key, api_url) = self.state.read_with(cx, |state, cx| {
             let api_url = OpenAiLanguageModelProvider::api_url(cx);
-            let extra_headers = OpenAiLanguageModelProvider::settings(cx)
-                .custom_headers
-                .clone();
-            (state.api_key_state.key(&api_url), api_url, extra_headers)
+            (state.api_key_state.key(&api_url), api_url)
         });
 
         let provider = PROVIDER_NAME;
@@ -401,7 +383,7 @@ impl OpenAiLanguageModel {
                 &api_url,
                 &api_key,
                 request,
-                &extra_headers,
+                vec![],
             );
             let response = request.await?;
             Ok(response)
@@ -472,10 +454,6 @@ impl LanguageModel for OpenAiLanguageModel {
         supports_selectable_thinking_effort(&self.model)
     }
 
-    fn supports_fast_mode(&self) -> bool {
-        self.model.supports_priority()
-    }
-
     fn supported_effort_levels(&self) -> Vec<LanguageModelEffortLevel> {
         supported_thinking_effort_levels(&self.model)
     }
@@ -498,7 +476,7 @@ impl LanguageModel for OpenAiLanguageModel {
 
     fn stream_completion(
         &self,
-        mut request: LanguageModelRequest,
+        request: LanguageModelRequest,
         cx: &AsyncApp,
     ) -> BoxFuture<
         'static,
@@ -510,9 +488,6 @@ impl LanguageModel for OpenAiLanguageModel {
             LanguageModelCompletionError,
         >,
     > {
-        if !self.model.supports_priority() {
-            request.speed = None;
-        }
         if self.model.uses_responses_api() {
             let request = into_open_ai_response(
                 request,

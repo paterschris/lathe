@@ -22,6 +22,7 @@ mod extension_workflow_rollout;
 mod extensions;
 mod nix_build;
 mod publish_extension_cli;
+mod release;
 mod release_nightly;
 mod run_bundling;
 

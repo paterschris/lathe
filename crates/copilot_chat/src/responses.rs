@@ -139,7 +139,12 @@ pub enum ResponseInputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<ItemStatus>,
     },
-    Reasoning(ResponseReasoningInputItem),
+    Reasoning {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        summary: Vec<ResponseReasoningItem>,
+        encrypted_content: String,
+    },
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -157,17 +162,7 @@ pub struct IncompleteDetails {
     pub reason: Option<IncompleteReason>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ResponseReasoningInputItem {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub summary: Vec<ResponseReasoningItem>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted_content: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ResponseReasoningItem {
     #[serde(rename = "type")]
     pub kind: String,

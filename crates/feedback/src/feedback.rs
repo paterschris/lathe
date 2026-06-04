@@ -9,33 +9,40 @@ use zed_actions::feedback::{EmailZed, FileBugReport, RequestFeature};
 actions!(
     zed,
     [
-        /// Opens the Lathe repository on GitHub.
+        /// Opens the Zed repository on GitHub.
         OpenZedRepo,
         /// Copies installed extensions to the clipboard for bug reports.
         CopyInstalledExtensionsIntoClipboard
     ]
 );
 
-const LATHE_REPO_URL: &str = "https://github.com/paterschris/lathe";
+const ZED_REPO_URL: &str = "https://github.com/zed-industries/zed";
 
-const REQUEST_FEATURE_URL: &str = "https://github.com/paterschris/lathe/issues/new";
+const REQUEST_FEATURE_URL: &str = "https://github.com/zed-industries/zed/discussions/new/choose";
 
 fn file_bug_report_url(specs: &SystemSpecs) -> String {
     format!(
         concat!(
-            "https://github.com/paterschris/lathe/issues/new",
+            "https://github.com/zed-industries/zed/issues/new",
             "?",
-            "body={}"
+            "template=10_bug_report.yml",
+            "&",
+            "environment={}"
         ),
-        urlencoding::encode(&format!("## Description\n\n\n\n## System Information\n\n{specs}"))
+        urlencoding::encode(&specs.to_string())
     )
 }
 
 fn email_zed_url(specs: &SystemSpecs) -> String {
     format!(
         concat!("mailto:hi@zed.dev", "?", "body={}"),
-        urlencoding::encode(&format!("\n\nSystem Information:\n\n{specs}"))
+        email_body(specs)
     )
+}
+
+fn email_body(specs: &SystemSpecs) -> String {
+    let body = format!("\n\nSystem Information:\n\n{}", specs);
+    urlencoding::encode(&body).to_string()
 }
 
 pub fn init(cx: &mut App) {
@@ -102,7 +109,7 @@ pub fn init(cx: &mut App) {
                 .detach();
             })
             .register_action(move |_, _: &OpenZedRepo, _, cx| {
-                cx.open_url(LATHE_REPO_URL);
+                cx.open_url(ZED_REPO_URL);
             });
     })
     .detach();

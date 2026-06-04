@@ -286,13 +286,8 @@ pub struct SettingsJsonSchemaParams<'a> {
 
 impl SettingsStore {
     pub fn new(cx: &mut App, default_settings: &str) -> Self {
-        Self::new_with_semantic_tokens(cx, default_settings)
-    }
-
-    pub fn new_with_semantic_tokens(cx: &mut App, default_settings: &str) -> Self {
         let (setting_file_updates_tx, mut setting_file_updates_rx) = mpsc::unbounded();
-        let default_settings: SettingsContent =
-            SettingsContent::parse_json_with_comments(default_settings).unwrap();
+        let default_settings = Self::parse_default_settings(default_settings).unwrap();
         if !cx.has_global::<DefaultSemanticTokenRules>() {
             cx.set_global::<DefaultSemanticTokenRules>(
                 crate::parse_json_with_comments::<SemanticTokenRules>(
@@ -897,10 +892,23 @@ impl SettingsStore {
         default_settings_content: &str,
         cx: &mut App,
     ) -> Result<()> {
-        self.default_settings =
-            SettingsContent::parse_json_with_comments(default_settings_content)?.into();
+        self.default_settings = Self::parse_default_settings(default_settings_content)?.into();
         self.recompute_values(None, cx);
         Ok(())
+    }
+
+    /// Parses the default settings JSON and folds any `dev`/`nightly`/`preview`/`stable`
+    /// release-channel overrides and `macos`/`linux`/`windows` platform overrides into
+    /// the returned [`SettingsContent`].
+    ///
+    /// Unlike user settings, default settings are used directly as the base for all
+    /// merges, so overrides must be resolved up front.
+    fn parse_default_settings(default_settings: &str) -> Result<SettingsContent> {
+        let parsed = UserSettingsContent::parse_json_with_comments(default_settings)?;
+        let mut merged = (*parsed.content).clone();
+        merged.merge_from_option(parsed.for_release_channel());
+        merged.merge_from_option(parsed.for_os());
+        Ok(merged)
     }
 
     /// Sets the user settings via a JSON string.
@@ -2169,6 +2177,9 @@ mod tests {
             r#" { "editor.tabSize": 37 } "#.to_owned(),
             r#"{
               "base_keymap": "VSCode",
+              "minimap": {
+                "show": "always"
+              },
               "tab_size": 37
             }
             "#
@@ -2187,6 +2198,9 @@ mod tests {
             r#"{ "editor.tabSize": 42 }"#.to_owned(),
             r#"{
                 "base_keymap": "VSCode",
+                "minimap": {
+                    "show": "always"
+                },
                 "tab_size": 42,
                 "preferred_line_length": 99,
             }
@@ -2207,6 +2221,9 @@ mod tests {
             r#"{}"#.to_owned(),
             r#"{
                 "base_keymap": "VSCode",
+                "minimap": {
+                    "show": "always"
+                },
                 "preferred_line_length": 99,
                 "tab_size": 42
             }
@@ -2233,6 +2250,9 @@ mod tests {
               "base_keymap": "VSCode",
               "tabs": {
                 "git_status": true
+              },
+              "minimap": {
+                "show": "always"
               }
             }
             "#
@@ -2257,7 +2277,10 @@ mod tests {
                 "sort_mode": "mixed",
                 "sort_order": "lower"
               },
-              "base_keymap": "VSCode"
+              "base_keymap": "VSCode",
+              "minimap": {
+                "show": "always"
+              }
             }
             "#
             .unindent(),
@@ -2274,11 +2297,128 @@ mod tests {
             r#"{ "editor.fontFamily": "Cascadia Code, 'Consolas', Courier New" }"#.to_owned(),
             r#"{
               "base_keymap": "VSCode",
+              "minimap": {
+                "show": "always"
+              },
               "buffer_font_fallbacks": [
                 "Consolas",
                 "Courier New"
               ],
               "buffer_font_family": "Cascadia Code"
+            }
+            "#
+            .unindent(),
+            cx,
+        );
+
+        // terminal bell settings - newer accessibility setting
+        check_vscode_import(
+            &mut store,
+            r#"{
+            }
+            "#
+            .unindent(),
+            r#"{ "accessibility.signals.terminalBell": { "sound": "on" } }"#.to_owned(),
+            r#"{
+              "terminal": {
+                "bell": "system"
+              },
+              "base_keymap": "VSCode",
+              "minimap": {
+                "show": "always"
+              }
+            }
+            "#
+            .unindent(),
+            cx,
+        );
+
+        // terminal bell settings - newer accessibility setting disabled
+        check_vscode_import(
+            &mut store,
+            r#"{
+            }
+            "#
+            .unindent(),
+            r#"{ "accessibility.signals.terminalBell": { "sound": "off" } }"#.to_owned(),
+            r#"{
+              "terminal": {
+                "bell": "off"
+              },
+              "base_keymap": "VSCode",
+              "minimap": {
+                "show": "always"
+              }
+            }
+            "#
+            .unindent(),
+            cx,
+        );
+
+        // terminal bell settings - older enableBell setting (true)
+        check_vscode_import(
+            &mut store,
+            r#"{
+            }
+            "#
+            .unindent(),
+            r#"{ "terminal.integrated.enableBell": true }"#.to_owned(),
+            r#"{
+              "terminal": {
+                "bell": "system"
+              },
+              "base_keymap": "VSCode",
+              "minimap": {
+                "show": "always"
+              }
+            }
+            "#
+            .unindent(),
+            cx,
+        );
+
+        // terminal bell settings - older enableBell setting (false)
+        check_vscode_import(
+            &mut store,
+            r#"{
+            }
+            "#
+            .unindent(),
+            r#"{ "terminal.integrated.enableBell": false }"#.to_owned(),
+            r#"{
+              "terminal": {
+                "bell": "off"
+              },
+              "base_keymap": "VSCode",
+              "minimap": {
+                "show": "always"
+              }
+            }
+            "#
+            .unindent(),
+            cx,
+        );
+
+        // newer accessibility setting takes precedence over older enableBell
+        check_vscode_import(
+            &mut store,
+            r#"{
+            }
+            "#
+            .unindent(),
+            r#"{
+              "accessibility.signals.terminalBell": { "sound": "off" },
+              "terminal.integrated.enableBell": true
+            }"#
+            .to_owned(),
+            r#"{
+              "terminal": {
+                "bell": "off"
+              },
+              "base_keymap": "VSCode",
+              "minimap": {
+                "show": "always"
+              }
             }
             "#
             .unindent(),
@@ -2299,6 +2439,9 @@ mod tests {
             .to_owned(),
             r#"{
               "base_keymap": "VSCode",
+              "minimap": {
+                "show": "always"
+              },
               "hover_popover_hiding_delay": 500,
               "hover_popover_sticky": false
             }

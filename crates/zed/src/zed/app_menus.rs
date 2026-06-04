@@ -60,10 +60,10 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
 
     vec![
         Menu {
-            name: "Lathe".into(),
+            name: "Zed".into(),
             disabled: false,
             items: vec![
-                MenuItem::action("About Lathe", zed_actions::About),
+                MenuItem::action("About Zed", zed_actions::About),
                 MenuItem::action("Check for Updates", auto_update::Check),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu::new("Settings").items([
@@ -95,13 +95,13 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("Install CLI", install_cli::InstallCliBinary),
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::action("Hide Lathe", super::Hide),
+                MenuItem::action("Hide Zed", super::Hide),
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Hide Others", super::HideOthers),
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Show All", super::ShowAll),
                 MenuItem::separator(),
-                MenuItem::action("Quit Lathe", Quit),
+                MenuItem::action("Quit Zed", Quit),
             ],
         },
         Menu {
@@ -140,8 +140,6 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("Save", workspace::Save { save_intent: None }),
                 MenuItem::action("Save As…", workspace::SaveAs),
                 MenuItem::action("Save All", workspace::SaveAll { save_intent: None }),
-                MenuItem::action("Save Workspace", workspace::SaveWorkspace),
-                MenuItem::action("Save Workspace As…", workspace::SaveWorkspaceAs),
                 MenuItem::separator(),
                 MenuItem::action(
                     "Close Editor",
@@ -308,6 +306,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("File Bug Report...", zed_actions::feedback::FileBugReport),
                 MenuItem::action("Request Feature...", zed_actions::feedback::RequestFeature),
+                MenuItem::action("Email Us...", zed_actions::feedback::EmailZed),
                 MenuItem::separator(),
                 MenuItem::action(
                     "Documentation",
@@ -315,7 +314,19 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                         url: "https://zed.dev/docs".into(),
                     },
                 ),
-                MenuItem::action("Lathe Repository", feedback::OpenZedRepo),
+                MenuItem::action("Zed Repository", feedback::OpenZedRepo),
+                MenuItem::action(
+                    "Zed Twitter",
+                    super::OpenBrowser {
+                        url: "https://twitter.com/zeddotdev".into(),
+                    },
+                ),
+                MenuItem::action(
+                    "Join the Team",
+                    super::OpenBrowser {
+                        url: "https://zed.dev/jobs".into(),
+                    },
+                ),
             ],
         },
     ]

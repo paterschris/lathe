@@ -52,14 +52,16 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Weak,
-        atomic::{AtomicUsize, Ordering::SeqCst},
+        atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
     },
     time::Duration,
 };
 use uuid::Uuid;
 
+pub(crate) mod a11y;
 mod prompts;
 
+use self::a11y::A11y;
 use crate::util::atomic_incr_if_not_zero;
 pub use prompts::*;
 
@@ -1016,6 +1018,7 @@ pub struct Window {
     /// The hitbox that has captured the pointer, if any.
     /// While captured, mouse events route to this hitbox regardless of hit testing.
     captured_hitbox: Option<HitboxId>,
+    pub(crate) a11y: A11y,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
 }
@@ -1628,6 +1631,12 @@ impl Window {
             client_inset: None,
             image_cache_stack: Vec::new(),
             captured_hitbox: None,
+            // The fork has not yet ported the platform-side accessibility
+            // adapter init (PlatformWindow::a11y_init), so the active flag
+            // stays false and the a11y machinery is dormant at runtime. The
+            // struct still has to exist so element-tree code that references
+            // window.a11y compiles after the upstream a11y merge.
+            a11y: A11y::new(Arc::new(AtomicBool::new(false)), true),
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
         })
@@ -3374,10 +3383,12 @@ impl Window {
         result
     }
 
-    /// Paint one or more drop shadows into the scene for the next frame at the current z-index.
+    /// Paint the drop (non-inset) shadows from `shadows` into the scene at the current
+    /// z-index. Inset shadows are skipped; paint those with [`Self::paint_inset_shadows`]
+    /// after the element's background so they layer on top of the fill.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
-    pub fn paint_shadows(
+    pub(crate) fn paint_drop_shadows(
         &mut self,
         bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
@@ -3388,7 +3399,12 @@ impl Window {
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
         let opacity = self.element_opacity();
+        let element_bounds = bounds.scale(scale_factor);
+        let element_corner_radii = corner_radii.scale(scale_factor);
         for shadow in shadows {
+            if shadow.inset {
+                continue;
+            }
             let shadow_bounds = (bounds + shadow.offset).dilate(shadow.spread_radius);
             self.next_frame.scene.insert_primitive(Shadow {
                 order: 0,
@@ -3397,6 +3413,58 @@ impl Window {
                 content_mask: content_mask.scale(scale_factor),
                 corner_radii: corner_radii.scale(scale_factor),
                 color: shadow.color.opacity(opacity),
+                element_bounds,
+                element_corner_radii,
+                inset: 0,
+                pad: 0,
+            });
+        }
+    }
+
+    /// Paint the inset shadows from `shadows` into the scene at the current z-index. Should
+    /// be called after the element's background so the shadow layers on top of the fill.
+    /// Drop shadows are skipped; paint those with [`Self::paint_drop_shadows`] before the
+    /// background.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub(crate) fn paint_inset_shadows(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+    ) {
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        let content_mask = self.content_mask();
+        let opacity = self.element_opacity();
+        let element_bounds = bounds.scale(scale_factor);
+        let element_corner_radii = corner_radii.scale(scale_factor);
+        for shadow in shadows {
+            if !shadow.inset {
+                continue;
+            }
+            let hole = (bounds + shadow.offset).dilate(-shadow.spread_radius);
+            // Clamp at zero so a large spread can't produce negative radii, which would
+            // break the SDF in the shader.
+            let zero = Pixels::ZERO;
+            let hole_corner_radii = Corners {
+                top_left: (corner_radii.top_left - shadow.spread_radius).max(zero),
+                top_right: (corner_radii.top_right - shadow.spread_radius).max(zero),
+                bottom_right: (corner_radii.bottom_right - shadow.spread_radius).max(zero),
+                bottom_left: (corner_radii.bottom_left - shadow.spread_radius).max(zero),
+            };
+            self.next_frame.scene.insert_primitive(Shadow {
+                order: 0,
+                blur_radius: shadow.blur_radius.scale(scale_factor),
+                bounds: hole.scale(scale_factor),
+                content_mask: content_mask.scale(scale_factor),
+                corner_radii: hole_corner_radii.scale(scale_factor),
+                color: shadow.color.opacity(opacity),
+                element_bounds,
+                element_corner_radii,
+                inset: 1,
+                pad: 0,
             });
         }
     }
@@ -5254,6 +5322,27 @@ impl Window {
     /// with the window, for others it's just a simple global function call.
     pub fn play_system_bell(&self) {
         self.platform_window.play_system_bell()
+    }
+
+    /// Register a listener for an accessibility action on a specific node.
+    /// The listener will be called when a screen reader requests the given
+    /// action on the node identified by `node_id`.
+    ///
+    /// The fork has not yet ported the platform-side AccessKit adapter, so
+    /// the underlying a11y state stays inactive and listeners registered here
+    /// never fire at runtime. The method exists so the element-tree code that
+    /// upstream now calls (div.rs, text.rs) can compile in the fork.
+    pub fn on_a11y_action(
+        &mut self,
+        node_id: accesskit::NodeId,
+        action: accesskit::Action,
+        listener: impl FnMut(Option<&accesskit::ActionData>, &mut Window, &mut App) + 'static,
+    ) {
+        self.a11y
+            .action_listeners
+            .entry(node_id)
+            .or_default()
+            .push((action, Box::new(listener)));
     }
 
     /// Toggles the inspector mode on this window.

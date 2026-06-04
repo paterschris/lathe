@@ -20,11 +20,13 @@ pub mod opencode;
 pub mod vercel_ai_gateway;
 pub mod x_ai;
 
+#[allow(dead_code)]
 const COMMON_RESERVED_HEADER_NAMES: &[&str] = &["Authorization", "Content-Type", "Accept"];
 
 /// Validate the user-supplied custom-headers map once at settings load time,
 /// dropping reserved or malformed entries (each with a `log::warn!`) and
 /// returning a typed `CustomHeaders` ready to be appended to outgoing requests.
+#[allow(dead_code)]
 pub(crate) fn resolve_custom_headers(
     provider_name: &str,
     settings: &HashMap<String, String>,

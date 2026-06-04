@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use agent_skills::{Skill, SkillIndex, encode_skill_share_link};
 use fs::RemoveOptions;
 use gpui::{Action as _, ClipboardItem, ScrollHandle, SharedString, prelude::*};

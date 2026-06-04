@@ -25,6 +25,7 @@ use file_icons::FileIcons;
 use futures::StreamExt as _;
 use futures::channel::oneshot::Canceled;
 use git::commit::ParsedCommitMessage;
+use git::Oid;
 use git::repository::{
     Branch, CommitData, CommitDetails, CommitOptions, CommitSummary, DiffType, FetchOptions,
     GitCommitTemplate, GitCommitter, LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput,
@@ -35,7 +36,8 @@ use git::status::{DiffStat, StageStatus};
 use git::{Amend, Commit, Signoff, ToggleStaged, repository::RepoPath, status::FileStatus};
 use git::{
     ExpandCommitEditor, GitHostingProviderRegistry, GitRemote, RestoreTrackedFiles, StageAll,
-    StashAll, StashApply, StashPop, ToggleFillCommitEditor, TrashUntrackedFiles, UnstageAll,
+    StashAll, StashApply, StashFile, StashPop, ToggleFillCommitEditor, TrashUntrackedFiles,
+    UnstageAll,
     parse_git_remote_url,
 };
 use gpui::{
@@ -87,7 +89,7 @@ use util::paths::PathStyle;
 use util::{ResultExt, TryFutureExt, markdown::MarkdownInlineCode, maybe, rel_path::RelPath};
 use workspace::SERIALIZATION_THROTTLE_TIME;
 use workspace::{
-    Workspace,
+    Item, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{DetachAndPromptErr, ErrorMessagePrompt, NotificationId, NotifyResultExt},
 };
@@ -129,6 +131,8 @@ actions!(
         ActivateChangesTab,
         /// Activates the History tab.
         ActivateHistoryTab,
+        /// Activates the Explorer tab (branches, worktrees, stashes).
+        ActivateExplorerTab,
     ]
 );
 
@@ -291,6 +295,22 @@ pub fn register(workspace: &mut Workspace) {
 #[derive(Debug, Clone)]
 pub enum Event {
     Focus,
+    /// User picked something in the Explorer tab that resolves to a single
+    /// commit (a branch tip, worktree head, or stash oid). The History tab's
+    /// graph view subscribes to this and scrolls to bring that commit into
+    /// view.
+    ScrollGraphToCommit(Oid),
+}
+
+/// One rendered row in the Explorer's flat row list. Headers are interleaved
+/// with their section's entries, indexed back into `explorer_entries`.
+enum ExplorerRow {
+    Header {
+        section: ExplorerSection,
+        count: usize,
+        collapsed: bool,
+    },
+    Entry(usize),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -305,6 +325,82 @@ struct SerializedGitPanel {
 enum GitPanelTab {
     Changes,
     History,
+    Explorer,
+}
+
+/// One of the four section headers in the Explorer tab. Section order is
+/// fixed at Local → Remote → Worktrees → Stashes; this enum identifies which
+/// row was clicked so callers can pick the right action (checkout / activate
+/// worktree / apply stash).
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub(crate) enum ExplorerSection {
+    Local,
+    Remote,
+    Worktrees,
+    Stashes,
+}
+
+impl ExplorerSection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Local => "LOCAL",
+            Self::Remote => "REMOTE",
+            Self::Worktrees => "WORKTREES",
+            Self::Stashes => "STASHES",
+        }
+    }
+}
+
+/// Sourced rows for the Explorer tab. Each row is whatever the section list
+/// renders one of: a branch entry (local or remote), a linked-worktree entry,
+/// or a stash entry. Held in a single `Vec` keyed by index so keyboard
+/// navigation and selection can stay flat.
+#[derive(Debug, Clone)]
+pub(crate) enum ExplorerEntry {
+    LocalBranch(Branch),
+    RemoteBranch(Branch),
+    Worktree(::git::repository::Worktree),
+    Stash(::git::stash::StashEntry),
+}
+
+impl ExplorerEntry {
+    fn section(&self) -> ExplorerSection {
+        match self {
+            Self::LocalBranch(_) => ExplorerSection::Local,
+            Self::RemoteBranch(_) => ExplorerSection::Remote,
+            Self::Worktree(_) => ExplorerSection::Worktrees,
+            Self::Stash(_) => ExplorerSection::Stashes,
+        }
+    }
+
+    /// User-visible label used both for rendering and for filter matching.
+    fn label(&self) -> SharedString {
+        match self {
+            Self::LocalBranch(branch) | Self::RemoteBranch(branch) => {
+                SharedString::from(branch.name().to_string())
+            }
+            Self::Worktree(worktree) => worktree
+                .ref_name
+                .clone()
+                .unwrap_or_else(|| SharedString::from(worktree.sha.to_string())),
+            Self::Stash(stash) => SharedString::from(stash.message.clone()),
+        }
+    }
+
+    /// Commit the row points at. Used by the auto-scroll-to-commit
+    /// integration with the graph view. `None` for entries that don't have a
+    /// single resolvable commit (e.g. a worktree whose head couldn't be
+    /// parsed as an oid).
+    fn target_commit(&self) -> Option<::git::Oid> {
+        match self {
+            Self::LocalBranch(branch) | Self::RemoteBranch(branch) => branch
+                .most_recent_commit
+                .as_ref()
+                .and_then(|commit| ::std::str::FromStr::from_str(commit.sha.as_ref()).ok()),
+            Self::Worktree(worktree) => ::std::str::FromStr::from_str(worktree.sha.as_ref()).ok(),
+            Self::Stash(stash) => Some(stash.oid),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -761,6 +857,12 @@ pub struct GitPanel {
     commit_history_scroll_handle: UniformListScrollHandle,
     focused_history_entry: Option<usize>,
     history_keyboard_nav: bool,
+    explorer_entries: Vec<ExplorerEntry>,
+    explorer_filter: Entity<Editor>,
+    explorer_collapsed_sections: HashSet<ExplorerSection>,
+    explorer_selected_row: Option<usize>,
+    explorer_scroll_handle: UniformListScrollHandle,
+    explorer_load_task: Option<Task<()>>,
     _repo_subscriptions: Vec<Subscription>,
 }
 
@@ -1022,6 +1124,16 @@ impl GitPanel {
                 commit_history_scroll_handle: UniformListScrollHandle::new(),
                 focused_history_entry: None,
                 history_keyboard_nav: false,
+                explorer_entries: Vec::new(),
+                explorer_filter: cx.new(|cx| {
+                    let mut editor = Editor::single_line(window, cx);
+                    editor.set_placeholder_text("Filter (⌘+Option+F)", window, cx);
+                    editor
+                }),
+                explorer_collapsed_sections: HashSet::default(),
+                explorer_selected_row: None,
+                explorer_scroll_handle: UniformListScrollHandle::new(),
+                explorer_load_task: None,
                 _repo_subscriptions: Vec::new(),
             };
 
@@ -1485,7 +1597,7 @@ impl GitPanel {
             let git_repo = self.active_repository.as_ref()?;
 
             if let Some(project_diff) = workspace.read(cx).active_item_as::<ProjectDiff>(cx)
-                && let Some(project_path) = project_diff.read(cx).active_path(cx)
+                && let Some(project_path) = project_diff.read(cx).active_project_path(cx)
                 && Some(&entry.repo_path)
                     == git_repo
                         .read(cx)
@@ -2393,6 +2505,46 @@ impl GitPanel {
                     cx.notify();
                 })
             }
+        })
+        .detach();
+    }
+
+    /// Stash only the path of the currently selected entry. Uses
+    /// `stash_entries_with_message` under the hood (the same plumbing the
+    /// discard-with-safety-net flow uses) so single-file stashes show up in
+    /// `git stash list` like any other entry.
+    pub fn stash_selected(
+        &mut self,
+        _: &StashFile,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active_repository) = self.active_repository.clone() else {
+            return;
+        };
+        let Some(status_entry) = self
+            .get_selected_entry()
+            .and_then(|entry| entry.status_entry())
+            .cloned()
+        else {
+            return;
+        };
+
+        let path = status_entry.repo_path;
+        let message = format!("lathe-stash-file {}", path.as_unix_str());
+
+        cx.spawn(async move |this, cx| {
+            let stash_task = active_repository.update(cx, |repo, cx| {
+                repo.stash_entries_with_message(vec![path], message, cx)
+            });
+            let result = stash_task.await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.show_error_toast("stash file", error, cx);
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -4042,11 +4194,36 @@ impl GitPanel {
     }
 
     fn schedule_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Reads of `self.active_repository` further down (History and
+        // Explorer refresh paths) need to see the *new* active repo, not
+        // whichever one was active before this event fired. The debounced
+        // `update_visible_entries` below also writes the same field, but
+        // that runs ~UPDATE_DEBOUNCE later — without this upfront sync,
+        // History reload + Explorer reload both fetch from the previous
+        // repo until the debounce expires (or the user clicks again).
+        self.active_repository = self.project.read(cx).active_repository(cx);
+
         let handle = cx.entity().downgrade();
         self.reopen_commit_buffer(window, cx);
         self.preload_commit_history(cx);
         if self.active_tab == GitPanelTab::History {
+            // Clear the previous repo's SHAs so the History list doesn't
+            // render stale "Loading…" rows whose detail fetches now target
+            // a repository that doesn't have those commits.
+            self.commit_history_shas.clear();
+            self.focused_history_entry = None;
+            self._repo_subscriptions.clear();
             self.load_commit_history(cx);
+        }
+        if self.active_tab == GitPanelTab::Explorer {
+            // The branches/worktrees/stashes lists are cached on `self`, so
+            // they need an explicit reload whenever the active repository
+            // changes (e.g. the user clicks a different repo in the
+            // multi-repo strip). Reset selection too so a stale row index
+            // doesn't survive the switch.
+            self.explorer_selected_row = None;
+            self.explorer_entries.clear();
+            self.refresh_explorer_data(cx);
         }
         self.update_visible_entries_task = cx.spawn_in(window, async move |_, cx| {
             cx.background_executor().timer(UPDATE_DEBOUNCE).await;
@@ -5577,7 +5754,7 @@ impl GitPanel {
             .border_color(cx.theme().colors().border.opacity(0.8))
             .child(
                 div()
-                    .flex_grow()
+                    .flex_grow(1.0)
                     .overflow_hidden()
                     .max_w(relative(0.85))
                     .child(
@@ -5695,7 +5872,6 @@ impl GitPanel {
         )
     }
 
-    #[allow(dead_code)]
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active_tab = self.active_tab;
 
@@ -5755,11 +5931,20 @@ impl GitPanel {
             .child(Divider::vertical().color(ui::DividerColor::BorderFaded))
             .child(tab(
                 ElementId::Name("history-tab".into()),
-                active_tab != GitPanelTab::Changes,
+                active_tab == GitPanelTab::History,
                 false,
                 "History".into(),
                 GitPanelTab::History,
                 ActivateHistoryTab.boxed_clone(),
+            ))
+            .child(Divider::vertical().color(ui::DividerColor::BorderFaded))
+            .child(tab(
+                ElementId::Name("explorer-tab".into()),
+                active_tab == GitPanelTab::Explorer,
+                false,
+                "Explorer".into(),
+                GitPanelTab::Explorer,
+                ActivateExplorerTab.boxed_clone(),
             ))
     }
 
@@ -5776,6 +5961,318 @@ impl GitPanel {
                 )
             }
         })
+    }
+
+    /// Kick off async loads of the things the Explorer tab needs to render
+    /// (branches via the git CLI; worktrees and stashes are already cached on
+    /// the repository). Results land in `explorer_entries` on the foreground
+    /// thread.
+    fn refresh_explorer_data(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repository.clone() else {
+            self.explorer_entries.clear();
+            return;
+        };
+        self.populate_cached_explorer_entries(cx);
+        let branches_rx = repo.update(cx, |repo, _| repo.branches());
+        self.explorer_load_task = Some(cx.spawn(async move |this, cx| {
+            let Ok(Ok(branches)) = branches_rx.await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.merge_branches_into_explorer(branches);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Populate `explorer_entries` from data already on the cached repository
+    /// snapshot (linked worktrees, stash entries) so the tab renders
+    /// immediately while the async branch fetch is in flight.
+    fn populate_cached_explorer_entries(&mut self, cx: &App) {
+        let mut entries: Vec<ExplorerEntry> = Vec::new();
+        if let Some(repo) = self.active_repository.as_ref() {
+            let repo_read = repo.read(cx);
+            for worktree in repo_read.linked_worktrees().iter() {
+                entries.push(ExplorerEntry::Worktree(worktree.clone()));
+            }
+            for stash in repo_read.stash_entries.entries.iter() {
+                entries.push(ExplorerEntry::Stash(stash.clone()));
+            }
+        }
+        self.explorer_entries = entries;
+    }
+
+    /// Merge a freshly-fetched `Vec<Branch>` into `explorer_entries`,
+    /// splitting on `refs/heads/` vs `refs/remotes/`. Replaces any previous
+    /// branch entries while leaving worktrees/stashes alone.
+    fn merge_branches_into_explorer(&mut self, branches: Vec<Branch>) {
+        self.explorer_entries.retain(|entry| {
+            !matches!(
+                entry,
+                ExplorerEntry::LocalBranch(_) | ExplorerEntry::RemoteBranch(_)
+            )
+        });
+        let (locals, remotes): (Vec<_>, Vec<_>) = branches.into_iter().partition(|branch| {
+            branch
+                .ref_name
+                .as_ref()
+                .starts_with("refs/heads/")
+        });
+        // Section order matches what the UI shows top-to-bottom.
+        let locals = locals.into_iter().map(ExplorerEntry::LocalBranch);
+        let remotes = remotes.into_iter().map(ExplorerEntry::RemoteBranch);
+        // Prepend so the relative ordering in the panel is Local, Remote,
+        // Worktrees, Stashes (cached worktrees/stashes were appended first
+        // by `populate_cached_explorer_entries`).
+        let mut combined: Vec<ExplorerEntry> = locals.collect();
+        combined.extend(remotes);
+        combined.extend(std::mem::take(&mut self.explorer_entries));
+        self.explorer_entries = combined;
+    }
+
+    fn explorer_filter_text(&self, cx: &App) -> String {
+        self.explorer_filter.read(cx).text(cx).to_lowercase()
+    }
+
+    fn explorer_visible_entries(&self, cx: &App) -> Vec<(ExplorerSection, Vec<usize>)> {
+        let filter = self.explorer_filter_text(cx);
+        let needle = filter.trim();
+        let sections = [
+            ExplorerSection::Local,
+            ExplorerSection::Remote,
+            ExplorerSection::Worktrees,
+            ExplorerSection::Stashes,
+        ];
+        sections
+            .into_iter()
+            .map(|section| {
+                let indices = self
+                    .explorer_entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| entry.section() == section)
+                    .filter(|(_, entry)| {
+                        needle.is_empty()
+                            || entry
+                                .label()
+                                .to_lowercase()
+                                .contains(needle)
+                    })
+                    .map(|(ix, _)| ix)
+                    .collect();
+                (section, indices)
+            })
+            .collect()
+    }
+
+    fn render_explorer_tab(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let sections = self.explorer_visible_entries(cx);
+        let collapsed = self.explorer_collapsed_sections.clone();
+
+        // Build a flat list of rows: alternating section-header rows and
+        // entry rows. We track each row's kind in a parallel vector so the
+        // uniform_list closure can dispatch.
+        let mut rows: Vec<ExplorerRow> = Vec::new();
+        for (section, indices) in &sections {
+            let is_collapsed = collapsed.contains(section);
+            rows.push(ExplorerRow::Header {
+                section: *section,
+                count: indices.len(),
+                collapsed: is_collapsed,
+            });
+            if !is_collapsed {
+                for ix in indices {
+                    rows.push(ExplorerRow::Entry(*ix));
+                }
+            }
+        }
+
+        let total_count = self.explorer_entries.len();
+        let viewing_label = if total_count == 0 {
+            "Loading…".to_string()
+        } else {
+            format!("Viewing {}", total_count)
+        };
+
+        let entries = std::sync::Arc::new(rows);
+        let entries_for_list = entries.clone();
+        let explorer_entries = self.explorer_entries.clone();
+
+        v_flex()
+            .flex_1()
+            .size_full()
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .px_3()
+                    .py_1()
+                    .justify_between()
+                    .child(
+                        Label::new(viewing_label)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(
+                h_flex().px_3().pb_1().child(
+                    div()
+                        .w_full()
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .rounded_md()
+                        .px_2()
+                        .py_1()
+                        .child(self.explorer_filter.clone()),
+                ),
+            )
+            .child(
+                uniform_list(
+                    "git-explorer-list",
+                    entries.len(),
+                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                        let mut elements = Vec::with_capacity(range.end - range.start);
+                        for ix in range {
+                            let row = &entries_for_list[ix];
+                            elements.push(this.render_explorer_row(ix, row, &explorer_entries, cx));
+                        }
+                        elements
+                    }),
+                )
+                .track_scroll(&self.explorer_scroll_handle)
+                .flex_grow(1.0)
+                .size_full(),
+            )
+    }
+
+    fn render_explorer_row(
+        &self,
+        row_ix: usize,
+        row: &ExplorerRow,
+        explorer_entries: &[ExplorerEntry],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match row {
+            ExplorerRow::Header {
+                section,
+                count,
+                collapsed,
+            } => {
+                let section = *section;
+                let collapsed = *collapsed;
+                h_flex()
+                    .id(("git-explorer-header", row_ix))
+                    .px_3()
+                    .py_1()
+                    .gap_1()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().colors().element_hover))
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(section.label())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(div().flex_grow(1.0))
+                    .child(
+                        Label::new(count.to_string())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.explorer_collapsed_sections.contains(&section) {
+                            this.explorer_collapsed_sections.remove(&section);
+                        } else {
+                            this.explorer_collapsed_sections.insert(section);
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
+            ExplorerRow::Entry(entry_ix) => {
+                let entry_ix = *entry_ix;
+                let entry = match explorer_entries.get(entry_ix) {
+                    Some(entry) => entry.clone(),
+                    None => return div().into_any_element(),
+                };
+                let selected = self.explorer_selected_row == Some(row_ix);
+                let label = entry.label();
+                let (icon, is_head) = match &entry {
+                    ExplorerEntry::LocalBranch(b) => (IconName::GitBranch, b.is_head),
+                    ExplorerEntry::RemoteBranch(_) => (IconName::GitBranch, false),
+                    ExplorerEntry::Worktree(w) => (IconName::FolderOpen, w.is_main),
+                    ExplorerEntry::Stash(_) => (IconName::Archive, false),
+                };
+                h_flex()
+                    .id(("git-explorer-row", row_ix))
+                    .px_5()
+                    .py_0p5()
+                    .gap_2()
+                    .cursor_pointer()
+                    .when(selected, |this| {
+                        this.bg(cx.theme().colors().element_selected)
+                    })
+                    .hover(|s| s.bg(cx.theme().colors().element_hover))
+                    .child(Icon::new(icon).size(IconSize::Small).color(if is_head {
+                        Color::Accent
+                    } else {
+                        Color::Muted
+                    }))
+                    .child(Label::new(label).size(LabelSize::Small))
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        this.explorer_selected_row = Some(row_ix);
+                        this.activate_explorer_entry(entry_ix, window, cx);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// Handle a click on an Explorer row. Single-click is purely
+    /// navigational: it selects the row and dispatches `OpenAtCommit` so
+    /// the Git Graph view opens (or activates, if already open) on the
+    /// target commit. No branch checkout, worktree switch, or stash apply
+    /// happens here — those are destructive and belong on an explicit
+    /// gesture (right-click menu) rather than the same single-click used
+    /// for browsing.
+    fn activate_explorer_entry(
+        &mut self,
+        entry_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.explorer_entries.get(entry_ix).cloned() else {
+            return;
+        };
+        let Some(oid) = entry.target_commit() else {
+            return;
+        };
+        // Keep the existing emit so any other subscribers (e.g. an already
+        // open graph view) react instantly without re-dispatching the
+        // open-graph action.
+        cx.emit(Event::ScrollGraphToCommit(oid));
+        // And dispatch the action that opens the Git Graph item if it's
+        // not already in the workspace; the action's handler also activates
+        // the existing graph and selects the commit.
+        window.dispatch_action(
+            Box::new(OpenAtCommit {
+                sha: oid.to_string(),
+            }),
+            cx,
+        );
     }
 
     fn select_next_history_entry(&mut self, cx: &mut Context<Self>) {
@@ -5849,6 +6346,15 @@ impl GitPanel {
         self.set_active_tab(GitPanelTab::History, window, cx);
     }
 
+    fn activate_explorer_tab(
+        &mut self,
+        _: &ActivateExplorerTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_active_tab(GitPanelTab::Explorer, window, cx);
+    }
+
     fn set_active_tab(&mut self, tab: GitPanelTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab == tab {
             return;
@@ -5865,6 +6371,13 @@ impl GitPanel {
                 self.commit_history_shas.clear();
                 self.focused_history_entry = None;
                 self._repo_subscriptions.clear();
+            }
+            GitPanelTab::Explorer => {
+                self.focus_handle.focus(window, cx);
+                self.commit_history_shas.clear();
+                self.focused_history_entry = None;
+                self._repo_subscriptions.clear();
+                self.refresh_explorer_data(cx);
             }
         }
         cx.notify();
@@ -6518,7 +7031,7 @@ impl GitPanel {
                         })
                         .group("entries")
                         .size_full()
-                        .flex_grow()
+                        .flex_grow(1.0)
                         .with_width_from_item(self.max_width_item_index)
                         .track_scroll(&self.scroll_handle),
                     )
@@ -6662,6 +7175,7 @@ impl GitPanel {
                     "Add to .gitignore",
                     git::AddToGitignore.boxed_clone(),
                 )
+                .action_disabled_when(is_created, "Stash File", git::StashFile.boxed_clone())
                 .separator()
                 .action("Open Diff", menu::Confirm.boxed_clone())
                 .action("Open File", menu::SecondaryConfirm.boxed_clone())
@@ -7712,6 +8226,7 @@ impl Render for GitPanel {
                     .on_action(cx.listener(Self::clean_all))
                     .on_action(cx.listener(Self::generate_commit_message_action))
                     .on_action(cx.listener(Self::stash_all))
+                    .on_action(cx.listener(Self::stash_selected))
                     .on_action(cx.listener(Self::stash_pop))
             })
             .on_action(cx.listener(Self::collapse_selected_entry))
@@ -7738,6 +8253,7 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::toggle_tree_view))
             .on_action(cx.listener(Self::activate_changes_tab))
             .on_action(cx.listener(Self::activate_history_tab))
+            .on_action(cx.listener(Self::activate_explorer_tab))
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().colors().panel_background)
@@ -7745,6 +8261,7 @@ impl Render for GitPanel {
                 v_flex()
                     .size_full()
                     .child(self.render_repos_strip(cx))
+                    .child(self.render_tab_bar(cx))
                     .map(|this| {
                         if self.pending_hunk_refresh {
                             self.pending_hunk_refresh = false;
@@ -7753,16 +8270,6 @@ impl Render for GitPanel {
                             });
                         }
                         this
-                    })
-                    .children(self.render_panel_header(window, cx))
-                    .map(|this| {
-                        if let Some(repo) = self.active_repository.clone()
-                            && has_entries
-                        {
-                            this.child(self.render_entries(has_write_access, repo, window, cx))
-                        } else {
-                            this.child(self.render_empty_state(cx).into_any_element())
-                        }
                     })
                     .map(|this| match self.active_tab {
                         GitPanelTab::Changes => this
@@ -7791,6 +8298,7 @@ impl Render for GitPanel {
                                 this.children(self.render_previous_commit(window, cx))
                             }),
                         GitPanelTab::History => this.child(self.render_history_tab(window, cx)),
+                        GitPanelTab::Explorer => this.child(self.render_explorer_tab(window, cx)),
                     })
                     .into_any_element(),
             )
@@ -8232,7 +8740,12 @@ impl Component for PanelRepoFooter {
         ComponentScope::VersionControl
     }
 
-    fn preview(_window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
+    fn description() -> &'static str {
+        "The git panel footer that displays the active repository, branch, and \
+         upstream tracking summary."
+    }
+
+    fn preview(_window: &mut Window, _cx: &mut App) -> AnyElement {
         let unknown_upstream = None;
         let no_remote_upstream = Some(UpstreamTracking::Gone);
         let ahead_of_upstream = Some(
@@ -8306,8 +8819,7 @@ impl Component for PanelRepoFooter {
         }
 
         let example_width = px(340.);
-        Some(
-            v_flex()
+        v_flex()
                 .gap_6()
                 .w_full()
                 .flex_none()
@@ -8475,8 +8987,7 @@ impl Component for PanelRepoFooter {
                     .grow()
                     .vertical(),
                 ])
-                .into_any_element(),
-        )
+                .into_any_element()
     }
 }
 
@@ -9504,7 +10015,7 @@ mod tests {
                 .item_of_type::<ProjectDiff>(cx)
                 .expect("ProjectDiff should exist")
                 .read(cx)
-                .active_path(cx)
+                .active_project_path(cx)
                 .expect("active_path should exist");
 
             assert_eq!(active_path.path, rel_path("untracked").into_arc());

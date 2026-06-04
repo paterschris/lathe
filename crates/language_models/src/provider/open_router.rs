@@ -3,7 +3,7 @@ use collections::HashMap;
 use credentials_provider::CredentialsProvider;
 use futures::{FutureExt, Stream, StreamExt, future::BoxFuture};
 use gpui::{AnyView, App, AsyncApp, Context, Entity, SharedString, Task, TaskExt};
-use http_client::{CustomHeaders, HttpClient};
+use http_client::HttpClient;
 use language_model::{
     ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, LanguageModel, LanguageModelCompletionError,
     LanguageModelCompletionEvent, LanguageModelId, LanguageModelName, LanguageModelProvider,
@@ -29,13 +29,11 @@ const PROVIDER_NAME: LanguageModelProviderName = LanguageModelProviderName::new(
 
 const API_KEY_ENV_VAR_NAME: &str = "OPENROUTER_API_KEY";
 static API_KEY_ENV_VAR: LazyLock<EnvVar> = env_var!(API_KEY_ENV_VAR_NAME);
-pub(crate) const RESERVED_HEADER_NAMES: &[&str] = &["HTTP-Referer", "X-Title"];
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct OpenRouterSettings {
     pub api_url: String,
     pub available_models: Vec<AvailableModel>,
-    pub custom_headers: CustomHeaders,
 }
 
 pub struct OpenRouterLanguageModelProvider {
@@ -92,16 +90,13 @@ impl State {
     ) -> Task<Result<(), LanguageModelCompletionError>> {
         let http_client = self.http_client.clone();
         let api_url = OpenRouterLanguageModelProvider::api_url(cx);
-        let extra_headers = OpenRouterLanguageModelProvider::settings(cx)
-            .custom_headers
-            .clone();
         let Some(api_key) = self.api_key_state.key(&api_url) else {
             return Task::ready(Err(LanguageModelCompletionError::NoApiKey {
                 provider: PROVIDER_NAME,
             }));
         };
         cx.spawn(async move |this, cx| {
-            let models = list_models(http_client.as_ref(), &api_url, &api_key, &extra_headers)
+            let models = list_models(http_client.as_ref(), &api_url, &api_key)
                 .await
                 .map_err(|e| {
                     LanguageModelCompletionError::Other(anyhow::anyhow!(
@@ -296,12 +291,9 @@ impl OpenRouterLanguageModel {
         >,
     > {
         let http_client = self.http_client.clone();
-        let (api_key, api_url, extra_headers) = self.state.read_with(cx, |state, cx| {
+        let (api_key, api_url) = self.state.read_with(cx, |state, cx| {
             let api_url = OpenRouterLanguageModelProvider::api_url(cx);
-            let extra_headers = OpenRouterLanguageModelProvider::settings(cx)
-                .custom_headers
-                .clone();
-            (state.api_key_state.key(&api_url), api_url, extra_headers)
+            (state.api_key_state.key(&api_url), api_url)
         });
 
         async move {
@@ -310,13 +302,8 @@ impl OpenRouterLanguageModel {
                     provider: PROVIDER_NAME,
                 });
             };
-            let request = open_router::stream_completion(
-                http_client.as_ref(),
-                &api_url,
-                &api_key,
-                request,
-                &extra_headers,
-            );
+            let request =
+                open_router::stream_completion(http_client.as_ref(), &api_url, &api_key, request);
             request.await.map_err(Into::into)
         }
         .boxed()
@@ -426,10 +413,13 @@ pub fn into_open_router(
 
     let mut messages = Vec::new();
     for message in request.messages {
-        let reasoning_details_for_message = if is_anthropic_model {
+        let reasoning_details_for_message: Option<serde_json::Value> = if is_anthropic_model {
             None
         } else {
-            message.reasoning_details.clone()
+            message
+                .reasoning_details
+                .as_deref()
+                .cloned()
         };
 
         for content in message.content {
@@ -553,7 +543,7 @@ fn add_message_content_part(
     new_part: open_router::MessagePart,
     role: Role,
     messages: &mut Vec<open_router::RequestMessage>,
-    reasoning_details: Option<Arc<serde_json::Value>>,
+    reasoning_details: Option<serde_json::Value>,
 ) {
     match (role, messages.last_mut()) {
         (Role::User, Some(open_router::RequestMessage::User { content }))

@@ -1,3 +1,3 @@
-pub(crate) mod colors;
-pub(crate) mod keys;
-pub(crate) mod mouse;
+pub mod colors;
+pub mod keys;
+pub mod mouse;

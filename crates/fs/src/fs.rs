@@ -1073,9 +1073,9 @@ impl Fs for RealFs {
         let (tx, rx) = async_channel::unbounded();
         let pending_paths: Arc<Mutex<Vec<PathEvent>>> = Default::default();
         let watcher = Arc::new(fs_watcher::FsWatcher::new(
+            executor.clone(),
             tx,
             pending_paths.clone(),
-            fs_watcher::WatcherMode::Native,
         ));
 
         // If the path doesn't exist yet (e.g. settings.json), watch the parent dir to learn when it's created.

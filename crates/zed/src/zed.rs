@@ -15,7 +15,7 @@ pub mod visual_tests;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_only_instance;
 
-use agent::{UserAgentsMdState, init_user_agents_md};
+use agent_settings::{UserAgentsMdState, init_user_agents_md};
 use agent_ui::AgentDiffToolbar;
 use anyhow::Context as _;
 pub use app_menus::*;
@@ -4729,7 +4729,12 @@ mod tests {
                     let scroll_position = editor_ref.scroll_position(cx);
 
                     (
-                        editor_ref.project_path(cx).unwrap(),
+                        editor_ref
+                            .buffer()
+                            .read(cx)
+                            .as_singleton()
+                            .and_then(|buffer| buffer.read(cx).project_path(cx))
+                            .unwrap(),
                         selections[0].start,
                         scroll_position.y,
                     )

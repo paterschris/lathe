@@ -171,6 +171,7 @@ static ACTION_STATISTICS: spin::Mutex<ActionStatistics> =
     const { spin::Mutex::new(ActionStatistics::new()) };
 
 #[doc(hidden)]
+#[allow(dead_code)]
 pub(crate) fn update_running_action(action: &(dyn Action + 'static), cx: &mut crate::App) {
     let now = Instant::now();
     let action = action.type_id();
@@ -179,6 +180,7 @@ pub(crate) fn update_running_action(action: &(dyn Action + 'static), cx: &mut cr
 }
 
 #[doc(hidden)]
+#[allow(dead_code)]
 pub(crate) fn save_action_timing() {
     ACTION_STATISTICS.lock().save_action_timing();
 }

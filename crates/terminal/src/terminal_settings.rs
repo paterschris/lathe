@@ -1,3 +1,6 @@
+use alacritty_terminal::vte::ansi::{
+    CursorShape as AlacCursorShape, CursorStyle as AlacCursorStyle,
+};
 use collections::HashMap;
 use gpui::{FontFallbacks, FontFeatures, FontWeight, Pixels, px};
 use schemars::JsonSchema;
@@ -161,6 +164,26 @@ impl From<settings::CursorShapeContent> for CursorShape {
             settings::CursorShapeContent::Underline => CursorShape::Underline,
             settings::CursorShapeContent::Bar => CursorShape::Bar,
             settings::CursorShapeContent::Hollow => CursorShape::Hollow,
+        }
+    }
+}
+
+impl From<CursorShape> for AlacCursorShape {
+    fn from(value: CursorShape) -> Self {
+        match value {
+            CursorShape::Block => AlacCursorShape::Block,
+            CursorShape::Underline => AlacCursorShape::Underline,
+            CursorShape::Bar => AlacCursorShape::Beam,
+            CursorShape::Hollow => AlacCursorShape::HollowBlock,
+        }
+    }
+}
+
+impl From<CursorShape> for AlacCursorStyle {
+    fn from(value: CursorShape) -> Self {
+        AlacCursorStyle {
+            shape: value.into(),
+            blinking: false,
         }
     }
 }

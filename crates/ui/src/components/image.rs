@@ -106,15 +106,14 @@ impl Component for Vector {
         "Vector"
     }
 
-    fn description() -> Option<&'static str> {
-        Some("A vector image component that can be displayed at specific sizes.")
+    fn description() -> &'static str {
+        "A vector image component that can be displayed at specific sizes."
     }
 
-    fn preview(_window: &mut Window, _cx: &mut App) -> Option<AnyElement> {
+    fn preview(_window: &mut Window, _cx: &mut App) -> AnyElement {
         let size = rems_from_px(60.);
 
-        Some(
-            v_flex()
+        v_flex()
                 .gap_6()
                 .children(vec![
                     example_group_with_title(
@@ -164,8 +163,7 @@ impl Component for Vector {
                         )],
                     ),
                 ])
-                .into_any_element(),
-        )
+                .into_any_element()
     }
 }
 

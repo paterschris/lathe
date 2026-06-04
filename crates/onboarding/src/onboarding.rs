@@ -54,6 +54,7 @@ pub struct ImportCursorSettings {
 }
 
 pub const FIRST_OPEN: &str = "first_open";
+pub const DOCS_URL: &str = "https://zed.dev/docs/";
 
 actions!(
     onboarding,
@@ -350,11 +351,11 @@ impl Render for Onboarding {
                                             .child(
                                                 v_flex()
                                                     .child(
-                                                        Headline::new("Welcome to Lathe")
+                                                        Headline::new("Welcome to Zed")
                                                             .size(HeadlineSize::Small),
                                                     )
                                                     .child(
-                                                        Label::new("A Zed fork, sharpened")
+                                                        Label::new("The editor for what's next")
                                                             .color(Color::Muted)
                                                             .size(LabelSize::Small)
                                                             .italic(),

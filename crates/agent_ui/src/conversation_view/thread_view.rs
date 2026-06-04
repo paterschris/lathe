@@ -384,7 +384,7 @@ impl ThreadView {
         resumed_without_history: bool,
         project: WeakEntity<Project>,
         thread_store: Option<Entity<ThreadStore>>,
-        prompt_store: Option<Entity<PromptStore>>,
+        _prompt_store: Option<Entity<PromptStore>>,
         initial_content: Option<AgentInitialContent>,
         mut subscriptions: Vec<Subscription>,
         window: &mut Window,
@@ -404,7 +404,6 @@ impl ThreadView {
                 workspace.clone(),
                 project.clone(),
                 thread_store,
-                prompt_store,
                 session_capabilities.clone(),
                 agent_id.clone(),
                 &placeholder,
@@ -1700,6 +1699,30 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// Persist a new title for this thread the same way the in-thread title
+    /// editor does. Used by sidebar inline rename so the title shows up in the
+    /// metadata store and the underlying agent thread.
+    pub fn rename(&mut self, title: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        if self.title_editor.read(cx).text(cx) != title.as_ref() {
+            self.title_editor.update(cx, |editor, cx| {
+                editor.set_text(title.clone(), window, cx);
+            });
+        }
+        if let Some(store) = ThreadMetadataStore::try_global(cx)
+            && !self.is_subagent()
+        {
+            let thread_id = self.root_thread_id;
+            store.update(cx, |store, cx| {
+                store.set_title_override(thread_id, title.clone(), cx);
+            });
+        }
+        self.thread.update(cx, |thread, cx| {
+            if thread.can_set_title(cx) {
+                thread.set_title(title, cx).detach_and_log_err(cx);
+            }
+        });
+    }
+
     pub fn handle_title_editor_event(
         &mut self,
         title_editor: &Entity<Editor>,
@@ -2010,7 +2033,7 @@ impl ThreadView {
         let thread = &self.thread;
         let telemetry = ActionLogTelemetry::from(thread.read(cx));
         let action_log = thread.read(cx).action_log().clone();
-        let has_changes = action_log.read(cx).changed_buffers(cx).len() > 0;
+        let has_changes = action_log.read(cx).changed_buffers(cx).next().is_some();
 
         action_log
             .update(cx, |action_log, cx| {
@@ -2280,7 +2303,7 @@ impl ThreadView {
         let thread = self.thread.read(cx);
         let action_log = thread.action_log();
         let telemetry = ActionLogTelemetry::from(thread);
-        let changed_buffers = action_log.read(cx).changed_buffers(cx);
+        let changed_buffers: Vec<_> = action_log.read(cx).changed_buffers(cx).collect();
         let plan = thread.plan();
         let queue_is_empty = !self.has_queued_messages();
 
@@ -2316,7 +2339,7 @@ impl ThreadView {
                 v_flex()
                     .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
                     .when(max_content_width.is_none(), |this| this.w_full())
-                    .flex_shrink()
+                    .flex_shrink(1.0)
                     .flex_grow_0()
                     .max_w_full()
                     .bg(self.activity_bar_bg(cx))
@@ -2329,6 +2352,7 @@ impl ThreadView {
                         offset: point(px(1.), px(-1.)),
                         blur_radius: px(2.),
                         spread_radius: px(0.),
+                        inset: false,
                     }])
                     .when_some(subagents_awaiting_permission, |this, element| {
                         this.child(element)
@@ -2385,7 +2409,7 @@ impl ThreadView {
         &self,
         action_log: &Entity<ActionLog>,
         telemetry: ActionLogTelemetry,
-        changed_buffers: &BTreeMap<Entity<Buffer>, Entity<BufferDiff>>,
+        changed_buffers: &[(Entity<Buffer>, Entity<BufferDiff>)],
         pending_edits: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -3031,7 +3055,7 @@ impl ThreadView {
 
     fn render_edits_summary(
         &self,
-        changed_buffers: &BTreeMap<Entity<Buffer>, Entity<BufferDiff>>,
+        changed_buffers: &[(Entity<Buffer>, Entity<BufferDiff>)],
         expanded: bool,
         pending_edits: bool,
         cx: &Context<Self>,
@@ -3076,7 +3100,7 @@ impl ThreadView {
                                 ),
                             )
                         } else {
-                            let stats = DiffStats::all_files(changed_buffers, cx);
+                            let stats = DiffStats::all_files(changed_buffers.iter().cloned(), cx);
                             let dot_divider = || {
                                 Label::new("•")
                                     .size(LabelSize::XSmall)
@@ -3323,7 +3347,7 @@ impl ThreadView {
                     .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
                     .when(max_content_width.is_none(), |this| this.w_full())
                     .when(fills_container, |this| this.h_full())
-                    .flex_shrink()
+                    .flex_shrink(1.0)
                     .flex_grow_0()
                     .justify_between()
                     .gap_2()
@@ -3633,12 +3657,11 @@ impl ThreadView {
 
         let tooltip_separator_color = Color::Custom(cx.theme().colors().text_disabled.opacity(0.6));
 
-        let (user_rules_count, first_user_rules_id, project_rules_count, project_entry_ids) = self
+        let (user_rules_count, project_rules_count, project_entry_ids) = self
             .as_native_thread(cx)
             .map(|thread| {
                 let project_context = thread.read(cx).project_context().read(cx);
-                let user_rules_count = project_context.user_rules.len();
-                let first_user_rules_id = project_context.user_rules.first().map(|r| r.uuid.0);
+                let user_rules_count = 0usize;
                 let project_entry_ids = project_context
                     .worktrees
                     .iter()
@@ -3646,12 +3669,7 @@ impl ThreadView {
                     .map(|rf| ProjectEntryId::from_usize(rf.project_entry_id))
                     .collect::<Vec<_>>();
                 let project_rules_count = project_entry_ids.len();
-                (
-                    user_rules_count,
-                    first_user_rules_id,
-                    project_rules_count,
-                    project_entry_ids,
-                )
+                (user_rules_count, project_rules_count, project_entry_ids)
             })
             .unwrap_or_default();
 
@@ -3690,7 +3708,6 @@ impl ThreadView {
                     cost_label,
                     separator_color: tooltip_separator_color,
                     user_rules_count,
-                    first_user_rules_id,
                     project_rules_count,
                     project_entry_ids,
                     workspace,
@@ -4367,7 +4384,6 @@ struct TokenUsageTooltip {
     cost_label: Option<String>,
     separator_color: Color,
     user_rules_count: usize,
-    first_user_rules_id: Option<uuid::Uuid>,
     project_rules_count: usize,
     project_entry_ids: Vec<ProjectEntryId>,
     workspace: WeakEntity<Workspace>,
@@ -4386,7 +4402,6 @@ impl Render for TokenUsageTooltip {
         let show_split = self.show_split;
         let cost_label = self.cost_label.clone();
         let user_rules_count = self.user_rules_count;
-        let first_user_rules_id = self.first_user_rules_id;
         let project_rules_count = self.project_rules_count;
         let project_entry_ids = self.project_entry_ids.clone();
         let workspace = self.workspace.clone();
@@ -4467,27 +4482,6 @@ impl Render for TokenUsageTooltip {
                                 .child(
                                     v_flex()
                                         .mx_neg_1()
-                                        .when(user_rules_count > 0, move |this| {
-                                            this.child(
-                                                Button::new(
-                                                    "open-user-rules",
-                                                    format!("{} user rules", user_rules_count),
-                                                )
-                                                .end_icon(
-                                                    Icon::new(IconName::ArrowUpRight)
-                                                        .color(Color::Muted)
-                                                        .size(IconSize::XSmall),
-                                                )
-                                                .on_click(move |_, window, cx| {
-                                                    window.dispatch_action(
-                                                        Box::new(OpenRulesLibrary {
-                                                            prompt_to_select: first_user_rules_id,
-                                                        }),
-                                                        cx,
-                                                    );
-                                                }),
-                                            )
-                                        })
                                         .when(project_rules_count > 0, move |this| {
                                             let workspace = workspace.clone();
                                             let project_entry_ids = project_entry_ids.clone();
@@ -4566,7 +4560,7 @@ impl ThreadView {
             }),
         )
         .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
-        .flex_grow()
+        .flex_grow(1.0)
     }
 
     fn render_entry(
@@ -4859,6 +4853,7 @@ impl ThreadView {
             AgentThreadEntry::CompletedPlan(entries) => {
                 self.render_completed_plan(entries, window, cx)
             }
+            AgentThreadEntry::ContextCompaction => Empty.into_any_element(),
         };
 
         let is_subagent_output = self.is_subagent()
@@ -5968,7 +5963,8 @@ impl ThreadView {
                 }
                 AgentThreadEntry::ToolCall(_)
                 | AgentThreadEntry::AssistantMessage(_)
-                | AgentThreadEntry::CompletedPlan(_) => {}
+                | AgentThreadEntry::CompletedPlan(_)
+                | AgentThreadEntry::ContextCompaction => {}
             }
         }
 
@@ -7585,7 +7581,7 @@ impl ThreadView {
                         window,
                         cx,
                     )
-                } else if let Some(image) = content.image() {
+                } else if let Some((image, _size)) = content.image() {
                     let location = tool_call.locations.first().cloned();
                     self.render_image_output(
                         entry_ix,
@@ -7891,8 +7887,8 @@ impl ThreadView {
             .as_ref()
             .map(|thread| thread.read(cx).session_id().clone());
         let action_log = thread.as_ref().map(|thread| thread.read(cx).action_log());
-        let changed_buffers = action_log
-            .map(|log| log.read(cx).changed_buffers(cx))
+        let changed_buffers: Vec<_> = action_log
+            .map(|log| log.read(cx).changed_buffers(cx).collect())
             .unwrap_or_default();
 
         let is_pending_tool_call = thread_view
@@ -7905,7 +7901,7 @@ impl ThreadView {
 
         let is_expanded = self.expanded_tool_calls.contains(&tool_call.id);
         let files_changed = changed_buffers.len();
-        let diff_stats = DiffStats::all_files(&changed_buffers, cx);
+        let diff_stats = DiffStats::all_files(changed_buffers.iter().cloned(), cx);
 
         let is_running = matches!(
             tool_call.status,
@@ -9462,6 +9458,7 @@ pub(crate) fn open_link(
             | MentionUri::Selection {
                 abs_path: Some(path),
                 line_range,
+                ..
             } => {
                 let project = workspace.project();
                 let Some(path) =
@@ -9499,17 +9496,6 @@ pub(crate) fn open_link(
                         panel.open_thread(id, None, Some(name.into()), window, cx)
                     });
                 }
-            }
-            MentionUri::Rule { id, .. } => {
-                let PromptId::User { uuid } = id else {
-                    return;
-                };
-                window.dispatch_action(
-                    Box::new(OpenRulesLibrary {
-                        prompt_to_select: Some(uuid.0),
-                    }),
-                    cx,
-                )
             }
             MentionUri::Fetch { url } => {
                 cx.open_url(url.as_str());

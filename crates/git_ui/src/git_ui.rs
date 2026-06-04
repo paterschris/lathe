@@ -29,7 +29,7 @@ use ui::prelude::*;
 use workspace::{ModalView, OpenMode, Workspace, notifications::DetachAndPromptErr};
 use zed_actions;
 
-use crate::{commit_view::CommitView, git_panel::GitPanel, text_diff_view::TextDiffView};
+use crate::{commit_view::CommitView, text_diff_view::TextDiffView};
 
 mod askpass_modal;
 pub mod branch_picker;
@@ -42,6 +42,7 @@ pub mod file_history_view;
 pub mod git_activity_panel;
 pub mod git_flow;
 pub mod git_panel;
+pub use git_panel::{Event as GitPanelEvent, GitPanel};
 pub mod interactive_rebase_modal;
 pub mod merge_editor_view;
 // PR view + panel live in the dedicated `pr_ui` crate now; zed.rs takes care
@@ -50,7 +51,6 @@ pub mod merge_editor_view;
 mod git_panel_settings;
 pub mod new_panel_settings;
 pub mod git_picker;
-mod git_runtime_diagnostics;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;

@@ -3371,7 +3371,7 @@ mod tests {
                 cx.background_executor(),
                 PathStyle::local(),
             );
-            builder.subscribe(cx)
+            builder.unwrap().subscribe(cx)
         });
 
         thread.update(cx, |thread, cx| {
@@ -3451,7 +3451,7 @@ mod tests {
                 cx.background_executor(),
                 PathStyle::local(),
             );
-            builder.subscribe(cx)
+            builder.unwrap().subscribe(cx)
         });
 
         thread.update(cx, |thread, cx| {
@@ -5065,7 +5065,7 @@ mod tests {
                 cx.background_executor(),
                 PathStyle::local(),
             );
-            builder.subscribe(cx)
+            builder.unwrap().subscribe(cx)
         });
 
         thread.update(cx, |thread, cx| {
@@ -5111,7 +5111,7 @@ mod tests {
                 cx.background_executor(),
                 PathStyle::local(),
             );
-            builder.subscribe(cx)
+            builder.unwrap().subscribe(cx)
         });
 
         thread.update(cx, |thread, cx| {
@@ -5171,7 +5171,7 @@ mod tests {
                 cx.background_executor(),
                 PathStyle::local(),
             );
-            builder.subscribe(cx)
+            builder.unwrap().subscribe(cx)
         });
 
         // Register the terminal as created

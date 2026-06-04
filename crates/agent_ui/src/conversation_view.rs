@@ -40,7 +40,7 @@ use language_model::{LanguageModelCompletionError, LanguageModelRegistry};
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use parking_lot::RwLock;
 use project::{AgentId, AgentServerStore, Project, ProjectEntryId};
-use prompt_store::{PromptId, PromptStore};
+use prompt_store::PromptStore;
 
 use crate::message_editor::SessionCapabilities;
 use crate::{AgentThreadSource, DEFAULT_THREAD_TITLE, resolve_agent_image};
@@ -52,7 +52,7 @@ use settings::{
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
-use std::{collections::BTreeMap, rc::Rc, time::Duration};
+use std::{rc::Rc, time::Duration};
 use terminal_view::terminal_panel::TerminalPanel;
 use text::Anchor;
 use theme_settings::{AgentBufferFontSize, AgentUiFontSize};
@@ -69,7 +69,6 @@ use workspace::{
     CollaboratorId, MultiWorkspace, NewTerminal, Toast, Workspace, notifications::NotificationId,
 };
 use zed_actions::agent::{Chat, ToggleModelSelector};
-use zed_actions::assistant::OpenRulesLibrary;
 
 use super::config_options::ConfigOptionsView;
 use super::entry_view_state::EntryViewState;
@@ -807,6 +806,7 @@ impl ConversationView {
                         });
                     }
                 }
+                AgentConnectionEntryEvent::LoadingStatusChanged(_) => {}
             });
 
         let connect_result = connection_entry.read(cx).wait_for_connection();
@@ -1079,7 +1079,6 @@ impl ConversationView {
                 self.workspace.clone(),
                 self.project.downgrade(),
                 self.thread_store.clone(),
-                self.prompt_store.clone(),
                 session_capabilities.clone(),
                 self.agent.agent_id(),
             )
@@ -2466,7 +2465,6 @@ impl ConversationView {
                     workspace.clone(),
                     project.clone(),
                     None,
-                    None,
                     session_capabilities.clone(),
                     agent_name.clone(),
                     "",
@@ -2821,7 +2819,8 @@ impl ConversationView {
                             dismiss_if_visible(this, window, cx);
                         }
                         AgentPanelEvent::EntryChanged
-                        | AgentPanelEvent::ThreadInteracted { .. } => {}
+                        | AgentPanelEvent::ThreadInteracted { .. }
+                        | AgentPanelEvent::TerminalClosed { .. } => {}
                     },
                 ));
             }

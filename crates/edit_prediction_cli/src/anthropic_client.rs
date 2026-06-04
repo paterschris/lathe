@@ -63,7 +63,6 @@ impl PlainLlmClient {
             &self.api_key,
             request,
             None,
-            &http_client::CustomHeaders::default(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("{:?}", e))?;
@@ -105,7 +104,6 @@ impl PlainLlmClient {
             &self.api_key,
             request,
             None,
-            &http_client::CustomHeaders::default(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("{:?}", e))?;

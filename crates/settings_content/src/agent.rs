@@ -71,9 +71,7 @@ pub enum ThinkingBlockDisplay {
     AlwaysCollapsed,
 }
 
-#[derive(
-    Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default,
-)]
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema, MergeFrom)]
 #[serde(rename_all = "snake_case")]
 pub enum NewThreadLocation {
     #[default]

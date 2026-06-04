@@ -4,18 +4,26 @@ use gpui::{
     Element, ElementId, Entity, FocusHandle, Font, FontFeatures, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, Hitbox, Hsla, InputHandler, InteractiveElement, Interactivity,
     IntoElement, LayoutId, Length, ModifiersChangedEvent, MouseButton, MouseMoveEvent, Pixels,
-    Point as GpuiPoint, StatefulInteractiveElement, StrikethroughStyle, Styled, TextRun, TextStyle,
+    Point, StatefulInteractiveElement, StrikethroughStyle, Styled, TextRun, TextStyle,
     UTF16Selection, UnderlineStyle, WeakEntity, WhiteSpace, Window, div, fill, point, px, relative,
     size,
 };
 use itertools::Itertools;
-use language::CursorShape as EditorCursorShape;
+use language::CursorShape;
 use settings::Settings;
 use std::time::Instant;
 use terminal::{
-    Cell, Color, Content, CursorShape, IndexedCell, Modes, NamedColor, Point, Range, Terminal,
-    TerminalBounds, is_app_chosen_exact_color as terminal_is_app_chosen_exact_color,
-    is_default_background_color, terminal_settings::TerminalSettings,
+    IndexedCell, Terminal, TerminalBounds, TerminalContent,
+    alacritty_terminal::{
+        grid::Dimensions,
+        index::Point as AlacPoint,
+        term::{TermMode, cell::Flags},
+        vte::ansi::{
+            Color::{self as AnsiColor, Named},
+            CursorShape as AlacCursorShape, NamedColor,
+        },
+    },
+    terminal_settings::TerminalSettings,
 };
 use theme::{ActiveTheme, Theme};
 use theme_settings::ThemeSettings;
@@ -25,7 +33,7 @@ use util::ResultExt;
 use workspace::Workspace;
 
 use std::mem;
-use std::{fmt::Debug, rc::Rc};
+use std::{fmt::Debug, ops::RangeInclusive, rc::Rc};
 
 use crate::{BlockContext, BlockProperties, ContentMode, TerminalMode, TerminalView};
 
@@ -34,12 +42,12 @@ pub struct LayoutState {
     hitbox: Hitbox,
     batched_text_runs: Vec<BatchedTextRun>,
     rects: Vec<LayoutRect>,
-    relative_highlighted_ranges: Vec<(Range, Hsla)>,
+    relative_highlighted_ranges: Vec<(RangeInclusive<AlacPoint>, Hsla)>,
     cursor: Option<CursorLayout>,
     ime_cursor_bounds: Option<Bounds<Pixels>>,
     background_color: Hsla,
     dimensions: TerminalBounds,
-    mode: Modes,
+    mode: TermMode,
     display_offset: usize,
     hyperlink_tooltip: Option<AnyElement>,
     block_below_cursor_element: Option<AnyElement>,
@@ -47,7 +55,7 @@ pub struct LayoutState {
     content_mode: ContentMode,
 }
 
-/// Helper struct for converting terminal cursor points to displayed cursor points.
+/// Helper struct for converting data between Alacritty's cursor points, and displayed cursor points.
 #[derive(Copy, Clone)]
 struct DisplayCursor {
     line: i32,
@@ -55,10 +63,10 @@ struct DisplayCursor {
 }
 
 impl DisplayCursor {
-    fn from(cursor_point: Point, display_offset: usize) -> Self {
+    fn from(cursor_point: AlacPoint, display_offset: usize) -> Self {
         Self {
-            line: cursor_point.line + display_offset as i32,
-            col: cursor_point.column,
+            line: cursor_point.line.0 + display_offset as i32,
+            col: cursor_point.column.0,
         }
     }
 
@@ -71,30 +79,10 @@ impl DisplayCursor {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default)]
-pub struct LayoutPoint {
-    line: i32,
-    column: i32,
-}
-
-impl LayoutPoint {
-    fn new(line: i32, column: i32) -> Self {
-        Self { line, column }
-    }
-
-    pub fn line(&self) -> i32 {
-        self.line
-    }
-
-    pub fn column(&self) -> i32 {
-        self.column
-    }
-}
-
 /// A batched text run that combines multiple adjacent cells with the same style
 #[derive(Debug)]
 pub struct BatchedTextRun {
-    pub start_point: LayoutPoint,
+    pub start_point: AlacPoint<i32, i32>,
     pub text: String,
     pub cell_count: usize,
     pub style: TextRun,
@@ -103,7 +91,7 @@ pub struct BatchedTextRun {
 
 impl BatchedTextRun {
     fn new_from_char(
-        start_point: LayoutPoint,
+        start_point: AlacPoint<i32, i32>,
         c: char,
         style: TextRun,
         font_size: AbsoluteLength,
@@ -147,17 +135,17 @@ impl BatchedTextRun {
 
     pub fn paint(
         &self,
-        origin: GpuiPoint<Pixels>,
+        origin: Point<Pixels>,
         dimensions: &TerminalBounds,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let pos = GpuiPoint::new(
+        let pos = Point::new(
             origin.x + self.start_point.column as f32 * dimensions.cell_width,
             origin.y + self.start_point.line as f32 * dimensions.line_height,
         );
 
-        window
+        let _ = window
             .text_system()
             .shape_line(
                 self.text.clone().into(),
@@ -172,20 +160,19 @@ impl BatchedTextRun {
                 None,
                 window,
                 cx,
-            )
-            .log_err();
+            );
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct LayoutRect {
-    point: LayoutPoint,
+    point: AlacPoint<i32, i32>,
     num_of_cells: usize,
     color: Hsla,
 }
 
 impl LayoutRect {
-    fn new(point: LayoutPoint, num_of_cells: usize, color: Hsla) -> LayoutRect {
+    fn new(point: AlacPoint<i32, i32>, num_of_cells: usize, color: Hsla) -> LayoutRect {
         LayoutRect {
             point,
             num_of_cells,
@@ -193,17 +180,12 @@ impl LayoutRect {
         }
     }
 
-    pub fn paint(
-        &self,
-        origin: GpuiPoint<Pixels>,
-        dimensions: &TerminalBounds,
-        window: &mut Window,
-    ) {
+    pub fn paint(&self, origin: Point<Pixels>, dimensions: &TerminalBounds, window: &mut Window) {
         let position = {
-            let layout_point = self.point;
+            let alac_point = self.point;
             point(
-                (origin.x + layout_point.column as f32 * dimensions.cell_width).floor(),
-                origin.y + layout_point.line as f32 * dimensions.line_height,
+                (origin.x + alac_point.column as f32 * dimensions.cell_width).floor(),
+                origin.y + alac_point.line as f32 * dimensions.line_height,
             )
         };
         let size = point(
@@ -262,31 +244,6 @@ impl BackgroundRegion {
         self.start_col = self.start_col.min(other.start_col);
         self.end_line = self.end_line.max(other.end_line);
         self.end_col = self.end_col.max(other.end_col);
-    }
-}
-
-pub trait TerminalLayoutCell {
-    fn point(&self) -> Point;
-    fn cell(&self) -> &Cell;
-}
-
-impl TerminalLayoutCell for IndexedCell {
-    fn point(&self) -> Point {
-        self.point
-    }
-
-    fn cell(&self) -> &Cell {
-        &self.cell
-    }
-}
-
-impl TerminalLayoutCell for &IndexedCell {
-    fn point(&self) -> Point {
-        self.point
-    }
-
-    fn cell(&self) -> &Cell {
-        &self.cell
     }
 }
 
@@ -369,11 +326,13 @@ impl TerminalElement {
         .track_focus(&focus)
     }
 
-    pub fn layout_grid<T: TerminalLayoutCell>(
-        grid: impl Iterator<Item = T>,
+    //Vec<Range<AlacPoint>> -> Clip out the parts of the ranges
+
+    pub fn layout_grid(
+        grid: impl Iterator<Item = IndexedCell>,
         start_line_offset: i32,
         text_style: &TextStyle,
-        hyperlink: Option<(HighlightStyle, &Range)>,
+        hyperlink: Option<(HighlightStyle, &RangeInclusive<AlacPoint>)>,
         minimum_contrast: f32,
         cx: &App,
     ) -> (Vec<LayoutRect>, Vec<BatchedTextRun>) {
@@ -393,9 +352,9 @@ impl TerminalElement {
         let mut current_batch: Option<BatchedTextRun> = None;
 
         // First pass: collect all cells and their backgrounds
-        let linegroups = grid.into_iter().chunk_by(|cell| cell.point().line);
+        let linegroups = grid.into_iter().chunk_by(|i| i.point.line);
         for (line_index, (_, line)) in linegroups.into_iter().enumerate() {
-            let display_line = start_line_offset + line_index as i32;
+            let alac_line = start_line_offset + line_index as i32;
 
             // Flush any existing batch at line boundaries
             if let Some(batch) = current_batch.take() {
@@ -405,38 +364,36 @@ impl TerminalElement {
             let mut previous_cell_had_extras = false;
 
             for cell in line {
-                let point = cell.point();
-                let cell = cell.cell();
-                let mut fg = cell.foreground();
-                let mut bg = cell.background();
-                if cell.is_inverse() {
+                let mut fg = cell.fg;
+                let mut bg = cell.bg;
+                if cell.flags.contains(Flags::INVERSE) {
                     mem::swap(&mut fg, &mut bg);
                 }
 
                 // Collect background regions (skip default background)
-                if !is_default_background_color(bg) {
+                if !matches!(bg, Named(NamedColor::Background)) {
                     let color = convert_color(&bg, theme);
-                    let col = point.column as i32;
+                    let col = cell.point.column.0 as i32;
 
                     // Try to extend the last region if it's on the same line with the same color
                     if let Some(last_region) = background_regions.last_mut()
                         && last_region.color == color
-                        && last_region.start_line == display_line
-                        && last_region.end_line == display_line
+                        && last_region.start_line == alac_line
+                        && last_region.end_line == alac_line
                         && last_region.end_col + 1 == col
                     {
                         last_region.end_col = col;
                     } else {
-                        background_regions.push(BackgroundRegion::new(display_line, col, color));
+                        background_regions.push(BackgroundRegion::new(alac_line, col, color));
                     }
                 }
                 // Skip wide character spacers - they're just placeholders for the second cell of wide characters
-                if cell.is_wide_char_spacer() {
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
 
                 // Skip spaces that follow cells with extras (emoji variation sequences)
-                if cell.character() == ' ' && previous_cell_had_extras {
+                if cell.c == ' ' && previous_cell_had_extras {
                     previous_cell_had_extras = false;
                     continue;
                 }
@@ -446,11 +403,10 @@ impl TerminalElement {
 
                 //Layout current cell text
                 {
-                    if !is_blank(cell) {
+                    if !is_blank(&cell) {
                         cell_count += 1;
                         let cell_style = TerminalElement::cell_style(
-                            point,
-                            cell,
+                            &cell,
                             fg,
                             bg,
                             theme,
@@ -459,7 +415,7 @@ impl TerminalElement {
                             minimum_contrast,
                         );
 
-                        let cell_point = LayoutPoint::new(display_line, point.column as i32);
+                        let cell_point = AlacPoint::new(alac_line, cell.point.column.0 as i32);
                         let zero_width_chars = cell.zerowidth();
 
                         // Try to batch with existing run
@@ -469,7 +425,7 @@ impl TerminalElement {
                                 && batch.start_point.column + batch.cell_count as i32
                                     == cell_point.column
                             {
-                                batch.append_char(cell.character());
+                                batch.append_char(cell.c);
                                 if let Some(chars) = zero_width_chars {
                                     batch.append_zero_width_chars(chars);
                                 }
@@ -479,7 +435,7 @@ impl TerminalElement {
                                 batched_runs.push(old_batch);
                                 let mut new_batch = BatchedTextRun::new_from_char(
                                     cell_point,
-                                    cell.character(),
+                                    cell.c,
                                     cell_style,
                                     text_style.font_size,
                                 );
@@ -492,7 +448,7 @@ impl TerminalElement {
                             // Start new batch
                             let mut new_batch = BatchedTextRun::new_from_char(
                                 cell_point,
-                                cell.character(),
+                                cell.c,
                                 cell_style,
                                 text_style.font_size,
                             );
@@ -521,7 +477,7 @@ impl TerminalElement {
         for region in merged_regions {
             for line in region.start_line..=region.end_line {
                 rects.push(LayoutRect::new(
-                    LayoutPoint::new(line, region.start_col),
+                    AlacPoint::new(line, region.start_col),
                     (region.end_col - region.start_col + 1) as usize,
                     region.color,
                 ));
@@ -545,11 +501,8 @@ impl TerminalElement {
     }
 
     /// Computes the cursor position based on the cursor point and terminal dimensions.
-    fn cursor_position(
-        cursor_point: DisplayCursor,
-        size: TerminalBounds,
-    ) -> Option<GpuiPoint<Pixels>> {
-        if cursor_point.line() < size.num_lines() as i32 {
+    fn cursor_position(cursor_point: DisplayCursor, size: TerminalBounds) -> Option<Point<Pixels>> {
+        if cursor_point.line() < size.total_lines() as i32 {
             // When on pixel boundaries round the origin down
             Some(point(
                 (cursor_point.col() as f32 * size.cell_width()).floor(),
@@ -591,60 +544,68 @@ impl TerminalElement {
     /// 6x6x6 cube at 16..=231 and the 24-step grayscale ramp at 232..=255).
     /// Indices 0..=15 still go through contrast adjustment since those map to
     /// theme-defined ANSI colors that can clash with the theme background.
-    fn is_app_chosen_exact_color(fg: &Color) -> bool {
-        terminal_is_app_chosen_exact_color(*fg)
+    fn is_app_chosen_exact_color(fg: &terminal::alacritty_terminal::vte::ansi::Color) -> bool {
+        matches!(
+            fg,
+            terminal::alacritty_terminal::vte::ansi::Color::Spec(_)
+                | terminal::alacritty_terminal::vte::ansi::Color::Indexed(16..=255)
+        )
     }
 
-    /// Converts terminal cell styles to GPUI text styles and background color.
+    /// Converts the Alacritty cell styles to GPUI text styles and background color.
     fn cell_style(
-        point: Point,
-        cell: &Cell,
-        fg: Color,
-        bg: Color,
+        indexed: &IndexedCell,
+        fg: terminal::alacritty_terminal::vte::ansi::Color,
+        bg: terminal::alacritty_terminal::vte::ansi::Color,
         colors: &Theme,
         text_style: &TextStyle,
-        hyperlink: Option<(HighlightStyle, &Range)>,
+        hyperlink: Option<(HighlightStyle, &RangeInclusive<AlacPoint>)>,
         minimum_contrast: f32,
     ) -> TextRun {
+        let flags = indexed.cell.flags;
         let skip_contrast = Self::is_app_chosen_exact_color(&fg);
         let mut fg = convert_color(&fg, colors);
         let bg = convert_color(&bg, colors);
 
-        if !skip_contrast && !Self::is_decorative_character(cell.character()) {
+        if !skip_contrast && !Self::is_decorative_character(indexed.c) {
             fg = ensure_minimum_contrast(fg, bg, minimum_contrast);
         }
 
-        // Use a dim multiplier that stays close to the existing Alacritty look.
-        if cell.is_dim() {
+        // Ghostty uses (175/255) as the multiplier (~0.69), Alacritty uses 0.66, Kitty
+        // uses 0.75. We're using 0.7 because it's pretty well in the middle of that.
+        if flags.intersects(Flags::DIM) {
             fg.a *= 0.7;
         }
 
-        let underline =
-            (cell.has_underline() || cell.hyperlink().is_some()).then(|| UnderlineStyle {
-                color: Some(fg),
-                thickness: Pixels::from(1.0),
-                wavy: cell.has_undercurl(),
-            });
-
-        let strikethrough = cell.has_strikeout().then(|| StrikethroughStyle {
+        let underline = (flags.intersects(Flags::ALL_UNDERLINES)
+            || indexed.cell.hyperlink().is_some())
+        .then(|| UnderlineStyle {
             color: Some(fg),
             thickness: Pixels::from(1.0),
+            wavy: flags.contains(Flags::UNDERCURL),
         });
 
-        let weight = if cell.is_bold() {
+        let strikethrough = flags
+            .intersects(Flags::STRIKEOUT)
+            .then(|| StrikethroughStyle {
+                color: Some(fg),
+                thickness: Pixels::from(1.0),
+            });
+
+        let weight = if flags.intersects(Flags::BOLD) {
             FontWeight::BOLD
         } else {
             text_style.font_weight
         };
 
-        let style = if cell.is_italic() {
+        let style = if flags.intersects(Flags::ITALIC) {
             FontStyle::Italic
         } else {
             FontStyle::Normal
         };
 
         let mut result = TextRun {
-            len: cell.character().len_utf8(),
+            len: indexed.c.len_utf8(),
             color: fg,
             background_color: None,
             font: Font {
@@ -657,7 +618,7 @@ impl TerminalElement {
         };
 
         if let Some((style, range)) = hyperlink
-            && range.contains(point)
+            && range.contains(&indexed.point)
         {
             if let Some(underline) = style.underline {
                 result.underline = Some(underline);
@@ -693,7 +654,7 @@ impl TerminalElement {
 
     fn register_mouse_listeners(
         &mut self,
-        mode: Modes,
+        mode: TermMode,
         hitbox: &Hitbox,
         content_mode: &ContentMode,
         window: &mut Window,
@@ -799,7 +760,7 @@ impl TerminalElement {
 
         // Mouse mode handlers:
         // All mouse modes need the extra click handlers
-        if mode.intersects(Modes::MOUSE_MODE) {
+        if mode.intersects(TermMode::MOUSE_MODE) {
             self.interactivity.on_mouse_down(
                 MouseButton::Right,
                 TerminalElement::generic_button_handler(
@@ -1116,7 +1077,7 @@ impl Element for TerminalElement {
                     element
                 });
 
-                let Content {
+                let TerminalContent {
                     cells,
                     mode,
                     display_offset,
@@ -1135,7 +1096,7 @@ impl Element for TerminalElement {
                 }
                 if let Some(selection) = selection {
                     relative_highlighted_ranges
-                        .push((selection.point_range(), player_color.selection));
+                        .push((selection.start..=selection.end, player_color.selection));
                 }
 
                 // then have that representation be converted to the appropriate highlight data structure
@@ -1166,7 +1127,7 @@ impl Element for TerminalElement {
                     // Fast path: terminal fully visible, no clipping needed.
                     // Avoid grouping/allocation overhead by streaming cells directly.
                     TerminalElement::layout_grid(
-                        cells.iter(),
+                        cells.iter().cloned(),
                         0,
                         &text_style,
                         last_hovered_word
@@ -1197,7 +1158,8 @@ impl Element for TerminalElement {
                             .into_iter()
                             .skip(rows_above_viewport)
                             .take(visible_row_count)
-                            .flat_map(|(_, line_cells)| line_cells),
+                            .flat_map(|(_, line_cells)| line_cells)
+                            .cloned(),
                         rows_above_viewport as i32,
                         &text_style,
                         last_hovered_word
@@ -1242,20 +1204,20 @@ impl Element for TerminalElement {
                         size: size(cursor_width.ceil(), dimensions.line_height),
                     });
 
-                let cursor = if let CursorShape::Hidden = cursor.shape {
+                let cursor = if let AlacCursorShape::Hidden = cursor.shape {
                     None
                 } else {
                     let focused = self.focused;
                     ime_cursor_bounds.map(move |bounds| {
                         let (shape, text) = match cursor.shape {
-                            CursorShape::Block if !focused => (EditorCursorShape::Hollow, None),
-                            CursorShape::Block => (EditorCursorShape::Block, Some(cursor_text)),
-                            CursorShape::Underline if !focused => (EditorCursorShape::Hollow, None),
-                            CursorShape::Underline => (EditorCursorShape::Underline, None),
-                            CursorShape::Bar if !focused => (EditorCursorShape::Hollow, None),
-                            CursorShape::Bar => (EditorCursorShape::Bar, None),
-                            CursorShape::HollowBlock => (EditorCursorShape::Hollow, None),
-                            CursorShape::Hidden => unreachable!(),
+                            AlacCursorShape::Block if !focused => (CursorShape::Hollow, None),
+                            AlacCursorShape::Block => (CursorShape::Block, Some(cursor_text)),
+                            AlacCursorShape::Underline if !focused => (CursorShape::Hollow, None),
+                            AlacCursorShape::Underline => (CursorShape::Underline, None),
+                            AlacCursorShape::Beam if !focused => (CursorShape::Hollow, None),
+                            AlacCursorShape::Beam => (CursorShape::Bar, None),
+                            AlacCursorShape::HollowBlock => (CursorShape::Hollow, None),
+                            AlacCursorShape::Hidden => unreachable!(),
                         };
 
                         CursorLayout::new(
@@ -1272,7 +1234,7 @@ impl Element for TerminalElement {
                 let block_below_cursor_element = if let Some(block) = &self.block_below_cursor {
                     let terminal = self.terminal.read(cx);
                     if terminal.last_content.display_offset == 0 {
-                        let target_line = terminal.last_content.cursor.point.line + 1;
+                        let target_line = terminal.last_content.cursor.point.line.0 + 1;
                         let render = &block.render;
                         let mut block_cx = BlockContext {
                             window,
@@ -1287,7 +1249,7 @@ impl Element for TerminalElement {
                                 block.height as f32 * dimensions.line_height(),
                             ),
                         );
-                        let origin = GpuiPoint::new(bounds.origin.x, dimensions.bounds.origin.y)
+                        let origin = Point::new(bounds.origin.x, dimensions.bounds.origin.y)
                             + point(px(0.), target_line as f32 * dimensions.line_height())
                             - point(px(0.), scroll_top);
                         window.with_rem_size(rem_size, |window| {
@@ -1336,7 +1298,7 @@ impl Element for TerminalElement {
             let scroll_top = self.terminal_view.read(cx).scroll_top;
 
             window.paint_quad(fill(bounds, layout.background_color));
-            let origin = layout.dimensions.bounds.origin - GpuiPoint::new(px(0.), scroll_top);
+            let origin = layout.dimensions.bounds.origin - Point::new(px(0.), scroll_top);
             let scale_factor = window.scale_factor();
             let snap_px = |value: Pixels| {
                 Pixels::from((f32::from(value) * scale_factor).floor() / scale_factor)
@@ -1528,7 +1490,7 @@ impl InputHandler for TerminalInputHandler {
             .read(cx)
             .last_content
             .mode
-            .contains(Modes::ALT_SCREEN)
+            .contains(TermMode::ALT_SCREEN)
         {
             None
         } else {
@@ -1619,7 +1581,7 @@ impl InputHandler for TerminalInputHandler {
 
     fn character_index_for_point(
         &mut self,
-        _point: GpuiPoint<Pixels>,
+        _point: Point<Pixels>,
         _window: &mut Window,
         _cx: &mut App,
     ) -> Option<usize> {
@@ -1627,12 +1589,12 @@ impl InputHandler for TerminalInputHandler {
     }
 }
 
-pub fn is_blank(cell: &Cell) -> bool {
-    if cell.character() != ' ' {
+pub fn is_blank(cell: &IndexedCell) -> bool {
+    if cell.c != ' ' {
         return false;
     }
 
-    if !is_default_background_color(cell.background()) {
+    if cell.bg != AnsiColor::Named(NamedColor::Background) {
         return false;
     }
 
@@ -1640,7 +1602,10 @@ pub fn is_blank(cell: &Cell) -> bool {
         return false;
     }
 
-    if cell.has_visible_style_modifier() {
+    if cell
+        .flags
+        .intersects(Flags::ALL_UNDERLINES | Flags::INVERSE | Flags::STRIKEOUT)
+    {
         return false;
     }
 
@@ -1648,9 +1613,9 @@ pub fn is_blank(cell: &Cell) -> bool {
 }
 
 fn to_highlighted_range_lines(
-    range: &Range,
+    range: &RangeInclusive<AlacPoint>,
     layout: &LayoutState,
-    origin: GpuiPoint<Pixels>,
+    origin: Point<Pixels>,
 ) -> Option<(Pixels, Vec<HighlightedRangeLine>)> {
     // Step 1. Normalize the points to be viewport relative.
     // When display_offset = 1, here's how the grid is arranged:
@@ -1670,20 +1635,24 @@ fn to_highlighted_range_lines(
     // of the grid data we should be looking at. But for the rendering step, we don't
     // want negatives. We want things relative to the 'viewport' (the area of the grid
     // which is currently shown according to the display offset)
-    let display_offset = i32::try_from(layout.display_offset).unwrap_or(i32::MAX);
-    let unclamped_start_line = range.start().line.saturating_add(display_offset);
-    let unclamped_start_column = range.start().column;
-    let unclamped_end_line = range.end().line.saturating_add(display_offset);
-    let unclamped_end_column = range.end().column;
+    let unclamped_start = AlacPoint::new(
+        range.start().line + layout.display_offset,
+        range.start().column,
+    );
+    let unclamped_end =
+        AlacPoint::new(range.end().line + layout.display_offset, range.end().column);
 
     // Step 2. Clamp range to viewport, and return None if it doesn't overlap
-    if unclamped_end_line < 0 || unclamped_start_line > layout.dimensions.num_lines() as i32 {
+    if unclamped_end.line.0 < 0 || unclamped_start.line.0 > layout.dimensions.num_lines() as i32 {
         return None;
     }
 
-    let clamped_start_line = unclamped_start_line.max(0) as usize;
+    let clamped_start_line = unclamped_start.line.0.max(0) as usize;
 
-    let clamped_end_line = unclamped_end_line.min(layout.dimensions.num_lines() as i32) as usize;
+    let clamped_end_line = unclamped_end
+        .line
+        .0
+        .min(layout.dimensions.num_lines() as i32) as usize;
 
     // Convert the start of the range to pixels
     let start_y = origin.y + clamped_start_line as f32 * layout.dimensions.line_height;
@@ -1693,13 +1662,14 @@ fn to_highlighted_range_lines(
     let mut highlighted_range_lines = Vec::new();
     for line in clamped_start_line..=clamped_end_line {
         let mut line_start = 0;
-        let mut line_end = layout.dimensions.num_columns();
+        let mut line_end = layout.dimensions.columns();
 
-        if line == clamped_start_line && unclamped_start_line >= 0 {
-            line_start = unclamped_start_column;
+        if line == clamped_start_line && unclamped_start.line.0 >= 0 {
+            line_start = unclamped_start.column.0;
         }
-        if line == clamped_end_line && unclamped_end_line <= layout.dimensions.num_lines() as i32 {
-            line_end = unclamped_end_column + 1; // +1 for inclusive
+        if line == clamped_end_line && unclamped_end.line.0 <= layout.dimensions.num_lines() as i32
+        {
+            line_end = unclamped_end.column.0 + 1; // +1 for inclusive
         }
 
         highlighted_range_lines.push(HighlightedRangeLine {
@@ -1712,11 +1682,11 @@ fn to_highlighted_range_lines(
 }
 
 /// Converts a 2, 8, or 24 bit color ANSI color to the GPUI equivalent.
-pub fn convert_color(fg: &Color, theme: &Theme) -> Hsla {
+pub fn convert_color(fg: &terminal::alacritty_terminal::vte::ansi::Color, theme: &Theme) -> Hsla {
     let colors = theme.colors();
     match fg {
         // Named and theme defined colors
-        Color::Named(color) => match color {
+        terminal::alacritty_terminal::vte::ansi::Color::Named(n) => match n {
             NamedColor::Black => colors.terminal_ansi_black,
             NamedColor::Red => colors.terminal_ansi_red,
             NamedColor::Green => colors.terminal_ansi_green,
@@ -1748,9 +1718,13 @@ pub fn convert_color(fg: &Color, theme: &Theme) -> Hsla {
             NamedColor::DimForeground => colors.terminal_dim_foreground,
         },
         // 'True' colors
-        Color::Spec(rgb) => terminal::rgba_color(rgb.r, rgb.g, rgb.b),
+        terminal::alacritty_terminal::vte::ansi::Color::Spec(rgb) => {
+            terminal::rgba_color(rgb.r, rgb.g, rgb.b)
+        }
         // 8 bit, indexed colors
-        Color::Indexed(i) => terminal::get_color_at_index(*i as usize, theme),
+        terminal::alacritty_terminal::vte::ansi::Color::Indexed(i) => {
+            terminal::get_color_at_index(*i as usize, theme)
+        }
     }
 }
 
@@ -1859,7 +1833,7 @@ mod tests {
 
     #[test]
     fn test_is_app_chosen_exact_color() {
-        use terminal::{Color, NamedColor, Rgb};
+        use terminal::alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
         // Indices 0..=15 are theme-overridable ANSI colors; contrast adjustment must still apply.
         assert!(!TerminalElement::is_app_chosen_exact_color(
@@ -2080,7 +2054,7 @@ mod tests {
         };
 
         let font_size = AbsoluteLength::Pixels(px(12.0));
-        let batch = BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'a', style1, font_size);
+        let batch = BatchedTextRun::new_from_char(AlacPoint::new(0, 0), 'a', style1, font_size);
 
         // Should be able to append same style
         assert!(batch.can_append(&style2));
@@ -2099,8 +2073,7 @@ mod tests {
         };
 
         let font_size = AbsoluteLength::Pixels(px(12.0));
-        let mut batch =
-            BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'a', style, font_size);
+        let mut batch = BatchedTextRun::new_from_char(AlacPoint::new(0, 0), 'a', style, font_size);
 
         assert_eq!(batch.text, "a");
         assert_eq!(batch.cell_count, 1);
@@ -2129,8 +2102,7 @@ mod tests {
         };
 
         let font_size = AbsoluteLength::Pixels(px(12.0));
-        let mut batch =
-            BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'x', style, font_size);
+        let mut batch = BatchedTextRun::new_from_char(AlacPoint::new(0, 0), 'x', style, font_size);
 
         assert_eq!(batch.text, "x");
         assert_eq!(batch.cell_count, 1);
@@ -2160,8 +2132,7 @@ mod tests {
         };
 
         let font_size = AbsoluteLength::Pixels(px(12.0));
-        let mut batch =
-            BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'x', style, font_size);
+        let mut batch = BatchedTextRun::new_from_char(AlacPoint::new(0, 0), 'x', style, font_size);
 
         let combining = '\u{0301}';
         batch.append_zero_width_chars(&[combining]);
@@ -2273,14 +2244,16 @@ mod tests {
         // This works for both Scrollable and Inline modes because we filter
         // by enumerated line group index, not by cell.point.line values.
         use itertools::Itertools;
-        use terminal::{Cell, IndexedCell, Point};
+        use terminal::IndexedCell;
+        use terminal::alacritty_terminal::index::{Column, Line, Point as AlacPoint};
+        use terminal::alacritty_terminal::term::cell::Cell;
 
         // Create mock cells for lines 0-23 (typical terminal with 24 visible lines)
         let mut cells = Vec::new();
         for line in 0..24i32 {
             for col in 0..3i32 {
                 cells.push(IndexedCell {
-                    point: Point::new(line, col as usize),
+                    point: AlacPoint::new(Line(line), Column(col as usize)),
                     cell: Cell::default(),
                 });
             }
@@ -2307,14 +2280,14 @@ mod tests {
         // First filtered cell should be line 5
         assert_eq!(
             filtered.first().unwrap().point.line,
-            5,
+            Line(5),
             "First cell should be on line 5"
         );
 
         // Last filtered cell should be line 15
         assert_eq!(
             filtered.last().unwrap().point.line,
-            15,
+            Line(15),
             "Last cell should be on line 15"
         );
     }
@@ -2325,7 +2298,9 @@ mod tests {
         // for scrollback history. The screen-position filtering approach works because
         // we filter by enumerated line group index, not by cell.point.line values.
         use itertools::Itertools;
-        use terminal::{Cell, IndexedCell, Point};
+        use terminal::IndexedCell;
+        use terminal::alacritty_terminal::index::{Column, Line, Point as AlacPoint};
+        use terminal::alacritty_terminal::term::cell::Cell;
 
         // Simulate cells from a scrolled terminal with scrollback
         // These have negative line numbers representing scrollback history
@@ -2333,7 +2308,7 @@ mod tests {
         for line in -588i32..=-578i32 {
             for col in 0..80i32 {
                 scrollback_cells.push(IndexedCell {
-                    point: Point::new(line, col as usize),
+                    point: AlacPoint::new(Line(line), Column(col as usize)),
                     cell: Cell::default(),
                 });
             }
@@ -2359,14 +2334,14 @@ mod tests {
         // First filtered cell should be line -585 (skipped 3 lines from -588)
         assert_eq!(
             filtered.first().unwrap().point.line,
-            -585,
+            Line(-585),
             "First cell should be on line -585"
         );
 
         // Last filtered cell should be line -581 (5 lines: -585, -584, -583, -582, -581)
         assert_eq!(
             filtered.last().unwrap().point.line,
-            -581,
+            Line(-581),
             "Last cell should be on line -581"
         );
     }
@@ -2375,12 +2350,14 @@ mod tests {
     fn test_screen_position_filtering_skip_all() {
         // Test what happens when we skip more rows than exist
         use itertools::Itertools;
-        use terminal::{Cell, IndexedCell, Point};
+        use terminal::IndexedCell;
+        use terminal::alacritty_terminal::index::{Column, Line, Point as AlacPoint};
+        use terminal::alacritty_terminal::term::cell::Cell;
 
         let mut cells = Vec::new();
         for line in 0..10i32 {
             cells.push(IndexedCell {
-                point: Point::new(line, 0),
+                point: AlacPoint::new(Line(line), Column(0)),
                 cell: Cell::default(),
             });
         }
@@ -2445,14 +2422,15 @@ mod tests {
         // not by cell.point.line values. This makes the filtering agnostic to the
         // actual line numbers in the cells.
         use itertools::Itertools;
-        use terminal::Point;
-        use terminal::{Cell, IndexedCell};
+        use terminal::IndexedCell;
+        use terminal::alacritty_terminal::index::{Column, Line, Point as AlacPoint};
+        use terminal::alacritty_terminal::term::cell::Cell;
 
         // Test with positive line numbers (Inline mode style)
         let positive_cells: Vec<_> = (0..10i32)
             .flat_map(|line| {
                 (0..3i32).map(move |col| IndexedCell {
-                    point: Point::new(line, col as usize),
+                    point: AlacPoint::new(Line(line), Column(col as usize)),
                     cell: Cell::default(),
                 })
             })
@@ -2462,7 +2440,7 @@ mod tests {
         let negative_cells: Vec<_> = (-10i32..0i32)
             .flat_map(|line| {
                 (0..3i32).map(move |col| IndexedCell {
-                    point: Point::new(line, col as usize),
+                    point: AlacPoint::new(Line(line), Column(col as usize)),
                     cell: Cell::default(),
                 })
             })
@@ -2496,11 +2474,11 @@ mod tests {
         assert_eq!(negative_filtered.len(), 12);
 
         // Positive: lines 3, 4, 5, 6
-        assert_eq!(positive_filtered.first().unwrap().point.line, 3);
-        assert_eq!(positive_filtered.last().unwrap().point.line, 6);
+        assert_eq!(positive_filtered.first().unwrap().point.line, Line(3));
+        assert_eq!(positive_filtered.last().unwrap().point.line, Line(6));
 
         // Negative: lines -7, -6, -5, -4
-        assert_eq!(negative_filtered.first().unwrap().point.line, -7);
-        assert_eq!(negative_filtered.last().unwrap().point.line, -4);
+        assert_eq!(negative_filtered.first().unwrap().point.line, Line(-7));
+        assert_eq!(negative_filtered.last().unwrap().point.line, Line(-4));
     }
 }

@@ -2246,8 +2246,7 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap()
-            .branches;
+            .unwrap();
         let repo_branches = repo_branches
             .iter()
             .map(|b| b.name())
@@ -2332,8 +2331,7 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap()
-            .branches;
+            .unwrap();
         assert!(
             repo_branches
                 .iter()
@@ -2412,8 +2410,7 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap()
-            .branches;
+            .unwrap();
         assert!(
             repo_branches
                 .iter()
@@ -2494,8 +2491,7 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap()
-            .branches;
+            .unwrap();
         assert!(
             repo_branches
                 .iter()
@@ -2573,8 +2569,7 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap()
-            .branches;
+            .unwrap();
         let repo_branches = repo_branches
             .iter()
             .map(|b| b.name())
@@ -2759,8 +2754,7 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap()
-            .branches;
+            .unwrap();
 
         let new_branch = branches
             .into_iter()

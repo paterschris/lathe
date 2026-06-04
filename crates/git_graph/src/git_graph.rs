@@ -1,4 +1,4 @@
-use collections::{BTreeMap, HashMap, IndexSet};
+use collections::{BTreeMap, BTreeSet, HashMap, IndexSet};
 use editor::Editor;
 use futures::channel::oneshot;
 use git::{
@@ -1222,6 +1222,11 @@ pub struct GitGraph {
     table_interaction_state: Entity<TableInteractionState>,
     column_widths: Entity<RedistributableColumnsState>,
     selected_entry_idx: Option<usize>,
+    /// Additional rows marked alongside `selected_entry_idx` via Shift-click /
+    /// Cmd-click. Always treated as a *set* that includes the active
+    /// selection; the right-click menu turns a contiguous run of marked rows
+    /// into a "Squash N Commits" entry.
+    marked_entry_idxs: BTreeSet<usize>,
     hovered_entry_idx: Option<usize>,
     graph_canvas_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     log_source: LogSource,
@@ -1354,6 +1359,40 @@ impl GitGraph {
         })
         .detach();
 
+        // Subscribe to the GitPanel so that clicks in its Explorer tab can
+        // scroll the graph to the corresponding commit. Deferred to the next
+        // frame because `GitGraph::new` can run inside a workspace.update
+        // closure (when the OpenAtCommit action handler dispatches it), and
+        // calling `workspace.read(cx).panel::<...>(cx)` synchronously inside
+        // that closure tries to re-borrow the workspace entity and panics.
+        // If the panel isn't registered yet, the subscription is just
+        // skipped — the graph view still works, just no auto-scroll on
+        // future Explorer clicks until the panel is available.
+        let workspace_for_sub = workspace.clone();
+        let weak_self = cx.weak_entity();
+        cx.defer(move |cx| {
+            let Some(workspace_handle) = workspace_for_sub.upgrade() else {
+                return;
+            };
+            let Some(git_panel) = workspace_handle.read(cx).panel::<git_ui::GitPanel>(cx) else {
+                return;
+            };
+            let Some(this) = weak_self.upgrade() else {
+                return;
+            };
+            this.update(cx, |_, cx| {
+                cx.subscribe(
+                    &git_panel,
+                    |this, _panel, event: &git_ui::GitPanelEvent, cx| {
+                        if let git_ui::GitPanelEvent::ScrollGraphToCommit(oid) = event {
+                            this.scroll_to_oid(*oid, cx);
+                        }
+                    },
+                )
+                .detach();
+            });
+        });
+
         let search_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_placeholder_text("Search commits…", window, cx);
@@ -1414,6 +1453,7 @@ impl GitGraph {
             table_interaction_state,
             column_widths,
             selected_entry_idx: None,
+            marked_entry_idxs: BTreeSet::default(),
             hovered_entry_idx: None,
             graph_canvas_bounds: Rc::new(Cell::new(None)),
             selected_commit_diff: None,
@@ -2035,6 +2075,97 @@ impl GitGraph {
             });
         }
         cx.notify();
+    }
+
+    /// Toggle whether `idx` is in the marked set. Does not move the primary
+    /// selection.
+    fn toggle_marked(&mut self, idx: usize) {
+        if !self.marked_entry_idxs.remove(&idx) {
+            self.marked_entry_idxs.insert(idx);
+        }
+    }
+
+    /// Shift-click handler: marks every row between the active selection and
+    /// `idx` (inclusive on both ends). If there is no active selection yet,
+    /// just marks `idx`.
+    fn extend_marked_range(&mut self, idx: usize) {
+        let Some(anchor) = self.selected_entry_idx else {
+            self.marked_entry_idxs.insert(idx);
+            return;
+        };
+        let (low, high) = if anchor <= idx {
+            (anchor, idx)
+        } else {
+            (idx, anchor)
+        };
+        for i in low..=high {
+            self.marked_entry_idxs.insert(i);
+        }
+    }
+
+    /// The full set of indices included in a multi-select action: the
+    /// explicitly-marked rows plus the active selection. Returned sorted
+    /// ascending (BTreeSet iteration order). Used by the context menu to
+    /// decide whether to offer "Squash N Commits".
+    fn multi_selection(&self) -> Vec<usize> {
+        let mut set = self.marked_entry_idxs.clone();
+        if let Some(idx) = self.selected_entry_idx {
+            set.insert(idx);
+        }
+        set.into_iter().collect()
+    }
+
+    /// If ≥ 2 commits are selected and they all share a single branch lane
+    /// (the visible "color" in the graph), return their indices in display
+    /// order (newest-first, same as `multi_selection`). Returns None when
+    /// fewer than two commits are selected, or when the selection crosses
+    /// lanes — squash is only well-defined for a set of commits that lives
+    /// on the same linear history, which in this graph view corresponds to
+    /// sharing a lane.
+    ///
+    /// Allowing non-contiguous selections matters in practice: a user
+    /// usually wants to Cmd-click two commits on the same yellow branch
+    /// even when a green side-branch commit sits between them in the
+    /// display. Filtering by lane makes that work.
+    fn same_lane_multi_selection(&self) -> Option<Vec<usize>> {
+        let selected = self.multi_selection();
+        if selected.len() < 2 {
+            return None;
+        }
+        let lanes: Vec<usize> = selected
+            .iter()
+            .filter_map(|ix| self.graph_data.commits.get(*ix).map(|c| c.lane))
+            .collect();
+        if lanes.len() != selected.len() {
+            return None;
+        }
+        let first_lane = lanes[0];
+        if lanes.iter().all(|&lane| lane == first_lane) {
+            Some(selected)
+        } else {
+            None
+        }
+    }
+
+    /// Scroll to (and select) the commit identified by `oid`. Used by the
+    /// git panel's Explorer tab to follow the user's branch / worktree /
+    /// stash selection. If the commit isn't loaded yet, the request is
+    /// stashed in `pending_select_sha` and applied when the next
+    /// `GitGraphEvent::FullyLoaded` arrives — matching how
+    /// `fetch_initial_graph_data`'s own pending-selection plumbing works.
+    pub fn scroll_to_oid(&mut self, oid: Oid, cx: &mut Context<Self>) {
+        if let Some(idx) = self
+            .graph_data
+            .commits
+            .iter()
+            .position(|entry| entry.data.sha == oid)
+        {
+            self.select_entry(idx, ScrollStrategy::Center, cx);
+        } else {
+            // Commit is below the loaded window. Remember the request and
+            // let the load-more / fully-loaded paths pick it up.
+            self.pending_select_sha = Some(oid);
+        }
     }
 
     fn select_entry(
@@ -3797,6 +3928,102 @@ impl GitGraph {
                 });
             }
 
+            // Squash the multi-selected commits into one. Available when ≥2
+            // commits are selected and they all live on the same branch
+            // lane (= same linear history); the right-clicked commit must
+            // be in that set. Cmd-click selections that skip over commits
+            // from other branches still qualify, because the filtered set
+            // is contiguous on its own lane.
+            //
+            // The rebase plan covers every commit on that lane from the
+            // oldest selected one up to the newest, with selected commits
+            // marked `Squash` (except the oldest, which is `Pick`) and
+            // unselected same-lane commits left as plain `Pick`. Upstream
+            // is the parent of the oldest selected commit. Commits from
+            // other lanes are skipped — they aren't in this branch's
+            // history.
+            if current_branch.is_some()
+                && let Some(selection) = self.same_lane_multi_selection()
+                && selection.contains(&row_index)
+            {
+                let oldest = *selection.last().unwrap();
+                let lane = self.graph_data.commits.get(oldest).map(|c| c.lane);
+                let count = selection.len();
+                let upstream_oid = self
+                    .graph_data
+                    .commits
+                    .get(oldest)
+                    .and_then(|entry| entry.data.parents.first().copied());
+                if let (Some(lane), Some(upstream_oid)) = (lane, upstream_oid) {
+                    // Walk the lane from oldest selected to newest selected.
+                    let newest = *selection.first().unwrap();
+                    let same_lane_indices: Vec<usize> = (newest..=oldest)
+                        .rev()
+                        .filter(|i| {
+                            self.graph_data
+                                .commits
+                                .get(*i)
+                                .is_some_and(|c| c.lane == lane)
+                        })
+                        .collect();
+                    let selection_set: std::collections::BTreeSet<usize> =
+                        selection.iter().copied().collect();
+                    let plan_entries: Vec<RebasePlanEntry> = same_lane_indices
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(plan_ix, &i)| {
+                            let entry = self.graph_data.commits.get(i)?;
+                            let sha = entry.data.sha;
+                            let short = sha.display_short();
+                            let is_selected = selection_set.contains(&i);
+                            let action = if plan_ix == 0 {
+                                // Oldest position must be Pick regardless.
+                                RebaseAction::Pick
+                            } else if is_selected {
+                                RebaseAction::Squash
+                            } else {
+                                RebaseAction::Pick
+                            };
+                            Some(RebasePlanEntry {
+                                sha: sha.to_string().into(),
+                                short_sha: short.clone().into(),
+                                subject: short.into(),
+                                action,
+                            })
+                        })
+                        .collect();
+                    let label = format!("Squash {count} commits into one…");
+                    let upstream_sha: SharedString = upstream_oid.to_string().into();
+                    menu = menu.entry(label, None, {
+                        let git_store = git_store.clone();
+                        let workspace = workspace.clone();
+                        let pre = pre_state.clone();
+                        move |window, cx| {
+                            let plan_entries = plan_entries.clone();
+                            let upstream = upstream_sha.clone();
+                            let git_store = git_store.clone();
+                            let workspace_weak = workspace.clone();
+                            let pre = pre.clone();
+                            workspace
+                                .update(cx, |workspace, cx| {
+                                    workspace.toggle_modal(window, cx, |_window, cx| {
+                                        InteractiveRebaseModal::new(
+                                            plan_entries,
+                                            upstream,
+                                            repo_id,
+                                            git_store,
+                                            workspace_weak,
+                                            pre,
+                                            cx,
+                                        )
+                                    });
+                                })
+                                .ok();
+                        }
+                    });
+                }
+            }
+
             // Interactive rebase: replay every commit between this commit
             // (exclusive) and HEAD (inclusive) through a modal where the user
             // can mark each one pick / reword / squash / fixup / drop.
@@ -4068,6 +4295,7 @@ impl Render for GitGraph {
                         .child({
                             let row_height = Self::row_height(window, cx);
                             let selected_entry_idx = self.selected_entry_idx;
+                            let marked_entry_idxs = self.marked_entry_idxs.clone();
                             let hovered_entry_idx = self.hovered_entry_idx;
                             let _context_menu_entry_idx =
                                 self.context_menu.as_ref().map(|menu| menu.entry_idx);
@@ -4162,6 +4390,8 @@ impl Render for GitGraph {
                                                                 };
                                                                 let is_selected =
                                                                     selected_entry_idx == Some(index);
+                                                                let is_marked =
+                                                                    marked_entry_idxs.contains(&index);
                                                                 let is_hovered =
                                                                     hovered_entry_idx == Some(index);
                                                                 let is_focused =
@@ -4184,10 +4414,20 @@ impl Render for GitGraph {
 
                                                                 let row_sha = row_shas.get(index).copied();
 
+                                                                let marked_bg = cx
+                                                                    .theme()
+                                                                    .colors()
+                                                                    .element_selected
+                                                                    .opacity(0.4);
+
                                                                 row.h(row_height)
                                                                     .when(is_selected, |row| row.bg(selected_bg))
                                                                     .when(
-                                                                        is_hovered && !is_selected,
+                                                                        is_marked && !is_selected,
+                                                                        |row| row.bg(marked_bg),
+                                                                    )
+                                                                    .when(
+                                                                        is_hovered && !is_selected && !is_marked,
                                                                         |row| row.bg(hover_bg),
                                                                     )
                                                                     .when_some(row_sha, |row, sha| {
@@ -4223,7 +4463,23 @@ impl Render for GitGraph {
                                                                     })
                                                                     .on_click(move |event, window, cx| {
                                                                         let click_count = event.click_count();
+                                                                        let modifiers = event.modifiers();
                                                                         weak.update(cx, |this, cx| {
+                                                                            // Shift-click extends the marked run from
+                                                                            // the previous selection. Platform-click
+                                                                            // (Cmd on mac / Ctrl elsewhere) toggles
+                                                                            // this row's mark without moving the
+                                                                            // primary selection. Plain click resets
+                                                                            // marks and selects this row.
+                                                                            if modifiers.shift {
+                                                                                this.extend_marked_range(index);
+                                                                            } else if modifiers.platform
+                                                                                || modifiers.control
+                                                                            {
+                                                                                this.toggle_marked(index);
+                                                                            } else {
+                                                                                this.marked_entry_idxs.clear();
+                                                                            }
                                                                             this.select_entry(
                                                                                 index,
                                                                                 ScrollStrategy::Center,

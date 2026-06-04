@@ -7,8 +7,9 @@ use cloud_llm_client::{
     SERVER_SUPPORTS_STATUS_MESSAGES_HEADER_NAME, ZED_VERSION_HEADER_NAME,
 };
 use futures::{
-    AsyncBufReadExt, FutureExt, Stream, StreamExt,
+    AsyncBufReadExt, AsyncReadExt as _, FutureExt, Stream, StreamExt,
     future::BoxFuture,
+    io::BufReader,
     stream::{self, BoxStream},
 };
 use google_ai::GoogleModelMode;
@@ -30,7 +31,6 @@ use language_model::{
 use schemars::JsonSchema;
 use semver::Version;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use smol::io::{AsyncReadExt, BufReader};
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -697,6 +697,13 @@ impl<TP: CloudLlmTokenProvider + 'static> CloudModelProvider<TP> {
             .cloned()
             .collect();
         self.models = models;
+    }
+
+    pub fn clear_models(&mut self) {
+        self.models.clear();
+        self.default_model = None;
+        self.default_fast_model = None;
+        self.recommended_models.clear();
     }
 
     pub fn create_model(

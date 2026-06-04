@@ -5,8 +5,7 @@ use call::{ActiveCall, Room};
 use channel::ChannelStore;
 use client::{User, proto::PeerId};
 use gpui::{
-    AnyElement, Hsla, IntoElement, MouseButton, Path, ScreenCaptureSource, SourceKind, Styled,
-    TaskExt,
+    AnyElement, Hsla, IntoElement, MouseButton, Path, ScreenCaptureSource, Styled, TaskExt,
     WeakEntity, canvas, point,
 };
 use gpui::{App, Task, Window};
@@ -87,7 +86,7 @@ pub fn toggle_screen_sharing(
         }
         Err(e) => Task::ready(Err(e)),
     };
-    toggle_screen_sharing.detach_and_prompt_err("Sharing Screen Failed", window, cx, |e, _, _| Some(format!("{:?}\n\nPlease check that you have given Lathe permissions to record your screen in Settings.", e)));
+    toggle_screen_sharing.detach_and_prompt_err("Sharing Screen Failed", window, cx, |e, _, _| Some(format!("{:?}\n\nPlease check that you have given Zed permissions to record your screen in Settings.", e)));
 }
 
 pub fn toggle_mute(cx: &mut App) {
@@ -653,7 +652,49 @@ impl TitleBar {
                                 .read(cx)
                                 .room()
                                 .and_then(|room| room.read(cx).shared_screen_id());
-                            populate_screen_share_menu(this, screens, active_screenshare_id);
+                            for screen in screens {
+                                let Ok(meta) = screen.metadata() else {
+                                    continue;
+                                };
+
+                                let label = meta
+                                    .label
+                                    .clone()
+                                    .unwrap_or_else(|| SharedString::from("Unknown screen"));
+                                let resolution = SharedString::from(format!(
+                                    "{} × {}",
+                                    meta.resolution.width.0, meta.resolution.height.0
+                                ));
+                                this.push_item(ContextMenuItem::CustomEntry {
+                                    entry_render: Box::new(move |_, _| {
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                Icon::new(IconName::Screen)
+                                                    .size(IconSize::XSmall)
+                                                    .map(|this| {
+                                                        if active_screenshare_id == Some(meta.id) {
+                                                            this.color(Color::Accent)
+                                                        } else {
+                                                            this.color(Color::Muted)
+                                                        }
+                                                    }),
+                                            )
+                                            .child(Label::new(label.clone()))
+                                            .child(
+                                                Label::new(resolution.clone())
+                                                    .color(Color::Muted)
+                                                    .size(LabelSize::Small),
+                                            )
+                                            .into_any()
+                                    }),
+                                    selectable: true,
+                                    documentation_aside: None,
+                                    handler: Rc::new(move |_, window, cx| {
+                                        toggle_screen_sharing(Ok(Some(screen.clone())), window, cx);
+                                    }),
+                                });
+                            }
                         })
                     })
                     .detach_and_log_err(cx);
@@ -663,161 +704,11 @@ impl TitleBar {
     }
 }
 
-/// Entry in the share-screen picker after classifying the raw capture source.
-struct ShareEntry {
-    source: Rc<dyn ScreenCaptureSource>,
-    id: u64,
-    label: SharedString,
-    subtitle: SharedString,
-    icon: IconName,
-}
-
-/// Fills the share-screen popover with grouped, prioritized sources:
-///   This Lathe window(s)
-///   ─────────────────
-///   Other windows (grouped by app)
-///   ─────────────────
-///   Screens
-///
-/// The goal is that the user can pick the right thing at a glance without
-/// scanning through a flat list of every visible window on the system.
-fn populate_screen_share_menu(
-    menu: &mut ContextMenu,
-    sources: Vec<Rc<dyn ScreenCaptureSource>>,
-    active_screenshare_id: Option<u64>,
-) {
-    let mut own_windows: Vec<ShareEntry> = Vec::new();
-    let mut other_windows: Vec<ShareEntry> = Vec::new();
-    let mut displays: Vec<ShareEntry> = Vec::new();
-
-    for source in sources {
-        let Ok(meta) = source.metadata() else {
-            continue;
-        };
-        let resolution = format!("{} × {}", meta.resolution.width.0, meta.resolution.height.0);
-        match &meta.kind {
-            SourceKind::Display => {
-                let label = meta
-                    .label
-                    .clone()
-                    .unwrap_or_else(|| SharedString::from("Display"));
-                displays.push(ShareEntry {
-                    source: source.clone(),
-                    id: meta.id,
-                    label,
-                    subtitle: resolution.into(),
-                    icon: IconName::Screen,
-                });
-            }
-            SourceKind::Window {
-                app_name,
-                is_own_app,
-            } => {
-                let label = meta
-                    .label
-                    .clone()
-                    .or_else(|| app_name.clone())
-                    .unwrap_or_else(|| SharedString::from("Window"));
-                let subtitle = app_name
-                    .clone()
-                    .unwrap_or_else(|| SharedString::from("Window"));
-                let entry = ShareEntry {
-                    source: source.clone(),
-                    id: meta.id,
-                    label,
-                    subtitle,
-                    icon: IconName::ArrowUpRight,
-                };
-                if *is_own_app {
-                    own_windows.push(entry);
-                } else {
-                    other_windows.push(entry);
-                }
-            }
-        }
-    }
-
-    other_windows.sort_by(|a, b| a.subtitle.cmp(&b.subtitle).then(a.label.cmp(&b.label)));
-
-    let mut sections_emitted = 0;
-    let mut push_section =
-        |menu: &mut ContextMenu, header: SharedString, entries: Vec<ShareEntry>| {
-            if entries.is_empty() {
-                return;
-            }
-            if sections_emitted > 0 {
-                menu.push_item(ContextMenuItem::Separator);
-            }
-            menu.push_item(ContextMenuItem::Header(header));
-            for entry in entries {
-                push_share_entry(menu, entry, active_screenshare_id);
-            }
-            sections_emitted += 1;
-        };
-
-    push_section(menu, "Lathe windows".into(), own_windows);
-    push_section(menu, "Other windows".into(), other_windows);
-    push_section(menu, "Screens".into(), displays);
-}
-
-fn push_share_entry(
-    menu: &mut ContextMenu,
-    entry: ShareEntry,
-    active_screenshare_id: Option<u64>,
-) {
-    let ShareEntry {
-        source,
-        id,
-        label,
-        subtitle,
-        icon,
-    } = entry;
-    let is_active = active_screenshare_id == Some(id);
-    menu.push_item(ContextMenuItem::CustomEntry {
-        entry_render: Box::new(move |_, _| {
-            h_flex()
-                .gap_2()
-                .child(
-                    Icon::new(icon)
-                        .size(IconSize::XSmall)
-                        .map(|this| {
-                            if is_active {
-                                this.color(Color::Accent)
-                            } else {
-                                this.color(Color::Muted)
-                            }
-                        }),
-                )
-                .child(Label::new(label.clone()))
-                .child(
-                    Label::new(subtitle.clone())
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                )
-                .into_any()
-        }),
-        selectable: true,
-        documentation_aside: None,
-        handler: Rc::new(move |_, window, cx| {
-            toggle_screen_sharing(Ok(Some(source.clone())), window, cx);
-        }),
-    });
-}
-
 /// Picks the screen to share when clicking on the main screen sharing button.
-/// Prefers: (1) this app's own window, (2) the main display, (3) any source.
 fn pick_default_screen(cx: &App) -> Task<anyhow::Result<Option<Rc<dyn ScreenCaptureSource>>>> {
     let source = cx.screen_capture_sources();
     cx.spawn(async move |_| {
         let available_sources = source.await??;
-        let own_window = available_sources.iter().find(|it| {
-            it.as_ref()
-                .metadata()
-                .is_ok_and(|meta| matches!(meta.kind, SourceKind::Window { is_own_app: true, .. }))
-        });
-        if let Some(own) = own_window {
-            return Ok(Some(own.clone()));
-        }
         Ok(available_sources
             .iter()
             .find(|it| {

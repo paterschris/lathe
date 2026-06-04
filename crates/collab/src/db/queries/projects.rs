@@ -586,6 +586,7 @@ impl Database {
                 project_id: ActiveValue::set(project_id),
                 id: ActiveValue::set(server.id as i64),
                 name: ActiveValue::set(server.name.clone()),
+                language_name: ActiveValue::set(server.language_name.clone()),
                 worktree_id: ActiveValue::set(server.worktree_id.map(|id| id as i64)),
                 capabilities: ActiveValue::set(update.capabilities.clone()),
             })
@@ -889,6 +890,7 @@ impl Database {
                         removed_statuses: Vec::new(),
                         current_merge_conflicts,
                         branch_summary,
+                        branch_list_error: None,
                         head_commit_details,
                         scan_id: db_repository_entry.scan_id as u64,
                         is_last_update: true,
@@ -984,6 +986,7 @@ impl Database {
                     server: proto::LanguageServer {
                         id: language_server.id as u64,
                         name: language_server.name,
+                        language_name: language_server.language_name,
                         worktree_id: language_server.worktree_id.map(|id| id as u64),
                     },
                     capabilities: language_server.capabilities,

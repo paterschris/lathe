@@ -467,6 +467,16 @@ pub enum WindowButton {
     Close,
 }
 
+/// Controls whether profiler statistics include tasks that are still running
+/// in addition to completed task timings. Used by hang-detection and
+/// miniprofiler tooling to capture in-flight work without waiting for it to
+/// finish. Treated as an implementation detail of the test/profiling macros.
+#[doc(hidden)]
+pub enum TasksIncluded {
+    OnlyCompleted,
+    CompletedAndRunning,
+}
+
 impl WindowButton {
     /// Returns a stable element ID for rendering this button.
     pub fn id(&self) -> &'static str {
@@ -625,6 +635,21 @@ impl Tiling {
     }
 }
 
+/// Callbacks for the accessibility adapter.
+///
+/// The fork has not yet wired the platform-side AccessKit integration. This
+/// struct exists because the upstream gpui_macos backend (auto-merged in)
+/// still calls `PlatformWindow::a11y_init` with one of these. The trait
+/// method has a no-op default impl, so the callbacks are never invoked.
+pub struct A11yCallbacks {
+    /// Called when the adapter is activated (a screen reader connects).
+    pub activation: Box<dyn Fn() -> Option<accesskit::TreeUpdate> + Send + 'static>,
+    /// Called when an action is requested by the screen reader.
+    pub action: Box<dyn Fn(accesskit::ActionRequest) + Send + 'static>,
+    /// Called when the adapter is deactivated (screen reader disconnects).
+    pub deactivation: Box<dyn Fn() + Send + 'static>,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 #[expect(missing_docs)]
 pub struct RequestFrameOptions {
@@ -694,6 +719,8 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         false
     }
     fn set_edited(&mut self, _edited: bool) {}
+    #[cfg(target_os = "macos")]
+    fn set_traffic_light_position(&self, _position: Point<Pixels>) {}
     fn show_character_palette(&self) {}
     fn titlebar_double_click(&self) {}
     fn on_move_tab_to_new_window(&self, _callback: Box<dyn FnMut()>) {}
@@ -733,6 +760,15 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
     fn play_system_bell(&self) {}
+
+    /// Initialize the accessibility adapter with callbacks.
+    fn a11y_init(&self, _callbacks: A11yCallbacks) {}
+
+    /// Provide a `TreeUpdate` to the accessibility adapter.
+    fn a11y_tree_update(&self, _tree_update: accesskit::TreeUpdate) {}
+
+    /// Inform the adapter of updated window bounds.
+    fn a11y_update_window_bounds(&self) {}
 
     #[cfg(any(test, feature = "test-support"))]
     fn as_test(&mut self) -> Option<&mut TestWindow> {

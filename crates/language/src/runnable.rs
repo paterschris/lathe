@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{cmp::Reverse, iter, ops::Range, sync::Arc};
 
 use collections::HashMap;

@@ -1399,7 +1399,8 @@ impl TitleBar {
                                     move |_window, cx| {
                                         user_store.update(cx, |user_store, cx| {
                                             user_store
-                                                .set_current_organization(organization.clone(), cx);
+                                                .set_current_organization(organization.clone(), cx)
+                                                .detach();
                                         });
                                     }
                                 },

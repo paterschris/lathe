@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use gh_workflow::{ctx::Context, *};
 use serde_json::Value;
 
@@ -185,6 +187,20 @@ pub fn cargo_fmt() -> Step<Run> {
     named::bash("cargo fmt --all -- --check")
 }
 
+pub fn install_cargo_edit() -> Step<Use> {
+    taiki_install_action("cargo-edit")
+}
+
+pub fn taiki_install_action(tool: &str) -> Step<Use> {
+    Step::new(named::function_name(1))
+        .uses(
+            "taiki-e",
+            "install-action",
+            "02cc5f8ca9f2301050c0c099055816a41ee05507", // v2
+        )
+        .add_with(("tool", tool))
+}
+
 pub fn cargo_install_nextest() -> Step<Use> {
     named::uses(
         "taiki-e",
@@ -331,7 +347,7 @@ pub struct NamedJob<J: JobType = RunJob> {
 // }
 
 pub(crate) const DEFAULT_REPOSITORY_OWNER_GUARD: &str =
-    "(github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')";
+    "(github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')";
 
 pub fn repository_owner_guard_expression(trigger_always: bool) -> Expression {
     Expression::new(format!(
@@ -888,7 +904,6 @@ pub(crate) struct BotCommitStep {
     token: String,
 }
 
-#[allow(dead_code)]
 impl BotCommitStep {
     pub fn new(message: impl ToString, branch: impl ToString, token: &StepOutput) -> Self {
         Self {
@@ -923,13 +938,11 @@ impl From<BotCommitStep> for Step<Use> {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) enum GitRef {
     Tag(String),
     Branch(String),
 }
 
-#[allow(dead_code)]
 impl GitRef {
     pub fn tag(name: impl ToString) -> Self {
         Self::Tag(name.to_string())
@@ -1059,7 +1072,6 @@ pub(crate) struct CreatePrStep {
     path: Option<String>,
 }
 
-#[allow(dead_code)]
 impl CreatePrStep {
     pub fn new(title: impl ToString, branch: impl ToString, token: &StepOutput) -> Self {
         Self {

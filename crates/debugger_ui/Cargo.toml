@@ -63,6 +63,7 @@ settings.workspace = true
 sysinfo.workspace = true
 task.workspace = true
 tasks_ui.workspace = true
+alacritty_terminal.workspace = true
 terminal.workspace = true
 terminal_view.workspace = true
 text.workspace = true

@@ -44,21 +44,21 @@ trait InstalledApp {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "lathe",
+    name = "zed",
     disable_version_flag = true,
-    before_help = "The Lathe CLI binary.
-This CLI is a separate binary that invokes Lathe.
+    before_help = "The Zed CLI binary.
+This CLI is a separate binary that invokes Zed.
 
 Examples:
-    `lathe`
-          Simply opens Lathe
-    `lathe --foreground`
+    `zed`
+          Simply opens Zed
+    `zed --foreground`
           Runs in foreground (shows all logs)
-    `lathe path-to-your-project`
-          Open your project in Lathe
-    `lathe -n path-to-file `
+    `zed path-to-your-project`
+          Open your project in Zed
+    `zed -n path-to-file `
           Open file/folder in a new window",
-    after_help = "To read from stdin, append '-', e.g. 'ps axf | lathe -'"
+    after_help = "To read from stdin, append '-', e.g. 'ps axf | zed -'"
 )]
 struct Args {
     /// Wait for all of the given paths to be opened/closed before exiting.
@@ -133,7 +133,7 @@ struct Args {
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.
     #[arg(long, action = clap::ArgAction::Append, num_args = 2, value_names = ["OLD_PATH", "NEW_PATH"])]
     diff: Vec<String>,
-    /// Uninstall Lathe from user system
+    /// Uninstall Zed from user system
     #[cfg(all(
         any(target_os = "linux", target_os = "macos"),
         not(feature = "no-bundled-uninstall")
@@ -869,15 +869,10 @@ mod linux {
                 let cli = env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // ../libexec/lathe-editor is Lathe's Linux package layout. The remaining
-                // entries are upstream's: libexec is the standard, lib/zed is for Arch (and
-                // other non-libexec distros), ./zed is the target dir in dev builds.
-                let possible_locations = [
-                    "../libexec/lathe-editor",
-                    "../libexec/zed-editor",
-                    "../lib/zed/zed-editor",
-                    "./zed",
-                ];
+                // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
+                // ./zed is for the target directory in development builds.
+                let possible_locations =
+                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zed"];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -893,7 +888,7 @@ mod linux {
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
             format!(
-                "Lathe {}{}{} – {}",
+                "Zed {}{}{} – {}",
                 if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
                     "".to_string()
                 } else {
@@ -1053,7 +1048,7 @@ mod flatpak {
 
     pub fn set_bin_if_no_escape(mut args: super::Args) -> super::Args {
         if env::var(NO_ESCAPE_ENV_NAME).is_ok()
-            && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("dev.lathe.lathe"))
+            && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("dev.zed.Zed"))
             && args.zed.is_none()
         {
             args.zed = Some("/app/libexec/zed-editor".into());
@@ -1068,7 +1063,7 @@ mod flatpak {
         }
 
         if let Ok(flatpak_id) = env::var("FLATPAK_ID") {
-            if !flatpak_id.starts_with("dev.lathe.lathe") {
+            if !flatpak_id.starts_with("dev.zed.Zed") {
                 return None;
             }
 
@@ -1140,7 +1135,7 @@ mod windows {
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
             format!(
-                "Lathe {}{}{} – {}",
+                "Zed {}{}{} – {}",
                 if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
                     "".to_string()
                 } else {
@@ -1212,15 +1207,9 @@ mod windows {
                 let cli = std::env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // ../libexec/lathe-editor.exe is Lathe's Windows package layout (bin/cli +
-                // libexec/editor, mirrors Linux). ../Zed.exe is upstream Zed's installer
-                // layout, lib/zed is MSYS2, ./zed.exe is the target dir in dev builds.
-                let possible_locations = [
-                    "../libexec/lathe-editor.exe",
-                    "../Zed.exe",
-                    "../lib/zed/zed-editor.exe",
-                    "./zed.exe",
-                ];
+                // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
+                // directory in development builds.
+                let possible_locations = ["../Zed.exe", "../lib/zed/zed-editor.exe", "./zed.exe"];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -1319,7 +1308,7 @@ mod mac_os {
 
     impl InstalledApp for Bundle {
         fn zed_version_string(&self) -> String {
-            format!("Lathe {} – {}", self.version(), self.path().display(),)
+            format!("Zed {} – {}", self.version(), self.path().display(),)
         }
 
         fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
