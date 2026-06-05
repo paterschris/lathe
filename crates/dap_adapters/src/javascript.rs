@@ -110,9 +110,22 @@ impl JsDebugAdapter {
                 .entry("cwd")
                 .or_insert(delegate.worktree_root_path().to_string_lossy().into());
 
-            configuration
-                .entry("console")
-                .or_insert("externalTerminal".into());
+            // `console` is a launch-only field in vscode-js-debug; injecting it
+            // into an attach payload causes the adapter to exit at startup with
+            // an "unknown property" error. For launch, default to
+            // `internalConsole` (matching vscode-js-debug's own default) so
+            // `outputCapture: "std"` and the IDE's debug console work as users
+            // expect. Callers who want a real TTY can opt into
+            // `integratedTerminal` or `externalTerminal` explicitly.
+            let is_attach_request = configuration
+                .get("request")
+                .and_then(Value::as_str)
+                == Some("attach");
+            if !is_attach_request {
+                configuration
+                    .entry("console")
+                    .or_insert("internalConsole".into());
+            }
 
             configuration.entry("sourceMaps").or_insert(true.into());
             configuration
