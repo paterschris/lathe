@@ -2077,6 +2077,13 @@ pub fn entry_diagnostic_aware_icon_decoration_and_color(
 }
 
 pub fn entry_git_aware_label_color(git_status: GitSummary, ignored: bool, selected: bool) -> Color {
+    // When the row is highlighted (selected or marked), the selection background can
+    // collide with git status tints (e.g. Created/Modified greens), making the label
+    // unreadable. Fall back to the default label color so contrast against the
+    // selection background is always preserved.
+    if selected {
+        return entry_label_color(true);
+    }
     let tracked = git_status.index + git_status.worktree;
     if git_status.conflict > 0 {
         Color::Conflict
