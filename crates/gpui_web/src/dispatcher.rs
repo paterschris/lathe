@@ -210,6 +210,20 @@ impl WebDispatcher {
 }
 
 impl PlatformDispatcher for WebDispatcher {
+    fn get_all_timings(&self) -> Vec<gpui::ThreadTaskTimings> {
+        Vec::new()
+    }
+
+    fn get_current_thread_timings(&self) -> gpui::ThreadTaskTimings {
+        gpui::ThreadTaskTimings {
+            thread_name: None,
+            thread_id: std::thread::current().id(),
+            timings: Vec::new(),
+            stats: Default::default(),
+            total_pushed: 0,
+        }
+    }
+
     fn is_main_thread(&self) -> bool {
         self.on_main_thread()
     }
