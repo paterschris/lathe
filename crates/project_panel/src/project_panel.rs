@@ -5327,7 +5327,7 @@ impl ProjectPanel {
             }
         }
 
-        let filename_text_color = details.filename_text_color;
+        let mut filename_text_color = details.filename_text_color;
         let diagnostic_severity = details.diagnostic_severity;
         let diagnostic_count = details.diagnostic_count;
         let item_colors = get_item_color(is_sticky, cx);
@@ -5374,6 +5374,11 @@ impl ProjectPanel {
         } else if details.is_selected {
             item_colors.default
         } else if let Some(git_bg) = git_bg {
+            // The git status is being communicated via the row background; the
+            // label's git tint (e.g. Color::Created) would collide with it and
+            // render as low-contrast text on a same-hue background. Drop back
+            // to the default label color so the filename stays readable.
+            filename_text_color = Color::Default;
             git_bg
         } else {
             item_colors.default
@@ -6274,7 +6279,7 @@ impl ProjectPanel {
             .copied();
 
         let filename_text_color =
-            entry_git_aware_label_color(git_status, entry.is_ignored, is_marked);
+            entry_git_aware_label_color(git_status, entry.is_ignored, is_marked || is_selected);
 
         let is_cut = self
             .clipboard
