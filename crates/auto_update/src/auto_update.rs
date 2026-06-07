@@ -1336,20 +1336,23 @@ async fn install_release_macos(
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // hdiutil prints one tab-separated line per partition: <dev>\t<scheme>\t<mount-point>.
-    // The mount point is empty for partition-scheme rows, so pick the last non-empty entry
-    // that lives under the mountroot we requested. This is necessary because the volume
-    // name baked into the DMG is channel-specific (e.g. "Lathe", "Lathe Beta") rather than
-    // a fixed string, so we cannot derive the path without consulting hdiutil's output.
+    // hdiutil's "attach" output ends with one line per mounted partition:
+    //   <dev>  <scheme>  <mount-point>
+    // Older Apple-Partition-Map DMGs emit tab-separated columns; newer
+    // GPT-formatted DMGs (with a Protective MBR + GPT layout) emit
+    // multi-space-separated columns and include a verbose Checksumming
+    // preamble before the partition rows. split_whitespace handles both
+    // shapes, and the mountroot prefix check rejects preamble/header
+    // lines that don't carry a path under the mountroot we requested.
+    // (The volume name baked into the DMG is channel-specific, e.g.
+    // "Lathe" or "Lathe Beta", so we have to consult hdiutil's output
+    // rather than hard-code a path.)
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mount_path = stdout
         .lines()
         .rev()
         .find_map(|line| {
-            let last = line.split('\t').next_back()?.trim();
-            if last.is_empty() {
-                return None;
-            }
+            let last = line.split_whitespace().next_back()?;
             let path = PathBuf::from(last);
             path.starts_with(mountroot).then_some(path)
         })
