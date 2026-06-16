@@ -35,6 +35,14 @@ zip_path="target/release/Lathe-${version}-${arch}-macos.zip"
 tag="v${version}"
 repo="paterschris/lathe"
 
+# Mark beta/preview tags as GitHub prereleases
+prerelease_args=()
+case "$version" in
+    *-beta*|*-pre*|*-rc*)
+        prerelease_args=(--prerelease)
+        ;;
+esac
+
 echo ""
 echo "=== Step 3: Release ==="
 
@@ -48,7 +56,8 @@ else
         --title "Lathe ${tag}" \
         --notes "Lathe ${tag} for macOS (${arch})" \
         --target main \
-        --repo "$repo"
+        --repo "$repo" \
+        "${prerelease_args[@]}"
 fi
 
 echo ""
