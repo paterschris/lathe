@@ -11,6 +11,7 @@ use git::{
     status::{FileStatus, StatusCode, TrackedStatus},
 };
 use git_ui::{
+    branch_from_commit_modal::BranchFromCommitModal,
     commit_tooltip::CommitAvatar,
     commit_view::CommitView,
     git_status_icon,
@@ -1798,6 +1799,10 @@ impl GitGraph {
                                             .into();
                                             let target_branch = stripped.to_string();
                                             let weak_for_drop = weak_self_for_chip.clone();
+                                            let target_branch_for_ref =
+                                                target_branch.clone();
+                                            let weak_for_ref_drop =
+                                                weak_for_drop.clone();
                                             div()
                                                 .id(ElementId::Name(chip_id))
                                                 .on_drag(payload, |_payload, _, _, cx| {
@@ -1821,6 +1826,32 @@ impl GitGraph {
                                                                     target_branch,
                                                                     payload,
                                                                     cx,
+                                                                );
+                                                            })
+                                                            .ok();
+                                                    },
+                                                )
+                                                .drag_over::<DraggedGraphRef>({
+                                                    let target = target_branch_for_ref.clone();
+                                                    move |chip, payload, _, cx| {
+                                                        if payload.branch_name == target {
+                                                            chip
+                                                        } else {
+                                                            chip.bg(cx
+                                                                .theme()
+                                                                .colors()
+                                                                .drop_target_background)
+                                                        }
+                                                    }
+                                                })
+                                                .on_drop::<DraggedGraphRef>(
+                                                    move |payload, _, cx| {
+                                                        let payload = payload.clone();
+                                                        let target = target_branch_for_ref.clone();
+                                                        weak_for_ref_drop
+                                                            .update(cx, |this, cx| {
+                                                                this.handle_ref_drop_on_ref(
+                                                                    target, payload, cx,
                                                                 );
                                                             })
                                                             .ok();
@@ -3627,6 +3658,94 @@ impl GitGraph {
         );
     }
 
+    /// Drag-and-drop: dropping ref `payload.branch_name` onto ref `target`
+    /// rebases the source branch onto the target. Performs a `git switch` if
+    /// the source isn't already checked out, then runs `git rebase <target>`.
+    fn handle_ref_drop_on_ref(
+        &mut self,
+        target_branch: String,
+        payload: DraggedGraphRef,
+        cx: &mut Context<Self>,
+    ) {
+        if payload.repo_id != self.repo_id {
+            return;
+        }
+        if payload.branch_name == target_branch {
+            return;
+        }
+
+        let git_store = self.git_store.clone();
+        let workspace = self.workspace.clone();
+        let repo_id = self.repo_id;
+        let DraggedGraphRef {
+            branch_name: source,
+            current_tip_sha,
+            is_current: source_is_current,
+            ..
+        } = payload;
+
+        let Some(repo) = git_store.read(cx).repositories().get(&repo_id).cloned() else {
+            return;
+        };
+
+        let checkout_receiver = if source_is_current {
+            None
+        } else {
+            Some(repo.update(cx, |repo, _| repo.change_branch(source.clone())))
+        };
+        let rebase_target = target_branch;
+        let undo_branch = source.clone();
+        let undo_sha = current_tip_sha;
+        let label = format!("Rebase {source} onto {rebase_target}");
+
+        cx.spawn(async move |this, cx| {
+            if let Some(receiver) = checkout_receiver {
+                match receiver.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        log::error!("checkout before rebase failed: {error:?}");
+                        return;
+                    }
+                    Err(_) => return,
+                }
+            }
+            let rebase_receiver = this
+                .update(cx, |this, cx| {
+                    this.git_store
+                        .read(cx)
+                        .repositories()
+                        .get(&this.repo_id)
+                        .cloned()
+                        .map(|repo| {
+                            repo.update(cx, |repo, _| {
+                                repo.rebase(rebase_target.clone(), RebaseOptions::default())
+                            })
+                        })
+                })
+                .ok()
+                .flatten();
+            let Some(receiver) = rebase_receiver else {
+                return;
+            };
+            let _ = cx.update(|cx| {
+                detach_op_with_undo(
+                    cx,
+                    receiver,
+                    git_store,
+                    workspace,
+                    repo_id,
+                    label,
+                    UndoAction::RestoreBranchTip {
+                        branch: undo_branch,
+                        sha: undo_sha,
+                        is_current: true,
+                    },
+                );
+            });
+        })
+        .detach();
+    }
+
     fn handle_graph_right_click(
         &mut self,
         event: &MouseDownEvent,
@@ -3695,15 +3814,42 @@ impl GitGraph {
                         let sha = sha.to_string();
                         let repo = git_store.read(cx).repositories().get(&repo_id).cloned();
                         if let Some(repo) = repo {
-                            let receiver = repo.update(cx, |repo, _cx| repo.change_branch(sha));
+                            let receiver = repo.update(cx, |repo, _cx| repo.change_to_commit(sha));
                             detach_op(cx, receiver);
                         }
                     }
                 });
             }
 
-            menu = menu.entry("Branch from here…", None, move |_window, _cx| {
-                // Phase 3 will open a branch-name modal; placeholder until then.
+            menu = menu.entry("Branch from here…", None, {
+                let sha = sha_full.clone();
+                let short_sha = sha_short.clone();
+                let git_store = git_store.clone();
+                let workspace = workspace.clone();
+                move |window, cx| {
+                    let sha = sha.clone();
+                    let short_sha = short_sha.clone();
+                    let Some(repository) =
+                        git_store.read(cx).repositories().get(&repo_id).cloned()
+                    else {
+                        return;
+                    };
+                    let workspace_weak = workspace.clone();
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.toggle_modal(window, cx, |window, cx| {
+                                BranchFromCommitModal::new(
+                                    sha,
+                                    short_sha,
+                                    repository,
+                                    workspace_weak,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        })
+                        .ok();
+                }
             });
 
             menu = menu.entry("Tag here…", None, {
@@ -3986,8 +4132,7 @@ impl GitGraph {
                             };
                             Some(RebasePlanEntry {
                                 sha: sha.to_string().into(),
-                                short_sha: short.clone().into(),
-                                subject: short.into(),
+                                short_sha: short.into(),
                                 action,
                             })
                         })
@@ -4004,6 +4149,11 @@ impl GitGraph {
                             let git_store = git_store.clone();
                             let workspace_weak = workspace.clone();
                             let pre = pre.clone();
+                            let Some(repository) =
+                                git_store.read(cx).repositories().get(&repo_id).cloned()
+                            else {
+                                return;
+                            };
                             workspace
                                 .update(cx, |workspace, cx| {
                                     workspace.toggle_modal(window, cx, |_window, cx| {
@@ -4012,6 +4162,7 @@ impl GitGraph {
                                             upstream,
                                             repo_id,
                                             git_store,
+                                            repository,
                                             workspace_weak,
                                             pre,
                                             cx,
@@ -4036,11 +4187,7 @@ impl GitGraph {
                         let short = sha.display_short();
                         RebasePlanEntry {
                             sha: sha.to_string().into(),
-                            short_sha: short.clone().into(),
-                            // Subject isn't available on the lightweight graph data;
-                            // the short SHA stands in until the modal can fetch
-                            // commit details lazily.
-                            subject: short.into(),
+                            short_sha: short.into(),
                             action: RebaseAction::Pick,
                         }
                     })
@@ -4060,6 +4207,11 @@ impl GitGraph {
                         let git_store = git_store.clone();
                         let workspace_weak = workspace.clone();
                         let pre = pre.clone();
+                        let Some(repository) =
+                            git_store.read(cx).repositories().get(&repo_id).cloned()
+                        else {
+                            return;
+                        };
                         workspace
                             .update(cx, |workspace, cx| {
                                 workspace.toggle_modal(window, cx, |_window, cx| {
@@ -4068,6 +4220,7 @@ impl GitGraph {
                                         upstream,
                                         repo_id,
                                         git_store,
+                                        repository,
                                         workspace_weak,
                                         pre,
                                         cx,

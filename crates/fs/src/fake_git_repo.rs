@@ -883,6 +883,13 @@ impl GitRepository for FakeGitRepository {
         })
     }
 
+    fn change_to_commit(&self, _revision: String) -> BoxFuture<'_, Result<()>> {
+        self.with_state_async(true, |state| {
+            state.current_branch_name = None;
+            Ok(())
+        })
+    }
+
     fn create_branch(
         &self,
         name: String,

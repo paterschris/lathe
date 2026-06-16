@@ -1,4 +1,5 @@
 use crate::askpass_modal::AskPassModal;
+use crate::branch_from_commit_modal::BranchFromCommitModal;
 use crate::commit_modal::CommitModal;
 use crate::commit_tooltip::{CommitAvatar, CommitTooltip};
 use crate::commit_view::CommitView;
@@ -23,13 +24,14 @@ use editor::{
 use editor::{EditorStyle, RewrapOptions};
 use file_icons::FileIcons;
 use futures::StreamExt as _;
-use futures::channel::oneshot::Canceled;
+use futures::channel::oneshot::{self, Canceled};
 use git::commit::ParsedCommitMessage;
 use git::Oid;
 use git::repository::{
     Branch, CommitData, CommitDetails, CommitOptions, CommitSummary, DiffType, FetchOptions,
-    GitCommitTemplate, GitCommitter, LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput,
-    ResetMode, Upstream, UpstreamTracking, UpstreamTrackingStatus, get_git_committer,
+    GitCommitTemplate, GitCommitter, LogOrder, LogSource, MergeOptions, PushOptions, RebaseOptions,
+    Remote, RemoteCommandOutput, ResetMode, Upstream, UpstreamTracking, UpstreamTrackingStatus,
+    get_git_committer,
 };
 use git::stash::GitStash;
 use git::status::{DiffStat, StageStatus};
@@ -41,10 +43,11 @@ use git::{
     parse_git_remote_url,
 };
 use gpui::{
-    AbsoluteLength, Action, Anchor, AsyncApp, AsyncWindowContext, Bounds, ClickEvent, DismissEvent,
-    Empty, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, MouseButton, MouseDownEvent,
-    Point, PromptLevel, ScrollStrategy, Subscription, Task, TaskExt, TextStyle,
-    UniformListScrollHandle, WeakEntity, actions, anchored, deferred, point, size, uniform_list,
+    AbsoluteLength, Action, Anchor, AsyncApp, AsyncWindowContext, Bounds, ClickEvent, ClipboardItem,
+    DismissEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, MouseButton,
+    MouseDownEvent, Pixels, Point, PromptLevel, ScrollStrategy, Subscription, Task, TaskExt,
+    TextStyle, UniformListScrollHandle, WeakEntity, actions, anchored, deferred, point, size,
+    uniform_list,
 };
 use itertools::Itertools;
 use language::{Buffer, File, ToPoint as _};
@@ -310,7 +313,18 @@ enum ExplorerRow {
         count: usize,
         collapsed: bool,
     },
-    Entry(usize),
+    Folder {
+        section: ExplorerSection,
+        path: SharedString,
+        name: SharedString,
+        depth: usize,
+        collapsed: bool,
+        count: usize,
+    },
+    Entry {
+        entry_ix: usize,
+        depth: usize,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -363,6 +377,37 @@ pub(crate) enum ExplorerEntry {
     Stash(::git::stash::StashEntry),
 }
 
+/// Payload for the explorer-row drag-and-drop. Carries the source branch name
+/// from the row being dragged. Dropping it onto another branch row triggers a
+/// rebase of source onto target.
+#[derive(Clone)]
+pub(crate) struct DraggedExplorerBranch {
+    pub name: SharedString,
+}
+
+pub(crate) struct DraggedBranchView {
+    pub name: SharedString,
+}
+
+impl Render for DraggedBranchView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .bg(cx.theme().colors().background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .rounded_md()
+            .px_2()
+            .py_0p5()
+            .gap_1()
+            .child(
+                Icon::new(IconName::GitBranch)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(Label::new(self.name.clone()).size(LabelSize::Small))
+    }
+}
+
 impl ExplorerEntry {
     fn section(&self) -> ExplorerSection {
         match self {
@@ -399,6 +444,111 @@ impl ExplorerEntry {
                 .and_then(|commit| ::std::str::FromStr::from_str(commit.sha.as_ref()).ok()),
             Self::Worktree(worktree) => ::std::str::FromStr::from_str(worktree.sha.as_ref()).ok(),
             Self::Stash(stash) => Some(stash.oid),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ExplorerFolderNode {
+    name: SharedString,
+    full_path: SharedString,
+    children: BTreeMap<SharedString, ExplorerFolderNode>,
+    entry_ix: Option<usize>,
+}
+
+impl ExplorerFolderNode {
+    fn leaf_count(&self) -> usize {
+        let mut total = if self.entry_ix.is_some() { 1 } else { 0 };
+        for child in self.children.values() {
+            total += child.leaf_count();
+        }
+        total
+    }
+}
+
+fn build_explorer_folder_tree(
+    explorer_entries: &[ExplorerEntry],
+    indices: &[usize],
+) -> ExplorerFolderNode {
+    let mut root = ExplorerFolderNode::default();
+    for &ix in indices {
+        let Some(entry) = explorer_entries.get(ix) else {
+            continue;
+        };
+        let label = entry.label();
+        let parts: Vec<&str> = label.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let mut node = &mut root;
+        let mut full_path = String::new();
+        let last = parts.len() - 1;
+        for (i, part) in parts.iter().enumerate() {
+            if !full_path.is_empty() {
+                full_path.push('/');
+            }
+            full_path.push_str(part);
+            let segment = SharedString::from(part.to_string());
+            let path = SharedString::from(full_path.clone());
+            node = node
+                .children
+                .entry(segment.clone())
+                .or_insert_with(|| ExplorerFolderNode {
+                    name: segment,
+                    full_path: path,
+                    children: BTreeMap::new(),
+                    entry_ix: None,
+                });
+            if i == last {
+                node.entry_ix = Some(ix);
+            }
+        }
+    }
+    root
+}
+
+fn flatten_folder_tree(
+    node: &ExplorerFolderNode,
+    section: ExplorerSection,
+    depth: usize,
+    rows: &mut Vec<ExplorerRow>,
+    collapsed_folders: &HashSet<(ExplorerSection, SharedString)>,
+) {
+    // GitKraken-style ordering: folders (alphabetical) first at each level,
+    // then leaf entries (alphabetical) at the same level.
+    let mut child_folders = Vec::new();
+    let mut child_leaves = Vec::new();
+    for child in node.children.values() {
+        if child.children.is_empty() && child.entry_ix.is_some() {
+            child_leaves.push(child);
+        } else {
+            child_folders.push(child);
+        }
+    }
+    for folder in child_folders {
+        let key = (section, folder.full_path.clone());
+        let is_collapsed = collapsed_folders.contains(&key);
+        rows.push(ExplorerRow::Folder {
+            section,
+            path: folder.full_path.clone(),
+            name: folder.name.clone(),
+            depth,
+            collapsed: is_collapsed,
+            count: folder.leaf_count(),
+        });
+        if !is_collapsed {
+            flatten_folder_tree(folder, section, depth + 1, rows, collapsed_folders);
+        }
+        // A "folder" that also has its own entry (e.g. a branch named exactly
+        // the same as a parent of another branch) gets a leaf row right after
+        // its folder subtree at the same depth.
+        if let Some(ix) = folder.entry_ix {
+            rows.push(ExplorerRow::Entry { entry_ix: ix, depth });
+        }
+    }
+    for leaf in child_leaves {
+        if let Some(ix) = leaf.entry_ix {
+            rows.push(ExplorerRow::Entry { entry_ix: ix, depth });
         }
     }
 }
@@ -860,6 +1010,7 @@ pub struct GitPanel {
     explorer_entries: Vec<ExplorerEntry>,
     explorer_filter: Entity<Editor>,
     explorer_collapsed_sections: HashSet<ExplorerSection>,
+    explorer_collapsed_folders: HashSet<(ExplorerSection, SharedString)>,
     explorer_selected_row: Option<usize>,
     explorer_scroll_handle: UniformListScrollHandle,
     explorer_load_task: Option<Task<()>>,
@@ -1131,6 +1282,7 @@ impl GitPanel {
                     editor
                 }),
                 explorer_collapsed_sections: HashSet::default(),
+                explorer_collapsed_folders: HashSet::default(),
                 explorer_selected_row: None,
                 explorer_scroll_handle: UniformListScrollHandle::new(),
                 explorer_load_task: None,
@@ -5986,6 +6138,22 @@ impl GitPanel {
         }));
     }
 
+    /// Toggle the collapsed state for one folder path within a section.
+    fn toggle_explorer_folder(
+        &mut self,
+        section: ExplorerSection,
+        path: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (section, path);
+        if self.explorer_collapsed_folders.contains(&key) {
+            self.explorer_collapsed_folders.remove(&key);
+        } else {
+            self.explorer_collapsed_folders.insert(key);
+        }
+        cx.notify();
+    }
+
     /// Populate `explorer_entries` from data already on the cached repository
     /// snapshot (linked worktrees, stash entries) so the tab renders
     /// immediately while the async branch fetch is in flight.
@@ -6073,6 +6241,8 @@ impl GitPanel {
     ) -> impl IntoElement {
         let sections = self.explorer_visible_entries(cx);
         let collapsed = self.explorer_collapsed_sections.clone();
+        let collapsed_folders = self.explorer_collapsed_folders.clone();
+        let filter_active = !self.explorer_filter_text(cx).trim().is_empty();
 
         // Build a flat list of rows: alternating section-header rows and
         // entry rows. We track each row's kind in a parallel vector so the
@@ -6085,9 +6255,19 @@ impl GitPanel {
                 count: indices.len(),
                 collapsed: is_collapsed,
             });
-            if !is_collapsed {
+            if is_collapsed {
+                continue;
+            }
+            let tree_eligible = matches!(
+                section,
+                ExplorerSection::Local | ExplorerSection::Remote
+            ) && !filter_active;
+            if tree_eligible {
+                let tree = build_explorer_folder_tree(&self.explorer_entries, indices);
+                flatten_folder_tree(&tree, *section, 0, &mut rows, &collapsed_folders);
+            } else {
                 for ix in indices {
-                    rows.push(ExplorerRow::Entry(*ix));
+                    rows.push(ExplorerRow::Entry { entry_ix: *ix, depth: 0 });
                 }
             }
         }
@@ -6166,6 +6346,7 @@ impl GitPanel {
                 let collapsed = *collapsed;
                 h_flex()
                     .id(("git-explorer-header", row_ix))
+                    .w_full()
                     .px_3()
                     .py_1()
                     .gap_1()
@@ -6201,23 +6382,102 @@ impl GitPanel {
                     }))
                     .into_any_element()
             }
-            ExplorerRow::Entry(entry_ix) => {
+            ExplorerRow::Folder {
+                section,
+                path,
+                name,
+                depth,
+                collapsed,
+                count,
+            } => {
+                let section = *section;
+                let path = path.clone();
+                let collapsed = *collapsed;
+                let depth = *depth;
+                h_flex()
+                    .id(("git-explorer-folder", row_ix))
+                    .w_full()
+                    .pl(px(20.0 + (depth as f32) * 14.0))
+                    .pr_3()
+                    .py_0p5()
+                    .gap_1()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().colors().element_hover))
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::Folder
+                        } else {
+                            IconName::FolderOpen
+                        })
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .child(Label::new(name.clone()).size(LabelSize::Small))
+                    .child(div().flex_1())
+                    .child(
+                        Label::new(count.to_string())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_explorer_folder(section, path.clone(), cx);
+                    }))
+                    .into_any_element()
+            }
+            ExplorerRow::Entry { entry_ix, depth } => {
                 let entry_ix = *entry_ix;
+                let depth = *depth;
                 let entry = match explorer_entries.get(entry_ix) {
                     Some(entry) => entry.clone(),
                     None => return div().into_any_element(),
                 };
                 let selected = self.explorer_selected_row == Some(row_ix);
-                let label = entry.label();
+                let full_label = entry.label();
+                let label: SharedString = if depth > 0 {
+                    let last = full_label
+                        .as_ref()
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(full_label.as_ref());
+                    SharedString::from(last.to_string())
+                } else {
+                    full_label
+                };
                 let (icon, is_head) = match &entry {
                     ExplorerEntry::LocalBranch(b) => (IconName::GitBranch, b.is_head),
                     ExplorerEntry::RemoteBranch(_) => (IconName::GitBranch, false),
                     ExplorerEntry::Worktree(w) => (IconName::FolderOpen, w.is_main),
                     ExplorerEntry::Stash(_) => (IconName::Archive, false),
                 };
+                let (drag_source_name, drop_target_name) = match &entry {
+                    ExplorerEntry::LocalBranch(b) => (
+                        Some(SharedString::from(b.name().to_string())),
+                        Some(SharedString::from(b.name().to_string())),
+                    ),
+                    ExplorerEntry::RemoteBranch(b) => {
+                        (None, Some(SharedString::from(b.name().to_string())))
+                    }
+                    ExplorerEntry::Worktree(_) | ExplorerEntry::Stash(_) => (None, None),
+                };
+                let tracking_status = match &entry {
+                    ExplorerEntry::LocalBranch(b) => b.tracking_status(),
+                    _ => None,
+                }
+                .filter(|s| s.ahead > 0 || s.behind > 0);
                 h_flex()
                     .id(("git-explorer-row", row_ix))
-                    .px_5()
+                    .w_full()
+                    .pl(px(20.0 + (depth as f32) * 14.0))
+                    .pr_3()
                     .py_0p5()
                     .gap_2()
                     .cursor_pointer()
@@ -6230,24 +6490,80 @@ impl GitPanel {
                     } else {
                         Color::Muted
                     }))
-                    .child(Label::new(label).size(LabelSize::Small))
-                    .on_click(cx.listener(move |this, _event, window, cx| {
+                    .child(Label::new(label).size(LabelSize::Small).when(
+                        is_head,
+                        |label| label.color(Color::Accent),
+                    ))
+                    .child(div().flex_1())
+                    .when_some(tracking_status, |this, status| {
+                        this.child(render_tracking_chip(status))
+                    })
+                    .when_some(drag_source_name, |this, source| {
+                        this.on_drag(
+                            DraggedExplorerBranch { name: source },
+                            |payload, _, _, cx| {
+                                cx.new(|_| DraggedBranchView {
+                                    name: payload.name.clone(),
+                                })
+                            },
+                        )
+                    })
+                    .when_some(drop_target_name, |this, target_name| {
+                        let target_for_drag = target_name.clone();
+                        this.drag_over::<DraggedExplorerBranch>(
+                            move |style, payload, _window, cx| {
+                                if payload.name == target_for_drag {
+                                    style
+                                } else {
+                                    style.bg(cx.theme().colors().drop_target_background)
+                                }
+                            },
+                        )
+                        .on_drop(cx.listener(
+                            move |this, payload: &DraggedExplorerBranch, window, cx| {
+                                if payload.name == target_name {
+                                    return;
+                                }
+                                this.rebase_branch_onto(
+                                    payload.name.to_string(),
+                                    target_name.to_string(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ))
+                    })
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.explorer_selected_row = Some(row_ix);
-                        this.activate_explorer_entry(entry_ix, window, cx);
+                        if event.click_count() > 1 {
+                            this.checkout_explorer_entry(entry_ix, window, cx);
+                        } else {
+                            this.activate_explorer_entry(entry_ix, window, cx);
+                        }
                         cx.notify();
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.explorer_selected_row = Some(row_ix);
+                            this.deploy_explorer_context_menu(
+                                event.position,
+                                entry_ix,
+                                window,
+                                cx,
+                            );
+                        }),
+                    )
                     .into_any_element()
             }
         }
     }
 
-    /// Handle a click on an Explorer row. Single-click is purely
-    /// navigational: it selects the row and dispatches `OpenAtCommit` so
-    /// the Git Graph view opens (or activates, if already open) on the
-    /// target commit. No branch checkout, worktree switch, or stash apply
-    /// happens here — those are destructive and belong on an explicit
-    /// gesture (right-click menu) rather than the same single-click used
-    /// for browsing.
+    /// Handle a single click on an Explorer row. Purely navigational: it
+    /// selects the row and dispatches `OpenAtCommit` so the Git Graph view
+    /// opens (or activates, if already open) on the target commit. Double-
+    /// click invokes `checkout_explorer_entry` instead for the destructive
+    /// switch action.
     fn activate_explorer_entry(
         &mut self,
         entry_ix: usize,
@@ -6273,6 +6589,429 @@ impl GitPanel {
             }),
             cx,
         );
+    }
+
+    /// Double-click on an Explorer row: switch to the underlying branch
+    /// (local or remote). Worktree/stash double-click is a no-op for now —
+    /// those still require the right-click menu.
+    fn checkout_explorer_entry(
+        &mut self,
+        entry_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.explorer_entries.get(entry_ix).cloned() else {
+            return;
+        };
+        let branch_name = match entry {
+            ExplorerEntry::LocalBranch(b) | ExplorerEntry::RemoteBranch(b) => b.name().to_string(),
+            ExplorerEntry::Worktree(_) | ExplorerEntry::Stash(_) => return,
+        };
+        let Some(repo) = self.active_repository.clone() else {
+            return;
+        };
+        cx.spawn(async move |_, cx| {
+            repo.update(cx, |repo, _| repo.change_branch(branch_name))
+                .await??;
+            anyhow::Ok(())
+        })
+        .detach_and_prompt_err("Failed to change branch", window, cx, |_, _, _| None);
+    }
+
+    /// Drag-and-drop handler: rebase `source` branch onto `target`. Performs
+    /// `git switch <source>` (so the source branch is checked out) and then
+    /// `git rebase <target>`. Both steps run on the foreground; errors surface
+    /// via the standard git-panel error toast.
+    fn rebase_branch_onto(
+        &mut self,
+        source: String,
+        target: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.active_repository.clone() else {
+            return;
+        };
+        let workspace = self.workspace.clone();
+        let already_on_source = repo
+            .read(cx)
+            .branch
+            .as_ref()
+            .map(|b| b.name() == source)
+            .unwrap_or(false);
+        let checkout_receiver = if already_on_source {
+            None
+        } else {
+            Some(repo.update(cx, |repo, _| repo.change_branch(source.clone())))
+        };
+        let target_label = target.clone();
+        cx.spawn(async move |this, cx| {
+            if let Some(receiver) = checkout_receiver {
+                match receiver.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        if let Some(workspace) = workspace.upgrade() {
+                            let _ = cx.update(|cx| {
+                                show_error_toast(
+                                    workspace,
+                                    format!("checkout {source}"),
+                                    error,
+                                    cx,
+                                )
+                            });
+                        }
+                        return;
+                    }
+                    Err(_) => return,
+                }
+            }
+            let rebase_receiver = this
+                .update(cx, |this, cx| {
+                    this.active_repository.as_ref().map(|repo| {
+                        repo.update(cx, |repo, _| {
+                            repo.rebase(target.clone(), RebaseOptions::default())
+                        })
+                    })
+                })
+                .ok()
+                .flatten();
+            let Some(receiver) = rebase_receiver else {
+                return;
+            };
+            match receiver.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if let Some(workspace) = workspace.upgrade() {
+                        let _ = cx.update(|cx| {
+                            show_error_toast(
+                                workspace,
+                                format!("rebase onto {target_label}"),
+                                error,
+                                cx,
+                            )
+                        });
+                    }
+                }
+                Err(_) => {}
+            }
+        })
+        .detach();
+    }
+
+    /// Push an empty source refspec (`:<remote_branch>`) to delete the
+    /// branch on the upstream remote, then delete the local branch on
+    /// success. Errors at either stage surface as the standard git error
+    /// toast; on success the Explorer branch list is refreshed so the
+    /// removed entries disappear without a manual reopen.
+    fn delete_branch_remote(
+        &mut self,
+        branch_name: SharedString,
+        remote_name: SharedString,
+        remote_branch_name: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_push_and_pull(cx) {
+            self.show_error_toast(
+                "delete remote branch",
+                anyhow::anyhow!(
+                    "deleting remote branches is not yet supported on remote projects"
+                ),
+                cx,
+            );
+            return;
+        }
+        let Some(repo) = self.active_repository.clone() else {
+            return;
+        };
+        let askpass =
+            self.askpass_delegate(format!("git push {remote_name} --delete"), window, cx);
+        let push_label: SharedString =
+            format!("delete {branch_name} on {remote_name}").into();
+
+        cx.spawn(async move |this, cx| {
+            let push = repo.update(cx, |repo, cx| {
+                repo.push(
+                    SharedString::default(),
+                    remote_branch_name,
+                    remote_name,
+                    None,
+                    askpass,
+                    cx,
+                )
+            });
+            match push.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    this.update(cx, |this, cx| this.show_error_toast(push_label, err, cx))?;
+                    return anyhow::Ok(());
+                }
+                Err(_) => return anyhow::Ok(()),
+            }
+
+            let delete_local = repo.update(cx, |repo, _| {
+                repo.delete_branch(false, branch_name.to_string(), false)
+            });
+            match delete_local.await {
+                Ok(Ok(())) => {
+                    this.update(cx, |this, cx| this.refresh_explorer_data(cx))?;
+                }
+                Ok(Err(err)) => {
+                    this.update(cx, |this, cx| {
+                        this.show_error_toast("delete local branch", err, cx)
+                    })?;
+                }
+                Err(_) => {}
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn deploy_explorer_context_menu(
+        &mut self,
+        position: Point<Pixels>,
+        entry_ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.explorer_entries.get(entry_ix).cloned() else {
+            return;
+        };
+        if let ExplorerEntry::Stash(stash) = &entry {
+            self.deploy_stash_context_menu(position, stash.clone(), window, cx);
+            return;
+        }
+        let (branch, is_remote) = match &entry {
+            ExplorerEntry::LocalBranch(b) => (b.clone(), false),
+            ExplorerEntry::RemoteBranch(b) => (b.clone(), true),
+            ExplorerEntry::Worktree(_) | ExplorerEntry::Stash(_) => return,
+        };
+        let Some(repo) = self.active_repository.clone() else {
+            return;
+        };
+        let branch_name: SharedString = branch.name().to_string().into();
+        let is_head = branch.is_head;
+        let current_branch_name = repo
+            .read(cx)
+            .branch
+            .as_ref()
+            .map(|b| b.name().to_string());
+        let workspace = self.workspace.clone();
+        let panel = cx.entity().downgrade();
+        // Local branches that actually have a remote-tracking upstream get the
+        // "delete on origin too" entry. We skip it when the tracking ref is
+        // `Gone` because there is no remote ref left to push a delete to.
+        let upstream_for_remote_delete: Option<(SharedString, SharedString)> = if is_remote {
+            None
+        } else {
+            branch.upstream.as_ref().and_then(|u| {
+                if !matches!(u.tracking, UpstreamTracking::Tracked(_)) {
+                    return None;
+                }
+                let remote = u.remote_name()?;
+                let remote_branch = u.branch_name()?;
+                Some((remote.to_string().into(), remote_branch.to_string().into()))
+            })
+        };
+
+        let context_menu = ContextMenu::build(window, cx, |menu, _window, _cx| {
+            let mut menu = menu
+                .context(self.focus_handle.clone())
+                .header(branch_name.clone());
+
+            if !is_head {
+                let name = branch_name.clone();
+                let repo = repo.clone();
+                let workspace = workspace.clone();
+                let panel = panel.clone();
+                menu = menu.entry("Checkout", None, move |_, cx| {
+                    let receiver =
+                        repo.update(cx, |repo, _| repo.change_branch(name.to_string()));
+                    run_branch_op(cx, workspace.clone(), panel.clone(), receiver, "checkout");
+                });
+            }
+
+            if let Some(commit) = branch.most_recent_commit.clone() {
+                let sha: SharedString = commit.sha.to_string().into();
+                let short_sha: SharedString =
+                    sha.chars().take(7).collect::<String>().into();
+                let repo = repo.clone();
+                let workspace = workspace.clone();
+                menu = menu.entry("Branch from here…", None, move |window, cx| {
+                    let sha = sha.clone();
+                    let short_sha = short_sha.clone();
+                    let repo = repo.clone();
+                    let workspace_weak = workspace.clone();
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.toggle_modal(window, cx, |window, cx| {
+                                BranchFromCommitModal::new(
+                                    sha,
+                                    short_sha,
+                                    repo,
+                                    workspace_weak,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        })
+                        .ok();
+                });
+            }
+
+            menu = menu.separator();
+
+            {
+                let name = branch_name.clone();
+                menu = menu.entry("Copy branch name", None, move |_, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(name.to_string()));
+                });
+            }
+
+            let can_merge_or_rebase = !is_head && current_branch_name.is_some();
+            if can_merge_or_rebase {
+                let current = current_branch_name.clone().unwrap_or_default();
+
+                let name = branch_name.clone();
+                let repo_merge = repo.clone();
+                let current_label = current.clone();
+                let workspace_m = workspace.clone();
+                let panel_m = panel.clone();
+                menu = menu.entry(
+                    format!("Merge into {current_label}"),
+                    None,
+                    move |_, cx| {
+                        let receiver = repo_merge.update(cx, |repo, _| {
+                            repo.merge(name.to_string(), MergeOptions::default())
+                        });
+                        run_branch_op(cx, workspace_m.clone(), panel_m.clone(), receiver, "merge");
+                    },
+                );
+
+                let name = branch_name.clone();
+                let repo_rebase = repo.clone();
+                let workspace_r = workspace.clone();
+                let panel_r = panel.clone();
+                menu = menu.entry(
+                    format!("Rebase {current} onto this"),
+                    None,
+                    move |_, cx| {
+                        let receiver = repo_rebase.update(cx, |repo, _| {
+                            repo.rebase(name.to_string(), RebaseOptions::default())
+                        });
+                        run_branch_op(cx, workspace_r.clone(), panel_r.clone(), receiver, "rebase");
+                    },
+                );
+            }
+
+            if !is_head {
+                menu = menu.separator();
+                let local_label = if upstream_for_remote_delete.is_some() {
+                    "Delete locally"
+                } else {
+                    "Delete"
+                };
+                let name = branch_name.clone();
+                let repo_del = repo.clone();
+                let workspace_d = workspace.clone();
+                let panel_d = panel.clone();
+                menu = menu.entry(local_label, None, move |_, cx| {
+                    let receiver = repo_del.update(cx, |repo, _| {
+                        repo.delete_branch(is_remote, name.to_string(), false)
+                    });
+                    run_branch_op(cx, workspace_d.clone(), panel_d.clone(), receiver, "delete branch");
+                });
+
+                if let Some((remote_name, remote_branch_name)) = upstream_for_remote_delete {
+                    let name = branch_name.clone();
+                    let panel_dr = panel.clone();
+                    menu = menu.entry(
+                        format!("Delete on {remote_name} and locally"),
+                        None,
+                        move |window, cx| {
+                            let name = name.clone();
+                            let remote_name = remote_name.clone();
+                            let remote_branch_name = remote_branch_name.clone();
+                            panel_dr
+                                .update(cx, |panel, cx| {
+                                    panel.delete_branch_remote(
+                                        name,
+                                        remote_name,
+                                        remote_branch_name,
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                        },
+                    );
+                }
+            }
+
+            menu
+        });
+        self.set_context_menu(context_menu, position, window, cx);
+    }
+
+    fn deploy_stash_context_menu(
+        &mut self,
+        position: Point<Pixels>,
+        stash: ::git::stash::StashEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.active_repository.clone() else {
+            return;
+        };
+        let workspace = self.workspace.clone();
+        let panel = cx.entity().downgrade();
+        let header: SharedString = stash.message.clone().into();
+        let index = stash.index;
+
+        let context_menu = ContextMenu::build(window, cx, |menu, _window, _cx| {
+            let mut menu = menu.context(self.focus_handle.clone()).header(header.clone());
+
+            {
+                let repo = repo.clone();
+                let workspace = workspace.clone();
+                menu = menu.entry("Apply Stash", None, move |_, cx| {
+                    run_stash_op(cx, workspace.clone(), repo.clone(), StashOp::Apply, index);
+                });
+            }
+
+            {
+                let repo = repo.clone();
+                let workspace = workspace.clone();
+                menu = menu.entry("Pop Stash", None, move |_, cx| {
+                    run_stash_op(cx, workspace.clone(), repo.clone(), StashOp::Pop, index);
+                });
+            }
+
+            menu = menu.separator();
+
+            {
+                let message = stash.message.clone();
+                menu = menu.entry("Copy stash message", None, move |_, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(message.clone()));
+                });
+            }
+
+            menu = menu.separator();
+
+            {
+                let repo = repo.clone();
+                let workspace = workspace.clone();
+                let panel = panel.clone();
+                menu = menu.entry("Delete Stash", None, move |_, cx| {
+                    let receiver = repo.update(cx, |repo, cx| repo.stash_drop(Some(index), cx));
+                    run_branch_op(cx, workspace.clone(), panel.clone(), receiver, "stash drop");
+                });
+            }
+
+            menu
+        });
+        self.set_context_menu(context_menu, position, window, cx);
     }
 
     fn select_next_history_entry(&mut self, cx: &mut Context<Self>) {
@@ -9082,6 +9821,74 @@ pub(crate) fn show_error_toast(
             workspace.toggle_status_toast(toast, cx)
         });
     }
+}
+
+#[derive(Clone, Copy)]
+enum StashOp {
+    Pop,
+    Apply,
+}
+
+impl StashOp {
+    fn label(self) -> &'static str {
+        match self {
+            StashOp::Pop => "stash pop",
+            StashOp::Apply => "stash apply",
+        }
+    }
+}
+
+fn run_stash_op(
+    cx: &mut App,
+    workspace: WeakEntity<Workspace>,
+    repo: Entity<Repository>,
+    op: StashOp,
+    index: usize,
+) {
+    let label = op.label();
+    cx.spawn(async move |cx| {
+        let task = repo.update(cx, |repo, cx| match op {
+            StashOp::Pop => repo.stash_pop(Some(index), cx),
+            StashOp::Apply => repo.stash_apply(Some(index), cx),
+        });
+        if let Err(err) = task.await {
+            let Some(workspace) = workspace.upgrade() else {
+                log::error!("git {label} failed: {err:?}");
+                return;
+            };
+            cx.update(|cx| show_error_toast(workspace, label, err, cx));
+        }
+    })
+    .detach();
+}
+
+fn run_branch_op(
+    cx: &mut App,
+    workspace: WeakEntity<Workspace>,
+    panel: WeakEntity<GitPanel>,
+    receiver: oneshot::Receiver<anyhow::Result<()>>,
+    action: impl Into<SharedString>,
+) {
+    let action = action.into();
+    cx.spawn(async move |cx| {
+        let result = receiver.await;
+        let err = match result {
+            Ok(Ok(())) => {
+                panel
+                    .update(cx, |panel, cx| panel.refresh_explorer_data(cx))
+                    .ok();
+                return;
+            }
+            Ok(Err(e)) => e,
+            Err(_) => anyhow::anyhow!("operation cancelled"),
+        };
+        let Ok(workspace) = workspace.upgrade().ok_or(()) else {
+            log::error!("git {action} failed: {err:?}");
+            return;
+        };
+        let _ = cx.update(|cx| show_error_toast(workspace, action, err, cx));
+    })
+    .detach();
 }
 
 fn rpc_error_raw_message_from_chain(error: &anyhow::Error) -> Option<&str> {

@@ -830,6 +830,10 @@ pub trait GitRepository: Send + Sync {
     fn branches(&self) -> BoxFuture<'_, Result<Vec<Branch>>>;
 
     fn change_branch(&self, name: String) -> BoxFuture<'_, Result<()>>;
+    /// Detached HEAD checkout of an arbitrary revision (commit SHA, tag, etc.).
+    /// Unlike `change_branch`, no branch lookup is performed — the revision
+    /// is passed directly to `git checkout`.
+    fn change_to_commit(&self, revision: String) -> BoxFuture<'_, Result<()>>;
     fn create_branch(&self, name: String, base_branch: Option<String>)
     -> BoxFuture<'_, Result<()>>;
     fn rename_branch(&self, branch: String, new_name: String) -> BoxFuture<'_, Result<()>>;
@@ -1321,6 +1325,9 @@ pub struct RebaseTodoEntry {
     pub action: RebaseAction,
     /// Commit SHA the action applies to. Ignored for `Drop` if you choose to omit.
     pub commit: String,
+    /// When `action` is `Reword`, the replacement commit message. `None` keeps
+    /// the existing message. Ignored for other actions.
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2329,6 +2336,16 @@ impl GitRepository for RealGitRepository {
             .spawn(async move {
                 let branch = branch.await?;
                 git_binary?.run(&["checkout", &branch]).await?;
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn change_to_commit(&self, revision: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary_in_worktree();
+        self.executor
+            .spawn(async move {
+                git_binary?.run(&["checkout", &revision]).await?;
                 anyhow::Ok(())
             })
             .boxed()
@@ -3864,12 +3881,44 @@ impl GitRepository for RealGitRepository {
 
             // Render the todo file we want git to use, then point GIT_SEQUENCE_EDITOR
             // at a small helper that overwrites the todo file git generates.
+            //
+            // For a `Reword` entry with a replacement message, we can't rely on
+            // `reword` + `GIT_EDITOR=true` (which would keep the existing message).
+            // Instead we emit `pick <sha>` followed by an `exec git commit --amend`
+            // that reads the new message from a tempfile, which sidesteps shell
+            // quoting headaches and supports multi-line bodies.
             let mut todo_text = String::new();
+            // Hold the reword tempfiles alive until the rebase command finishes.
+            let mut reword_message_files: Vec<tempfile::NamedTempFile> = Vec::new();
             for entry in &todo {
-                todo_text.push_str(entry.action.as_command());
-                todo_text.push(' ');
-                todo_text.push_str(&entry.commit);
-                todo_text.push('\n');
+                if entry.action == RebaseAction::Reword
+                    && let Some(message) = entry.message.as_ref()
+                {
+                    let msg_file = tempfile::Builder::new()
+                        .prefix("lathe-rebase-msg-")
+                        .tempfile()
+                        .context("creating temp file for rebase reword message")?;
+                    smol::fs::write(msg_file.path(), message.as_bytes())
+                        .await
+                        .context("writing rebase reword message")?;
+                    let msg_path = msg_file
+                        .path()
+                        .to_str()
+                        .context("rebase reword message path is not utf-8")?
+                        .to_owned();
+                    todo_text.push_str("pick ");
+                    todo_text.push_str(&entry.commit);
+                    todo_text.push('\n');
+                    todo_text.push_str("exec git commit --amend --cleanup=verbatim --allow-empty -F \"");
+                    todo_text.push_str(&msg_path.replace('"', "\\\""));
+                    todo_text.push_str("\"\n");
+                    reword_message_files.push(msg_file);
+                } else {
+                    todo_text.push_str(entry.action.as_command());
+                    todo_text.push(' ');
+                    todo_text.push_str(&entry.commit);
+                    todo_text.push('\n');
+                }
             }
 
             let tmp = tempfile::Builder::new()

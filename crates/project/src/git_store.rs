@@ -7778,6 +7778,22 @@ impl Repository {
         )
     }
 
+    /// Detached HEAD checkout of an arbitrary revision (commit SHA, tag, etc.).
+    /// Not yet wired through collab — bails on remote projects.
+    pub fn change_to_commit(&mut self, revision: String) -> oneshot::Receiver<Result<()>> {
+        let label: SharedString = format!("git checkout {revision}").into();
+        self.send_job("change_to_commit", Some(label), move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.change_to_commit(revision).await
+                }
+                RepositoryState::Remote(_) => {
+                    bail!("detached checkout is not yet supported on remote projects")
+                }
+            }
+        })
+    }
+
     pub fn delete_branch(
         &mut self,
         is_remote: bool,

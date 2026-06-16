@@ -43,6 +43,7 @@ pub mod git_activity_panel;
 pub mod git_flow;
 pub mod git_panel;
 pub use git_panel::{Event as GitPanelEvent, GitPanel};
+pub mod branch_from_commit_modal;
 pub mod interactive_rebase_modal;
 pub mod merge_editor_view;
 // PR view + panel live in the dedicated `pr_ui` crate now; zed.rs takes care
