@@ -1416,14 +1416,21 @@ impl PickerDelegate for DebugDelegate {
             return;
         };
 
+        let owning_worktree_id = match &kind {
+            Some(TaskSourceKind::Worktree { id, .. }) => Some(*id),
+            _ => None,
+        };
         let context = context.unwrap_or_else(|| {
             self.task_contexts
                 .as_ref()
                 .and_then(|task_contexts| {
+                    let context = owning_worktree_id
+                        .and_then(|id| task_contexts.task_context_for_worktree_id(id).cloned())
+                        .or_else(|| task_contexts.active_context().cloned())?;
                     Some(DebugScenarioContext {
-                        task_context: task_contexts.active_context().cloned()?.into(),
+                        task_context: context.into(),
                         active_buffer: None,
-                        worktree_id: task_contexts.worktree(),
+                        worktree_id: owning_worktree_id.or_else(|| task_contexts.worktree()),
                     })
                 })
                 .unwrap_or_default()
