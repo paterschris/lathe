@@ -11547,8 +11547,17 @@ impl Focusable for Editor {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        EditorElement::new(&cx.entity(), self.create_style(cx))
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut style = self.create_style(cx);
+        if matches!(
+            self.mode,
+            EditorMode::Full { .. } | EditorMode::Minimap { .. }
+        ) {
+            style.text.font_size = ThemeSettings::get_global(cx)
+                .buffer_font_size_in_window(window, cx)
+                .into();
+        }
+        EditorElement::new(&cx.entity(), style)
     }
 }
 

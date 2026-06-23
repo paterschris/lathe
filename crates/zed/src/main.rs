@@ -205,6 +205,13 @@ fn main() {
     #[cfg(unix)]
     util::prevent_root_execution();
 
+    // Raise the file-descriptor soft limit early; the default (256 on macOS) is
+    // easily exhausted by watched files plus spawned agent subprocesses, which
+    // surfaces as EMFILE ("Too many open files") and silently breaks file reads
+    // and subprocess spawns.
+    #[cfg(unix)]
+    util::increase_open_file_limit();
+
     let args = Args::parse();
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
@@ -516,6 +523,7 @@ fn main() {
 
         GitHostingProviderRegistry::set_global(git_hosting_provider_registry, cx);
         git_hosting_providers::init(cx);
+        git::git_host_credentials::init(zed_credentials_provider::global(cx), cx);
 
         OpenListener::set_global(cx, open_listener.clone());
 
@@ -767,7 +775,7 @@ fn main() {
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         collab_ui::init(&app_state, cx);
         git_ui::init(cx);
-        // pr_ui::init disabled for the beta — see `initialize_panels`.
+        pr_ui::init(cx);
         git_graph::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);

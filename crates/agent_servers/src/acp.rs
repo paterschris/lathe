@@ -731,6 +731,9 @@ impl AcpConnection {
         //   2. global default for the agent
         //   3. implicit single-account default
         // No injection happens for agents without a known descriptor or when no account resolves.
+        // API-key env vars to strip from the spawned child when an account is
+        // bound (populated inside the injection block below). Empty = no scrub.
+        let mut scrub_env: &'static [&'static str] = &[];
         let is_local_project = project.read_with(cx, |project, _| project.is_local());
         if is_local_project {
             let agent_id_str = agent_id.0.as_ref();
@@ -745,6 +748,20 @@ impl AcpConnection {
                             descriptor.config_dir_env_var.to_string(),
                             account.config_dir.display().to_string(),
                         );
+                        // For Gemini, make sure the relocated config dir selects
+                        // AI Studio API-key auth. Accounts created before this was
+                        // written at create time would otherwise launch with no
+                        // selected auth type and fail with AuthRequired.
+                        if agent_id_str == GEMINI_ID {
+                            if let Err(error) = ai_accounts::ensure_gemini_api_key_auth_selected(
+                                &account.config_dir,
+                            ) {
+                                log::warn!(
+                                    "ai_accounts: failed to ensure Gemini settings.json for {}: {error:#}",
+                                    account.id
+                                );
+                            }
+                        }
                         // Touch last_used_at so the account floats to the top
                         // of the Manage modal's per-agent list. Failure here
                         // is benign — drop a log line and keep going rather
@@ -754,6 +771,14 @@ impl AcpConnection {
                                 "ai_accounts: failed to update last_used_at for {}: {error:#}",
                                 account.id
                             );
+                        }
+                        // Strip API-key env vars that would override the
+                        // account's subscription login. Removed from the
+                        // injected map here, and from the child's inherited
+                        // environment after the command is built.
+                        scrub_env = descriptor.scrub_env;
+                        for key in scrub_env {
+                            env.remove(*key);
                         }
                     }
                 }
@@ -771,6 +796,12 @@ impl AcpConnection {
         let builder = ShellBuilder::new(&Shell::System, cfg!(windows)).non_interactive();
         let mut child = builder.build_std_command(Some(path.clone()), &args);
         child.envs(env.clone());
+        // The child inherits Lathe's own environment by default, so scrubbed
+        // keys must be explicitly removed — omitting them from `env` is not
+        // enough to stop an ambient API key from reaching the agent.
+        for key in scrub_env {
+            child.env_remove(*key);
+        }
         if let Some(cwd) = project.read_with(cx, |project, _cx| {
             if project.is_local() {
                 root_dir.as_ref()
@@ -1006,7 +1037,13 @@ impl AcpConnection {
                 "label": "gemini /auth",
                 "command": original_command.path.to_string_lossy(),
                 "args": gemini_args,
-                "env": original_command.env.unwrap_or_default(),
+                // Use the fully-resolved env (which includes the per-account
+                // GEMINI_CONFIG_DIR injected above), not the pre-injection
+                // command env. Otherwise the login terminal writes the OAuth
+                // credentials into the global ~/.gemini while the running agent
+                // reads the bound account's isolated config dir, so the login
+                // never takes effect for the account.
+                "env": env.clone(),
             });
             let meta = acp::Meta::from_iter([("terminal-auth".to_string(), value)]);
             vec![acp::AuthMethod::Agent(

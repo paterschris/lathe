@@ -5,6 +5,7 @@ mod forgejo;
 mod gitea;
 mod gitee;
 mod github;
+mod github_device_flow;
 mod gitlab;
 mod sourcehut;
 
@@ -15,5 +16,6 @@ pub use forgejo::*;
 pub use gitea::*;
 pub use gitee::*;
 pub use github::*;
+pub use github_device_flow::*;
 pub use gitlab::*;
 pub use sourcehut::*;

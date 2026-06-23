@@ -797,9 +797,9 @@ impl TerminalElement {
         }
     }
 
-    fn rem_size(&self, cx: &mut App) -> Option<Pixels> {
+    fn rem_size(&self, window: &Window, cx: &mut App) -> Option<Pixels> {
         let settings = ThemeSettings::get_global(cx).clone();
-        let buffer_font_size = settings.buffer_font_size(cx);
+        let buffer_font_size = settings.buffer_font_size_in_window(window, cx);
         let rem_size_scale = {
             // Our default UI font size is 14px on a 16px base scale.
             // This means the default UI font size is 0.875rems.
@@ -883,7 +883,7 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let rem_size = self.rem_size(cx);
+        let rem_size = self.rem_size(window, cx);
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -895,7 +895,7 @@ impl Element for TerminalElement {
                 let hitbox = hitbox.unwrap();
                 let settings = ThemeSettings::get_global(cx).clone();
 
-                let buffer_font_size = settings.buffer_font_size(cx);
+                let buffer_font_size = settings.buffer_font_size_in_window(window, cx);
 
                 let terminal_settings = TerminalSettings::get_global(cx);
                 let minimum_contrast = terminal_settings.minimum_contrast;
@@ -928,7 +928,7 @@ impl Element for TerminalElement {
                     TerminalMode::Standalone => terminal_settings
                         .font_size
                         .map_or(buffer_font_size, |size| {
-                            theme_settings::adjusted_font_size(size, cx)
+                            theme_settings::adjusted_font_size(size, window, cx)
                         }),
                 };
 

@@ -2717,22 +2717,28 @@ impl AgentPanel {
     pub fn increase_font_size(
         &mut self,
         action: &IncreaseBufferFontSize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.handle_font_size_action(action.persist, px(1.0), cx);
+        self.handle_font_size_action(action.persist, px(1.0), window, cx);
     }
 
     pub fn decrease_font_size(
         &mut self,
         action: &DecreaseBufferFontSize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.handle_font_size_action(action.persist, px(-1.0), cx);
+        self.handle_font_size_action(action.persist, px(-1.0), window, cx);
     }
 
-    fn handle_font_size_action(&mut self, persist: bool, delta: Pixels, cx: &mut Context<Self>) {
+    fn handle_font_size_action(
+        &mut self,
+        persist: bool,
+        delta: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.visible_font_size() {
             WhichFontSize::AgentFont => {
                 if persist {
@@ -2751,8 +2757,8 @@ impl AgentPanel {
                         );
                     });
                 } else {
-                    theme_settings::adjust_agent_ui_font_size(cx, |size| size + delta);
-                    theme_settings::adjust_agent_buffer_font_size(cx, |size| size + delta);
+                    theme_settings::adjust_agent_ui_font_size(window, cx, |size| size + delta);
+                    theme_settings::adjust_agent_buffer_font_size(window, cx, |size| size + delta);
                 }
             }
             WhichFontSize::None => {
@@ -2768,7 +2774,7 @@ impl AgentPanel {
     pub fn reset_font_size(
         &mut self,
         action: &ResetBufferFontSize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match self.visible_font_size() {
@@ -2779,8 +2785,8 @@ impl AgentPanel {
                         settings.theme.agent_buffer_font_size = None;
                     });
                 } else {
-                    theme_settings::reset_agent_ui_font_size(cx);
-                    theme_settings::reset_agent_buffer_font_size(cx);
+                    theme_settings::reset_agent_ui_font_size(window, cx);
+                    theme_settings::reset_agent_buffer_font_size(window, cx);
                 }
             }
             WhichFontSize::None => {
@@ -2791,9 +2797,9 @@ impl AgentPanel {
         }
     }
 
-    pub fn reset_agent_zoom(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        theme_settings::reset_agent_ui_font_size(cx);
-        theme_settings::reset_agent_buffer_font_size(cx);
+    pub fn reset_agent_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        theme_settings::reset_agent_ui_font_size(window, cx);
+        theme_settings::reset_agent_buffer_font_size(window, cx);
     }
 
     pub fn toggle_zoom(&mut self, _: &ToggleZoom, window: &mut Window, cx: &mut Context<Self>) {
@@ -5293,9 +5299,11 @@ impl Render for AgentPanel {
 
         match self.visible_font_size() {
             WhichFontSize::AgentFont => {
-                WithRemSize::new(ThemeSettings::get_global(cx).agent_ui_font_size(cx))
-                    .size_full()
-                    .child(content)
+                WithRemSize::new(
+                    ThemeSettings::get_global(cx).agent_ui_font_size_in_window(window, cx),
+                )
+                .size_full()
+                .child(content)
                     .into_any()
             }
             _ => content.into_any(),

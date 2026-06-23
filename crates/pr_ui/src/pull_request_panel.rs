@@ -85,6 +85,8 @@ pub struct PullRequestPanel {
     host_context: Option<(Arc<dyn GitHostingProvider + Send + Sync>, ParsedGitRemote)>,
     scroll_handle: UniformListScrollHandle,
     filter: StateFilter,
+    /// PR number most recently opened from this panel; highlighted in the list.
+    selected_pr: Option<u32>,
     _load_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -119,6 +121,7 @@ impl PullRequestPanel {
                 host_context: None,
                 scroll_handle: UniformListScrollHandle::default(),
                 filter: StateFilter::Open,
+                selected_pr: None,
                 _load_task: None,
                 _subscriptions: subscriptions,
             };
@@ -133,9 +136,27 @@ impl PullRequestPanel {
         event: &GitStoreEvent,
         cx: &mut Context<Self>,
     ) {
-        if matches!(event, GitStoreEvent::ActiveRepositoryChanged(_)) {
-            self.host_context = None;
-            self.kick_off_refresh(cx);
+        match event {
+            // The active repository changed entirely: re-resolve the host (each
+            // repo can point at a different provider) and reload.
+            GitStoreEvent::ActiveRepositoryChanged(_) => {
+                self.host_context = None;
+                self.kick_off_refresh(cx);
+            }
+            // The active repository's data updated. At launch the repository is
+            // present before its remote URLs are scanned, so the first resolve
+            // sees no remote and parks in NoHost; retry once the repo updates so
+            // the panel populates without a manual refresh. Gated on not having
+            // resolved a host yet (state Idle/NoHost) so ordinary git activity on
+            // an already-loaded panel does not re-hit the hosting API.
+            GitStoreEvent::RepositoryUpdated(_, _, true) => {
+                if self.host_context.is_none()
+                    && matches!(self.state, LoadState::Idle | LoadState::NoHost(_))
+                {
+                    self.kick_off_refresh(cx);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -191,6 +212,8 @@ impl PullRequestPanel {
             repo: remote.repo.clone(),
         };
         let number = summary.number;
+        self.selected_pr = Some(number);
+        cx.notify();
         let workspace = self.workspace.clone();
         workspace
             .update(cx, |workspace, cx| {
@@ -325,11 +348,22 @@ impl PullRequestPanel {
             PullRequestState::Closed => Color::Error,
         };
 
+        let is_selected = self.selected_pr == Some(number);
+
         h_flex()
             .id(("pr-row", ix))
             .h(rems(ROW_HEIGHT_REMS))
             .px_2()
             .gap_2()
+            .border_l_2()
+            .border_color(if is_selected {
+                cx.theme().colors().border_focused
+            } else {
+                gpui::transparent_black()
+            })
+            .when(is_selected, |this| {
+                this.bg(cx.theme().colors().element_selected)
+            })
             .hover(|this| this.bg(cx.theme().colors().element_hover))
             .on_mouse_down(
                 MouseButton::Left,
@@ -449,11 +483,30 @@ async fn load_pull_requests(
 
     let mut chosen: Option<(Arc<dyn GitHostingProvider + Send + Sync>, ParsedGitRemote)> = None;
     let mut last_summaries: Vec<PullRequestSummary> = Vec::new();
+    let mut connect_hint: Option<SharedString> = None;
 
     for remote_url in candidates {
         let Some((provider, parsed)) = parse_git_remote_url(registry.clone(), &remote_url) else {
             continue;
         };
+        // Resolve the credential for THIS repo's host only. We never fall back to
+        // another host's token, so a Bitbucket repository without a Bitbucket
+        // credential surfaces a connect prompt instead of an empty GitHub result.
+        let host = provider.base_url().host_str().map(|host| host.to_string());
+        let auth = match host.as_deref() {
+            Some(host) => git::git_host_credentials::auth_for_host(cx, host)
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        if auth.is_none() {
+            if connect_hint.is_none() {
+                connect_hint =
+                    Some(format!("Connect {} to view pull requests.", provider.name()).into());
+            }
+            continue;
+        }
         let filter = PullRequestListFilter {
             states: filter.states(),
             author: None,
@@ -464,13 +517,10 @@ async fn load_pull_requests(
             repo: parsed.repo.clone(),
         };
         let summaries = provider
-            .list_pull_requests(&remote_for_call, filter, http_client.clone())
+            .list_pull_requests(&remote_for_call, filter, auth, http_client.clone())
             .await
             .with_context(|| {
-                format!(
-                    "listing pull requests for {}/{}",
-                    parsed.owner, parsed.repo
-                )
+                format!("listing pull requests for {}/{}", parsed.owner, parsed.repo)
             })?;
         let got_any = !summaries.is_empty();
         chosen = Some((provider, parsed));
@@ -481,6 +531,9 @@ async fn load_pull_requests(
     }
 
     let Some((provider, remote)) = chosen else {
+        if let Some(hint) = connect_hint {
+            return Ok(LoadOutcome::NoHost(hint));
+        }
         return Ok(LoadOutcome::NoHost(
             "Remote URL does not match any known hosting provider.".into(),
         ));
@@ -652,6 +705,8 @@ impl Panel for PullRequestPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        5
+        // Must be unique across all registered panels (dock.rs panics in debug
+        // builds otherwise). 5 collides with CollabPanel; 4 is a free slot.
+        4
     }
 }

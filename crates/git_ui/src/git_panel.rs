@@ -984,8 +984,8 @@ pub struct GitPanel {
     stash_entries: GitStash,
     /// Whether the multi-repository strip above the header is expanded. When
     /// the workspace has more than one repository this strip surfaces an
-    /// inline switcher + bulk actions; collapsed by default to keep the panel
-    /// uncluttered for single-repo workspaces.
+    /// inline switcher + bulk actions; expanded by default so the repository
+    /// list is visible on launch. Only shown for multi-repo workspaces.
     repos_strip_expanded: bool,
     /// Set whenever a cached `HunkLoadState` BufferDiff emits a change so the
     /// next render rebuilds visible entries. Required to keep the hunk
@@ -1264,7 +1264,7 @@ impl GitPanel {
                 entry_count: 0,
                 bulk_staging: None,
                 stash_entries: Default::default(),
-                repos_strip_expanded: false,
+                repos_strip_expanded: true,
                 pending_hunk_refresh: false,
                 expanded_files: HashSet::default(),
                 hunk_states: HashMap::default(),

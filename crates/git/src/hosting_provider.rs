@@ -110,8 +110,48 @@ pub struct PullRequestReviewComment {
     /// 1-indexed line in the file the comment is anchored to, when the host
     /// reports one. `None` for file-level comments that don't pin a line.
     pub line: Option<u32>,
+    /// For threaded review replies, the id of the comment this one replies to
+    /// (`in_reply_to_id` on GitHub, `parent.id` on Bitbucket). `None` for the
+    /// top-level comment of a thread. Used to group comments into threads and
+    /// indent replies in the diff view.
+    pub parent_id: Option<u64>,
+    /// Whether this comment's thread is marked resolved on the host. Only the
+    /// thread's root comment carries this. GitHub's REST API does not expose it,
+    /// so it is always `false` there.
+    pub is_resolved: bool,
     pub created_at: SharedString,
     pub url: Url,
+}
+
+/// Authentication material for a hosting provider's REST API.
+///
+/// Resolved per host by the caller (which has keychain access via
+/// [`crate::git_host_credentials`]) and threaded into the pull-request methods
+/// below. `None` means no stored credential is available, in which case a
+/// provider may fall back to an environment token (e.g. `GITHUB_TOKEN`) or make
+/// an unauthenticated request.
+#[derive(Clone)]
+pub enum GitHostAuth {
+    /// `Authorization: Bearer <token>` — GitHub OAuth/device tokens and PATs,
+    /// or Bitbucket Cloud OAuth access tokens.
+    Bearer(String),
+    /// HTTP Basic credentials — Bitbucket Cloud username + App Password (or
+    /// Atlassian account email + API token).
+    Basic { username: String, secret: String },
+}
+
+impl std::fmt::Debug for GitHostAuth {
+    /// Redacts secrets so a credential can never be leaked through a `{:?}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GitHostAuth::Bearer(_) => f.write_str("GitHostAuth::Bearer(<redacted>)"),
+            GitHostAuth::Basic { username, .. } => f
+                .debug_struct("GitHostAuth::Basic")
+                .field("username", username)
+                .field("secret", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -252,6 +292,7 @@ pub trait GitHostingProvider {
         &self,
         _remote: &ParsedGitRemote,
         _filter: PullRequestListFilter,
+        _auth: Option<GitHostAuth>,
         _http_client: Arc<dyn HttpClient>,
     ) -> Result<Vec<PullRequestSummary>> {
         Ok(Vec::new())
@@ -264,6 +305,7 @@ pub trait GitHostingProvider {
         &self,
         _remote: &ParsedGitRemote,
         _number: u32,
+        _auth: Option<GitHostAuth>,
         _http_client: Arc<dyn HttpClient>,
     ) -> Result<PullRequestDetail> {
         anyhow::bail!("pull request detail not supported by this hosting provider")
@@ -276,6 +318,7 @@ pub trait GitHostingProvider {
         &self,
         _remote: &ParsedGitRemote,
         _number: u32,
+        _auth: Option<GitHostAuth>,
         _http_client: Arc<dyn HttpClient>,
     ) -> Result<String> {
         anyhow::bail!("pull request diff not supported by this hosting provider")
@@ -286,9 +329,24 @@ pub trait GitHostingProvider {
         &self,
         _remote: &ParsedGitRemote,
         _number: u32,
+        _auth: Option<GitHostAuth>,
         _http_client: Arc<dyn HttpClient>,
     ) -> Result<Vec<PullRequestReviewComment>> {
         Ok(Vec::new())
+    }
+
+    /// Fetch the full UTF-8 content of a file at a given revision (commit SHA or
+    /// ref). The PR view uses this to anchor review comments to their exact line
+    /// even when that line is unchanged and so absent from the diff.
+    async fn get_file_content(
+        &self,
+        _remote: &ParsedGitRemote,
+        _path: &str,
+        _revision: &str,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<String> {
+        anyhow::bail!("fetching file content is not supported by this hosting provider")
     }
 
     /// Combine the pull request into its target branch using the host's API.
@@ -297,6 +355,7 @@ pub trait GitHostingProvider {
         _remote: &ParsedGitRemote,
         _number: u32,
         _method: PullRequestMergeMethod,
+        _auth: Option<GitHostAuth>,
         _http_client: Arc<dyn HttpClient>,
     ) -> Result<()> {
         anyhow::bail!("merging pull requests is not supported by this hosting provider")
@@ -311,6 +370,7 @@ pub trait GitHostingProvider {
         _number: u32,
         _verdict: PullRequestReviewVerdict,
         _body: Option<SharedString>,
+        _auth: Option<GitHostAuth>,
         _http_client: Arc<dyn HttpClient>,
     ) -> Result<()> {
         anyhow::bail!("submitting reviews is not supported by this hosting provider")
@@ -325,6 +385,7 @@ pub trait GitHostingProvider {
         _number: u32,
         _in_reply_to: u64,
         _body: SharedString,
+        _auth: Option<GitHostAuth>,
         _http_client: Arc<dyn HttpClient>,
     ) -> Result<()> {
         anyhow::bail!("posting review comments is not supported by this hosting provider")

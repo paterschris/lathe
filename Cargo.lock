@@ -555,6 +555,7 @@ dependencies = [
  "watch",
  "workspace",
  "zed_actions",
+ "zed_credentials_provider",
 ]
 
 [[package]]
@@ -599,6 +600,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "collections",
+ "log",
  "paths",
  "serde",
  "serde_json",
@@ -7647,6 +7649,7 @@ dependencies = [
  "askpass",
  "async-trait",
  "collections",
+ "credentials_provider",
  "derive_more",
  "futures 0.3.32",
  "git2",
@@ -7731,6 +7734,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "futures 0.3.32",
  "git",
  "gpui",
@@ -11568,6 +11572,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "mobile_dev"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "db",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "log",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "tempfile",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "moka"
 version = "0.12.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14147,12 +14175,17 @@ name = "pr_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "buffer_diff",
  "collections",
  "editor",
  "futures 0.3.32",
  "git",
+ "git_hosting_providers",
  "gpui",
+ "language",
  "log",
+ "markdown",
+ "multi_buffer",
  "notifications",
  "picker",
  "project",
@@ -19251,6 +19284,7 @@ dependencies = [
  "cloud_api_types",
  "db",
  "feature_flags",
+ "git",
  "git_ui",
  "gpui",
  "icons",
@@ -23601,6 +23635,7 @@ dependencies = [
  "migrator",
  "mimalloc",
  "miniprofiler_ui",
+ "mobile_dev",
  "node_runtime",
  "notifications",
  "onboarding",
@@ -23675,6 +23710,7 @@ dependencies = [
  "workspace",
  "zed-reqwest",
  "zed_actions",
+ "zed_credentials_provider",
  "zed_env_vars",
  "zlog",
  "zlog_settings",

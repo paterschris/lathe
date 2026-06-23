@@ -35,6 +35,24 @@ pub struct ChangeKeybinding {
     pub action: String,
 }
 
+/// Connects a git hosting account so pull requests can be listed and reviewed.
+/// `host` is the canonical hostname, for example `github.com` or `bitbucket.org`.
+#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectGitHost {
+    pub host: String,
+}
+
+/// Disconnects a git hosting account, removing its stored credential. `host` is
+/// the canonical hostname, for example `github.com` or `bitbucket.org`.
+#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct DisconnectGitHost {
+    pub host: String,
+}
+
 actions!(
     zed,
     [

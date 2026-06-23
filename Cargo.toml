@@ -138,6 +138,7 @@ members = [
     "crates/migrator",
     "crates/miniprofiler_ui",
     "crates/mistral",
+    "crates/mobile_dev",
     "crates/multi_buffer",
     "crates/net",
     "crates/node_runtime",
@@ -399,6 +400,7 @@ media = { path = "crates/media" }
 menu = { path = "crates/menu" }
 migrator = { path = "crates/migrator" }
 mistral = { path = "crates/mistral" }
+mobile_dev = { path = "crates/mobile_dev" }
 multi_buffer = { path = "crates/multi_buffer" }
 miniprofiler_ui = { path = "crates/miniprofiler_ui" }
 net = { path = "crates/net" }

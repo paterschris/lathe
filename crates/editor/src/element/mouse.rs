@@ -515,9 +515,9 @@ impl EditorElement {
                         };
 
                         if delta_y > 0.0 {
-                            theme_settings::increase_buffer_font_size(cx);
+                            theme_settings::increase_buffer_font_size(window, cx);
                         } else if delta_y < 0.0 {
-                            theme_settings::decrease_buffer_font_size(cx);
+                            theme_settings::decrease_buffer_font_size(window, cx);
                         }
 
                         cx.stop_propagation();

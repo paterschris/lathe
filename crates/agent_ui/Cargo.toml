@@ -112,6 +112,7 @@ uuid.workspace = true
 watch.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
+zed_credentials_provider.workspace = true
 image.workspace = true
 reqwest_client = { workspace = true, optional = true }
 

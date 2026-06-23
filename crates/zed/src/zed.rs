@@ -714,14 +714,14 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
-        // PR panel is hidden for the beta — kept in `crates/pr_ui` for the
-        // upcoming GUI-credentials work. Re-add the load + `add_panel_when_ready`
-        // calls below once auth is keychain-backed.
+        let pull_request_panel = pr_ui::PullRequestPanel::load(workspace_handle.clone(), cx.clone());
         let git_activity_panel =
             GitActivityPanel::load(workspace_handle.clone(), cx.clone());
         let channels_panel =
             collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
+        let mobile_dev_panel =
+            mobile_dev::MobileDevPanel::load(workspace_handle.clone(), cx.clone());
 
         async fn add_panel_when_ready(
             panel_task: impl Future<Output = anyhow::Result<Entity<impl workspace::Panel>>> + 'static,
@@ -743,9 +743,11 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(pull_request_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_activity_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(mobile_dev_panel, workspace_handle.clone(), cx.clone()),
             initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),
         );
 
@@ -979,7 +981,7 @@ fn register_actions(
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::IncreaseUiFontSize, _window, cx| {
+            move |_, action: &zed_actions::IncreaseUiFontSize, window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, cx| {
                         let ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx) + px(1.0);
@@ -989,13 +991,13 @@ fn register_actions(
                             .insert(f32::from(theme_settings::clamp_font_size(ui_font_size)).into());
                     });
                 } else {
-                    theme_settings::adjust_ui_font_size(cx, |size| size + px(1.0));
+                    theme_settings::adjust_ui_font_size(window, cx, |size| size + px(1.0));
                 }
             }
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::DecreaseUiFontSize, _window, cx| {
+            move |_, action: &zed_actions::DecreaseUiFontSize, window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, cx| {
                         let ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx) - px(1.0);
@@ -1005,25 +1007,25 @@ fn register_actions(
                             .insert(f32::from(theme_settings::clamp_font_size(ui_font_size)).into());
                     });
                 } else {
-                    theme_settings::adjust_ui_font_size(cx, |size| size - px(1.0));
+                    theme_settings::adjust_ui_font_size(window, cx, |size| size - px(1.0));
                 }
             }
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::ResetUiFontSize, _window, cx| {
+            move |_, action: &zed_actions::ResetUiFontSize, window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, _| {
                         settings.theme.ui_font_size = None;
                     });
                 } else {
-                    theme_settings::reset_ui_font_size(cx);
+                    theme_settings::reset_ui_font_size(window, cx);
                 }
             }
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::IncreaseBufferFontSize, _window, cx| {
+            move |_, action: &zed_actions::IncreaseBufferFontSize, window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, cx| {
                         let buffer_font_size =
@@ -1034,13 +1036,13 @@ fn register_actions(
                             .insert(f32::from(theme_settings::clamp_font_size(buffer_font_size)).into());
                     });
                 } else {
-                    theme_settings::increase_buffer_font_size(cx);
+                    theme_settings::increase_buffer_font_size(window, cx);
                 }
             }
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::DecreaseBufferFontSize, _window, cx| {
+            move |_, action: &zed_actions::DecreaseBufferFontSize, window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, cx| {
                         let buffer_font_size =
@@ -1051,25 +1053,25 @@ fn register_actions(
                             .insert(f32::from(theme_settings::clamp_font_size(buffer_font_size)).into());
                     });
                 } else {
-                    theme_settings::decrease_buffer_font_size(cx);
+                    theme_settings::decrease_buffer_font_size(window, cx);
                 }
             }
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::ResetBufferFontSize, _window, cx| {
+            move |_, action: &zed_actions::ResetBufferFontSize, window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, _| {
                         settings.theme.buffer_font_size = None;
                     });
                 } else {
-                    theme_settings::reset_buffer_font_size(cx);
+                    theme_settings::reset_buffer_font_size(window, cx);
                 }
             }
         })
         .register_action({
             let fs = app_state.fs.clone();
-            move |_, action: &zed_actions::ResetAllZoom, _window, cx| {
+            move |_, action: &zed_actions::ResetAllZoom, window, cx| {
                 if action.persist {
                     update_settings_file(fs.clone(), cx, move |settings, _| {
                         settings.theme.ui_font_size = None;
@@ -1078,10 +1080,10 @@ fn register_actions(
                         settings.theme.agent_buffer_font_size = None;
                     });
                 } else {
-                    theme_settings::reset_ui_font_size(cx);
-                    theme_settings::reset_buffer_font_size(cx);
-                    theme_settings::reset_agent_ui_font_size(cx);
-                    theme_settings::reset_agent_buffer_font_size(cx);
+                    theme_settings::reset_ui_font_size(window, cx);
+                    theme_settings::reset_buffer_font_size(window, cx);
+                    theme_settings::reset_agent_ui_font_size(window, cx);
+                    theme_settings::reset_agent_buffer_font_size(window, cx);
                 }
             }
         })
@@ -5455,7 +5457,8 @@ mod tests {
             editor::init(cx);
             collab_ui::init(&app_state, cx);
             git_ui::init(cx);
-            // pr_ui::init disabled for the beta — see `initialize_panels`.
+            pr_ui::init(cx);
+            mobile_dev::init(cx);
             project_panel::init(cx);
             outline_panel::init(cx);
             terminal_view::init(cx);

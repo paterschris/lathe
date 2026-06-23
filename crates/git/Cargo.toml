@@ -12,13 +12,14 @@ workspace = true
 path = "src/git.rs"
 
 [features]
-test-support = ["rand"]
+test-support = ["rand", "gpui/test-support"]
 
 [dependencies]
 anyhow.workspace = true
 askpass.workspace = true
 async-trait.workspace = true
 collections.workspace = true
+credentials_provider.workspace = true
 derive_more.workspace = true
 gpui.workspace = true
 http_client.workspace = true

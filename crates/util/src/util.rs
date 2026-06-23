@@ -229,6 +229,42 @@ Error: Running Zed as root or via sudo is unsupported.
     }
 }
 
+/// Raise the soft `RLIMIT_NOFILE` toward the hard limit. A busy session (many
+/// watched files plus spawned agent subprocesses) can otherwise exhaust the
+/// default soft limit — 256 on macOS — and start failing with EMFILE, which
+/// silently breaks opening files and spawning subprocesses such as agent login
+/// terminals. Best-effort: logs and continues if a syscall fails.
+#[cfg(unix)]
+pub fn increase_open_file_limit() {
+    // SAFETY: `getrlimit`/`setrlimit` operate on a stack-local, fully
+    // initialized `rlimit` value and a valid resource id.
+    unsafe {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+            eprintln!("warning: getrlimit(RLIMIT_NOFILE) failed; leaving file limit unchanged");
+            return;
+        }
+        // macOS caps per-process descriptors at OPEN_MAX (10240) regardless of
+        // an "unlimited" hard limit, so never request more than that.
+        const CEILING: libc::rlim_t = 10240;
+        let desired = if limit.rlim_max == libc::RLIM_INFINITY {
+            CEILING
+        } else {
+            limit.rlim_max.min(CEILING)
+        };
+        if limit.rlim_cur >= desired {
+            return;
+        }
+        limit.rlim_cur = desired;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+            eprintln!("warning: setrlimit(RLIMIT_NOFILE) failed; leaving file limit unchanged");
+        }
+    }
+}
+
 #[cfg(unix)]
 fn load_shell_from_passwd() -> Result<()> {
     let buflen = match unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) } {

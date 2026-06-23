@@ -2,12 +2,10 @@ use std::collections::HashSet;
 
 use ai_accounts::{
     AccountState, AgentDescriptor, AiAccount, AiAccountsIndex, BrandAccent, CLAUDE_CODE_DESCRIPTOR,
-    ConversationSummary, TIER_A_DESCRIPTORS, claude_profiles_dir, delete_account,
-    import_from_claude_profiles, list_conversations, load_index, resume_command, save_index,
-    verify_account,
+    ConversationSummary, LoginFlow, TIER_A_DESCRIPTORS, api_key_keychain_url, claude_profiles_dir,
+    delete_account, descriptor_for, import_from_claude_profiles, list_conversations, load_index,
+    resume_command, save_index, verify_account,
 };
-#[cfg(test)]
-use ai_accounts::descriptor_for;
 use gpui::{
     AnyElement, DismissEvent, EventEmitter, FocusHandle, Focusable, Hsla, Rgba, ScrollHandle,
     WeakEntity, WindowAppearance, prelude::*, px,
@@ -88,6 +86,16 @@ impl ManageAiAccountsModal {
             .map(|account| account.display_name.clone())
             .unwrap_or_else(|| account_id.clone());
 
+        // For API-key accounts, capture the keychain location now (while the
+        // account still exists in the index) so we can clean up the stored key
+        // after the registry entry is removed.
+        let keychain_url = self.index.find(&account_id).and_then(|account| {
+            descriptor_for(&account.agent_id)
+                .filter(|descriptor| matches!(descriptor.login_flow, LoginFlow::ApiKey { .. }))
+                .map(|_| api_key_keychain_url(&account.agent_id, &account.id))
+        });
+        let credentials_provider = zed_credentials_provider::global(cx);
+
         let prompt = window.prompt(
             gpui::PromptLevel::Critical,
             &format!("Delete AI account \"{display_name}\"?"),
@@ -108,6 +116,15 @@ impl ManageAiAccountsModal {
                     false
                 }
             };
+            // Best-effort keychain cleanup: a leftover key is harmless but
+            // untidy, so don't fail the delete on it.
+            if success {
+                if let Some(url) = keychain_url {
+                    if let Err(error) = credentials_provider.delete_credentials(&url, &*cx).await {
+                        log::warn!("ai_accounts: failed to delete keychain key: {error:#}");
+                    }
+                }
+            }
             this.update(cx, |this, cx| {
                 this.refresh(cx);
                 if success {
@@ -136,6 +153,48 @@ impl ManageAiAccountsModal {
         cx.notify();
 
         let display_name = account.display_name.clone();
+
+        // API-key agents have no CLI status command; "verified" means a key is
+        // present in the keychain for this account.
+        let is_api_key = descriptor_for(&account.agent_id)
+            .is_some_and(|descriptor| matches!(descriptor.login_flow, LoginFlow::ApiKey { .. }));
+        if is_api_key {
+            let credentials_provider = zed_credentials_provider::global(cx);
+            let keychain_url = api_key_keychain_url(&account.agent_id, &account.id);
+            cx.spawn(async move |this, cx| {
+                let present = credentials_provider
+                    .read_credentials(&keychain_url, &*cx)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|(_, key)| !key.is_empty());
+                this.update(cx, |this, cx| {
+                    let (state, message) = if present {
+                        (
+                            AccountState::Authenticated,
+                            format!("API key present for \"{display_name}\""),
+                        )
+                    } else {
+                        (
+                            AccountState::Failed,
+                            format!(
+                                "No API key saved for \"{display_name}\" — reconnect to add one"
+                            ),
+                        )
+                    };
+                    if let Err(error) = this.index.set_state(&account_id, state) {
+                        log::error!("ai_accounts: set state failed: {error:#}");
+                    }
+                    let _ = save_index(&this.index);
+                    this.refresh(cx);
+                    this.toast(message, cx);
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+
         cx.spawn(async move |this, cx| {
             let result = verify_account(&account).await;
             this.update(cx, |this, cx| {

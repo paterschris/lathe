@@ -767,6 +767,19 @@ impl ConversationView {
         cx.notify();
     }
 
+    /// After a successful login, drop the memoized pre-auth connection so the
+    /// following `reset` reconnects with a fresh subprocess that reads the
+    /// newly written credentials. Without this, `reset` reuses the stale
+    /// unauthenticated connection (the agent was spawned before login) and the
+    /// login appears to have no effect.
+    fn restart_connection_for_auth(&mut self, cx: &mut Context<Self>) {
+        let key = self.connection_key.clone();
+        let server = self.agent.clone();
+        self.connection_store.update(cx, |store, cx| {
+            store.restart_connection(key, server, cx);
+        });
+    }
+
     fn initial_state(
         agent: Rc<dyn AgentServer>,
         connection_store: Entity<AgentConnectionStore>,
@@ -1856,6 +1869,7 @@ impl ConversationView {
                                 })
                             }
                         } else {
+                            this.restart_connection_for_auth(cx);
                             this.reset(window, cx);
                         }
                         this.auth_task.take()
@@ -1902,6 +1916,7 @@ impl ConversationView {
                             active.update(cx, |active, cx| active.handle_thread_error(err, cx));
                         }
                     } else {
+                        this.restart_connection_for_auth(cx);
                         this.reset(window, cx);
                     }
                     this.auth_task.take()

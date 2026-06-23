@@ -1,5 +1,6 @@
 use workspace::Workspace;
 
+pub mod connect_modal;
 pub mod pull_request_panel;
 pub mod pull_request_panel_settings;
 pub mod pull_request_picker;
@@ -18,4 +19,5 @@ pub fn init(cx: &mut gpui::App) {
 pub fn register(workspace: &mut Workspace) {
     pull_request_panel::register(workspace);
     pull_request_picker::register(workspace);
+    connect_modal::register(workspace);
 }

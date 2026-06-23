@@ -12,8 +12,10 @@ use url::Url;
 use urlencoding::encode;
 
 use git::{
-    BuildCommitPermalinkParams, BuildPermalinkParams, GitHostingProvider, ParsedGitRemote,
-    PullRequest, RemoteUrl,
+    BuildCommitPermalinkParams, BuildPermalinkParams, GitHostAuth, GitHostingProvider,
+    ParsedGitRemote, PullRequest, PullRequestDetail, PullRequestListFilter, PullRequestMergeMethod,
+    PullRequestReviewComment, PullRequestReviewVerdict, PullRequestState, PullRequestSummary,
+    RemoteUrl,
 };
 
 use crate::get_host_from_git_remote_url;
@@ -297,6 +299,503 @@ impl GitHostingProvider for Github {
             })
             .transpose()?;
         Ok(avatar_url)
+    }
+
+    async fn list_pull_requests(
+        &self,
+        remote: &ParsedGitRemote,
+        filter: PullRequestListFilter,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestSummary>> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let state = github_list_state(&filter);
+        let per_page = filter.limit.unwrap_or(50).clamp(1, 100);
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls?state={state}&per_page={per_page}&sort=updated&direction=desc",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            None,
+        )?;
+        let bytes = github_send(&http_client, request, "listing GitHub pull requests").await?;
+        let raw: Vec<GithubPullRequest> =
+            serde_json::from_slice(&bytes).context("parsing GitHub pull request list")?;
+
+        let mut summaries = Vec::new();
+        for pr in raw {
+            let pr_state = pr.pull_request_state();
+            if let Some(states) = &filter.states
+                && !states.contains(&pr_state)
+            {
+                continue;
+            }
+            if let Some(author) = &filter.author {
+                let login = pr.user.as_ref().map(|user| user.login.as_str()).unwrap_or_default();
+                if !login.to_lowercase().contains(&author.to_lowercase()) {
+                    continue;
+                }
+            }
+            summaries.push(pr.into_summary(pr_state)?);
+            if let Some(limit) = filter.limit
+                && summaries.len() as u32 >= limit
+            {
+                break;
+            }
+        }
+        Ok(summaries)
+    }
+
+    async fn get_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<PullRequestDetail> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            None,
+        )?;
+        let bytes = github_send(&http_client, request, "fetching GitHub pull request").await?;
+        let pr: GithubPullRequest =
+            serde_json::from_slice(&bytes).context("parsing GitHub pull request")?;
+        pr.into_detail()
+    }
+
+    async fn get_pull_request_diff(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<String> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github.v3.diff",
+            &auth,
+            None,
+        )?;
+        let bytes = github_send(&http_client, request, "fetching GitHub pull request diff").await?;
+        String::from_utf8(bytes).context("GitHub pull request diff was not valid UTF-8")
+    }
+
+    async fn get_file_content(
+        &self,
+        remote: &ParsedGitRemote,
+        path: &str,
+        revision: &str,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<String> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        // The `raw` media type returns the file bytes directly rather than the
+        // JSON envelope. `path` is already repo-relative with `/` separators,
+        // which is exactly what the contents API expects.
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/contents/{path}?ref={revision}",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request =
+            github_request(GithubMethod::Get, &url, "application/vnd.github.raw", &auth, None)?;
+        let bytes = github_send(&http_client, request, "fetching GitHub file content").await?;
+        String::from_utf8(bytes).context("GitHub file content was not valid UTF-8")
+    }
+
+    async fn get_pull_request_comments(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestReviewComment>> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/comments?per_page=100",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            None,
+        )?;
+        let bytes = github_send(&http_client, request, "fetching GitHub review comments").await?;
+        let raw: Vec<GithubReviewComment> =
+            serde_json::from_slice(&bytes).context("parsing GitHub review comments")?;
+        raw.into_iter()
+            .map(GithubReviewComment::into_comment)
+            .collect()
+    }
+
+    async fn merge_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        method: PullRequestMergeMethod,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/merge",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let merge_method = match method {
+            PullRequestMergeMethod::Merge => "merge",
+            PullRequestMergeMethod::Squash => "squash",
+            PullRequestMergeMethod::Rebase => "rebase",
+        };
+        let body = serde_json::to_vec(&serde_json::json!({ "merge_method": merge_method }))?;
+        let request = github_request(
+            GithubMethod::Put,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            Some(body),
+        )?;
+        github_send(&http_client, request, "merging GitHub pull request").await?;
+        Ok(())
+    }
+
+    async fn submit_review(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        verdict: PullRequestReviewVerdict,
+        body: Option<SharedString>,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/reviews",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let event = match verdict {
+            PullRequestReviewVerdict::Approve => "APPROVE",
+            PullRequestReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+            PullRequestReviewVerdict::Comment => "COMMENT",
+        };
+        let mut payload = serde_json::Map::new();
+        payload.insert("event".into(), serde_json::Value::from(event));
+        if let Some(body) = body {
+            payload.insert("body".into(), serde_json::Value::from(body.to_string()));
+        }
+        let body = serde_json::to_vec(&serde_json::Value::Object(payload))?;
+        let request = github_request(
+            GithubMethod::Post,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            Some(body),
+        )?;
+        github_send(&http_client, request, "submitting GitHub review").await?;
+        Ok(())
+    }
+
+    async fn post_review_comment(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        in_reply_to: u64,
+        body: SharedString,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/comments/{in_reply_to}/replies",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let body = serde_json::to_vec(&serde_json::json!({ "body": body.to_string() }))?;
+        let request = github_request(
+            GithubMethod::Post,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            Some(body),
+        )?;
+        github_send(&http_client, request, "posting GitHub review comment").await?;
+        Ok(())
+    }
+}
+
+enum GithubMethod {
+    Get,
+    Post,
+    Put,
+}
+
+/// Builds the `Authorization` header value for a GitHub API request. Falls back
+/// to the `GITHUB_TOKEN` environment variable when no stored credential is
+/// supplied, preserving the previous headless/CI behavior.
+fn github_auth_header(auth: &Option<GitHostAuth>) -> Option<String> {
+    match auth {
+        Some(GitHostAuth::Bearer(token)) => Some(format!("Bearer {token}")),
+        // GitHub authenticates with bearer tokens; Basic credentials belong to
+        // other hosts and are not applicable here.
+        Some(GitHostAuth::Basic { .. }) => None,
+        None => std::env::var("GITHUB_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty())
+            .map(|token| format!("Bearer {token}")),
+    }
+}
+
+fn github_request(
+    method: GithubMethod,
+    url: &str,
+    accept: &str,
+    auth: &Option<GitHostAuth>,
+    json_body: Option<Vec<u8>>,
+) -> Result<Request<AsyncBody>> {
+    let builder = match method {
+        GithubMethod::Get => Request::get(url),
+        GithubMethod::Post => Request::post(url),
+        GithubMethod::Put => Request::put(url),
+    };
+    let mut builder = builder
+        .header("Accept", accept)
+        .header("User-Agent", "Lathe")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .follow_redirects(http_client::RedirectPolicy::FollowAll);
+    if let Some(value) = github_auth_header(auth) {
+        builder = builder.header("Authorization", value);
+    }
+    let request = match json_body {
+        Some(body) => builder
+            .header("Content-Type", "application/json")
+            .body(AsyncBody::from(body))?,
+        None => builder.body(AsyncBody::default())?,
+    };
+    Ok(request)
+}
+
+async fn github_send(
+    client: &Arc<dyn HttpClient>,
+    request: Request<AsyncBody>,
+    context: &str,
+) -> Result<Vec<u8>> {
+    let mut response = client
+        .send(request)
+        .await
+        .with_context(|| format!("error while {context}"))?;
+    let mut bytes = Vec::new();
+    response.body_mut().read_to_end(&mut bytes).await?;
+    if !response.status().is_success() {
+        let text = String::from_utf8_lossy(&bytes);
+        bail!(
+            "{context} failed ({}): {text:?}",
+            response.status().as_u16()
+        );
+    }
+    Ok(bytes)
+}
+
+/// Maps a [`PullRequestListFilter`] to GitHub's single-valued `state` query
+/// parameter. GitHub has no "merged" state (merged PRs are closed with a
+/// `merged_at`), so merged is folded into closed and refined client-side.
+fn github_list_state(filter: &PullRequestListFilter) -> &'static str {
+    match &filter.states {
+        None => "all",
+        Some(states) => {
+            let wants_open = states.contains(&PullRequestState::Open);
+            let wants_closed = states.contains(&PullRequestState::Closed)
+                || states.contains(&PullRequestState::Merged);
+            match (wants_open, wants_closed) {
+                (true, false) => "open",
+                (false, true) => "closed",
+                _ => "all",
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct GithubUserRef {
+    login: String,
+}
+
+#[derive(Deserialize)]
+struct GithubBranchRef {
+    #[serde(rename = "ref")]
+    ref_name: String,
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct GithubPullRequest {
+    number: u32,
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+    state: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    user: Option<GithubUserRef>,
+    head: GithubBranchRef,
+    base: GithubBranchRef,
+    html_url: String,
+    updated_at: String,
+    #[serde(default)]
+    merged_at: Option<String>,
+    #[serde(default)]
+    mergeable: Option<bool>,
+    #[serde(default)]
+    additions: Option<u32>,
+    #[serde(default)]
+    deletions: Option<u32>,
+    #[serde(default)]
+    changed_files: Option<u32>,
+}
+
+impl GithubPullRequest {
+    fn pull_request_state(&self) -> PullRequestState {
+        if self.merged_at.is_some() {
+            PullRequestState::Merged
+        } else if self.state == "closed" {
+            PullRequestState::Closed
+        } else {
+            PullRequestState::Open
+        }
+    }
+
+    fn author_login(&self) -> SharedString {
+        self.user
+            .as_ref()
+            .map(|user| SharedString::from(user.login.clone()))
+            .unwrap_or_default()
+    }
+
+    fn into_summary(self, state: PullRequestState) -> Result<PullRequestSummary> {
+        let author_login = self.author_login();
+        let url = Url::parse(&self.html_url).context("parsing pull request URL")?;
+        Ok(PullRequestSummary {
+            number: self.number,
+            title: self.title.into(),
+            author_login,
+            state,
+            source_branch: self.head.ref_name.into(),
+            target_branch: self.base.ref_name.into(),
+            url,
+            updated_at: self.updated_at.into(),
+            is_draft: self.draft,
+        })
+    }
+
+    fn into_detail(self) -> Result<PullRequestDetail> {
+        let state = self.pull_request_state();
+        let author_login = self.author_login();
+        let url = Url::parse(&self.html_url).context("parsing pull request URL")?;
+        Ok(PullRequestDetail {
+            number: self.number,
+            title: self.title.into(),
+            body: self.body.unwrap_or_default().into(),
+            state,
+            author_login,
+            source_branch: self.head.ref_name.into(),
+            target_branch: self.base.ref_name.into(),
+            head_sha: self.head.sha.into(),
+            base_sha: self.base.sha.into(),
+            url,
+            updated_at: self.updated_at.into(),
+            is_draft: self.draft,
+            is_mergeable: self.mergeable,
+            additions: self.additions.unwrap_or(0),
+            deletions: self.deletions.unwrap_or(0),
+            changed_files: self.changed_files.unwrap_or(0),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct GithubReviewComment {
+    id: u64,
+    #[serde(default)]
+    user: Option<GithubUserRef>,
+    body: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    line: Option<u32>,
+    /// Present on replies; references the top-level comment of the thread.
+    #[serde(default)]
+    in_reply_to_id: Option<u64>,
+    created_at: String,
+    html_url: String,
+}
+
+impl GithubReviewComment {
+    fn into_comment(self) -> Result<PullRequestReviewComment> {
+        let url = Url::parse(&self.html_url).context("parsing review comment URL")?;
+        Ok(PullRequestReviewComment {
+            id: self.id,
+            author_login: self
+                .user
+                .map(|user| SharedString::from(user.login))
+                .unwrap_or_default(),
+            body: self.body.into(),
+            path: self.path.unwrap_or_default().into(),
+            line: self.line,
+            parent_id: self.in_reply_to_id,
+            // GitHub's REST review-comment API does not report thread resolution.
+            is_resolved: false,
+            created_at: self.created_at.into(),
+            url,
+        })
     }
 }
 
@@ -664,6 +1163,115 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "https://avatars.githubusercontent.com/u/e?email=12345%2Boctocat%40users.noreply.github.com&s=128"
+        );
+    }
+
+    #[test]
+    fn test_github_pull_request_into_summary() {
+        let json = r#"{
+            "number": 42,
+            "title": "Add device flow",
+            "body": "Body text",
+            "state": "open",
+            "draft": true,
+            "user": { "login": "octocat" },
+            "head": { "ref": "feature", "sha": "aaa111" },
+            "base": { "ref": "main", "sha": "bbb222" },
+            "html_url": "https://github.com/owner/repo/pull/42",
+            "updated_at": "2026-01-02T03:04:05Z"
+        }"#;
+        let pr: GithubPullRequest = serde_json::from_str(json).unwrap();
+        let state = pr.pull_request_state();
+        let summary = pr.into_summary(state).unwrap();
+
+        assert_eq!(summary.number, 42);
+        assert_eq!(summary.title.to_string(), "Add device flow");
+        assert_eq!(summary.author_login.to_string(), "octocat");
+        assert_eq!(summary.state, PullRequestState::Open);
+        assert_eq!(summary.source_branch.to_string(), "feature");
+        assert_eq!(summary.target_branch.to_string(), "main");
+        assert_eq!(summary.url.as_str(), "https://github.com/owner/repo/pull/42");
+        assert_eq!(summary.updated_at.to_string(), "2026-01-02T03:04:05Z");
+        assert!(summary.is_draft);
+    }
+
+    #[test]
+    fn test_github_pull_request_into_detail_merged_with_stats() {
+        // `merged_at` present must win over a `state` of "closed".
+        let json = r#"{
+            "number": 7,
+            "title": "Ship it",
+            "body": "Detailed body",
+            "state": "closed",
+            "user": { "login": "octocat" },
+            "head": { "ref": "topic", "sha": "headsha" },
+            "base": { "ref": "main", "sha": "basesha" },
+            "html_url": "https://github.com/owner/repo/pull/7",
+            "updated_at": "2026-01-03T00:00:00Z",
+            "merged_at": "2026-01-03T00:00:00Z",
+            "mergeable": true,
+            "additions": 12,
+            "deletions": 3,
+            "changed_files": 2
+        }"#;
+        let pr: GithubPullRequest = serde_json::from_str(json).unwrap();
+        let detail = pr.into_detail().unwrap();
+
+        assert_eq!(detail.state, PullRequestState::Merged);
+        assert_eq!(detail.body.to_string(), "Detailed body");
+        assert_eq!(detail.head_sha.to_string(), "headsha");
+        assert_eq!(detail.base_sha.to_string(), "basesha");
+        assert_eq!(detail.is_mergeable, Some(true));
+        assert_eq!(detail.additions, 12);
+        assert_eq!(detail.deletions, 3);
+        assert_eq!(detail.changed_files, 2);
+    }
+
+    #[test]
+    fn test_github_pull_request_missing_optional_fields_default() {
+        // No `user`, no `body`, no stats: mapper must not panic and must default.
+        let json = r#"{
+            "number": 1,
+            "title": "Minimal",
+            "state": "closed",
+            "head": { "ref": "h", "sha": "hs" },
+            "base": { "ref": "b", "sha": "bs" },
+            "html_url": "https://github.com/owner/repo/pull/1",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let pr: GithubPullRequest = serde_json::from_str(json).unwrap();
+        let detail = pr.into_detail().unwrap();
+
+        assert_eq!(detail.state, PullRequestState::Closed);
+        assert_eq!(detail.author_login.to_string(), "");
+        assert_eq!(detail.body.to_string(), "");
+        assert_eq!(detail.is_mergeable, None);
+        assert_eq!(detail.additions, 0);
+        assert!(!detail.is_draft);
+    }
+
+    #[test]
+    fn test_github_review_comment_into_comment() {
+        let json = r#"{
+            "id": 9001,
+            "user": { "login": "reviewer" },
+            "body": "Nit: rename this",
+            "path": "src/main.rs",
+            "line": 120,
+            "created_at": "2026-01-04T05:06:07Z",
+            "html_url": "https://github.com/owner/repo/pull/7#discussion_r9001"
+        }"#;
+        let comment: GithubReviewComment = serde_json::from_str(json).unwrap();
+        let mapped = comment.into_comment().unwrap();
+
+        assert_eq!(mapped.id, 9001);
+        assert_eq!(mapped.author_login.to_string(), "reviewer");
+        assert_eq!(mapped.body.to_string(), "Nit: rename this");
+        assert_eq!(mapped.path.to_string(), "src/main.rs");
+        assert_eq!(mapped.line, Some(120));
+        assert_eq!(
+            mapped.url.as_str(),
+            "https://github.com/owner/repo/pull/7#discussion_r9001"
         );
     }
 }

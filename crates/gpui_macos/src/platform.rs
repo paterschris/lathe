@@ -1123,12 +1123,18 @@ impl Platform for MacPlatform {
                 let result = CFType::wrap_under_create_rule(result)
                     .downcast::<CFDictionary>()
                     .context("keychain item was not a dictionary")?;
-                let username = result
-                    .find(kSecAttrAccount as *const _)
-                    .context("account was missing from keychain item")?;
-                let username = CFType::wrap_under_get_rule(*username)
-                    .downcast::<CFString>()
-                    .context("account was not a string")?;
+                // Tolerate a missing account attribute. A credential written
+                // with an empty username is stored by macOS without a
+                // `kSecAttrAccount` attribute, which previously made every such
+                // item fail to read. Callers that need the username get an empty
+                // string instead of a hard error.
+                let username = match result.find(kSecAttrAccount as *const _) {
+                    Some(username) => CFType::wrap_under_get_rule(*username)
+                        .downcast::<CFString>()
+                        .context("account was not a string")?
+                        .to_string(),
+                    None => String::new(),
+                };
                 let password = result
                     .find(kSecValueData as *const _)
                     .context("password was missing from keychain item")?;

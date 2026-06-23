@@ -280,7 +280,9 @@ impl Panel for GitActivityPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        6
+        // Must be unique across all registered panels (dock.rs panics in debug
+        // builds otherwise). 6 collides with OutlinePanel; 9 is a free slot.
+        9
     }
 }
 

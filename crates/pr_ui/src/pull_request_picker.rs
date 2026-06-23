@@ -169,8 +169,16 @@ async fn load_pull_requests(
         owner: remote.owner.clone(),
         repo: remote.repo.clone(),
     };
+    let host = provider.base_url().host_str().map(|host| host.to_string());
+    let auth = match host.as_deref() {
+        Some(host) => git::git_host_credentials::auth_for_host(cx, host)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
     let summaries = provider
-        .list_pull_requests(&remote_for_call, filter, http_client)
+        .list_pull_requests(&remote_for_call, filter, auth, http_client)
         .await?;
     Ok((provider, remote, summaries))
 }

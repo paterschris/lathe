@@ -79,7 +79,7 @@ impl<T: 'static> EventEmitter<PromptEditorEvent> for PromptEditor<T> {}
 
 impl<T: 'static> Render for PromptEditor<T> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
+        let ui_font_size = ThemeSettings::get_global(cx).ui_font_size_in_window(window, cx);
         let mut buttons = Vec::new();
 
         const RIGHT_PADDING: Pixels = px(9.);
@@ -1123,7 +1123,7 @@ impl<T: 'static> PromptEditor<T> {
             .into_any_element()
     }
 
-    fn render_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
 
         div()
@@ -1133,7 +1133,7 @@ impl<T: 'static> PromptEditor<T> {
             .bg(colors.editor_background)
             .child({
                 let settings = ThemeSettings::get_global(cx);
-                let font_size = settings.buffer_font_size(cx);
+                let font_size = settings.buffer_font_size_in_window(window, cx);
 
                 let text_style = TextStyle {
                     color: colors.editor_foreground,

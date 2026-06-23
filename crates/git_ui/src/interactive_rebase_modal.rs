@@ -3,15 +3,18 @@ use std::collections::HashMap;
 use editor::Editor;
 use git::Oid;
 use git::repository::{RebaseAction, RebaseTodoEntry};
-use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription, WeakEntity};
+use gpui::{
+    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, Subscription,
+    WeakEntity,
+};
 use project::git_store::{
     CommitDataState, GitStore, Repository, RepositoryId, undo_log::UndoAction,
 };
 use ui::{
     ActiveTheme, App, Button, ButtonCommon, ButtonStyle, Clickable, Color, Context, ContextMenu,
     Divider, FluentBuilder, Icon, IconName, IconSize, InteractiveElement, IntoElement, Label,
-    LabelCommon, LabelSize, ParentElement, PopoverMenu, Render, SharedString, StyledExt, Window,
-    div, h_flex, prelude::*, v_flex,
+    LabelCommon, LabelSize, ParentElement, PopoverMenu, Render, SharedString, StyledExt,
+    WithScrollbar, Window, div, h_flex, prelude::*, v_flex,
 };
 use workspace::{ModalView, Workspace};
 
@@ -59,6 +62,7 @@ pub struct InteractiveRebaseModal {
     /// time the user switches that row's action to `Reword`. Kept across action
     /// switches so the typed message survives picking another action and back.
     reword_editors: HashMap<usize, Entity<Editor>>,
+    scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -104,6 +108,7 @@ impl InteractiveRebaseModal {
             in_progress: false,
             last_error: None,
             reword_editors: HashMap::new(),
+            scroll_handle: ScrollHandle::new(),
             _subscriptions: vec![repo_subscription],
         }
     }
@@ -144,19 +149,25 @@ impl InteractiveRebaseModal {
         };
         let previous = entry.action;
         entry.action = action;
-        if action == RebaseAction::Reword
-            && previous != RebaseAction::Reword
-            && !self.reword_editors.contains_key(&index)
-        {
-            let sha = self.entries[index].sha.clone();
-            let short_sha = self.entries[index].short_sha.clone();
-            let initial = self.entry_subject(&sha, &short_sha, cx).to_string();
-            let editor = cx.new(|cx| {
-                let mut editor = Editor::single_line(window, cx);
-                editor.set_text(initial.as_str(), window, cx);
-                editor
-            });
-            self.reword_editors.insert(index, editor);
+        if action == RebaseAction::Reword && previous != RebaseAction::Reword {
+            if !self.reword_editors.contains_key(&index) {
+                let sha = self.entries[index].sha.clone();
+                let short_sha = self.entries[index].short_sha.clone();
+                let initial = self.entry_subject(&sha, &short_sha, cx).to_string();
+                let editor = cx.new(|cx| {
+                    let mut editor = Editor::single_line(window, cx);
+                    editor.set_text(initial.as_str(), window, cx);
+                    editor
+                });
+                self.reword_editors.insert(index, editor);
+            }
+            if let Some(editor) = self.reword_editors.get(&index).cloned() {
+                editor.update(cx, |editor, cx| {
+                    let handle = editor.focus_handle(cx);
+                    handle.focus(window, cx);
+                    editor.select_all(&Default::default(), window, cx);
+                });
+            }
         }
         cx.notify();
     }
@@ -282,7 +293,7 @@ fn action_color(action: RebaseAction) -> Color {
 }
 
 impl Render for InteractiveRebaseModal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entry_count = self.entries.len();
         let in_progress = self.in_progress;
         let weak_self = cx.weak_entity();
@@ -401,7 +412,18 @@ impl Render for InteractiveRebaseModal {
                             .size(LabelSize::Small),
                     ),
             )
-            .child(v_flex().w_full().flex_1().py_2().children(rows))
+            .child(
+                div()
+                    .id("rebase-rows")
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .py_2()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
+                    .children(rows)
+                    .vertical_scrollbar_for(&self.scroll_handle, window, cx),
+            )
             .child(Divider::horizontal())
             .child(
                 h_flex()

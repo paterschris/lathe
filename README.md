@@ -28,6 +28,18 @@ Tabs and project panel entries are color-coded by git status — modified, creat
 
 ![Git Tab Styling](assets/screenshots/git-aware-editor-tabs.png)
 
+### Hierarchical branch folder tree
+The Git Explorer panel renders Local and Remote branches as a collapsible folder tree, splitting names on `/`. So `feature/auth/login` and `feature/auth/signup` collapse under a single `feature/auth/` folder you can fold or expand. Folders show counts of contained branches and remember their open/closed state per section. When the filter input is active the tree flattens so filter results stay legible.
+
+### Branch from commit
+From any commit in the Git history view, create a new branch off that revision without first checking out. Useful for forking experimental work off a specific point.
+
+### Detached HEAD checkout from history
+Check out any commit SHA from the history view into detached HEAD. For inspecting old state without losing your current branch position. Local repositories only for now; collab projects bail with a clear error.
+
+### Interactive rebase with drag-and-drop
+The interactive rebase modal supports drag-and-drop reordering of commits and per-row pick / squash / edit / drop actions inline.
+
 ### Terminal awaiting-input indicator
 Shows a return icon in the terminal tab and title bar when Claude Code or other interactive prompts are waiting for input.
 
@@ -56,6 +68,12 @@ Commands (via the command palette):
 - `workspace groups: Rename Current Workspace Group`
 - `workspace groups: Bind Workspace Group Account`
 - `workspace groups: Unbind Workspace Group Account`
+
+### Per-window zoom
+`Cmd +`, `Cmd -`, and `Cmd 0` adjust the buffer and UI font size of only the active Lathe window, so two windows side-by-side can be zoomed independently. The "Reset Zoom" menu action and `Cmd +scroll-wheel` (when mouse-wheel zoom is enabled) also stay scoped to the focused window. The persisted variants (the menu's `… (persisted)` items) still write to `settings.json` and apply globally.
+
+### Mobile (Expo / React Native) workflow
+A drop-in `.zed/tasks.json` template and a setup walkthrough for building and installing Expo apps on Android devices without Android Studio. See [docs/mobile-development.md](docs/mobile-development.md). A first-class `mobile_dev` panel (device picker, logcat, one-click build & run) is in progress.
 
 ## Install
 

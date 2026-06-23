@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use ::settings::{IntoGpui, Settings, SettingsStore};
 use anyhow::{Context as _, Result};
-use gpui::{App, Font, HighlightStyle, Pixels, Refineable, px};
+use gpui::{App, Font, HighlightStyle, Pixels, Refineable};
 use gpui_util::ResultExt;
 use theme::{
     AccentColors, Appearance, AppearanceContent, DEFAULT_DARK_THEME, DEFAULT_ICON_THEME_NAME,
@@ -26,16 +26,21 @@ pub use crate::schema::{
     ThemeColorsContent, ThemeContent, ThemeFamilyContent, ThemeStyleContent,
     WindowBackgroundContent, status_colors_refinement, syntax_overrides, theme_colors_refinement,
 };
-use crate::settings::adjust_buffer_font_size;
+use crate::settings::{
+    reset_agent_buffer_font_size_for_all_windows, reset_agent_ui_font_size_for_all_windows,
+    reset_buffer_font_size_for_all_windows, reset_git_commit_buffer_font_size_for_all_windows,
+    reset_ui_font_size_for_all_windows,
+};
 pub use crate::settings::{
     AgentBufferFontSize, AgentUiFontSize, BufferLineHeight, FontFamilyName,
     GitCommitBufferFontSize, IconThemeName, IconThemeSelection, ThemeAppearanceMode, ThemeName,
     ThemeSelection, ThemeSettings, adjust_agent_buffer_font_size, adjust_agent_ui_font_size,
-    adjust_git_commit_buffer_font_size, adjust_ui_font_size, adjusted_font_size,
-    appearance_to_mode, clamp_font_size, default_theme, observe_buffer_font_size_adjustment,
-    reset_agent_buffer_font_size, reset_agent_ui_font_size, reset_buffer_font_size,
-    reset_git_commit_buffer_font_size, reset_ui_font_size, set_icon_theme, set_mode, set_theme,
-    setup_ui_font,
+    adjust_buffer_font_size, adjust_git_commit_buffer_font_size, adjust_ui_font_size,
+    adjusted_font_size, appearance_to_mode, clamp_font_size, clear_window_font_overrides,
+    decrease_buffer_font_size, default_theme, increase_buffer_font_size,
+    observe_buffer_font_size_adjustment, reset_agent_buffer_font_size, reset_agent_ui_font_size,
+    reset_buffer_font_size, reset_git_commit_buffer_font_size, reset_ui_font_size, set_icon_theme,
+    set_mode, set_theme, setup_ui_font,
 };
 pub use theme::UiDensity;
 
@@ -98,6 +103,11 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
         settings.theme_overrides.clone(),
     );
 
+    cx.on_window_closed(move |cx, window_id| {
+        clear_window_font_overrides(cx, window_id);
+    })
+    .detach();
+
     cx.observe_global::<SettingsStore>(move |cx| {
         let settings = ThemeSettings::get_global(cx);
 
@@ -115,27 +125,27 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
 
         if buffer_font_size_settings != prev_buffer_font_size_settings {
             prev_buffer_font_size_settings = buffer_font_size_settings;
-            reset_buffer_font_size(cx);
+            reset_buffer_font_size_for_all_windows(cx);
         }
 
         if ui_font_size_settings != prev_ui_font_size_settings {
             prev_ui_font_size_settings = ui_font_size_settings;
-            reset_ui_font_size(cx);
+            reset_ui_font_size_for_all_windows(cx);
         }
 
         if agent_ui_font_size_settings != prev_agent_ui_font_size_settings {
             prev_agent_ui_font_size_settings = agent_ui_font_size_settings;
-            reset_agent_ui_font_size(cx);
+            reset_agent_ui_font_size_for_all_windows(cx);
         }
 
         if agent_buffer_font_size_settings != prev_agent_buffer_font_size_settings {
             prev_agent_buffer_font_size_settings = agent_buffer_font_size_settings;
-            reset_agent_buffer_font_size(cx);
+            reset_agent_buffer_font_size_for_all_windows(cx);
         }
 
         if git_commit_buffer_font_size_settings != prev_git_commit_buffer_font_size_settings {
             prev_git_commit_buffer_font_size_settings = git_commit_buffer_font_size_settings;
-            reset_git_commit_buffer_font_size(cx);
+            reset_git_commit_buffer_font_size_for_all_windows(cx);
         }
 
         if theme_name != prev_theme_name || theme_overrides != prev_theme_overrides {
@@ -425,14 +435,3 @@ pub fn merge_accent_colors(
     }
 }
 
-/// Increases the buffer font size by 1 pixel, without persisting the result in the settings.
-/// This will be effective until the app is restarted.
-pub fn increase_buffer_font_size(cx: &mut App) {
-    adjust_buffer_font_size(cx, |size| size + px(1.0));
-}
-
-/// Decreases the buffer font size by 1 pixel, without persisting the result in the settings.
-/// This will be effective until the app is restarted.
-pub fn decrease_buffer_font_size(cx: &mut App) {
-    adjust_buffer_font_size(cx, |size| size - px(1.0));
-}

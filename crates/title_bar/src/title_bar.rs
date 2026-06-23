@@ -1247,6 +1247,10 @@ impl TitleBar {
         let active_account_id = self.client.active_account_id();
         let workspace = self.workspace.clone();
 
+        let github_connected = git::git_host_credentials::connected_username(cx, "github.com");
+        let bitbucket_connected =
+            git::git_host_credentials::connected_username(cx, "bitbucket.org");
+
         let bound_account_id = workspace
             .upgrade()
             .and_then(|w| w.read(cx).bound_collab_account_id().map(|s| s.to_string()));
@@ -1311,6 +1315,8 @@ impl TitleBar {
                 let workspace = workspace.clone();
                 let display_login = display_login.clone();
                 let display_account_id = display_account_id.clone();
+                let github_connected = github_connected.clone();
+                let bitbucket_connected = bitbucket_connected.clone();
 
                 ContextMenu::build(window, cx, |menu, _, _cx| {
                     menu.when(is_signed_in, |this| {
@@ -1515,6 +1521,46 @@ impl TitleBar {
                                 })
                         },
                     )
+                    .separator()
+                    .header("Git Integrations")
+                    .when(github_connected.is_some(), |this| {
+                        let login = github_connected.clone().unwrap_or_default();
+                        this.action(
+                            format!("Disconnect GitHub ({login})"),
+                            zed_actions::DisconnectGitHost {
+                                host: "github.com".to_string(),
+                            }
+                            .boxed_clone(),
+                        )
+                    })
+                    .when(github_connected.is_none(), |this| {
+                        this.action(
+                            "Connect GitHub…",
+                            zed_actions::ConnectGitHost {
+                                host: "github.com".to_string(),
+                            }
+                            .boxed_clone(),
+                        )
+                    })
+                    .when(bitbucket_connected.is_some(), |this| {
+                        let login = bitbucket_connected.clone().unwrap_or_default();
+                        this.action(
+                            format!("Disconnect Bitbucket ({login})"),
+                            zed_actions::DisconnectGitHost {
+                                host: "bitbucket.org".to_string(),
+                            }
+                            .boxed_clone(),
+                        )
+                    })
+                    .when(bitbucket_connected.is_none(), |this| {
+                        this.action(
+                            "Connect Bitbucket Cloud…",
+                            zed_actions::ConnectGitHost {
+                                host: "bitbucket.org".to_string(),
+                            }
+                            .boxed_clone(),
+                        )
+                    })
                 })
                 .into()
             })

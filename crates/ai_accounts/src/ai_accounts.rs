@@ -143,10 +143,30 @@ fn accounts_path() -> PathBuf {
 }
 
 pub fn load_index() -> AiAccountsIndex {
-    std::fs::read(accounts_path())
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    let path = accounts_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        // No file yet is the normal first-run case — an empty index is correct
+        // and not worth logging.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return AiAccountsIndex::default();
+        }
+        Err(error) => {
+            log::warn!("ai_accounts: failed to read {}: {error:#}", path.display());
+            return AiAccountsIndex::default();
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(index) => index,
+        // A parse failure used to silently fall back to an empty index, which
+        // both hid the cause (the UI just showed "No AI accounts yet") and
+        // risked a later save_index overwriting a recoverable file. Log loudly
+        // so the real error is visible.
+        Err(error) => {
+            log::error!("ai_accounts: failed to parse {}: {error:#}", path.display());
+            AiAccountsIndex::default()
+        }
+    }
 }
 
 pub fn save_index(index: &AiAccountsIndex) -> Result<()> {
@@ -164,6 +184,19 @@ pub enum LoginFlow {
     InThread { command: &'static str },
     /// Open a regular terminal pane and run the agent's login command interactively.
     EmbeddedTerminal { argv: &'static [&'static str] },
+    /// Authenticate by entering a provider API key. Lathe stores the key in the
+    /// system keychain scoped to the account (see [`api_key_keychain_url`]) and
+    /// injects it into the subprocess at spawn. Used when subscription/OAuth
+    /// login is unavailable: Google retired Gemini Code Assist OAuth for
+    /// individual accounts (June 2026), so for individuals the Gemini CLI only
+    /// authenticates via an AI Studio API key.
+    ApiKey {
+        /// Where the user obtains a key. Opened in the browser from the modal.
+        key_url: &'static str,
+        /// Subprocess environment variable the key is injected as (e.g.
+        /// `GEMINI_API_KEY`).
+        env_var: &'static str,
+    },
 }
 
 /// Hex-coded per-agent identification color, with light- and dark-theme
@@ -193,6 +226,14 @@ pub struct AgentDescriptor {
     /// semantics so an explicit value upstream of the spawn (workspace
     /// settings, user shell env) wins.
     pub default_env: &'static [(&'static str, &'static str)],
+    /// Environment variables to *remove* from the agent subprocess (and its
+    /// login terminal) when a Lathe AI account is bound. These are API-key
+    /// vars that would otherwise override the per-account subscription/OAuth
+    /// login — e.g. an ambient `GEMINI_API_KEY` makes the Gemini CLI silently
+    /// use API-key auth and ignore "Login with Google". Because the subprocess
+    /// inherits Lathe's own environment by default, omitting the key from the
+    /// injected env map is not enough; it must be explicitly removed.
+    pub scrub_env: &'static [&'static str],
 }
 
 pub const CLAUDE_CODE_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
@@ -219,20 +260,37 @@ pub const CLAUDE_CODE_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
         ("MCP_TIMEOUT", "5000"),
     ],
+    scrub_env: &[],
 };
 
 pub const GEMINI_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     agent_id: "gemini",
     display_name: "Gemini CLI",
-    config_dir_env_var: "GEMINI_CONFIG_DIR",
-    login_flow: LoginFlow::InThread { command: "/auth" },
-    verify_command: &["gemini", "/auth"],
-    signup_url: "https://gemini.google.com/",
+    // The Gemini CLI relocates its config/credential storage via GEMINI_CLI_HOME
+    // (it creates a `.gemini` folder under this root). GEMINI_CONFIG_DIR is NOT
+    // honored, so using it left every account sharing ~/.gemini.
+    config_dir_env_var: "GEMINI_CLI_HOME",
+    // Google retired Gemini Code Assist OAuth ("Login with Google") for
+    // individual accounts in June 2026, pushing them to Antigravity. For
+    // individuals the Gemini CLI now authenticates only via an AI Studio API
+    // key, so accounts are created by pasting a key rather than an OAuth flow.
+    login_flow: LoginFlow::ApiKey {
+        key_url: "https://aistudio.google.com/apikey",
+        env_var: "GEMINI_API_KEY",
+    },
+    // No CLI status check for key auth; the modal validates the key on entry
+    // and the Manage modal verifies by key presence in the keychain instead.
+    verify_command: &[],
+    signup_url: "https://aistudio.google.com/apikey",
     brand_accent: BrandAccent {
         light: "#4285f4",
         dark: "#7aa9f8",
     },
     default_env: &[],
+    // Nothing to scrub: with API-key auth the key IS the credential, so the
+    // injected GEMINI_API_KEY must reach the subprocess. (The retired OAuth
+    // flow stripped it so "Login with Google" would win instead.)
+    scrub_env: &[],
 };
 
 pub const CODEX_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
@@ -249,6 +307,7 @@ pub const CODEX_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         dark: "#2dc59a",
     },
     default_env: &[],
+    scrub_env: &[],
 };
 
 pub const TIER_A_DESCRIPTORS: &[AgentDescriptor] = &[
@@ -306,6 +365,16 @@ pub fn accounts_root() -> PathBuf {
     paths::data_dir().join("ai_accounts")
 }
 
+/// Keychain lookup key under which an account's provider API key is stored, for
+/// agents whose [`LoginFlow`] is [`LoginFlow::ApiKey`]. The value is opaque to
+/// the keychain (used only as a service identifier); scoping it per account
+/// keeps multiple API-key accounts for the same agent from colliding. Shared by
+/// the Add-account modal (write), the ACP spawn path (read), and account delete
+/// (cleanup) so all three agree on the location.
+pub fn api_key_keychain_url(agent_id: &str, account_id: &str) -> String {
+    format!("https://ai-account.lathe/{agent_id}/{account_id}")
+}
+
 /// Validates a proposed account display name for an agent. Returns Err with a
 /// user-presentable message when the name is empty or already in use within the
 /// same agent (case-insensitive). Caller has already loaded `index`.
@@ -355,8 +424,35 @@ fn apply_create_quirks(agent_id: &str, config_dir: &Path) -> Result<()> {
                     format!("writing Codex config.toml at {}", config_path.display())
                 })?;
         }
+    } else if agent_id == GEMINI_DESCRIPTOR.agent_id {
+        // The Gemini CLI chooses its auth method from
+        // `<GEMINI_CLI_HOME>/.gemini/settings.json` (`security.auth.selectedType`),
+        // not from the presence of GEMINI_API_KEY. We inject the key at spawn, but
+        // without a recorded auth type the `--experimental-acp` server reports
+        // AuthRequired ("Failed to Launch: Authentication required"). Pre-select
+        // the AI Studio API-key method so the injected key is actually used.
+        ensure_gemini_api_key_auth_selected(config_dir)?;
     }
     Ok(())
+}
+
+/// Writes `<config_dir>/.gemini/settings.json` selecting AI Studio API-key auth,
+/// unless a settings file already exists (the CLI owns it once created). Shared
+/// by account creation and the spawn-time backfill for accounts created before
+/// this auth type was written.
+pub fn ensure_gemini_api_key_auth_selected(config_dir: &Path) -> Result<()> {
+    let gemini_dir = config_dir.join(".gemini");
+    let settings_path = gemini_dir.join("settings.json");
+    if settings_path.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&gemini_dir)
+        .with_context(|| format!("creating Gemini config dir {}", gemini_dir.display()))?;
+    std::fs::write(
+        &settings_path,
+        "{\n  \"security\": {\n    \"auth\": {\n      \"selectedType\": \"gemini-api-key\"\n    }\n  }\n}\n",
+    )
+    .with_context(|| format!("writing Gemini settings.json at {}", settings_path.display()))
 }
 
 /// Creates a new account, materializes its config dir, applies per-agent
@@ -817,7 +913,9 @@ fn extract_text_from_content(value: &serde_json::Value) -> Option<String> {
 /// or `type: "model"` records. Auto-saved by ChatRecordingService on every
 /// turn (not just `/chat save`), so this captures the full session log.
 fn list_gemini_conversations(config_dir: &Path) -> Vec<ConversationSummary> {
-    let tmp_dir = config_dir.join("tmp");
+    // GEMINI_CLI_HOME makes the CLI store everything under `<config_dir>/.gemini`,
+    // so the per-project chat logs live at `<config_dir>/.gemini/tmp/...`.
+    let tmp_dir = config_dir.join(".gemini").join("tmp");
     let mut summaries: Vec<ConversationSummary> = Vec::new();
     let Ok(project_entries) = std::fs::read_dir(&tmp_dir) else {
         return Vec::new();
@@ -1058,6 +1156,44 @@ mod tests {
         assert_eq!(descriptor_for("gemini").map(|d| d.display_name), Some("Gemini CLI"));
         assert_eq!(descriptor_for("codex-acp").map(|d| d.display_name), Some("Codex CLI"));
         assert!(descriptor_for("nope").is_none());
+    }
+
+    #[test]
+    fn gemini_uses_api_key_login_with_https_key_url() {
+        let gemini = descriptor_for("gemini").expect("gemini descriptor");
+        match gemini.login_flow {
+            LoginFlow::ApiKey { key_url, env_var } => {
+                assert!(key_url.starts_with("https://"), "key_url must be https");
+                assert_eq!(env_var, "GEMINI_API_KEY");
+            }
+            other => panic!("expected Gemini to use ApiKey login flow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_key_agents_do_not_scrub_their_own_key() {
+        // Scrubbing is an OAuth-only protection. An ApiKey agent that stripped
+        // its own key var would defeat the auth it depends on (this is the
+        // exact conflict that made "add a Gemini account" break before).
+        for descriptor in TIER_A_DESCRIPTORS {
+            if let LoginFlow::ApiKey { env_var, .. } = descriptor.login_flow {
+                assert!(
+                    !descriptor.scrub_env.contains(&env_var),
+                    "{} must not scrub its own API-key var {env_var}",
+                    descriptor.agent_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn api_key_keychain_url_is_scoped_per_account() {
+        let a = api_key_keychain_url("gemini", "acct-1");
+        let b = api_key_keychain_url("gemini", "acct-2");
+        let c = api_key_keychain_url("codex-acp", "acct-1");
+        assert_ne!(a, b, "different accounts must not collide");
+        assert_ne!(a, c, "different agents must not collide");
+        assert!(a.contains("gemini") && a.contains("acct-1"));
     }
 
     #[test]

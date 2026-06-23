@@ -35,15 +35,20 @@ pub fn apply_features_and_fallbacks(
     unsafe {
         let mut keys = vec![kCTFontFeatureSettingsAttribute];
         let mut values = vec![generate_feature_array(features)];
-        if let Some(fallbacks) = fallbacks
-            && !fallbacks.fallback_list().is_empty()
-        {
-            keys.push(kCTFontCascadeListAttribute);
-            values.push(generate_fallback_array(
-                fallbacks,
-                font.native_font().as_concrete_TypeRef(),
-            ));
-        }
+        // Always install a cascade list that ends in the system fallback fonts, even
+        // when the user configured no explicit fallbacks. Fonts we bundle and load from
+        // memory (e.g. Lilex / IBM Plex) carry no default cascade list of their own, so
+        // without this CoreText renders `.notdef` (tofu) for any codepoint the primary
+        // font lacks instead of substituting a system font. That is what made symbols
+        // like `⏺`, `⎿`, and todo checkboxes emitted by terminal TUIs render as a
+        // `?`-in-a-box. When present, the user's fallbacks take precedence over the
+        // system ones.
+        let user_fallbacks = fallbacks.filter(|fallbacks| !fallbacks.fallback_list().is_empty());
+        keys.push(kCTFontCascadeListAttribute);
+        values.push(generate_fallback_array(
+            user_fallbacks,
+            font.native_font().as_concrete_TypeRef(),
+        ));
         let attrs = CFDictionaryCreate(
             kCFAllocatorDefault,
             keys.as_ptr() as _,
@@ -98,15 +103,20 @@ fn generate_feature_array(features: &FontFeatures) -> CFMutableArrayRef {
     }
 }
 
-fn generate_fallback_array(fallbacks: &FontFallbacks, font_ref: CTFontRef) -> CFMutableArrayRef {
+fn generate_fallback_array(
+    fallbacks: Option<&FontFallbacks>,
+    font_ref: CTFontRef,
+) -> CFMutableArrayRef {
     unsafe {
         let fallback_array = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
-        for user_fallback in fallbacks.fallback_list() {
-            let name = CFString::from(user_fallback.as_str());
-            let fallback_desc =
-                CTFontDescriptorCreateWithNameAndSize(name.as_concrete_TypeRef(), 0.0);
-            CFArrayAppendValue(fallback_array, fallback_desc as _);
-            CFRelease(fallback_desc as _);
+        if let Some(fallbacks) = fallbacks {
+            for user_fallback in fallbacks.fallback_list() {
+                let name = CFString::from(user_fallback.as_str());
+                let fallback_desc =
+                    CTFontDescriptorCreateWithNameAndSize(name.as_concrete_TypeRef(), 0.0);
+                CFArrayAppendValue(fallback_array, fallback_desc as _);
+                CFRelease(fallback_desc as _);
+            }
         }
         append_system_fallbacks(fallback_array, font_ref);
         fallback_array

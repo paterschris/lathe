@@ -1,0 +1,86 @@
+// Drop-in tasks for an Expo 54+ project targeting Android.
+// Copy to <project-root>/.zed/tasks.json.
+//
+// Requires (local-build path):
+//   JDK 17 on PATH, ANDROID_HOME set, adb on PATH.
+//   See docs/mobile-development.md in the Lathe repo for setup.
+//
+// The "eas:" tasks need only `npm i -g eas-cli` and an Expo account.
+[
+  {
+    "label": "android: prebuild",
+    "command": "npx",
+    "args": ["expo", "prebuild", "--platform", "android"],
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  },
+  {
+    "label": "android: prebuild (clean)",
+    "command": "npx",
+    "args": ["expo", "prebuild", "--platform", "android", "--clean"],
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  },
+  {
+    "label": "android: run on device (debug)",
+    "command": "npx",
+    "args": ["expo", "run:android", "--device"],
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  },
+  {
+    "label": "android: build release APK",
+    "command": "sh",
+    "args": [
+      "-c",
+      "cd android && ./gradlew assembleRelease"
+    ],
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  },
+  {
+    "label": "android: install release APK on connected device",
+    "command": "sh",
+    "args": [
+      "-c",
+      "adb install -r android/app/build/outputs/apk/release/app-release.apk"
+    ],
+    "use_new_terminal": false
+  },
+  {
+    "label": "adb: list devices",
+    "command": "adb",
+    "args": ["devices", "-l"],
+    "use_new_terminal": false
+  },
+  {
+    "label": "adb: pair wireless (Android 11+)",
+    "command": "sh",
+    "args": [
+      "-c",
+      "echo 'On phone: Developer options > Wireless debugging > Pair with code. Enter ip:port and code below:' && read -p 'ip:port: ' ADDR && read -p 'pair code: ' CODE && adb pair $ADDR $CODE"
+    ],
+    "use_new_terminal": true
+  },
+  {
+    "label": "adb: logcat (current app)",
+    "command": "sh",
+    "args": [
+      "-c",
+      "PKG=$(node -e \"console.log(require('./app.json').expo.android.package)\") && adb logcat --pid=$(adb shell pidof -s $PKG) -v threadtime"
+    ],
+    "use_new_terminal": true
+  },
+  {
+    "label": "eas: build preview (cloud)",
+    "command": "eas",
+    "args": ["build", "--platform", "android", "--profile", "preview", "--non-interactive"],
+    "use_new_terminal": false
+  },
+  {
+    "label": "eas: build production (cloud)",
+    "command": "eas",
+    "args": ["build", "--platform", "android", "--profile", "production", "--non-interactive"],
+    "use_new_terminal": false
+  }
+]

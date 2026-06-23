@@ -1,13 +1,18 @@
+use std::rc::Rc;
+
 use ai_accounts::{
     AgentDescriptor, AiAccountsSettings, BrandAccent, descriptor_for, load_index,
     mark_account_used,
 };
 use gpui::{Hsla, Rgba, WindowAppearance, prelude::*};
-use settings::{Settings as _, SettingsContent, update_settings_file};
+use project::AgentId;
+use settings::{
+    Settings as _, SettingsContent, update_settings_file, update_settings_file_with_completion,
+};
 use ui::{ButtonLike, ButtonStyle, ContextMenu, PopoverMenu, prelude::*};
 
 use crate::agent_panel::AgentPanel;
-use crate::{AddAiAccount, ManageAiAccounts};
+use crate::{AddAiAccount, Agent, ManageAiAccounts, NewExternalAgentThread};
 
 fn brand_accent_color(accent: &BrandAccent, window: &Window) -> Option<Hsla> {
     let is_dark = matches!(
@@ -65,6 +70,7 @@ impl AgentPanel {
             .collect();
         let active_id = active_account.map(|account| account.id.clone());
         let fs = self.fs();
+        let panel = cx.weak_entity();
         let menu_id = SharedString::from(format!("ai-account-chip-menu-{agent_id_static}"));
         let trigger_id = SharedString::from(format!("ai-account-chip-trigger-{agent_id_static}"));
 
@@ -90,29 +96,26 @@ impl AgentPanel {
                     let other_accounts = other_accounts.clone();
                     let fs = fs.clone();
                     let active_id = active_id.clone();
+                    let panel = panel.clone();
                     Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
                         let has_alternatives = !other_accounts.is_empty();
                         for (account_id, display_name) in other_accounts {
-                            let fs = fs.clone();
+                            let panel = panel.clone();
                             menu = menu.entry(
                                 SharedString::from(format!("Switch to {display_name}")),
                                 None,
                                 move |_window, cx| {
                                     let agent_id = agent_id_static.to_string();
-                                    let account_id_for_settings = account_id.clone();
-                                    let account_id_for_touch = account_id.clone();
-                                    update_settings_file(fs.clone(), cx, move |settings, _cx| {
-                                        bind_account(
-                                            settings,
-                                            &agent_id,
-                                            Some(account_id_for_settings),
-                                        );
-                                    });
-                                    if let Err(error) = mark_account_used(&account_id_for_touch) {
-                                        log::warn!(
-                                            "ai_accounts: failed to mark {account_id_for_touch} used: {error:#}"
-                                        );
-                                    }
+                                    let account_id = account_id.clone();
+                                    // Bind, wait for the binding to land, then
+                                    // restart the agent's subprocess so the new
+                                    // account's config dir is actually applied
+                                    // (the env is only read at spawn time).
+                                    panel
+                                        .update(cx, |panel, cx| {
+                                            panel.switch_ai_account(agent_id, account_id, cx);
+                                        })
+                                        .ok();
                                 },
                             );
                         }
@@ -154,6 +157,85 @@ impl AgentPanel {
                     }))
                 }),
         )
+    }
+
+    /// Re-spawns the cached ACP subprocess for `agent_id`. The per-account
+    /// config-dir env var (e.g. `CLAUDE_CONFIG_DIR`) is injected only once, at
+    /// subprocess spawn, so a bind or switch that merely rewrites the setting
+    /// would silently keep the previous account until the next restart. This
+    /// forces that restart so the new binding takes effect.
+    fn restart_ai_agent_connection(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+        let agent = Agent::Custom {
+            id: AgentId::new(agent_id.to_string()),
+        };
+        let server: Rc<dyn agent_servers::AgentServer> =
+            Rc::new(agent_servers::CustomAgentServer::new(agent.id()));
+        self.connection_store().clone().update(cx, |store, cx| {
+            store.restart_connection(agent, server, cx);
+        });
+    }
+
+    /// Binds `account_id` for `agent_id`, waits for the binding to apply to the
+    /// global settings store, then restarts the agent connection so the new
+    /// account is actually used. `update_settings_file_with_completion` applies
+    /// `set_user_settings` before resolving, so by the time the restart runs the
+    /// global `AiAccountsSettings` already reflects the binding (no race).
+    pub(crate) fn switch_ai_account(
+        &mut self,
+        agent_id: String,
+        account_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = mark_account_used(&account_id) {
+            log::warn!("ai_accounts: failed to mark {account_id} used: {error:#}");
+        }
+        let completion = update_settings_file_with_completion(self.fs(), cx, {
+            let agent_id = agent_id.clone();
+            move |settings, _cx| bind_account(settings, &agent_id, Some(account_id))
+        });
+        cx.spawn(async move |panel, cx| {
+            completion.await.ok();
+            panel
+                .update(cx, |panel, cx| {
+                    panel.restart_ai_agent_connection(&agent_id, cx);
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Connects a freshly added in-thread-login AI account (Claude, Gemini):
+    /// bind, wait for it to apply, restart the agent connection so the new
+    /// (empty) config dir is used, then open a thread. Because the config dir
+    /// has no credentials yet, the agent reports auth-required and the thread
+    /// surfaces the real code-based sign-in. Driven from the panel so it
+    /// outlives the dismissed Add AI Account modal.
+    pub(crate) fn connect_new_ai_account_in_thread(
+        &mut self,
+        agent_id: String,
+        account_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let completion = update_settings_file_with_completion(self.fs(), cx, {
+            let agent_id = agent_id.clone();
+            move |settings, _cx| bind_account(settings, &agent_id, Some(account_id))
+        });
+        cx.spawn_in(window, async move |panel, cx| {
+            completion.await.ok();
+            panel
+                .update_in(cx, |panel, window, cx| {
+                    panel.restart_ai_agent_connection(&agent_id, cx);
+                    window.dispatch_action(
+                        Box::new(NewExternalAgentThread {
+                            agent: AgentId::new(agent_id),
+                        }),
+                        cx,
+                    );
+                })
+                .ok();
+        })
+        .detach();
     }
 }
 
