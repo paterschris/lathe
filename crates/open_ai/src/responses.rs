@@ -3,8 +3,9 @@ use futures::{AsyncBufReadExt, AsyncReadExt, StreamExt, io::BufReader, stream::B
 use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
-use crate::{ReasoningEffort, RequestError, Role, ToolChoice};
+use crate::{ReasoningEffort, RequestError, Role, ServiceTier, ToolChoice};
 
 #[derive(Serialize, Debug)]
 pub struct Request {
@@ -35,6 +36,19 @@ pub struct Request {
     pub reasoning: Option<ReasoningConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<Vec<ContextManagement>>,
+}
+
+/// Server-side context management configuration.
+///
+/// <https://developers.openai.com/api/docs/guides/compaction>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContextManagement {
+    Compaction { compact_threshold: u64 },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -51,6 +65,14 @@ pub enum ResponseInputItem {
     FunctionCall(ResponseFunctionCallItem),
     FunctionCallOutput(ResponseFunctionCallOutputItem),
     Reasoning(ResponseReasoningInputItem),
+    Compaction(ResponseCompactionItem),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponseCompactionItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Arc<str>>,
+    pub encrypted_content: Arc<str>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -336,6 +358,7 @@ pub enum ResponseOutputItem {
     Message(ResponseOutputMessage),
     FunctionCall(ResponseFunctionToolCall),
     Reasoning(ResponseReasoningItem),
+    Compaction(ResponseCompactionItem),
     #[serde(other)]
     Unknown,
 }
@@ -518,6 +541,9 @@ pub async fn stream_response(
                                     }
                                 }
                             }
+                            // No synthesized deltas; the `OutputItemDone`
+                            // event pushed below carries the full item.
+                            ResponseOutputItem::Compaction(_) => {}
                             ResponseOutputItem::Unknown => {}
                         }
 

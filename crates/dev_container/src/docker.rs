@@ -185,9 +185,18 @@ impl DockerInspect {
 }
 
 impl Docker {
-    pub(crate) async fn new(docker_cli: &str) -> Self {
+    pub(crate) async fn new(docker_cli: &str, use_buildkit: Option<bool>) -> Self {
         let has_buildx = if docker_cli == "podman" {
             false
+        } else if let Some(use_buildkit) = use_buildkit {
+            // Honor the explicit `dev_container_use_buildkit` setting. Setting it
+            // to `false` forces the classic Docker builder for Docker-compatible
+            // engines that lack an integrated BuildKit (e.g. Apple Container via
+            // a Docker-API bridge), where BuildKit builds cannot resolve
+            // locally-built images. The classic builder builds the feature
+            // content as an image and references it with an ordinary
+            // multi-stage `FROM`.
+            use_buildkit
         } else {
             let output = Command::new(docker_cli)
                 .args(["buildx", "version"])
@@ -197,7 +206,7 @@ impl Docker {
         };
         if !has_buildx && docker_cli != "podman" {
             log::info!(
-                "docker buildx not found; dev container builds will use the scratch-image fallback"
+                "Using the classic Docker builder for dev container builds (BuildKit unavailable or disabled)"
             );
         }
         Self {
@@ -287,7 +296,15 @@ impl DockerClient for Docker {
     ) -> Result<(), DevContainerError> {
         let mut command = Command::new(&self.docker_cli);
         if !self.is_podman() {
-            command.env("DOCKER_BUILDKIT", "1");
+            if self.has_buildx {
+                command.env("DOCKER_BUILDKIT", "1");
+            } else {
+                // Without a usable BuildKit, build through the classic builder so
+                // multi-stage `FROM` of locally-built images (the feature content
+                // image) resolves from the daemon's image store.
+                command.env("DOCKER_BUILDKIT", "0");
+                command.env("COMPOSE_DOCKER_CLI_BUILD", "0");
+            }
         }
         command.args(&["compose", "--project-name", project_name]);
         for docker_compose_file in config_files {
@@ -379,8 +396,28 @@ impl DockerClient for Docker {
         &self,
         filters: Vec<String>,
     ) -> Result<Option<DockerPs>, DevContainerError> {
-        let command = self.create_docker_query_containers(filters);
-        evaluate_json_command(command).await
+        let mut command = self.create_docker_query_containers(filters);
+        let output = command.output().await.map_err(|e| {
+            log::error!("Error running command {:?}: {e}", command);
+            DevContainerError::CommandFailed(command.get_program().display().to_string())
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::error!("Non-success status from docker ps: {stderr}");
+            return Err(DevContainerError::CommandFailed(
+                command.get_program().display().to_string(),
+            ));
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        parse_find_process_output(&raw).map_err(|e| {
+            // Preserve the dedicated multi-match error; log and re-wrap other parse failures.
+            if let DevContainerError::MultipleMatchingContainers(_) = &e {
+                e
+            } else {
+                log::error!("Error parsing docker ps output: {e}");
+                DevContainerError::CommandFailed(command.get_program().display().to_string())
+            }
+        })
     }
 
     fn docker_cli(&self) -> String {
@@ -389,6 +426,33 @@ impl DockerClient for Docker {
 
     fn supports_compose_buildkit(&self) -> bool {
         self.has_buildx
+    }
+}
+
+/// Parses output of `docker ps -a --format={{ json . }}`. When a single
+/// container matches the label filters, docker emits one JSON object; when
+/// multiple match, it emits newline-delimited JSON (one object per line).
+///
+/// Returns `Ok(None)` for no matches, `Ok(Some(_))` for exactly one match,
+/// and `DevContainerError::MultipleMatchingContainers` for two or more
+/// matches. The spec expects identifying labels to be unique per project, so
+/// the caller can't silently pick one.
+fn parse_find_process_output(raw: &str) -> Result<Option<DockerPs>, DevContainerError> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let containers: Vec<DockerPs> = serde_json_lenient::Deserializer::from_str(raw)
+        .into_iter::<DockerPs>()
+        .collect::<Result<_, _>>()
+        .map_err(|e| {
+            DevContainerError::CommandFailed(format!("failed to parse docker ps output: {e}"))
+        })?;
+    match containers.len() {
+        0 => Ok(None),
+        1 => Ok(containers.into_iter().next()),
+        _ => Err(DevContainerError::MultipleMatchingContainers(
+            containers.into_iter().map(|c| c.id).collect(),
+        )),
     }
 }
 
@@ -532,12 +596,62 @@ mod test {
 
     use crate::{
         command_json::deserialize_json_output,
+        devcontainer_api::DevContainerError,
         devcontainer_json::MountDefinition,
         docker::{
-            Docker, DockerComposeConfig, DockerComposeService, DockerComposeServicePort,
-            DockerComposeVolume, DockerInspect, DockerPs,
+            Docker, DockerClient, DockerComposeConfig, DockerComposeService,
+            DockerComposeServicePort, DockerComposeVolume, DockerInspect, DockerPs,
+            parse_find_process_output,
         },
     };
+
+    #[test]
+    fn parse_find_process_output_none() {
+        assert!(matches!(parse_find_process_output(""), Ok(None)));
+        assert!(matches!(parse_find_process_output("   \n\n"), Ok(None)));
+    }
+
+    #[test]
+    fn parse_find_process_output_single() {
+        let raw = r#"{"ID":"abc123"}"#;
+        let result = parse_find_process_output(raw).expect("single match must parse");
+        assert_eq!(result.unwrap().id, "abc123");
+    }
+
+    #[test]
+    fn parse_find_process_output_multiple_errors() {
+        // `docker ps --format={{ json . }}` emits newline-delimited JSON when
+        // multiple containers match the filters. The spec expects the
+        // identifying labels to be unique per project, so this is an error.
+        let raw = "{\"ID\":\"abc\"}\n{\"ID\":\"def\"}\n";
+        match parse_find_process_output(raw) {
+            Err(DevContainerError::MultipleMatchingContainers(ids)) => {
+                assert_eq!(ids, vec!["abc".to_string(), "def".to_string()]);
+            }
+            other => panic!("expected MultipleMatchingContainers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn use_buildkit_setting_overrides_buildx_detection() {
+        // `Some(_)` short-circuits the `buildx version` probe, so these run
+        // without invoking docker.
+        let forced_off = futures::executor::block_on(Docker::new("docker", Some(false)));
+        assert!(
+            !forced_off.supports_compose_buildkit(),
+            "use_buildkit=false must force the classic builder"
+        );
+
+        let forced_on = futures::executor::block_on(Docker::new("docker", Some(true)));
+        assert!(
+            forced_on.supports_compose_buildkit(),
+            "use_buildkit=true must enable BuildKit"
+        );
+
+        // podman never supports the BuildKit/buildx path, regardless of the setting.
+        let podman = futures::executor::block_on(Docker::new("podman", Some(true)));
+        assert!(!podman.supports_compose_buildkit());
+    }
 
     #[test]
     fn should_parse_simple_env_var() {

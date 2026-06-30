@@ -670,6 +670,7 @@ impl ConsoleQueryBarCompletionProvider {
                         match_start: None,
                         snippet_deduplication_key: None,
                         icon_path: None,
+                        icon_color: None,
                         documentation: Some(CompletionDocumentation::MultiLineMarkdown(
                             variable_value.into(),
                         )),
@@ -780,6 +781,7 @@ impl ConsoleQueryBarCompletionProvider {
                         new_text,
                         label: CodeLabel::plain(completion.label, None),
                         icon_path: None,
+                        icon_color: None,
                         documentation: completion.detail.map(|detail| {
                             CompletionDocumentation::MultiLineMarkdown(detail.into())
                         }),

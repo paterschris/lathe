@@ -763,11 +763,9 @@ async fn test_remote_git_graph_data_and_search(
         .await;
     cx_a.update(|cx| {
         git_ui::init(cx);
-        git_graph::init(cx);
     });
     cx_b.update(|cx| {
         git_ui::init(cx);
-        git_graph::init(cx);
     });
     let active_call_a = cx_a.read(ActiveCall::global);
 

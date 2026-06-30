@@ -9,10 +9,11 @@ use gpui::{AnyView, App, AsyncApp, Context, Entity, Task, TaskExt};
 use http_client::HttpClient;
 use language_model::{
     ANTHROPIC_PROVIDER_ID, ANTHROPIC_PROVIDER_NAME, ApiKeyState, AuthenticateError,
-    ConfigurationViewTargetAgent, EnvVar, IconOrSvg, LanguageModel, LanguageModelCompletionError,
-    LanguageModelCompletionEvent, LanguageModelId, LanguageModelName, LanguageModelProvider,
-    LanguageModelProviderId, LanguageModelProviderName, LanguageModelProviderState,
-    LanguageModelRequest, LanguageModelToolChoice, RateLimiter, env_var,
+    ConfigurationViewTargetAgent, EnvVar, FastModeConfirmation, IconOrSvg, LanguageModel,
+    LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelId, LanguageModelName,
+    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
+    LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice,
+    ProviderConfigurationView, RateLimiter, env_var,
 };
 use settings::{Settings, SettingsStore};
 use std::sync::{Arc, LazyLock};
@@ -40,6 +41,9 @@ pub struct AnthropicLanguageModelProvider {
 
 const API_KEY_ENV_VAR_NAME: &str = "ANTHROPIC_API_KEY";
 static API_KEY_ENV_VAR: LazyLock<EnvVar> = env_var!(API_KEY_ENV_VAR_NAME);
+
+pub(crate) const RESERVED_HEADER_NAMES: &[&str] =
+    &["X-Api-Key", "Anthropic-Version", "Anthropic-Beta"];
 
 pub struct State {
     api_key_state: ApiKeyState,
@@ -275,6 +279,41 @@ impl LanguageModelProvider for AnthropicLanguageModelProvider {
         self.state
             .update(cx, |state, cx| state.set_api_key(None, cx))
     }
+
+    fn configuration_view_v2(
+        &self,
+        _target_agent: language_model::ConfigurationViewTargetAgent,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> ProviderConfigurationView {
+        let state = self.state.clone();
+        ProviderConfigurationView::Inline(
+            cx.new(|cx| {
+                crate::ApiKeyEditor::new(
+                    state,
+                    "https://console.anthropic.com/settings/keys",
+                    "sk-ant-...",
+                    |state, _cx| crate::api_key_status(&state.api_key_state),
+                    |state, key, cx| state.update(cx, |state, cx| state.set_api_key(Some(key), cx)),
+                    |state, cx| state.update(cx, |state, cx| state.set_api_key(None, cx)),
+                    window,
+                    cx,
+                )
+            })
+            .into(),
+        )
+    }
+
+    fn fast_mode_confirmation(&self, _cx: &App) -> Option<FastModeConfirmation> {
+        Some(FastModeConfirmation {
+            title: "Enable Fast Mode for Anthropic?".into(),
+            message: "Fast mode lets requests use your Anthropic Priority Tier capacity, which \
+                Anthropic prioritizes over standard requests during peak load. Requires a \
+                Priority Tier commitment with Anthropic; without one, requests behave the same \
+                as the standard tier."
+                .into(),
+        })
+    }
 }
 
 /// Pick the model from `models` whose id starts with the earliest matching
@@ -325,6 +364,7 @@ fn available_model_to_anthropic_model(available: &AvailableModel) -> anthropic::
         supports_adaptive_thinking,
         supports_images: true,
         supports_speed: false,
+        supports_compaction: false,
         supported_effort_levels: if supports_adaptive_thinking {
             vec![
                 anthropic::Effort::Low,
@@ -434,6 +474,18 @@ impl LanguageModel for AnthropicModel {
         self.model.supports_speed
     }
 
+    fn refusal_fallback_model_id(&self) -> Option<&'static str> {
+        if self.model.id.starts_with(anthropic::FABLE_MODEL_ID_PREFIX) {
+            Some(anthropic::FABLE_FALLBACK_MODEL_ID)
+        } else {
+            None
+        }
+    }
+
+    fn supports_server_side_compaction(&self) -> bool {
+        self.model.supports_compaction
+    }
+
     fn supported_effort_levels(&self) -> Vec<language_model::LanguageModelEffortLevel> {
         self.model
             .supported_effort_levels
@@ -502,7 +554,7 @@ impl LanguageModel for AnthropicModel {
         let request = self.stream_completion(request, cx);
         let future = self.request_limiter.stream(async move {
             let response = request.await?;
-            Ok(AnthropicEventMapper::new().map_stream(response))
+            Ok(AnthropicEventMapper::new(PROVIDER_NAME).map_stream(response))
         });
         async move { Ok(future.await?.boxed()) }.boxed()
     }

@@ -115,7 +115,7 @@ futures.workspace = true
 git.workspace = true
 git_graph.workspace = true
 git_hosting_providers.workspace = true
-git_ui.workspace = true
+git_ui = { workspace = true, features = ["call"] }
 pr_ui.workspace = true
 go_to_line.workspace = true
 system_specs.workspace = true
@@ -181,6 +181,7 @@ repl.workspace = true
 reqwest.workspace = true
 reqwest_client.workspace = true
 rope.workspace = true
+sandbox.workspace = true
 search.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -65,7 +65,7 @@ impl Render for BranchStatusIndicator {
             .upgrade()
             .map(|workspace| workspace.focus_handle(cx));
 
-        match render_remote_button("branch-status-indicator", &branch, focus_handle, true) {
+        match render_remote_button("branch-status-indicator", &branch, focus_handle, true, None) {
             Some(button) => button.into_any_element(),
             None => Empty.into_any_element(),
         }

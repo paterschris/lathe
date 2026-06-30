@@ -390,6 +390,10 @@ struct SaveWorkspaceGroupDelegate {
 impl PickerDelegate for SaveWorkspaceGroupDelegate {
     type ListItem = ListItem;
 
+    fn name() -> &'static str {
+        "save workspace group"
+    }
+
     fn placeholder_text(&self, _: &mut Window, _: &mut App) -> Arc<str> {
         "Name this group and press Enter".into()
     }
@@ -631,6 +635,10 @@ impl OpenWorkspaceGroupDelegate {
 
 impl PickerDelegate for OpenWorkspaceGroupDelegate {
     type ListItem = ListItem;
+
+    fn name() -> &'static str {
+        "open workspace group"
+    }
 
     fn placeholder_text(&self, _: &mut Window, _: &mut App) -> Arc<str> {
         "Open a saved workspace group…".into()
@@ -906,6 +914,10 @@ struct RenameWorkspaceGroupDelegate {
 
 impl PickerDelegate for RenameWorkspaceGroupDelegate {
     type ListItem = ListItem;
+
+    fn name() -> &'static str {
+        "rename workspace group"
+    }
 
     fn placeholder_text(&self, _: &mut Window, _: &mut App) -> Arc<str> {
         "New name for workspace group".into()

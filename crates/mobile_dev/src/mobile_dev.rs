@@ -198,7 +198,7 @@ impl MobileDevPanel {
         let project = workspace.project().clone();
 
         let device_tracker = cx.spawn(async move |this, cx| {
-            let stream = adb::track_devices(DEVICE_POLL_INTERVAL);
+            let stream = adb::track_devices(DEVICE_POLL_INTERVAL, cx.background_executor().clone());
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 let Ok(_) = this.update(cx, |panel, cx| {
@@ -268,7 +268,7 @@ impl MobileDevPanel {
             log::warn!("mobile_dev: cannot start logcat without a detected Expo project");
             return;
         };
-        let Some(package) = project.android_package.clone() else {
+        let Some(package) = project.android_package else {
             log::warn!(
                 "mobile_dev: cannot start logcat; app.json has no expo.android.package"
             );
@@ -356,7 +356,7 @@ impl MobileDevPanel {
             BuildKind::EasPreview | BuildKind::EasProduction => None,
         };
 
-        let session = match BuildSession::spawn(kind, project.root.clone(), device_serial) {
+        let session = match BuildSession::spawn(kind, project.root, device_serial) {
             Ok(session) => session,
             Err(err) => {
                 log::error!("mobile_dev: failed to spawn build: {err:#}");

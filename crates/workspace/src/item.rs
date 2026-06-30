@@ -136,6 +136,9 @@ pub struct TabContentParams {
     pub deemphasized: bool,
     /// Override for the tab text color, set by the pane based on git status.
     pub text_color_override: Option<Color>,
+    /// Maximum character length for the title. None = use the item's own default (typically MAX_TAB_TITLE_LEN).
+    pub max_title_len: Option<usize>,
+    pub truncate_title_middle: bool,
 }
 
 impl TabContentParams {

@@ -1,7 +1,4 @@
-use std::{
-    hint::cold_path,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use itertools::Itertools;
 
@@ -75,20 +72,31 @@ impl ActionStatistics {
         self.longest_runtimes.is_empty()
     }
 
+    #[cfg(feature = "profiler")]
     pub fn update_running_action(&mut self, action: &'static str, started: Instant) {
         self.running = Some((action, started));
     }
+    #[cfg(not(feature = "profiler"))]
+    pub fn update_running_action(&mut self, _action: &'static str, _started: Instant) {}
 
+    #[cfg(feature = "profiler")]
     pub fn save_action_timing(&mut self) {
         let now = Instant::now();
-        let (action, started) = self
-            .running
-            .take()
-            .expect("only called after `update_running_action`");
+
+        let Some((action, started)) = self.running.take() else {
+            // Actions are ran only on the foreground executor and therefore
+            // sequentially _except_ in tests where they can run concurrently.
+            //
+            // When ran sequentially self.running will always be Some. When ran
+            // concurrently that is no longer true. But that is fine, we do not
+            // need to track action timings in tests.
+            std::hint::cold_path();
+            return;
+        };
 
         let runtime = now.duration_since(started);
         if runtime >= self.runtime_to_beat {
-            cold_path(); // most actions are not the worst, optimize for that
+            std::hint::cold_path(); // most actions are not the worst, optimize for that
 
             if self.longest_runtimes.is_full()
                 && let Some(to_replace) = self
@@ -119,6 +127,8 @@ impl ActionStatistics {
                 .expect("never empty");
         }
     }
+    #[cfg(not(feature = "profiler"))]
+    pub fn save_action_timing(&mut self) {}
 
     pub fn longest_runtimes(&self, include_running: bool) -> impl Iterator<Item = ActionTiming> {
         self.longest_runtimes.iter().copied().chain(
@@ -167,10 +177,14 @@ impl ActionTiming {
 
 // The profiler is careful to never block when the lock is held, therefore a
 // spinlock is optimal.
+#[cfg(feature = "profiler")]
 static ACTION_STATISTICS: spin::Mutex<ActionStatistics> =
     const { spin::Mutex::new(ActionStatistics::new()) };
 
 #[doc(hidden)]
+#[cfg(feature = "profiler")]
+// TODO(merge): upstream calls this from window.rs action dispatch; Lathe's dispatch
+// path does not wire it up, so it stays unused (pre-merge carried #[allow(dead_code)]).
 #[allow(dead_code)]
 pub(crate) fn update_running_action(action: &(dyn Action + 'static), cx: &mut crate::App) {
     let now = Instant::now();
@@ -180,12 +194,34 @@ pub(crate) fn update_running_action(action: &(dyn Action + 'static), cx: &mut cr
 }
 
 #[doc(hidden)]
+#[cfg(not(feature = "profiler"))]
+// TODO(merge): see profiler-feature variant above; unused in Lathe's dispatch path.
+#[allow(dead_code)]
+pub(crate) fn update_running_action(_: &(dyn Action + 'static), _: &mut crate::App) {}
+
+#[doc(hidden)]
+#[cfg(feature = "profiler")]
+// TODO(merge): upstream calls this from window.rs action dispatch; Lathe's dispatch
+// path does not wire it up, so it stays unused (pre-merge carried #[allow(dead_code)]).
 #[allow(dead_code)]
 pub(crate) fn save_action_timing() {
     ACTION_STATISTICS.lock().save_action_timing();
 }
 
 #[doc(hidden)]
+#[cfg(not(feature = "profiler"))]
+// TODO(merge): see profiler-feature variant above; unused in Lathe's dispatch path.
+#[allow(dead_code)]
+pub(crate) fn save_action_timing() {}
+
+#[doc(hidden)]
+#[cfg(feature = "profiler")]
 pub fn take_action_stats() -> ActionStatistics {
     ACTION_STATISTICS.lock().take()
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "profiler"))]
+pub fn take_action_stats() -> ActionStatistics {
+    ActionStatistics::default()
 }

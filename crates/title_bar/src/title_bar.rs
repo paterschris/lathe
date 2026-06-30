@@ -7,6 +7,7 @@ mod update_version;
 
 use crate::application_menu::{ApplicationMenu, show_menus};
 use crate::plan_chip::PlanChip;
+use agent_settings::{AgentSettings, WindowLayout};
 use arrayvec::ArrayVec;
 use git_ui::worktree_picker::WorktreePicker;
 pub use platform_title_bar::{
@@ -24,6 +25,7 @@ use auto_update::AutoUpdateStatus;
 use call::ActiveCall;
 use client::{Client, UserStore, zed_urls};
 use cloud_api_types::Plan;
+use command_palette_hooks::CommandPaletteFilter;
 use feature_flags::{FeatureFlagAppExt as _, SkillsFeatureFlag};
 
 use gpui::{
@@ -35,15 +37,16 @@ use gpui::{
 use onboarding_banner::OnboardingBanner;
 use project::{Project, git_store::GitStoreEvent, trusted_worktrees::TrustedWorktrees};
 use remote::RemoteConnectionOptions;
-use settings::Settings;
+use settings::{Settings, SettingsStore};
 
+use std::any::TypeId;
 use std::sync::Arc;
 use std::time::Duration;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
 use ui::{
-    Avatar, ButtonLike, ContextMenu, CountBadge, IconWithIndicator, Indicator, PopoverMenu,
-    PopoverMenuHandle, TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
+    Avatar, ButtonLike, ContextMenu, ContextMenuEntry, CountBadge, IconWithIndicator, Indicator,
+    PopoverMenu, PopoverMenuHandle, TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
 };
 use update_version::UpdateVersion;
 use util::ResultExt;
@@ -73,8 +76,23 @@ actions!(
     ]
 );
 
+actions!(
+    workspace,
+    [
+        /// Switches to the classic, editor-focused panel layout.
+        UseClassicLayout,
+        /// Switches to the agentic panel layout.
+        UseAgenticLayout,
+    ]
+);
+
 pub fn init(cx: &mut App) {
     platform_title_bar::PlatformTitleBar::init(cx);
+
+    update_layout_action_filter(cx);
+
+    cx.observe_global::<SettingsStore>(update_layout_action_filter)
+        .detach();
 
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         let Some(window) = window else {
@@ -83,6 +101,14 @@ pub fn init(cx: &mut App) {
         let multi_workspace = workspace.multi_workspace().cloned();
         let item = cx.new(|cx| TitleBar::new("title-bar", workspace, multi_workspace, window, cx));
         workspace.set_titlebar_item(item.into(), window, cx);
+
+        workspace.register_action(|_workspace, _: &UseClassicLayout, _window, cx| {
+            set_window_layout(WindowLayout::Editor(None), cx);
+        });
+
+        workspace.register_action(|_workspace, _: &UseAgenticLayout, _window, cx| {
+            set_window_layout(WindowLayout::Agent(None), cx);
+        });
 
         workspace.register_action(|workspace, _: &SimulateUpdateAvailable, _window, cx| {
             if let Some(titlebar) = workspace
@@ -142,6 +168,28 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// Hides or shows the panel layout actions in the command palette based on
+/// whether AI is currently disabled.
+fn update_layout_action_filter(cx: &mut App) {
+    let disable_ai = project::DisableAiSettings::get_global(cx).disable_ai;
+    let layout_actions = [
+        TypeId::of::<UseClassicLayout>(),
+        TypeId::of::<UseAgenticLayout>(),
+    ];
+    CommandPaletteFilter::update_global(cx, |filter, _| {
+        if disable_ai {
+            filter.hide_action_types(&layout_actions);
+        } else {
+            filter.show_action_types(layout_actions.iter());
+        }
+    });
+}
+
+fn set_window_layout(layout: WindowLayout, cx: &App) {
+    let fs = <dyn fs::Fs>::global(cx);
+    drop(AgentSettings::set_layout(layout, fs, cx));
 }
 
 pub struct TitleBar {
@@ -217,13 +265,18 @@ impl Render for TitleBar {
                 };
 
                 if let Some(repo_name) = display_name.and_then(|n| n.to_str()) {
-                    let name = if let Ok(relative) =
-                        worktree_abs_path.strip_prefix(&*repo.work_directory_abs_path)
-                    {
-                        if relative.as_os_str().is_empty() {
-                            repo_name.to_string()
+                    let visible_worktrees_in_repo = self.visible_worktrees_in_repository(repo, cx);
+                    let name = if visible_worktrees_in_repo == 1 {
+                        if let Ok(relative) =
+                            worktree_abs_path.strip_prefix(&*repo.work_directory_abs_path)
+                        {
+                            if relative.as_os_str().is_empty() {
+                                repo_name.to_string()
+                            } else {
+                                format!("{}/{}", repo_name, relative.display())
+                            }
                         } else {
-                            format!("{}/{}", repo_name, relative.display())
+                            repo_name.to_string()
                         }
                     } else {
                         repo_name.to_string()
@@ -311,7 +364,7 @@ impl Render for TitleBar {
                 })
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .children(self.render_call_controls(window, cx))
+                .child(self.render_call_controls(window, cx))
                 .children(self.render_connection_status(status, cx))
                 .child(self.update_version.clone())
                 .when(
@@ -539,6 +592,22 @@ impl TitleBar {
             .cloned()
     }
 
+    fn visible_worktrees_in_repository(
+        &self,
+        repository: &project::git_store::Repository,
+        cx: &App,
+    ) -> usize {
+        let repo_path = &repository.work_directory_abs_path;
+        self.project
+            .read(cx)
+            .visible_worktrees(cx)
+            .filter(|worktree| {
+                let worktree_path = worktree.read(cx).abs_path();
+                worktree_path == *repo_path || worktree_path.starts_with(repo_path.as_ref())
+            })
+            .count()
+    }
+
     fn render_remote_project_connection(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let workspace = self.workspace.clone();
 
@@ -595,7 +664,7 @@ impl TitleBar {
                     Some(recent_projects::RemoteServerProjects::popover(
                         fs,
                         workspace.clone(),
-                        false,
+                        None,
                         window,
                         cx,
                     ))
@@ -622,10 +691,7 @@ impl TitleBar {
                     move |_window, cx| {
                         Tooltip::with_meta(
                             tooltip_title,
-                            Some(&OpenRemote {
-                                from_existing_connection: false,
-                                create_new_window: false,
-                            }),
+                            Some(&OpenRemote::default()),
                             meta.clone(),
                             cx,
                         )
@@ -675,7 +741,7 @@ impl TitleBar {
                 })
             });
 
-        if cfg!(macos_sdk_26) {
+        if ui::utils::MACOS_SDK_26_OR_LATER {
             // Make up for Tahoe's traffic light buttons having less spacing around them
             Some(div().child(button).ml_0p5().into_any_element())
         } else {
@@ -786,7 +852,7 @@ impl TitleBar {
                 Some(recent_projects::RecentProjects::popover(
                     workspace.clone(),
                     window_project_groups.clone(),
-                    false,
+                    None,
                     focus_handle.clone(),
                     window,
                     cx,
@@ -805,13 +871,7 @@ impl TitleBar {
                     .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                     .when(!is_project_selected, |s| s.color(Color::Muted)),
                 move |_window, cx| {
-                    Tooltip::for_action(
-                        "Recent Projects",
-                        &zed_actions::OpenRecent {
-                            create_new_window: false,
-                        },
-                        cx,
-                    )
+                    Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
                 },
             )
             .anchor(gpui::Anchor::TopLeft)
@@ -843,7 +903,7 @@ impl TitleBar {
                 Some(recent_projects::RecentProjects::popover(
                     workspace.clone(),
                     window_project_groups.clone(),
-                    false,
+                    None,
                     focus_handle.clone(),
                     window,
                     cx,
@@ -862,13 +922,7 @@ impl TitleBar {
                     .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                     .when(!is_project_selected, |s| s.color(Color::Muted)),
                 move |_window, cx| {
-                    Tooltip::for_action(
-                        "Recent Projects",
-                        &zed_actions::OpenRecent {
-                            create_new_window: false,
-                        },
-                        cx,
-                    )
+                    Tooltip::for_action("Recent Projects", &zed_actions::OpenRecent::default(), cx)
                 },
             )
             .anchor(gpui::Anchor::TopLeft)
@@ -1228,16 +1282,17 @@ impl TitleBar {
 
         let has_organization = user_store_read.current_organization().is_some();
 
-        let current_organization = user_store_read.current_organization();
+        let current_organization = user_store.read(cx).current_organization();
         let business_organization = current_organization
             .as_ref()
             .filter(|organization| !organization.is_personal);
-        let organizations: Vec<_> = user_store_read
+        let organizations: Vec<_> = user_store
+            .read(cx)
             .organizations()
             .iter()
-            .map(|org| {
-                let plan = user_store_read.plan_for_organization(&org.id);
-                (org.clone(), plan)
+            .map(|organization| {
+                let plan = user_store.read(cx).plan_for_organization(&organization.id);
+                (organization.clone(), plan)
             })
             .collect();
 
@@ -1287,7 +1342,7 @@ impl TitleBar {
                     }
                 });
 
-            ButtonLike::new("user-menu").child(
+            ButtonLike::new("user-menu").aria_label("User menu").child(
                 h_flex()
                     .when_some(
                         business_organization.filter(|_| show_business_organization),
@@ -1300,6 +1355,7 @@ impl TitleBar {
             )
         } else {
             ButtonLike::new("user-menu")
+                .aria_label("User menu")
                 .child(Icon::new(IconName::ChevronDown).size(IconSize::Small))
         };
 
@@ -1317,6 +1373,12 @@ impl TitleBar {
                 let display_account_id = display_account_id.clone();
                 let github_connected = github_connected.clone();
                 let bitbucket_connected = bitbucket_connected.clone();
+
+                let ai_enabled = !project::DisableAiSettings::get_global(cx).disable_ai;
+                let current_layout = AgentSettings::get_layout(cx);
+                let is_editor = matches!(current_layout, WindowLayout::Editor(_));
+                let is_agent = matches!(current_layout, WindowLayout::Agent(_));
+                let is_custom = matches!(current_layout, WindowLayout::Custom(_));
 
                 ContextMenu::build(window, cx, |menu, _, _cx| {
                     menu.when(is_signed_in, |this| {
@@ -1362,7 +1424,7 @@ impl TitleBar {
                         )
                         .separator()
                     })
-                    .when(has_organization, |this| {
+                    .map(|this| {
                         let mut this = this.header("Organization");
 
                         for (organization, plan) in &organizations {
@@ -1429,6 +1491,36 @@ impl TitleBar {
                         "Extensions",
                         zed_actions::Extensions::default().boxed_clone(),
                     )
+                    .when(ai_enabled, |menu| {
+                        menu.separator()
+                            .submenu("Panel Layout", move |menu, _window, _cx| {
+                                menu.toggleable_entry(
+                                    "Classic",
+                                    is_editor,
+                                    IconPosition::Start,
+                                    Some(UseClassicLayout.boxed_clone()),
+                                    move |window, cx| {
+                                        window.dispatch_action(UseClassicLayout.boxed_clone(), cx);
+                                    },
+                                )
+                                .toggleable_entry(
+                                    "Agentic",
+                                    is_agent,
+                                    IconPosition::Start,
+                                    Some(UseAgenticLayout.boxed_clone()),
+                                    move |window, cx| {
+                                        window.dispatch_action(UseAgenticLayout.boxed_clone(), cx);
+                                    },
+                                )
+                                .when(is_custom, |menu| {
+                                    menu.item(
+                                        ContextMenuEntry::new("Custom")
+                                            .toggleable(IconPosition::Start, true)
+                                            .disabled(true),
+                                    )
+                                })
+                            })
+                    })
                     .when(
                         is_signed_in || !saved_accounts.is_empty(),
                         |this| {

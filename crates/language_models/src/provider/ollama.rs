@@ -6,11 +6,12 @@ use futures::{Stream, TryFutureExt, stream};
 use gpui::{AnyView, App, AsyncApp, Context, CursorStyle, Entity, Task, TaskExt};
 use http_client::HttpClient;
 use language_model::{
-    ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, LanguageModel, LanguageModelCompletionError,
-    LanguageModelCompletionEvent, LanguageModelId, LanguageModelName, LanguageModelProvider,
-    LanguageModelProviderId, LanguageModelProviderName, LanguageModelProviderState,
-    LanguageModelRequest, LanguageModelRequestTool, LanguageModelToolChoice, LanguageModelToolUse,
-    LanguageModelToolUseId, MessageContent, RateLimiter, Role, StopReason, TokenUsage, env_var,
+    ApiKeyState, AuthenticateError, DisabledReason, EnvVar, IconOrSvg, LanguageModel,
+    LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelId, LanguageModelName,
+    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
+    LanguageModelProviderState, LanguageModelRequest, LanguageModelRequestTool,
+    LanguageModelToolChoice, LanguageModelToolUse, LanguageModelToolUseId, MessageContent,
+    RateLimiter, Role, StopReason, TokenUsage, env_var,
 };
 use menu;
 use ollama::{
@@ -128,18 +129,31 @@ impl State {
                     let api_key = api_key.clone();
                     async move {
                         let name = model.name.as_str();
-                        let model =
-                            show_model(http_client.as_ref(), &api_url, api_key.as_deref(), name)
-                                .await?;
-                        let ollama_model = ollama::Model::new(
+
+                        show_model(
+                            http_client.as_ref(),
+                            &api_url,
+                            api_key.as_deref(),
                             name,
-                            None,
-                            model.context_length,
-                            Some(model.supports_tools()),
-                            Some(model.supports_vision()),
-                            Some(model.supports_thinking()),
-                        );
-                        Ok(ollama_model)
+                        )
+                        .await
+                        .map_or_else(
+                            |error| {
+                                ollama::Model::new_disabled(
+                                    name,
+                                    format!("Failed to fetch model from API: {error}",),
+                                )
+                            },
+                            |model| {
+                                ollama::Model::new(
+                                    name,
+                                    model.context_length,
+                                    Some(model.supports_tools()),
+                                    Some(model.supports_vision()),
+                                    Some(model.supports_thinking()),
+                                )
+                            },
+                        )
                     }
                 });
 
@@ -147,10 +161,8 @@ impl State {
             // since there is an arbitrary number of models available
             let mut ollama_models: Vec<_> = futures::stream::iter(tasks)
                 .buffer_unordered(5)
-                .collect::<Vec<Result<_>>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?;
+                .collect()
+                .await;
 
             ollama_models.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -292,6 +304,7 @@ impl LanguageModelProvider for OllamaLanguageModelProvider {
             .map(|model| {
                 Arc::new(OllamaLanguageModel {
                     id: LanguageModelId::from(model.name.clone()),
+                    disabled: model.disabled.as_ref().map(|d| DisabledReason::new(d)),
                     model,
                     http_client: self.http_client.clone(),
                     request_limiter: RateLimiter::new(4),
@@ -334,6 +347,7 @@ pub struct OllamaLanguageModel {
     http_client: Arc<dyn HttpClient>,
     request_limiter: RateLimiter,
     state: Entity<State>,
+    disabled: Option<DisabledReason>,
 }
 
 impl OllamaLanguageModel {
@@ -492,6 +506,10 @@ impl LanguageModel for OllamaLanguageModel {
 
     fn telemetry_id(&self) -> String {
         format!("ollama/{}", self.model.id())
+    }
+
+    fn is_disabled(&self) -> Option<DisabledReason> {
+        self.disabled.clone()
     }
 
     fn max_token_count(&self) -> u64 {
@@ -1065,6 +1083,7 @@ fn merge_settings_into_models(
                     supports_tools: setting_model.supports_tools,
                     supports_vision: setting_model.supports_images,
                     supports_thinking: setting_model.supports_thinking,
+                    disabled: None,
                 },
             );
         }
@@ -1102,6 +1121,7 @@ mod tests {
                 supports_tools: None,
                 supports_vision: None,
                 supports_thinking: None,
+                disabled: None,
             },
         );
         models.insert(
@@ -1114,6 +1134,7 @@ mod tests {
                 supports_tools: None,
                 supports_vision: None,
                 supports_thinking: None,
+                disabled: None,
             },
         );
 

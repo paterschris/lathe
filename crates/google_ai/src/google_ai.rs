@@ -515,7 +515,7 @@ impl Model {
             Self::Gemini25FlashLite => "Gemini 2.5 Flash-Lite",
             Self::Gemini25Flash => "Gemini 2.5 Flash",
             Self::Gemini25Pro => "Gemini 2.5 Pro",
-            Self::Gemini31FlashLite => "Gemini 3.1 Flash Lite",
+            Self::Gemini31FlashLite => "Gemini 3.1 Flash-Lite",
             Self::Gemini3Flash => "Gemini 3 Flash",
             Self::Gemini31Pro => "Gemini 3.1 Pro",
             Self::Custom {

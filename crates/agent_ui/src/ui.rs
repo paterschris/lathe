@@ -5,6 +5,7 @@ mod mention_crease;
 mod model_selector_components;
 #[allow(dead_code, unused_imports)]
 mod rules_to_skills_modal;
+mod sandbox_status_tooltip;
 mod undo_reject_toast;
 
 pub use agent_notification::*;
@@ -14,6 +15,7 @@ pub use mention_crease::*;
 pub use model_selector_components::*;
 #[allow(unused_imports)]
 pub use rules_to_skills_modal::*;
+pub use sandbox_status_tooltip::*;
 pub use undo_reject_toast::*;
 
 /// Returns the appropriate [`DocumentationSide`] for documentation asides

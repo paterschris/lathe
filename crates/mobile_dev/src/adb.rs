@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use futures::io::{AsyncBufReadExt, BufReader};
 use futures::stream::Stream;
-use gpui::SharedString;
+use gpui::{BackgroundExecutor, SharedString};
 use smol::channel;
 use smol::stream::StreamExt as _;
 use util::command::{Stdio, new_command};
@@ -152,30 +152,36 @@ pub(crate) fn parse_devices(output: &str) -> Vec<AdbDevice> {
 /// We chose polling over `adb` server's `host:track-devices` socket because
 /// the wire protocol changes more often than the CLI output and adds no
 /// fidelity for our use case.
-pub fn track_devices(interval: Duration) -> impl Stream<Item = Result<Vec<AdbDevice>>> {
+pub fn track_devices(
+    interval: Duration,
+    executor: BackgroundExecutor,
+) -> impl Stream<Item = Result<Vec<AdbDevice>>> {
     smol::stream::unfold(
         (None::<Vec<AdbDevice>>, true),
-        move |(previous, first_tick)| async move {
-            if !first_tick {
-                smol::Timer::after(interval).await;
+        move |(previous, first_tick)| {
+            let executor = executor.clone();
+            async move {
+                if !first_tick {
+                    executor.timer(interval).await;
+                }
+                let current = list_devices().await;
+                let (emit_value, next_previous) = match (current, previous) {
+                    (Ok(now), None) => {
+                        let cloned = now.clone();
+                        (Ok(now), Some(cloned))
+                    }
+                    (Ok(now), Some(prev)) if now == prev => {
+                        let cloned = now.clone();
+                        (Ok(now), Some(cloned))
+                    }
+                    (Ok(now), Some(_)) => {
+                        let cloned = now.clone();
+                        (Ok(now), Some(cloned))
+                    }
+                    (Err(err), prev) => (Err(err), prev),
+                };
+                Some((emit_value, (next_previous, false)))
             }
-            let current = list_devices().await;
-            let (emit_value, next_previous) = match (current, previous) {
-                (Ok(now), None) => {
-                    let cloned = now.clone();
-                    (Ok(now), Some(cloned))
-                }
-                (Ok(now), Some(prev)) if now == prev => {
-                    let cloned = now.clone();
-                    (Ok(now), Some(cloned))
-                }
-                (Ok(now), Some(_)) => {
-                    let cloned = now.clone();
-                    (Ok(now), Some(cloned))
-                }
-                (Err(err), prev) => (Err(err), prev),
-            };
-            Some((emit_value, (next_previous, false)))
         },
     )
 }

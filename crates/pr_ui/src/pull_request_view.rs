@@ -1409,23 +1409,22 @@ async fn build_buffer_diff(
     let language = cx.update(|cx| buffer.read(cx).language().cloned());
     let buffer = cx.update(|cx| buffer.read(cx).snapshot());
 
-    let diff = cx.new(|cx| BufferDiff::new(&buffer.text, cx));
+    // `BufferDiff::new` seeds the internal base-text buffer with the language and
+    // registry so syntax highlighting is available for the deleted side, then
+    // `set_base_text` populates that base buffer from `old_text` and computes and
+    // applies the diff snapshot in one step.
+    let diff = cx.new(|cx| {
+        BufferDiff::new(
+            &buffer.text,
+            language,
+            Some(language_registry.clone()),
+            cx,
+        )
+    });
 
-    let update = diff
-        .update(cx, |diff, cx| {
-            diff.update_diff(
-                buffer.text.clone(),
-                old_text.map(|old_text| Arc::from(old_text.as_str())),
-                Some(true),
-                language.clone(),
-                cx,
-            )
-        })
-        .await;
-
+    let base_text = old_text.map(|old_text| Arc::<str>::from(old_text.as_str()));
     diff.update(cx, |diff, cx| {
-        diff.language_changed(language, Some(language_registry.clone()), cx);
-        diff.set_snapshot(update, &buffer.text, cx)
+        diff.set_base_text(base_text, buffer.text.clone(), cx)
     })
     .await;
 

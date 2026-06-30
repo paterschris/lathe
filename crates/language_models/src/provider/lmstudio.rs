@@ -344,6 +344,7 @@ impl LmStudioLanguageModel {
                     ),
                     MessageContent::Thinking { .. } => {}
                     MessageContent::RedactedThinking(_) => {}
+                    MessageContent::Compaction(_) => {}
                     MessageContent::Image(image) => {
                         add_message_content_part(
                             lmstudio::MessagePart::Image {

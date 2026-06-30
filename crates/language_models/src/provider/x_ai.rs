@@ -6,10 +6,10 @@ use gpui::{AnyView, App, AsyncApp, Context, Entity, Task, TaskExt, Window};
 use http_client::HttpClient;
 use language_model::{
     ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, LanguageModel, LanguageModelCompletionError,
-    LanguageModelCompletionEvent, LanguageModelId, LanguageModelName, LanguageModelProvider,
-    LanguageModelProviderId, LanguageModelProviderName, LanguageModelProviderState,
-    LanguageModelRequest, LanguageModelToolChoice, LanguageModelToolSchemaFormat, RateLimiter,
-    env_var,
+    LanguageModelCompletionEvent, LanguageModelEffortLevel, LanguageModelId, LanguageModelName,
+    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
+    LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice,
+    LanguageModelToolSchemaFormat, ProviderConfigurationView, RateLimiter, env_var,
 };
 use open_ai::ResponseStreamEvent;
 pub use settings::XaiAvailableModel as AvailableModel;
@@ -206,6 +206,30 @@ impl LanguageModelProvider for XAiLanguageModelProvider {
         self.state
             .update(cx, |state, cx| state.set_api_key(None, cx))
     }
+
+    fn configuration_view_v2(
+        &self,
+        _target_agent: language_model::ConfigurationViewTargetAgent,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> ProviderConfigurationView {
+        let state = self.state.clone();
+        ProviderConfigurationView::Inline(
+            cx.new(|cx| {
+                crate::ApiKeyEditor::new(
+                    state,
+                    "https://console.x.ai/team/default/api-keys",
+                    "xai-...",
+                    |state, _cx| crate::api_key_status(&state.api_key_state),
+                    |state, key, cx| state.update(cx, |state, cx| state.set_api_key(Some(key), cx)),
+                    |state, cx| state.update(cx, |state, cx| state.set_api_key(None, cx)),
+                    window,
+                    cx,
+                )
+            })
+            .into(),
+        )
+    }
 }
 
 pub struct XAiLanguageModel {
@@ -253,6 +277,76 @@ impl XAiLanguageModel {
 
         async move { Ok(future.await?.boxed()) }.boxed()
     }
+}
+
+fn x_ai_reasoning_efforts(model: &x_ai::Model) -> &'static [open_ai::ReasoningEffort] {
+    if model.supports_reasoning_effort() {
+        &[
+            open_ai::ReasoningEffort::None,
+            open_ai::ReasoningEffort::Low,
+            open_ai::ReasoningEffort::Medium,
+            open_ai::ReasoningEffort::High,
+        ]
+    } else {
+        &[]
+    }
+}
+
+fn default_thinking_reasoning_effort(model: &x_ai::Model) -> Option<open_ai::ReasoningEffort> {
+    if model.supports_reasoning_effort() {
+        Some(open_ai::ReasoningEffort::Low)
+    } else {
+        None
+    }
+}
+
+fn reasoning_effort_for_request(
+    request: &LanguageModelRequest,
+    model: &x_ai::Model,
+) -> Option<open_ai::ReasoningEffort> {
+    let supported_efforts = x_ai_reasoning_efforts(model);
+    if supported_efforts.is_empty() {
+        return None;
+    }
+
+    if request.thinking_allowed {
+        request
+            .thinking_effort
+            .as_deref()
+            .and_then(|effort| effort.parse::<open_ai::ReasoningEffort>().ok())
+            .filter(|effort| supported_efforts.contains(effort))
+            .filter(|effort| *effort != open_ai::ReasoningEffort::None)
+            .or_else(|| default_thinking_reasoning_effort(model))
+    } else if supported_efforts.contains(&open_ai::ReasoningEffort::None) {
+        Some(open_ai::ReasoningEffort::None)
+    } else {
+        None
+    }
+}
+
+fn supported_thinking_effort_levels(model: &x_ai::Model) -> Vec<LanguageModelEffortLevel> {
+    let default_effort = default_thinking_reasoning_effort(model);
+    x_ai_reasoning_efforts(model)
+        .iter()
+        .copied()
+        .filter_map(|effort| {
+            let (name, value) = match effort {
+                open_ai::ReasoningEffort::None => return None,
+                open_ai::ReasoningEffort::Minimal => ("Minimal", "minimal"),
+                open_ai::ReasoningEffort::Low => ("Low", "low"),
+                open_ai::ReasoningEffort::Medium => ("Medium", "medium"),
+                open_ai::ReasoningEffort::High => ("High", "high"),
+                open_ai::ReasoningEffort::XHigh => ("Extra High", "xhigh"),
+                open_ai::ReasoningEffort::Max => return None, // Not supported by any xAI models
+            };
+
+            Some(LanguageModelEffortLevel {
+                name: name.into(),
+                value: value.into(),
+                is_default: Some(effort) == default_effort,
+            })
+        })
+        .collect()
 }
 
 impl LanguageModel for XAiLanguageModel {
@@ -315,6 +409,10 @@ impl LanguageModel for XAiLanguageModel {
         true
     }
 
+    fn supported_effort_levels(&self) -> Vec<LanguageModelEffortLevel> {
+        supported_thinking_effort_levels(&self.model)
+    }
+
     fn stream_completion(
         &self,
         request: LanguageModelRequest,
@@ -329,13 +427,15 @@ impl LanguageModel for XAiLanguageModel {
             LanguageModelCompletionError,
         >,
     > {
+        let reasoning_effort = reasoning_effort_for_request(&request, &self.model);
         let request = crate::provider::open_ai::into_open_ai(
             request,
             self.model.id(),
             self.model.supports_parallel_tool_calls(),
             self.model.supports_prompt_cache_key(),
             self.max_output_tokens(),
-            None,
+            crate::provider::open_ai::ChatCompletionMaxTokensParameter::MaxCompletionTokens,
+            reasoning_effort,
             false,
         );
         let completions = self.stream_completion(request, cx);

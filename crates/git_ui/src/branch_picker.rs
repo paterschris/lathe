@@ -164,7 +164,6 @@ enum BranchListStyle {
 }
 
 pub struct BranchList {
-    width: Rems,
     pub picker: Entity<Picker<BranchListDelegate>>,
     picker_focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -278,8 +277,9 @@ impl BranchList {
 
         let picker = cx.new(|cx| {
             Picker::uniform_list(delegate, window, cx)
+                .initial_width(width)
                 .show_scrollbar(true)
-                .modal(!embedded)
+                .when(embedded, |picker| picker.embedded())
         });
         let picker_focus_handle = picker.focus_handle(cx);
 
@@ -340,7 +340,6 @@ impl BranchList {
         Self {
             picker,
             picker_focus_handle,
-            width,
             _subscriptions: subscriptions,
             embedded,
         }
@@ -444,7 +443,6 @@ impl Render for BranchList {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .key_context("GitBranchSelector")
-            .w(self.width)
             .on_modifiers_changed(cx.listener(Self::handle_modifiers_changed))
             .on_action(cx.listener(Self::handle_delete))
             .on_action(cx.listener(Self::handle_force_delete))
@@ -1047,11 +1045,15 @@ impl BranchListDelegate {
 impl PickerDelegate for BranchListDelegate {
     type ListItem = ListItem;
 
+    fn name() -> &'static str {
+        "branch picker"
+    }
+
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
         match self.state {
             PickerState::List | PickerState::NewRemote | PickerState::NewBranch => {
                 match self.branch_filter {
-                    BranchFilter::All | BranchFilter::Remote => "Select branch…",
+                    BranchFilter::All | BranchFilter::Remote => "Switch or type to create a branch…",
                 }
             }
             PickerState::CreateRemote(_) => "Enter a name for this remote…",
@@ -2086,7 +2088,6 @@ mod tests {
                     BranchList {
                         picker,
                         picker_focus_handle,
-                        width: rems(34.),
                         _subscriptions: vec![_subscription],
                         embedded: false,
                     }
@@ -2246,7 +2247,8 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .branches;
         let repo_branches = repo_branches
             .iter()
             .map(|b| b.name())
@@ -2331,7 +2333,8 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .branches;
         assert!(
             repo_branches
                 .iter()
@@ -2410,7 +2413,8 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .branches;
         assert!(
             repo_branches
                 .iter()
@@ -2491,7 +2495,8 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .branches;
         assert!(
             repo_branches
                 .iter()
@@ -2569,7 +2574,8 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .branches;
         let repo_branches = repo_branches
             .iter()
             .map(|b| b.name())
@@ -2754,7 +2760,8 @@ mod tests {
             })
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .branches;
 
         let new_branch = branches
             .into_iter()

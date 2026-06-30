@@ -1,8 +1,8 @@
 use gpui::{Action as _, App};
 use itertools::Itertools as _;
 use settings::{
-    AudioInputDeviceName, AudioOutputDeviceName, LanguageSettingsContent, SemanticTokens,
-    SettingsContent,
+    AudioInputDeviceName, AudioOutputDeviceName, EditPredictionDataCollectionChoice,
+    LanguageSettingsContent, SemanticTokens, SettingsContent,
 };
 use std::sync::{Arc, OnceLock};
 use strum::{EnumMessage, IntoDiscriminant as _, VariantArray};
@@ -12,8 +12,9 @@ use crate::{
     ActionLink, DynamicItem, PROJECT, SettingField, SettingItem, SettingsFieldMetadata,
     SettingsPage, SettingsPageItem, SubPageLink, USER, active_language, all_language_names,
     pages::{
-        open_audio_test_window, render_edit_prediction_setup_page,
-        render_tool_permissions_setup_page,
+        open_audio_test_window, render_edit_prediction_setup_page, render_external_agents_page,
+        render_llm_providers_page, render_mcp_servers_page, render_sandbox_settings_page,
+        render_skills_setup_page, render_tool_permissions_setup_page,
     },
 };
 
@@ -83,6 +84,11 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         pages.push(developer_page());
     }
 
+    // TODO(merge): upstream added a "Performance Profiler" instrumentation toggle
+    // (json_path "instrumentation.performance_profiler.enabled") as a SettingsPageItem
+    // here, but it pushes to `items` (one page's item list) while this function returns
+    // `pages`. Re-add the Performance Profiler SettingItem into the appropriate
+    // developer/system page once reconciled.
     pages
 }
 
@@ -112,6 +118,7 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "When Closing With No Tabs",
                 description: "What to do when using the 'close active item' action with no tabs.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("when_closing_with_no_tabs"),
                     pick: |settings_content| {
                         settings_content
@@ -119,7 +126,7 @@ fn general_page(cx: &App) -> SettingsPage {
                             .when_closing_with_no_tabs
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.when_closing_with_no_tabs = value;
                     },
                 }),
@@ -130,11 +137,12 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "On Last Window Closed",
                 description: "What to do when the last window is closed.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("on_last_window_closed"),
                     pick: |settings_content| {
                         settings_content.workspace.on_last_window_closed.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.on_last_window_closed = value;
                     },
                 }),
@@ -145,11 +153,12 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "Use System Path Prompts",
                 description: "Use native OS dialogs for 'Open' and 'Save As'.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("use_system_path_prompts"),
                     pick: |settings_content| {
                         settings_content.workspace.use_system_path_prompts.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.use_system_path_prompts = value;
                     },
                 }),
@@ -160,9 +169,10 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "Use System Prompts",
                 description: "Use native OS dialogs for confirmations.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("use_system_prompts"),
                     pick: |settings_content| settings_content.workspace.use_system_prompts.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.use_system_prompts = value;
                     },
                 }),
@@ -173,9 +183,10 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "Redact Private Values",
                 description: "Hide the values of variables in private files.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("redact_private_values"),
                     pick: |settings_content| settings_content.editor.redact_private_values.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.redact_private_values = value;
                     },
                 }),
@@ -187,11 +198,12 @@ fn general_page(cx: &App) -> SettingsPage {
                 description: "Globs to match against file paths to determine if a file is private.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("worktree.private_files"),
                         pick: |settings_content| {
                             settings_content.project.worktree.private_files.as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.project.worktree.private_files = value;
                         },
                     }
@@ -204,6 +216,7 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "CLI Default Open Behavior",
                 description: "How `zed <path>` opens directories when no flag is specified.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("cli_default_open_behavior"),
                     pick: |settings_content| {
                         settings_content
@@ -211,8 +224,27 @@ fn general_page(cx: &App) -> SettingsPage {
                             .cli_default_open_behavior
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.cli_default_open_behavior = value;
+                    },
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    should_do_titlecase: Some(false),
+                    ..Default::default()
+                })),
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Default Open Behavior",
+                description: "How projects open from the UI by default.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("default_open_behavior"),
+                    pick: |settings_content| {
+                        settings_content.workspace.default_open_behavior.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.default_open_behavior = value;
                     },
                 }),
                 metadata: Some(Box::new(SettingsFieldMetadata {
@@ -230,6 +262,7 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "Trust All Projects By Default",
                 description: "When opening Zed, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("session.trust_all_projects"),
                     pick: |settings_content| {
                         settings_content
@@ -237,7 +270,7 @@ fn general_page(cx: &App) -> SettingsPage {
                             .as_ref()
                             .and_then(|session| session.trust_all_worktrees.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .session
                             .get_or_insert_default()
@@ -257,6 +290,7 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "Restore Unsaved Buffers",
                 description: "Whether or not to restore unsaved buffers on restart.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("session.restore_unsaved_buffers"),
                     pick: |settings_content| {
                         settings_content
@@ -264,7 +298,7 @@ fn general_page(cx: &App) -> SettingsPage {
                             .as_ref()
                             .and_then(|session| session.restore_unsaved_buffers.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .session
                             .get_or_insert_default()
@@ -278,9 +312,10 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "Restore On Startup",
                 description: "What to restore from the previous session when opening Zed.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("restore_on_startup"),
                     pick: |settings_content| settings_content.workspace.restore_on_startup.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.restore_on_startup = value;
                     },
                 }),
@@ -299,9 +334,10 @@ fn general_page(cx: &App) -> SettingsPage {
                 description: "Which settings should be activated only in Preview build of Zed.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("preview_channel_settings"),
                         pick: |settings_content| Some(settings_content),
-                        write: |_settings_content, _value| {},
+                        write: |_settings_content, _value, _| {},
                     }
                     .unimplemented(),
                 ),
@@ -313,9 +349,10 @@ fn general_page(cx: &App) -> SettingsPage {
                 description: "Any number of settings profiles that are temporarily applied on top of your existing user settings.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("settings_profiles"),
                         pick: |settings_content| Some(settings_content),
-                        write: |_settings_content, _value| {},
+                        write: |_settings_content, _value, _| {},
                     }
                     .unimplemented(),
                 ),
@@ -324,13 +361,14 @@ fn general_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn privacy_section() -> [SettingsPageItem; 3] {
+    fn privacy_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader("Privacy"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Telemetry Diagnostics",
                 description: "Send debug information like crash reports.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("telemetry.diagnostics"),
                     pick: |settings_content| {
                         settings_content
@@ -338,7 +376,7 @@ fn general_page(cx: &App) -> SettingsPage {
                             .as_ref()
                             .and_then(|telemetry| telemetry.diagnostics.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .telemetry
                             .get_or_insert_default()
@@ -352,6 +390,7 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "Telemetry Metrics",
                 description: "Send anonymized usage data like what languages you're using Zed with.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("telemetry.metrics"),
                     pick: |settings_content| {
                         settings_content
@@ -359,8 +398,30 @@ fn general_page(cx: &App) -> SettingsPage {
                             .as_ref()
                             .and_then(|telemetry| telemetry.metrics.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.telemetry.get_or_insert_default().metrics = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Anthropic Data Retention",
+                description: "Allow sending requests to Anthropic models that cannot be offered with Zero Data Retention.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("telemetry.anthropic_retention"),
+                    pick: |settings_content| {
+                        settings_content
+                            .telemetry
+                            .as_ref()
+                            .and_then(|telemetry| telemetry.anthropic_retention.as_ref())
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .telemetry
+                            .get_or_insert_default()
+                            .anthropic_retention = value;
                     },
                 }),
                 metadata: None,
@@ -376,9 +437,10 @@ fn general_page(cx: &App) -> SettingsPage {
                 title: "Auto Update",
                 description: "Whether or not to automatically check for updates.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("auto_update"),
                     pick: |settings_content| settings_content.auto_update.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.auto_update = value;
                     },
                 }),
@@ -413,6 +475,7 @@ fn appearance_page() -> SettingsPage {
                     title: "Theme Mode",
                     description: "Choose a static, fixed theme or dynamically select themes based on appearance and light/dark modes.",
                     field: Box::new(SettingField {
+                        organization_override: None,
                         json_path: Some("theme$"),
                         pick: |settings_content| {
                             Some(&dynamic_variants::<settings::ThemeSelection>()[
@@ -422,7 +485,7 @@ fn appearance_page() -> SettingsPage {
                                     .as_ref()?
                                     .discriminant() as usize])
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             let Some(value) = value else {
                                 settings_content.theme.theme = None;
                                 return;
@@ -470,6 +533,7 @@ fn appearance_page() -> SettingsPage {
                                 title: "Theme Name",
                                 description: "The name of your selected theme.",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("theme"),
                                     pick: |settings_content| {
                                         match settings_content.theme.theme.as_ref() {
@@ -477,7 +541,7 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         let Some(value) = value else {
                                             return;
                                         };
@@ -498,6 +562,7 @@ fn appearance_page() -> SettingsPage {
                                 title: "Mode",
                                 description: "Choose whether to use the selected light or dark theme or to follow your OS appearance configuration.",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("theme.mode"),
                                     pick: |settings_content| {
                                         match settings_content.theme.theme.as_ref() {
@@ -505,7 +570,7 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         let Some(value) = value else {
                                             return;
                                         };
@@ -524,6 +589,7 @@ fn appearance_page() -> SettingsPage {
                                 title: "Light Theme",
                                 description: "The theme to use when mode is set to light, or when mode is set to system and it is in light mode.",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("theme.light"),
                                     pick: |settings_content| {
                                         match settings_content.theme.theme.as_ref() {
@@ -531,7 +597,7 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         let Some(value) = value else {
                                             return;
                                         };
@@ -550,6 +616,7 @@ fn appearance_page() -> SettingsPage {
                                 title: "Dark Theme",
                                 description: "The theme to use when mode is set to dark, or when mode is set to system and it is in dark mode.",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("theme.dark"),
                                     pick: |settings_content| {
                                         match settings_content.theme.theme.as_ref() {
@@ -557,7 +624,7 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         let Some(value) = value else {
                                             return;
                                         };
@@ -581,6 +648,7 @@ fn appearance_page() -> SettingsPage {
                     title: "Icon Theme",
                     description: "The custom set of icons Zed will associate with files and directories.",
                     field: Box::new(SettingField {
+                        organization_override: None,
                         json_path: Some("icon_theme$"),
                         pick: |settings_content| {
                             Some(&dynamic_variants::<settings::IconThemeSelection>()[
@@ -590,7 +658,7 @@ fn appearance_page() -> SettingsPage {
                                     .as_ref()?
                                     .discriminant() as usize])
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             let Some(value) = value else {
                                 settings_content.theme.icon_theme = None;
                                 return;
@@ -640,6 +708,7 @@ fn appearance_page() -> SettingsPage {
                                 title: "Icon Theme Name",
                                 description: "The name of your selected icon theme.",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("icon_theme$string"),
                                     pick: |settings_content| {
                                         match settings_content.theme.icon_theme.as_ref() {
@@ -647,7 +716,7 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         let Some(value) = value else {
                                             return;
                                         };
@@ -668,6 +737,7 @@ fn appearance_page() -> SettingsPage {
                                 title: "Mode",
                                 description: "Choose whether to use the selected light or dark icon theme or to follow your OS appearance configuration.",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("icon_theme"),
                                     pick: |settings_content| {
                                         match settings_content.theme.icon_theme.as_ref() {
@@ -675,7 +745,7 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         let Some(value) = value else {
                                             return;
                                         };
@@ -694,6 +764,7 @@ fn appearance_page() -> SettingsPage {
                                 title: "Light Icon Theme",
                                 description: "The icon theme to use when mode is set to light, or when mode is set to system and it is in light mode.",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("icon_theme.light"),
                                     pick: |settings_content| {
                                         match settings_content.theme.icon_theme.as_ref() {
@@ -701,7 +772,7 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         let Some(value) = value else {
                                             return;
                                         };
@@ -720,6 +791,7 @@ fn appearance_page() -> SettingsPage {
                                 title: "Dark Icon Theme",
                                 description: "The icon theme to use when mode is set to dark, or when mode is set to system and it is in dark mode.",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("icon_theme.dark"),
                                     pick: |settings_content| {
                                         match settings_content.theme.icon_theme.as_ref() {
@@ -727,7 +799,7 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         let Some(value) = value else {
                                             return;
                                         };
@@ -755,9 +827,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Font Family",
                 description: "Font family for editor text.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("buffer_font_family"),
                     pick: |settings_content| settings_content.theme.buffer_font_family.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.theme.buffer_font_family = value;
                     },
                 }),
@@ -768,9 +841,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Font Size",
                 description: "Font size for editor text.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("buffer_font_size"),
                     pick: |settings_content| settings_content.theme.buffer_font_size.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.theme.buffer_font_size = value;
                     },
                 }),
@@ -781,9 +855,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Font Weight",
                 description: "Font weight for editor text (100-900).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("buffer_font_weight"),
                     pick: |settings_content| settings_content.theme.buffer_font_weight.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.theme.buffer_font_weight = value;
                     },
                 }),
@@ -796,6 +871,7 @@ fn appearance_page() -> SettingsPage {
                     title: "Line Height",
                     description: "Line height for editor text.",
                     field: Box::new(SettingField {
+                        organization_override: None,
                         json_path: Some("buffer_line_height$"),
                         pick: |settings_content| {
                             Some(
@@ -807,7 +883,7 @@ fn appearance_page() -> SettingsPage {
                                     as usize],
                             )
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             let Some(value) = value else {
                                 settings_content.theme.buffer_line_height = None;
                                 return;
@@ -853,6 +929,7 @@ fn appearance_page() -> SettingsPage {
                             title: "Custom Line Height",
                             description: "Custom line height value (must be at least 1.0).",
                             field: Box::new(SettingField {
+                                organization_override: None,
                                 json_path: Some("buffer_line_height"),
                                 pick: |settings_content| match settings_content
                                     .theme
@@ -862,7 +939,7 @@ fn appearance_page() -> SettingsPage {
                                     Some(settings::BufferLineHeight::Custom(value)) => Some(value),
                                     _ => None,
                                 },
-                                write: |settings_content, value| {
+                                write: |settings_content, value, _| {
                                     let Some(value) = value else {
                                         return;
                                     };
@@ -885,11 +962,12 @@ fn appearance_page() -> SettingsPage {
                 description: "The OpenType features to enable for rendering in text buffers.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("buffer_font_features"),
                         pick: |settings_content| {
                             settings_content.theme.buffer_font_features.as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.theme.buffer_font_features = value;
                         },
                     }
@@ -903,11 +981,12 @@ fn appearance_page() -> SettingsPage {
                 description: "The font fallbacks to use for rendering in text buffers.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("buffer_font_fallbacks"),
                         pick: |settings_content| {
                             settings_content.theme.buffer_font_fallbacks.as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.theme.buffer_font_fallbacks = value;
                         },
                     }
@@ -925,9 +1004,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Font Family",
                 description: "Font family for UI elements.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("ui_font_family"),
                     pick: |settings_content| settings_content.theme.ui_font_family.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.theme.ui_font_family = value;
                     },
                 }),
@@ -938,9 +1018,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Font Size",
                 description: "Font size for UI elements.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("ui_font_size"),
                     pick: |settings_content| settings_content.theme.ui_font_size.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.theme.ui_font_size = value;
                     },
                 }),
@@ -951,9 +1032,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Font Weight",
                 description: "Font weight for UI elements (100-900).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("ui_font_weight"),
                     pick: |settings_content| settings_content.theme.ui_font_weight.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.theme.ui_font_weight = value;
                     },
                 }),
@@ -966,9 +1048,10 @@ fn appearance_page() -> SettingsPage {
                 description: "The OpenType features to enable for rendering in UI elements.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("ui_font_features"),
                         pick: |settings_content| settings_content.theme.ui_font_features.as_ref(),
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.theme.ui_font_features = value;
                         },
                     }
@@ -982,9 +1065,10 @@ fn appearance_page() -> SettingsPage {
                 description: "The font fallbacks to use for rendering in the UI.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("ui_font_fallbacks"),
                         pick: |settings_content| settings_content.theme.ui_font_fallbacks.as_ref(),
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.theme.ui_font_fallbacks = value;
                         },
                     }
@@ -1002,6 +1086,7 @@ fn appearance_page() -> SettingsPage {
                 title: "UI Font Size",
                 description: "Font size for agent response text in the agent panel. Falls back to the regular UI font size.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent_ui_font_size"),
                     pick: |settings_content| {
                         settings_content
@@ -1010,7 +1095,7 @@ fn appearance_page() -> SettingsPage {
                             .as_ref()
                             .or(settings_content.theme.ui_font_size.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.theme.agent_ui_font_size = value;
                     },
                 }),
@@ -1021,6 +1106,7 @@ fn appearance_page() -> SettingsPage {
                 title: "Buffer Font Size",
                 description: "Font size for user messages text in the agent panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent_buffer_font_size"),
                     pick: |settings_content| {
                         settings_content
@@ -1029,8 +1115,69 @@ fn appearance_page() -> SettingsPage {
                             .as_ref()
                             .or(settings_content.theme.buffer_font_size.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.theme.agent_buffer_font_size = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    fn markdown_preview_font_section() -> [SettingsPageItem; 4] {
+        [
+            SettingsPageItem::SectionHeader("Markdown Preview Font"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Font Family",
+                description: "Font family for the markdown preview. Falls back to the UI font family.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("markdown_preview_font_family"),
+                    pick: |settings_content| {
+                        settings_content.theme.markdown_preview_font_family.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.theme.markdown_preview_font_family = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Code Font Family",
+                description: "Font family for code blocks in the markdown preview. Falls back to the editor font family.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("markdown_preview_code_font_family"),
+                    pick: |settings_content| {
+                        settings_content
+                            .theme
+                            .markdown_preview_code_font_family
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.theme.markdown_preview_code_font_family = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Font Size",
+                description: "Font size for the markdown preview. Falls back to the editor font size.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("markdown_preview_font_size"),
+                    pick: |settings_content| {
+                        settings_content
+                            .theme
+                            .markdown_preview_font_size
+                            .as_ref()
+                            .or(settings_content.theme.buffer_font_size.as_ref())
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.theme.markdown_preview_font_size = value;
                     },
                 }),
                 metadata: None,
@@ -1046,11 +1193,12 @@ fn appearance_page() -> SettingsPage {
                 title: "Text Rendering Mode",
                 description: "The text rendering mode to use.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("text_rendering_mode"),
                     pick: |settings_content| {
                         settings_content.workspace.text_rendering_mode.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.text_rendering_mode = value;
                     },
                 }),
@@ -1067,9 +1215,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Multi Cursor Modifier",
                 description: "Modifier key for adding multiple cursors.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("multi_cursor_modifier"),
                     pick: |settings_content| settings_content.editor.multi_cursor_modifier.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.multi_cursor_modifier = value;
                     },
                 }),
@@ -1080,9 +1229,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Cursor Blink",
                 description: "Whether the cursor blinks in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("cursor_blink"),
                     pick: |settings_content| settings_content.editor.cursor_blink.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.cursor_blink = value;
                     },
                 }),
@@ -1093,9 +1243,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Cursor Shape",
                 description: "Cursor shape for the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("cursor_shape"),
                     pick: |settings_content| settings_content.editor.cursor_shape.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.cursor_shape = value;
                     },
                 }),
@@ -1106,9 +1257,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Hide Mouse",
                 description: "When to hide the mouse cursor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("hide_mouse"),
                     pick: |settings_content| settings_content.hide_mouse.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.hide_mouse = value;
                     },
                 }),
@@ -1125,9 +1277,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Unnecessary Code Fade",
                 description: "How much to fade out unused code (0.0 - 0.9).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("unnecessary_code_fade"),
                     pick: |settings_content| settings_content.theme.unnecessary_code_fade.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.theme.unnecessary_code_fade = value;
                     },
                 }),
@@ -1138,11 +1291,12 @@ fn appearance_page() -> SettingsPage {
                 title: "Current Line Highlight",
                 description: "How to highlight the current line.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("current_line_highlight"),
                     pick: |settings_content| {
                         settings_content.editor.current_line_highlight.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.current_line_highlight = value;
                     },
                 }),
@@ -1153,9 +1307,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Selection Highlight",
                 description: "Highlight all occurrences of selected text.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("selection_highlight"),
                     pick: |settings_content| settings_content.editor.selection_highlight.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.selection_highlight = value;
                     },
                 }),
@@ -1166,9 +1321,10 @@ fn appearance_page() -> SettingsPage {
                 title: "Rounded Selection",
                 description: "Whether the text selection should have rounded corners.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("rounded_selection"),
                     pick: |settings_content| settings_content.editor.rounded_selection.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.rounded_selection = value;
                     },
                 }),
@@ -1179,6 +1335,7 @@ fn appearance_page() -> SettingsPage {
                 title: "Minimum Contrast For Highlights",
                 description: "The minimum APCA perceptual contrast to maintain when rendering text over highlight backgrounds.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("minimum_contrast_for_highlights"),
                     pick: |settings_content| {
                         settings_content
@@ -1186,7 +1343,7 @@ fn appearance_page() -> SettingsPage {
                             .minimum_contrast_for_highlights
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.minimum_contrast_for_highlights = value;
                     },
                 }),
@@ -1203,6 +1360,7 @@ fn appearance_page() -> SettingsPage {
                 title: "Show Wrap Guides",
                 description: "Show wrap guides (vertical rulers).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("show_wrap_guides"),
                     pick: |settings_content| {
                         settings_content
@@ -1212,7 +1370,7 @@ fn appearance_page() -> SettingsPage {
                             .show_wrap_guides
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project
                             .all_languages
@@ -1229,6 +1387,7 @@ fn appearance_page() -> SettingsPage {
                 description: "Character counts at which to show wrap guides.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("wrap_guides"),
                         pick: |settings_content| {
                             settings_content
@@ -1238,7 +1397,7 @@ fn appearance_page() -> SettingsPage {
                                 .wrap_guides
                                 .as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.project.all_languages.defaults.wrap_guides = value;
                         },
                     }
@@ -1255,6 +1414,7 @@ fn appearance_page() -> SettingsPage {
         buffer_font_section(),
         ui_font_section(),
         agent_panel_font_section(),
+        markdown_preview_font_section(),
         text_rendering_section(),
         cursor_section(),
         highlighting_section(),
@@ -1300,9 +1460,10 @@ fn keymap_page() -> SettingsPage {
                 title: "Base Keymap",
                 description: "The name of a base set of key bindings to use.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("base_keymap"),
                     pick: |settings_content| settings_content.base_keymap.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.base_keymap = value;
                     },
                 }),
@@ -1322,6 +1483,7 @@ fn keymap_page() -> SettingsPage {
                 title: "Vim Mode",
                 description: "Enable Vim mode and key bindings.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim_mode"),
                     pick: |settings_content| settings_content.vim_mode.as_ref(),
                     write: write_vim_mode,
@@ -1333,6 +1495,7 @@ fn keymap_page() -> SettingsPage {
                 title: "Helix Mode",
                 description: "Enable Helix mode and key bindings.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("helix_mode"),
                     pick: |settings_content| settings_content.helix_mode.as_ref(),
                     write: write_helix_mode,
@@ -1365,6 +1528,7 @@ fn editor_page() -> SettingsPage {
                     title: "Auto Save Mode",
                     description: "When to auto save buffer changes.",
                     field: Box::new(SettingField {
+                        organization_override: None,
                         json_path: Some("autosave$"),
                         pick: |settings_content| {
                             Some(
@@ -1376,7 +1540,7 @@ fn editor_page() -> SettingsPage {
                                     as usize],
                             )
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             let Some(value) = value else {
                                 settings_content.workspace.autosave = None;
                                 return;
@@ -1421,6 +1585,7 @@ fn editor_page() -> SettingsPage {
                             title: "Delay (milliseconds)",
                             description: "Save after inactivity period (in milliseconds).",
                             field: Box::new(SettingField {
+                                organization_override: None,
                                 json_path: Some("autosave.after_delay.milliseconds"),
                                 pick: |settings_content| match settings_content
                                     .workspace
@@ -1432,7 +1597,7 @@ fn editor_page() -> SettingsPage {
                                     }) => Some(milliseconds),
                                     _ => None,
                                 },
-                                write: |settings_content, value| {
+                                write: |settings_content, value, _| {
                                     let Some(value) = value else {
                                         settings_content.workspace.autosave = None;
                                         return;
@@ -1462,6 +1627,7 @@ fn editor_page() -> SettingsPage {
                 title: "Show Which-key Menu",
                 description: "Display the which-key menu with matching bindings while a multi-stroke binding is pending.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("which_key.enabled"),
                     pick: |settings_content| {
                         settings_content
@@ -1469,7 +1635,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|settings| settings.enabled.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.which_key.get_or_insert_default().enabled = value;
                     },
                 }),
@@ -1480,6 +1646,7 @@ fn editor_page() -> SettingsPage {
                 title: "Menu Delay",
                 description: "Delay in milliseconds before the which-key menu appears.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("which_key.delay_ms"),
                     pick: |settings_content| {
                         settings_content
@@ -1487,7 +1654,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|settings| settings.delay_ms.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.which_key.get_or_insert_default().delay_ms = value;
                     },
                 }),
@@ -1504,11 +1671,12 @@ fn editor_page() -> SettingsPage {
                 title: "Double Click In Multibuffer",
                 description: "What to do when multibuffer is double-clicked in some of its excerpts.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("double_click_in_multibuffer"),
                     pick: |settings_content| {
                         settings_content.editor.double_click_in_multibuffer.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.double_click_in_multibuffer = value;
                     },
                 }),
@@ -1519,9 +1687,10 @@ fn editor_page() -> SettingsPage {
                 title: "Expand Excerpt Lines",
                 description: "How many lines to expand the multibuffer excerpts by default.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("expand_excerpt_lines"),
                     pick: |settings_content| settings_content.editor.expand_excerpt_lines.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.expand_excerpt_lines = value;
                     },
                 }),
@@ -1532,9 +1701,10 @@ fn editor_page() -> SettingsPage {
                 title: "Excerpt Context Lines",
                 description: "How many lines of context to provide in multibuffer excerpts by default.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("excerpt_context_lines"),
                     pick: |settings_content| settings_content.editor.excerpt_context_lines.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.excerpt_context_lines = value;
                     },
                 }),
@@ -1545,6 +1715,7 @@ fn editor_page() -> SettingsPage {
                 title: "Expand Outlines With Depth",
                 description: "Default depth to expand outline items in the current file.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.expand_outlines_with_depth"),
                     pick: |settings_content| {
                         settings_content
@@ -1554,7 +1725,7 @@ fn editor_page() -> SettingsPage {
                                 outline_panel.expand_outlines_with_depth.as_ref()
                             })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .outline_panel
                             .get_or_insert_default()
@@ -1568,9 +1739,10 @@ fn editor_page() -> SettingsPage {
                 title: "Diff View Style",
                 description: "How to display diffs in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("diff_view_style"),
                     pick: |settings_content| settings_content.editor.diff_view_style.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.diff_view_style = value;
                     },
                 }),
@@ -1581,11 +1753,12 @@ fn editor_page() -> SettingsPage {
                 title: "Minimum Split Diff Width",
                 description: "The minimum width (in columns) at which the split diff view is used. When the editor is narrower, the diff view automatically switches to unified mode. Set to 0 to disable.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("minimum_split_diff_width"),
                     pick: |settings_content| {
                         settings_content.editor.minimum_split_diff_width.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.minimum_split_diff_width = value;
                     },
                 }),
@@ -1602,11 +1775,12 @@ fn editor_page() -> SettingsPage {
                 title: "Scroll Beyond Last Line",
                 description: "Whether the editor will scroll beyond the last line.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scroll_beyond_last_line"),
                     pick: |settings_content| {
                         settings_content.editor.scroll_beyond_last_line.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.scroll_beyond_last_line = value;
                     },
                 }),
@@ -1617,11 +1791,12 @@ fn editor_page() -> SettingsPage {
                 title: "Vertical Scroll Margin",
                 description: "The number of lines to keep above/below the cursor when auto-scrolling.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vertical_scroll_margin"),
                     pick: |settings_content| {
                         settings_content.editor.vertical_scroll_margin.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.vertical_scroll_margin = value;
                     },
                 }),
@@ -1632,11 +1807,12 @@ fn editor_page() -> SettingsPage {
                 title: "Horizontal Scroll Margin",
                 description: "The number of characters to keep on either side when scrolling with the mouse.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("horizontal_scroll_margin"),
                     pick: |settings_content| {
                         settings_content.editor.horizontal_scroll_margin.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.horizontal_scroll_margin = value;
                     },
                 }),
@@ -1647,9 +1823,10 @@ fn editor_page() -> SettingsPage {
                 title: "Scroll Sensitivity",
                 description: "Scroll sensitivity multiplier for both horizontal and vertical scrolling.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scroll_sensitivity"),
                     pick: |settings_content| settings_content.editor.scroll_sensitivity.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.scroll_sensitivity = value;
                     },
                 }),
@@ -1660,9 +1837,10 @@ fn editor_page() -> SettingsPage {
                 title: "Mouse Wheel Zoom",
                 description: "Whether to zoom the editor font size with the mouse wheel while holding the primary modifier key.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("mouse_wheel_zoom"),
                     pick: |settings_content| settings_content.editor.mouse_wheel_zoom.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.mouse_wheel_zoom = value;
                     },
                 }),
@@ -1673,11 +1851,12 @@ fn editor_page() -> SettingsPage {
                 title: "Fast Scroll Sensitivity",
                 description: "Fast scroll sensitivity multiplier for both horizontal and vertical scrolling.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("fast_scroll_sensitivity"),
                     pick: |settings_content| {
                         settings_content.editor.fast_scroll_sensitivity.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.fast_scroll_sensitivity = value;
                     },
                 }),
@@ -1688,9 +1867,10 @@ fn editor_page() -> SettingsPage {
                 title: "Autoscroll On Clicks",
                 description: "Whether to scroll when clicking near the edge of the visible text area.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("autoscroll_on_clicks"),
                     pick: |settings_content| settings_content.editor.autoscroll_on_clicks.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.autoscroll_on_clicks = value;
                     },
                 }),
@@ -1701,6 +1881,7 @@ fn editor_page() -> SettingsPage {
                 title: "Sticky Scroll",
                 description: "Whether to stick scopes to the top of the editor",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("sticky_scroll.enabled"),
                     pick: |settings_content| {
                         settings_content
@@ -1709,7 +1890,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|sticky_scroll| sticky_scroll.enabled.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .sticky_scroll
@@ -1730,9 +1911,10 @@ fn editor_page() -> SettingsPage {
                 title: "Auto Signature Help",
                 description: "Automatically show a signature help pop-up.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("auto_signature_help"),
                     pick: |settings_content| settings_content.editor.auto_signature_help.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.auto_signature_help = value;
                     },
                 }),
@@ -1743,6 +1925,7 @@ fn editor_page() -> SettingsPage {
                 title: "Show Signature Help After Edits",
                 description: "Show the signature help pop-up after completions or bracket pairs are inserted.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("show_signature_help_after_edits"),
                     pick: |settings_content| {
                         settings_content
@@ -1750,7 +1933,7 @@ fn editor_page() -> SettingsPage {
                             .show_signature_help_after_edits
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.show_signature_help_after_edits = value;
                     },
                 }),
@@ -1761,9 +1944,10 @@ fn editor_page() -> SettingsPage {
                 title: "Snippet Sort Order",
                 description: "Determines how snippets are sorted relative to other completion items.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("snippet_sort_order"),
                     pick: |settings_content| settings_content.editor.snippet_sort_order.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.snippet_sort_order = value;
                     },
                 }),
@@ -1780,9 +1964,10 @@ fn editor_page() -> SettingsPage {
                 title: "Enabled",
                 description: "Show the informational hover box when moving the mouse over symbols in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("hover_popover_enabled"),
                     pick: |settings_content| settings_content.editor.hover_popover_enabled.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.hover_popover_enabled = value;
                     },
                 }),
@@ -1794,9 +1979,10 @@ fn editor_page() -> SettingsPage {
                 title: "Delay",
                 description: "Time to wait in milliseconds before showing the informational hover box.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("hover_popover_delay"),
                     pick: |settings_content| settings_content.editor.hover_popover_delay.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.hover_popover_delay = value;
                     },
                 }),
@@ -1807,9 +1993,10 @@ fn editor_page() -> SettingsPage {
                 title: "Sticky",
                 description: "Whether the hover popover sticks when the mouse moves toward it, allowing interaction with its contents.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("hover_popover_sticky"),
                     pick: |settings_content| settings_content.editor.hover_popover_sticky.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.hover_popover_sticky = value;
                     },
                 }),
@@ -1821,11 +2008,12 @@ fn editor_page() -> SettingsPage {
                 title: "Hiding Delay",
                 description: "Time to wait in milliseconds before hiding the hover popover after the mouse moves away.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("hover_popover_hiding_delay"),
                     pick: |settings_content| {
                         settings_content.editor.hover_popover_hiding_delay.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.hover_popover_hiding_delay = value;
                     },
                 }),
@@ -1842,6 +2030,7 @@ fn editor_page() -> SettingsPage {
                 title: "Enabled",
                 description: "Enable drag and drop selection.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("drag_and_drop_selection.enabled"),
                     pick: |settings_content| {
                         settings_content
@@ -1850,7 +2039,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|drag_and_drop| drag_and_drop.enabled.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .drag_and_drop_selection
@@ -1865,6 +2054,7 @@ fn editor_page() -> SettingsPage {
                 title: "Delay",
                 description: "Delay in milliseconds before drag and drop selection starts.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("drag_and_drop_selection.delay"),
                     pick: |settings_content| {
                         settings_content
@@ -1873,7 +2063,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|drag_and_drop| drag_and_drop.delay.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .drag_and_drop_selection
@@ -1894,6 +2084,7 @@ fn editor_page() -> SettingsPage {
                 title: "Show Line Numbers",
                 description: "Show line numbers in the gutter.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("gutter.line_numbers"),
                     pick: |settings_content| {
                         settings_content
@@ -1902,7 +2093,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|gutter| gutter.line_numbers.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .gutter
@@ -1917,9 +2108,10 @@ fn editor_page() -> SettingsPage {
                 title: "Relative Line Numbers",
                 description: "Controls line number display in the editor's gutter. \"disabled\" shows absolute line numbers, \"enabled\" shows relative line numbers for each absolute line, and \"wrapped\" shows relative line numbers for every line, absolute or wrapped.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("relative_line_numbers"),
                     pick: |settings_content| settings_content.editor.relative_line_numbers.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.relative_line_numbers = value;
                     },
                 }),
@@ -1930,6 +2122,7 @@ fn editor_page() -> SettingsPage {
                 title: "Show Runnables",
                 description: "Show runnable buttons in the gutter.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("gutter.runnables"),
                     pick: |settings_content| {
                         settings_content
@@ -1938,7 +2131,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|gutter| gutter.runnables.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .gutter
@@ -1953,6 +2146,7 @@ fn editor_page() -> SettingsPage {
                 title: "Show Breakpoints",
                 description: "Show breakpoints in the gutter.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("gutter.breakpoints"),
                     pick: |settings_content| {
                         settings_content
@@ -1961,7 +2155,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|gutter| gutter.breakpoints.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .gutter
@@ -1976,6 +2170,7 @@ fn editor_page() -> SettingsPage {
                 title: "Show Bookmarks",
                 description: "Show bookmarks in the gutter.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("gutter.bookmarks"),
                     pick: |settings_content| {
                         settings_content
@@ -1984,7 +2179,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|gutter| gutter.bookmarks.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .gutter
@@ -1999,6 +2194,7 @@ fn editor_page() -> SettingsPage {
                 title: "Show Folds",
                 description: "Show code folding controls in the gutter.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("gutter.folds"),
                     pick: |settings_content| {
                         settings_content
@@ -2007,7 +2203,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|gutter| gutter.folds.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.gutter.get_or_insert_default().folds = value;
                     },
                 }),
@@ -2018,6 +2214,7 @@ fn editor_page() -> SettingsPage {
                 title: "Min Line Number Digits",
                 description: "Minimum number of characters to reserve space for in the gutter.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("gutter.min_line_number_digits"),
                     pick: |settings_content| {
                         settings_content
@@ -2026,7 +2223,7 @@ fn editor_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|gutter| gutter.min_line_number_digits.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .gutter
@@ -2041,9 +2238,10 @@ fn editor_page() -> SettingsPage {
                 title: "Inline Code Actions",
                 description: "Show code action button at start of buffer line.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("inline_code_actions"),
                     pick: |settings_content| settings_content.editor.inline_code_actions.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.inline_code_actions = value;
                     },
                 }),
@@ -2060,11 +2258,12 @@ fn editor_page() -> SettingsPage {
                 title: "Show",
                 description: "When to show the scrollbar in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scrollbar"),
                     pick: |settings_content| {
                         settings_content.editor.scrollbar.as_ref()?.show.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .scrollbar
@@ -2079,11 +2278,12 @@ fn editor_page() -> SettingsPage {
                 title: "Cursors",
                 description: "Show cursor positions in the scrollbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scrollbar.cursors"),
                     pick: |settings_content| {
                         settings_content.editor.scrollbar.as_ref()?.cursors.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .scrollbar
@@ -2098,6 +2298,7 @@ fn editor_page() -> SettingsPage {
                 title: "Git Diff",
                 description: "Show Git diff indicators in the scrollbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scrollbar.git_diff"),
                     pick: |settings_content| {
                         settings_content
@@ -2107,7 +2308,7 @@ fn editor_page() -> SettingsPage {
                             .git_diff
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .scrollbar
@@ -2122,6 +2323,7 @@ fn editor_page() -> SettingsPage {
                 title: "Search Results",
                 description: "Show buffer search result indicators in the scrollbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scrollbar.search_results"),
                     pick: |settings_content| {
                         settings_content
@@ -2131,7 +2333,7 @@ fn editor_page() -> SettingsPage {
                             .search_results
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .scrollbar
@@ -2146,6 +2348,7 @@ fn editor_page() -> SettingsPage {
                 title: "Selected Text",
                 description: "Show selected text occurrences in the scrollbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scrollbar.selected_text"),
                     pick: |settings_content| {
                         settings_content
@@ -2155,7 +2358,7 @@ fn editor_page() -> SettingsPage {
                             .selected_text
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .scrollbar
@@ -2170,6 +2373,7 @@ fn editor_page() -> SettingsPage {
                 title: "Selected Symbol",
                 description: "Show selected symbol occurrences in the scrollbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scrollbar.selected_symbol"),
                     pick: |settings_content| {
                         settings_content
@@ -2179,7 +2383,7 @@ fn editor_page() -> SettingsPage {
                             .selected_symbol
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .scrollbar
@@ -2194,6 +2398,7 @@ fn editor_page() -> SettingsPage {
                 title: "Diagnostics",
                 description: "Which diagnostic indicators to show in the scrollbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scrollbar.diagnostics"),
                     pick: |settings_content| {
                         settings_content
@@ -2203,7 +2408,7 @@ fn editor_page() -> SettingsPage {
                             .diagnostics
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .scrollbar
@@ -2218,6 +2423,7 @@ fn editor_page() -> SettingsPage {
                 title: "Horizontal Scrollbar",
                 description: "When false, forcefully disables the horizontal scrollbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scrollbar.axes.horizontal"),
                     pick: |settings_content| {
                         settings_content
@@ -2229,7 +2435,7 @@ fn editor_page() -> SettingsPage {
                             .horizontal
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .scrollbar
@@ -2246,6 +2452,7 @@ fn editor_page() -> SettingsPage {
                 title: "Vertical Scrollbar",
                 description: "When false, forcefully disables the vertical scrollbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("scrollbar.axes.vertical"),
                     pick: |settings_content| {
                         settings_content
@@ -2257,7 +2464,7 @@ fn editor_page() -> SettingsPage {
                             .vertical
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .scrollbar
@@ -2280,11 +2487,12 @@ fn editor_page() -> SettingsPage {
                 title: "Show",
                 description: "When to show the minimap in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("minimap.show"),
                     pick: |settings_content| {
                         settings_content.editor.minimap.as_ref()?.show.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.minimap.get_or_insert_default().show = value;
                     },
                 }),
@@ -2295,6 +2503,7 @@ fn editor_page() -> SettingsPage {
                 title: "Display In",
                 description: "Where to show the minimap in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("minimap.display_in"),
                     pick: |settings_content| {
                         settings_content
@@ -2304,7 +2513,7 @@ fn editor_page() -> SettingsPage {
                             .display_in
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .minimap
@@ -2319,11 +2528,12 @@ fn editor_page() -> SettingsPage {
                 title: "Thumb",
                 description: "When to show the minimap thumb.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("minimap.thumb"),
                     pick: |settings_content| {
                         settings_content.editor.minimap.as_ref()?.thumb.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .minimap
@@ -2338,6 +2548,7 @@ fn editor_page() -> SettingsPage {
                 title: "Thumb Border",
                 description: "Border style for the minimap's scrollbar thumb.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("minimap.thumb_border"),
                     pick: |settings_content| {
                         settings_content
@@ -2347,7 +2558,7 @@ fn editor_page() -> SettingsPage {
                             .thumb_border
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .minimap
@@ -2362,6 +2573,7 @@ fn editor_page() -> SettingsPage {
                 title: "Current Line Highlight",
                 description: "How to highlight the current line in the minimap.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("minimap.current_line_highlight"),
                     pick: |settings_content| {
                         settings_content
@@ -2371,7 +2583,7 @@ fn editor_page() -> SettingsPage {
                             .and_then(|minimap| minimap.current_line_highlight.as_ref())
                             .or(settings_content.editor.current_line_highlight.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .minimap
@@ -2386,6 +2598,7 @@ fn editor_page() -> SettingsPage {
                 title: "Max Width Columns",
                 description: "Maximum number of columns to display in the minimap.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("minimap.max_width_columns"),
                     pick: |settings_content| {
                         settings_content
@@ -2395,7 +2608,7 @@ fn editor_page() -> SettingsPage {
                             .max_width_columns
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .minimap
@@ -2416,6 +2629,7 @@ fn editor_page() -> SettingsPage {
                 title: "Breadcrumbs",
                 description: "Show breadcrumbs.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("toolbar.breadcrumbs"),
                     pick: |settings_content| {
                         settings_content
@@ -2425,7 +2639,7 @@ fn editor_page() -> SettingsPage {
                             .breadcrumbs
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .toolbar
@@ -2440,6 +2654,7 @@ fn editor_page() -> SettingsPage {
                 title: "Quick Actions",
                 description: "Show quick action buttons (e.g., search, selection, editor controls, etc.).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("toolbar.quick_actions"),
                     pick: |settings_content| {
                         settings_content
@@ -2449,7 +2664,7 @@ fn editor_page() -> SettingsPage {
                             .quick_actions
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .toolbar
@@ -2464,6 +2679,7 @@ fn editor_page() -> SettingsPage {
                 title: "Selections Menu",
                 description: "Show the selections menu in the editor toolbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("toolbar.selections_menu"),
                     pick: |settings_content| {
                         settings_content
@@ -2473,7 +2689,7 @@ fn editor_page() -> SettingsPage {
                             .selections_menu
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .toolbar
@@ -2488,6 +2704,7 @@ fn editor_page() -> SettingsPage {
                 title: "Agent Review",
                 description: "Show agent review buttons in the editor toolbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("toolbar.agent_review"),
                     pick: |settings_content| {
                         settings_content
@@ -2497,7 +2714,7 @@ fn editor_page() -> SettingsPage {
                             .agent_review
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .toolbar
@@ -2512,6 +2729,7 @@ fn editor_page() -> SettingsPage {
                 title: "Code Actions",
                 description: "Show code action buttons in the editor toolbar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("toolbar.code_actions"),
                     pick: |settings_content| {
                         settings_content
@@ -2521,7 +2739,7 @@ fn editor_page() -> SettingsPage {
                             .code_actions
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .toolbar
@@ -2542,9 +2760,10 @@ fn editor_page() -> SettingsPage {
                 title: "Default Mode",
                 description: "The default mode when Vim starts.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.default_mode"),
                     pick: |settings_content| settings_content.vim.as_ref()?.default_mode.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.vim.get_or_insert_default().default_mode = value;
                     },
                 }),
@@ -2555,6 +2774,7 @@ fn editor_page() -> SettingsPage {
                 title: "Toggle Relative Line Numbers",
                 description: "Toggle relative line numbers in Vim mode.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.toggle_relative_line_numbers"),
                     pick: |settings_content| {
                         settings_content
@@ -2563,7 +2783,7 @@ fn editor_page() -> SettingsPage {
                             .toggle_relative_line_numbers
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .vim
                             .get_or_insert_default()
@@ -2577,11 +2797,12 @@ fn editor_page() -> SettingsPage {
                 title: "Use System Clipboard",
                 description: "Controls when to use system clipboard in Vim mode.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.use_system_clipboard"),
                     pick: |settings_content| {
                         settings_content.vim.as_ref()?.use_system_clipboard.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .vim
                             .get_or_insert_default()
@@ -2595,11 +2816,12 @@ fn editor_page() -> SettingsPage {
                 title: "Use Smartcase Find",
                 description: "Enable smartcase searching in Vim mode.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.use_smartcase_find"),
                     pick: |settings_content| {
                         settings_content.vim.as_ref()?.use_smartcase_find.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .vim
                             .get_or_insert_default()
@@ -2613,9 +2835,10 @@ fn editor_page() -> SettingsPage {
                 title: "Global Substitution Default",
                 description: "When enabled, the :substitute command replaces all matches in a line by default. The 'g' flag then toggles this behavior.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.gdefault"),
                     pick: |settings_content| settings_content.vim.as_ref()?.gdefault.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.vim.get_or_insert_default().gdefault = value;
                     },
                 }),
@@ -2626,6 +2849,7 @@ fn editor_page() -> SettingsPage {
                 title: "Highlight on Yank Duration",
                 description: "Duration in milliseconds to highlight yanked text in Vim mode.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.highlight_on_yank_duration"),
                     pick: |settings_content| {
                         settings_content
@@ -2634,7 +2858,7 @@ fn editor_page() -> SettingsPage {
                             .highlight_on_yank_duration
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .vim
                             .get_or_insert_default()
@@ -2648,11 +2872,12 @@ fn editor_page() -> SettingsPage {
                 title: "Regex Search",
                 description: "Use regex search by default in Vim search.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.use_regex_search"),
                     pick: |settings_content| {
                         settings_content.vim.as_ref()?.use_regex_search.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .vim
                             .get_or_insert_default()
@@ -2666,6 +2891,7 @@ fn editor_page() -> SettingsPage {
                 title: "Show Edit Predictions in Normal Mode",
                 description: "Whether edit predictions are shown in normal mode. By default, edit predictions are only shown in insert and replace modes.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.show_edit_predictions_in_normal_mode"),
                     pick: |settings_content| {
                         settings_content
@@ -2674,7 +2900,7 @@ fn editor_page() -> SettingsPage {
                             .show_edit_predictions_in_normal_mode
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .vim
                             .get_or_insert_default()
@@ -2688,6 +2914,7 @@ fn editor_page() -> SettingsPage {
                 title: "Cursor Shape - Normal Mode",
                 description: "Cursor shape for normal mode.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.cursor_shape.normal"),
                     pick: |settings_content| {
                         settings_content
@@ -2698,7 +2925,7 @@ fn editor_page() -> SettingsPage {
                             .normal
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .vim
                             .get_or_insert_default()
@@ -2714,6 +2941,7 @@ fn editor_page() -> SettingsPage {
                 title: "Cursor Shape - Insert Mode",
                 description: "Cursor shape for insert mode. Inherit uses the editor's cursor shape.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.cursor_shape.insert"),
                     pick: |settings_content| {
                         settings_content
@@ -2724,7 +2952,7 @@ fn editor_page() -> SettingsPage {
                             .insert
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .vim
                             .get_or_insert_default()
@@ -2740,6 +2968,7 @@ fn editor_page() -> SettingsPage {
                 title: "Cursor Shape - Replace Mode",
                 description: "Cursor shape for replace mode.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.cursor_shape.replace"),
                     pick: |settings_content| {
                         settings_content
@@ -2750,7 +2979,7 @@ fn editor_page() -> SettingsPage {
                             .replace
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .vim
                             .get_or_insert_default()
@@ -2766,6 +2995,7 @@ fn editor_page() -> SettingsPage {
                 title: "Cursor Shape - Visual Mode",
                 description: "Cursor shape for visual mode.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("vim.cursor_shape.visual"),
                     pick: |settings_content| {
                         settings_content
@@ -2776,7 +3006,7 @@ fn editor_page() -> SettingsPage {
                             .visual
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .vim
                             .get_or_insert_default()
@@ -2793,11 +3023,12 @@ fn editor_page() -> SettingsPage {
                 description: "Custom digraph mappings for Vim mode.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("vim.custom_digraphs"),
                         pick: |settings_content| {
                             settings_content.vim.as_ref()?.custom_digraphs.as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.vim.get_or_insert_default().custom_digraphs = value;
                         },
                     }
@@ -2840,11 +3071,12 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                 description: "A mapping from languages to files and file extensions that should be treated as that language.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("file_type_associations"),
                         pick: |settings_content| {
                             settings_content.project.all_languages.file_types.as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.project.all_languages.file_types = value;
                         },
                     }
@@ -2863,11 +3095,12 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                 title: "Max Severity",
                 description: "Which level to use to filter out diagnostics displayed in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("diagnostics_max_severity"),
                     pick: |settings_content| {
                         settings_content.editor.diagnostics_max_severity.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.diagnostics_max_severity = value;
                     },
                 }),
@@ -2878,6 +3111,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                 title: "Include Warnings",
                 description: "Whether to show warnings or not by default.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("diagnostics.include_warnings"),
                     pick: |settings_content| {
                         settings_content
@@ -2886,7 +3120,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                             .include_warnings
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .diagnostics
                             .get_or_insert_default()
@@ -2906,6 +3140,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                 title: "Enabled",
                 description: "Whether to show diagnostics inline or not.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("diagnostics.inline.enabled"),
                     pick: |settings_content| {
                         settings_content
@@ -2916,7 +3151,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                             .enabled
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .diagnostics
                             .get_or_insert_default()
@@ -2932,6 +3167,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                 title: "Update Debounce",
                 description: "The delay in milliseconds to show inline diagnostics after the last diagnostic update.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("diagnostics.inline.update_debounce_ms"),
                     pick: |settings_content| {
                         settings_content
@@ -2942,7 +3178,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                             .update_debounce_ms
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .diagnostics
                             .get_or_insert_default()
@@ -2958,6 +3194,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                 title: "Padding",
                 description: "The amount of padding between the end of the source line and the start of the inline diagnostic.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("diagnostics.inline.padding"),
                     pick: |settings_content| {
                         settings_content
@@ -2968,7 +3205,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                             .padding
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .diagnostics
                             .get_or_insert_default()
@@ -2984,6 +3221,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                 title: "Minimum Column",
                 description: "The minimum column at which to display inline diagnostics.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("diagnostics.inline.min_column"),
                     pick: |settings_content| {
                         settings_content
@@ -2994,7 +3232,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                             .min_column
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .diagnostics
                             .get_or_insert_default()
@@ -3016,6 +3254,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                 title: "Enabled",
                 description: "Whether to pull for language server-powered diagnostics or not.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("diagnostics.lsp_pull_diagnostics.enabled"),
                     pick: |settings_content| {
                         settings_content
@@ -3026,7 +3265,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                             .enabled
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .diagnostics
                             .get_or_insert_default()
@@ -3043,6 +3282,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                 title: "Debounce",
                 description: "Minimum time to wait before pulling diagnostics from the language server(s).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("diagnostics.lsp_pull_diagnostics.debounce_ms"),
                     pick: |settings_content| {
                         settings_content
@@ -3053,7 +3293,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                             .debounce_ms
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .diagnostics
                             .get_or_insert_default()
@@ -3075,11 +3315,12 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                 title: "Debounce",
                 description: "The debounce delay before querying highlights from the language.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("lsp_highlight_debounce"),
                     pick: |settings_content| {
                         settings_content.editor.lsp_highlight_debounce.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.lsp_highlight_debounce = value;
                     },
                 }),
@@ -3145,11 +3386,12 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Whole Word",
                 description: "Search for whole words by default.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("search.whole_word"),
                     pick: |settings_content| {
                         settings_content.editor.search.as_ref()?.whole_word.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .search
@@ -3164,6 +3406,7 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Case Sensitive",
                 description: "Search case-sensitively by default.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("search.case_sensitive"),
                     pick: |settings_content| {
                         settings_content
@@ -3173,7 +3416,7 @@ fn search_and_files_page() -> SettingsPage {
                             .case_sensitive
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .search
@@ -3188,9 +3431,10 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Use Smartcase Search",
                 description: "Whether to automatically enable case-sensitive search based on the search query.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("use_smartcase_search"),
                     pick: |settings_content| settings_content.editor.use_smartcase_search.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.use_smartcase_search = value;
                     },
                 }),
@@ -3201,6 +3445,7 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Include Ignored",
                 description: "Include ignored files in search results by default.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("search.include_ignored"),
                     pick: |settings_content| {
                         settings_content
@@ -3210,7 +3455,7 @@ fn search_and_files_page() -> SettingsPage {
                             .include_ignored
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .search
@@ -3225,11 +3470,12 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Regex",
                 description: "Use regex search by default.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("search.regex"),
                     pick: |settings_content| {
                         settings_content.editor.search.as_ref()?.regex.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.search.get_or_insert_default().regex = value;
                     },
                 }),
@@ -3240,9 +3486,10 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Search Wrap",
                 description: "Whether the editor search results will loop.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("search_wrap"),
                     pick: |settings_content| settings_content.editor.search_wrap.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.search_wrap = value;
                     },
                 }),
@@ -3253,6 +3500,7 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Center on Match",
                 description: "Whether to center the current match in the editor",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("editor.search.center_on_match"),
                     pick: |settings_content| {
                         settings_content
@@ -3261,7 +3509,7 @@ fn search_and_files_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|search| search.center_on_match.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .search
@@ -3276,6 +3524,7 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Seed Search Query From Cursor",
                 description: "When to populate a new search's query based on the text under the cursor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("seed_search_query_from_cursor"),
                     pick: |settings_content| {
                         settings_content
@@ -3283,7 +3532,7 @@ fn search_and_files_page() -> SettingsPage {
                             .seed_search_query_from_cursor
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.seed_search_query_from_cursor = value;
                     },
                 }),
@@ -3301,6 +3550,7 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Include Ignored in Search",
                 description: "Use gitignored files when searching.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("file_finder.include_ignored"),
                     pick: |settings_content| {
                         settings_content
@@ -3309,7 +3559,7 @@ fn search_and_files_page() -> SettingsPage {
                             .include_ignored
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .file_finder
                             .get_or_insert_default()
@@ -3323,11 +3573,12 @@ fn search_and_files_page() -> SettingsPage {
                 title: "File Icons",
                 description: "Show file icons in the file finder.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("file_finder.file_icons"),
                     pick: |settings_content| {
                         settings_content.file_finder.as_ref()?.file_icons.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .file_finder
                             .get_or_insert_default()
@@ -3341,6 +3592,7 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Modal Max Width",
                 description: "Determines how much space the file finder can take up in relation to the available window width.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("file_finder.modal_max_width"),
                     pick: |settings_content| {
                         settings_content
@@ -3349,7 +3601,7 @@ fn search_and_files_page() -> SettingsPage {
                             .modal_max_width
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .file_finder
                             .get_or_insert_default()
@@ -3363,6 +3615,7 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Skip Focus For Active In Search",
                 description: "Whether the file finder should skip focus for the active file in search results.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("file_finder.skip_focus_for_active_in_search"),
                     pick: |settings_content| {
                         settings_content
@@ -3371,7 +3624,7 @@ fn search_and_files_page() -> SettingsPage {
                             .skip_focus_for_active_in_search
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .file_finder
                             .get_or_insert_default()
@@ -3384,7 +3637,7 @@ fn search_and_files_page() -> SettingsPage {
         ]
     }
 
-    fn file_scan_section() -> [SettingsPageItem; 5] {
+    fn file_scan_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("File Scan"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3392,6 +3645,7 @@ fn search_and_files_page() -> SettingsPage {
                 description: "Files or globs of files that will be excluded by Zed entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("file_scan_exclusions"),
                         pick: |settings_content| {
                             settings_content
@@ -3400,7 +3654,7 @@ fn search_and_files_page() -> SettingsPage {
                                 .file_scan_exclusions
                                 .as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.project.worktree.file_scan_exclusions = value;
                         },
                     }
@@ -3414,6 +3668,7 @@ fn search_and_files_page() -> SettingsPage {
                 description: "Files or globs of files that will be included by Zed, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Zed's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("file_scan_inclusions"),
                         pick: |settings_content| {
                             settings_content
@@ -3422,7 +3677,7 @@ fn search_and_files_page() -> SettingsPage {
                                 .file_scan_inclusions
                                 .as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.project.worktree.file_scan_inclusions = value;
                         },
                     }
@@ -3432,14 +3687,31 @@ fn search_and_files_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Scan Symbolic Links",
+                description: "When to scan content of linked directories",
+                field: Box::new(SettingField {
+                    json_path: Some("scan_symlinks"),
+                    organization_override: None,
+                    pick: |settings_content| {
+                        settings_content.project.worktree.scan_symlinks.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.project.worktree.scan_symlinks = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Restore File State",
                 description: "Restore previous file state when reopening.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("restore_on_file_reopen"),
                     pick: |settings_content| {
                         settings_content.workspace.restore_on_file_reopen.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.restore_on_file_reopen = value;
                     },
                 }),
@@ -3450,11 +3722,12 @@ fn search_and_files_page() -> SettingsPage {
                 title: "Close on File Delete",
                 description: "Automatically close files that have been deleted.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("close_on_file_delete"),
                     pick: |settings_content| {
                         settings_content.workspace.close_on_file_delete.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.close_on_file_delete = value;
                     },
                 }),
@@ -3478,11 +3751,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Project Panel Button",
                 description: "Show the project panel button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.button"),
                     pick: |settings_content| {
                         settings_content.project_panel.as_ref()?.button.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -3496,6 +3770,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Active Language Button",
                 description: "Show the active language button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("status_bar.active_language_button"),
                     pick: |settings_content| {
                         settings_content
@@ -3504,7 +3779,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .active_language_button
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .status_bar
                             .get_or_insert_default()
@@ -3518,6 +3793,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Active Encoding Button",
                 description: "Control when to show the active encoding in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("status_bar.active_encoding_button"),
                     pick: |settings_content| {
                         settings_content
@@ -3526,7 +3802,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .active_encoding_button
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .status_bar
                             .get_or_insert_default()
@@ -3540,6 +3816,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Cursor Position Button",
                 description: "Show the cursor position button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("status_bar.cursor_position_button"),
                     pick: |settings_content| {
                         settings_content
@@ -3548,7 +3825,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .cursor_position_button
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .status_bar
                             .get_or_insert_default()
@@ -3562,6 +3839,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Line Endings Button",
                 description: "Show the active line endings button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("status_bar.line_endings_button"),
                     pick: |settings_content| {
                         settings_content
@@ -3570,7 +3848,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .line_endings_button
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .status_bar
                             .get_or_insert_default()
@@ -3584,9 +3862,10 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Terminal Button",
                 description: "Show the terminal button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.button"),
                     pick: |settings_content| settings_content.terminal.as_ref()?.button.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.terminal.get_or_insert_default().button = value;
                     },
                 }),
@@ -3597,9 +3876,10 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Diagnostics Button",
                 description: "Show the project diagnostics button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("diagnostics.button"),
                     pick: |settings_content| settings_content.diagnostics.as_ref()?.button.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.diagnostics.get_or_insert_default().button = value;
                     },
                 }),
@@ -3610,11 +3890,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Project Search Button",
                 description: "Show the project search button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("search.button"),
                     pick: |settings_content| {
                         settings_content.editor.search.as_ref()?.button.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .search
@@ -3629,9 +3910,10 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Debugger Button",
                 description: "Show the debugger button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("debugger.button"),
                     pick: |settings_content| settings_content.debugger.as_ref()?.button.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.debugger.get_or_insert_default().button = value;
                     },
                 }),
@@ -3642,6 +3924,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Active File Name",
                 description: "Show the name of the active file in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("status_bar.show_active_file"),
                     pick: |settings_content| {
                         settings_content
@@ -3650,7 +3933,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .show_active_file
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .status_bar
                             .get_or_insert_default()
@@ -3670,6 +3953,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Branch Status Icon",
                 description: "Show git status indicators on the branch icon in the titlebar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("title_bar.show_branch_status_icon"),
                     pick: |settings_content| {
                         settings_content
@@ -3678,7 +3962,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .show_branch_status_icon
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .title_bar
                             .get_or_insert_default()
@@ -3692,6 +3976,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Branch Name",
                 description: "Show the branch name button in the titlebar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("title_bar.show_branch_name"),
                     pick: |settings_content| {
                         settings_content
@@ -3700,7 +3985,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .show_branch_name
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .title_bar
                             .get_or_insert_default()
@@ -3714,6 +3999,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Project Items",
                 description: "Show the project host and name in the titlebar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("title_bar.show_project_items"),
                     pick: |settings_content| {
                         settings_content
@@ -3722,7 +4008,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .show_project_items
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .title_bar
                             .get_or_insert_default()
@@ -3736,6 +4022,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Onboarding Banner",
                 description: "Show banners announcing new features in the titlebar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("title_bar.show_onboarding_banner"),
                     pick: |settings_content| {
                         settings_content
@@ -3744,7 +4031,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .show_onboarding_banner
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .title_bar
                             .get_or_insert_default()
@@ -3758,11 +4045,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Sign In",
                 description: "Show the sign in button in the titlebar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("title_bar.show_sign_in"),
                     pick: |settings_content| {
                         settings_content.title_bar.as_ref()?.show_sign_in.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .title_bar
                             .get_or_insert_default()
@@ -3776,11 +4064,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show User Menu",
                 description: "Show the user menu button in the titlebar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("title_bar.show_user_menu"),
                     pick: |settings_content| {
                         settings_content.title_bar.as_ref()?.show_user_menu.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .title_bar
                             .get_or_insert_default()
@@ -3794,6 +4083,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show User Picture",
                 description: "Show user picture in the titlebar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("title_bar.show_user_picture"),
                     pick: |settings_content| {
                         settings_content
@@ -3802,7 +4092,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .show_user_picture
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .title_bar
                             .get_or_insert_default()
@@ -3816,11 +4106,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Menus",
                 description: "Show the menus in the titlebar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("title_bar.show_menus"),
                     pick: |settings_content| {
                         settings_content.title_bar.as_ref()?.show_menus.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .title_bar
                             .get_or_insert_default()
@@ -3837,6 +4128,7 @@ fn window_and_layout_page() -> SettingsPage {
                     description:
                         "(Linux only) choose how window control buttons are laid out in the titlebar.",
                     field: Box::new(SettingField {
+                        organization_override: None,
                         json_path: Some("title_bar.button_layout$"),
                         pick: |settings_content| {
                             Some(
@@ -3849,7 +4141,7 @@ fn window_and_layout_page() -> SettingsPage {
                                     as usize],
                             )
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             let Some(value) = value else {
                                 settings_content
                                     .title_bar
@@ -3917,6 +4209,7 @@ fn window_and_layout_page() -> SettingsPage {
                                 description:
                                     "GNOME-style layout string such as \"close:minimize,maximize\".",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("title_bar.button_layout"),
                                     pick: |settings_content| match settings_content
                                         .title_bar
@@ -3929,7 +4222,7 @@ fn window_and_layout_page() -> SettingsPage {
                                         }
                                         _ => DEFAULT_EMPTY_STRING,
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         settings_content
                                             .title_bar
                                             .get_or_insert_default()
@@ -3956,9 +4249,10 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Tab Bar",
                 description: "Show the tab bar in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("tab_bar.show"),
                     pick: |settings_content| settings_content.tab_bar.as_ref()?.show.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.tab_bar.get_or_insert_default().show = value;
                     },
                 }),
@@ -3969,9 +4263,10 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Git Status In Tabs",
                 description: "Show the Git file status on a tab item.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("tabs.git_status"),
                     pick: |settings_content| settings_content.tabs.as_ref()?.git_status.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.tabs.get_or_insert_default().git_status = value;
                     },
                 }),
@@ -3982,9 +4277,10 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show File Icons In Tabs",
                 description: "Show the file icon for a tab.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("tabs.file_icons"),
                     pick: |settings_content| settings_content.tabs.as_ref()?.file_icons.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.tabs.get_or_insert_default().file_icons = value;
                     },
                 }),
@@ -3995,11 +4291,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Tab Close Position",
                 description: "Position of the close button in a tab.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("tabs.close_position"),
                     pick: |settings_content| {
                         settings_content.tabs.as_ref()?.close_position.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.tabs.get_or_insert_default().close_position = value;
                     },
                 }),
@@ -4014,9 +4311,10 @@ fn window_and_layout_page() -> SettingsPage {
                 // is complex, so I'm going to come back to this later
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("max_tabs"),
                         pick: |settings_content| settings_content.workspace.max_tabs.as_ref(),
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.workspace.max_tabs = value;
                         },
                     }
@@ -4028,6 +4326,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Navigation History Buttons",
                 description: "Show the navigation history buttons in the tab bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("tab_bar.show_nav_history_buttons"),
                     pick: |settings_content| {
                         settings_content
@@ -4036,7 +4335,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .show_nav_history_buttons
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .tab_bar
                             .get_or_insert_default()
@@ -4050,6 +4349,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Tab Bar Buttons",
                 description: "Show the tab bar buttons (New, Split Pane, Zoom).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("tab_bar.show_tab_bar_buttons"),
                     pick: |settings_content| {
                         settings_content
@@ -4058,7 +4358,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .show_tab_bar_buttons
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .tab_bar
                             .get_or_insert_default()
@@ -4072,6 +4372,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Pinned Tabs Layout",
                 description: "Show pinned tabs in a separate row above unpinned tabs.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("tab_bar.show_pinned_tabs_in_separate_row"),
                     pick: |settings_content| {
                         settings_content
@@ -4080,7 +4381,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .show_pinned_tabs_in_separate_row
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .tab_bar
                             .get_or_insert_default()
@@ -4100,11 +4401,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Activate On Close",
                 description: "What to do after closing the current tab.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("tabs.activate_on_close"),
                     pick: |settings_content| {
                         settings_content.tabs.as_ref()?.activate_on_close.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .tabs
                             .get_or_insert_default()
@@ -4118,11 +4420,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Tab Show Diagnostics",
                 description: "Which files containing diagnostic errors/warnings to mark in the tabs.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("tabs.show_diagnostics"),
                     pick: |settings_content| {
                         settings_content.tabs.as_ref()?.show_diagnostics.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .tabs
                             .get_or_insert_default()
@@ -4136,11 +4439,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Show Close Button",
                 description: "Controls the appearance behavior of the tab's close button.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("tabs.show_close_button"),
                     pick: |settings_content| {
                         settings_content.tabs.as_ref()?.show_close_button.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .tabs
                             .get_or_insert_default()
@@ -4160,11 +4464,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Preview Tabs Enabled",
                 description: "Show opened editors as preview tabs.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("preview_tabs.enabled"),
                     pick: |settings_content| {
                         settings_content.preview_tabs.as_ref()?.enabled.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .preview_tabs
                             .get_or_insert_default()
@@ -4178,6 +4483,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Enable Preview From Project Panel",
                 description: "Whether to open tabs in preview mode when opened from the project panel with a single click.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("preview_tabs.enable_preview_from_project_panel"),
                     pick: |settings_content| {
                         settings_content
@@ -4186,7 +4492,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .enable_preview_from_project_panel
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .preview_tabs
                             .get_or_insert_default()
@@ -4200,6 +4506,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Enable Preview From File Finder",
                 description: "Whether to open tabs in preview mode when selected from the file finder.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("preview_tabs.enable_preview_from_file_finder"),
                     pick: |settings_content| {
                         settings_content
@@ -4208,7 +4515,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .enable_preview_from_file_finder
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .preview_tabs
                             .get_or_insert_default()
@@ -4222,6 +4529,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Enable Preview From Multibuffer",
                 description: "Whether to open tabs in preview mode when opened from a multibuffer.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("preview_tabs.enable_preview_from_multibuffer"),
                     pick: |settings_content| {
                         settings_content
@@ -4230,7 +4538,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .enable_preview_from_multibuffer
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .preview_tabs
                             .get_or_insert_default()
@@ -4244,6 +4552,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Enable Preview Multibuffer From Code Navigation",
                 description: "Whether to open tabs in preview mode when code navigation is used to open a multibuffer.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("preview_tabs.enable_preview_multibuffer_from_code_navigation"),
                     pick: |settings_content| {
                         settings_content
@@ -4252,7 +4561,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .enable_preview_multibuffer_from_code_navigation
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .preview_tabs
                             .get_or_insert_default()
@@ -4266,6 +4575,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Enable Preview File From Code Navigation",
                 description: "Whether to open tabs in preview mode when code navigation is used to open a single file.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("preview_tabs.enable_preview_file_from_code_navigation"),
                     pick: |settings_content| {
                         settings_content
@@ -4274,7 +4584,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .enable_preview_file_from_code_navigation
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .preview_tabs
                             .get_or_insert_default()
@@ -4288,6 +4598,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Enable Keep Preview On Code Navigation",
                 description: "Whether to keep tabs in preview mode when code navigation is used to navigate away from them. If `enable_preview_file_from_code_navigation` or `enable_preview_multibuffer_from_code_navigation` is also true, the new tab may replace the existing one.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("preview_tabs.enable_keep_preview_on_code_navigation"),
                     pick: |settings_content| {
                         settings_content
@@ -4296,7 +4607,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .enable_keep_preview_on_code_navigation
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .preview_tabs
                             .get_or_insert_default()
@@ -4316,9 +4627,10 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Bottom Dock Layout",
                 description: "Layout mode for the bottom dock.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("bottom_dock_layout"),
                     pick: |settings_content| settings_content.workspace.bottom_dock_layout.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.bottom_dock_layout = value;
                     },
                 }),
@@ -4330,6 +4642,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Centered Layout Left Padding",
                 description: "Left padding for centered layout.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("centered_layout.left_padding"),
                     pick: |settings_content| {
                         settings_content
@@ -4339,7 +4652,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .left_padding
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .workspace
                             .centered_layout
@@ -4354,6 +4667,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Centered Layout Right Padding",
                 description: "Right padding for centered layout.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("centered_layout.right_padding"),
                     pick: |settings_content| {
                         settings_content
@@ -4363,7 +4677,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .right_padding
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .workspace
                             .centered_layout
@@ -4377,6 +4691,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Focus Follows Mouse",
                 description: "Whether to change focus to a pane when the mouse hovers over it.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("focus_follows_mouse.enabled"),
                     pick: |settings_content| {
                         settings_content
@@ -4385,7 +4700,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|s| s.enabled.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .workspace
                             .focus_follows_mouse
@@ -4400,6 +4715,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Focus Follows Mouse Debounce ms",
                 description: "Amount of time to wait before changing focus.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("focus_follows_mouse.debounce_ms"),
                     pick: |settings_content| {
                         settings_content
@@ -4408,7 +4724,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .as_ref()
                             .and_then(|s| s.debounce_ms.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .workspace
                             .focus_follows_mouse
@@ -4430,11 +4746,12 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Use System Window Tabs",
                 description: "(macOS only) whether to allow Windows to tab together.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("use_system_window_tabs"),
                     pick: |settings_content| {
                         settings_content.workspace.use_system_window_tabs.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.use_system_window_tabs = value;
                     },
                 }),
@@ -4445,9 +4762,10 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Window Decorations",
                 description: "(Linux only) whether Zed or your compositor should draw window decorations.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("window_decorations"),
                     pick: |settings_content| settings_content.workspace.window_decorations.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.window_decorations = value;
                     },
                 }),
@@ -4464,6 +4782,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Inactive Opacity",
                 description: "Opacity of inactive panels (0.0 - 1.0).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("active_pane_modifiers.inactive_opacity"),
                     pick: |settings_content| {
                         settings_content
@@ -4473,7 +4792,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .inactive_opacity
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .workspace
                             .active_pane_modifiers
@@ -4488,6 +4807,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Border Size",
                 description: "Size of the border surrounding the active pane.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("active_pane_modifiers.border_size"),
                     pick: |settings_content| {
                         settings_content
@@ -4497,7 +4817,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .border_size
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .workspace
                             .active_pane_modifiers
@@ -4512,9 +4832,10 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Zoomed Padding",
                 description: "Show padding for zoomed panes.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("zoomed_padding"),
                     pick: |settings_content| settings_content.workspace.zoomed_padding.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.zoomed_padding = value;
                     },
                 }),
@@ -4531,6 +4852,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Vertical Split Direction",
                 description: "Direction to split vertically.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("pane_split_direction_vertical"),
                     pick: |settings_content| {
                         settings_content
@@ -4538,7 +4860,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .pane_split_direction_vertical
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.pane_split_direction_vertical = value;
                     },
                 }),
@@ -4549,6 +4871,7 @@ fn window_and_layout_page() -> SettingsPage {
                 title: "Horizontal Split Direction",
                 description: "Direction to split horizontally.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("pane_split_direction_horizontal"),
                     pick: |settings_content| {
                         settings_content
@@ -4556,7 +4879,7 @@ fn window_and_layout_page() -> SettingsPage {
                             .pane_split_direction_horizontal
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.pane_split_direction_horizontal = value;
                     },
                 }),
@@ -4590,9 +4913,10 @@ fn panels_page() -> SettingsPage {
                 title: "Project Panel Dock",
                 description: "Where to dock the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.dock"),
                     pick: |settings_content| settings_content.project_panel.as_ref()?.dock.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.project_panel.get_or_insert_default().dock = value;
                     },
                 }),
@@ -4603,6 +4927,7 @@ fn panels_page() -> SettingsPage {
                 title: "Project Panel Default Width",
                 description: "Default width of the project panel in pixels.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.default_width"),
                     pick: |settings_content| {
                         settings_content
@@ -4611,7 +4936,7 @@ fn panels_page() -> SettingsPage {
                             .default_width
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4625,6 +4950,7 @@ fn panels_page() -> SettingsPage {
                 title: "Hide .gitignore",
                 description: "Whether to hide the gitignore entries in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.hide_gitignore"),
                     pick: |settings_content| {
                         settings_content
@@ -4633,7 +4959,7 @@ fn panels_page() -> SettingsPage {
                             .hide_gitignore
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4647,6 +4973,7 @@ fn panels_page() -> SettingsPage {
                 title: "Entry Spacing",
                 description: "Spacing between worktree entries in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.entry_spacing"),
                     pick: |settings_content| {
                         settings_content
@@ -4655,7 +4982,7 @@ fn panels_page() -> SettingsPage {
                             .entry_spacing
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4669,11 +4996,12 @@ fn panels_page() -> SettingsPage {
                 title: "File Icons",
                 description: "Show file icons in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.file_icons"),
                     pick: |settings_content| {
                         settings_content.project_panel.as_ref()?.file_icons.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4687,6 +5015,7 @@ fn panels_page() -> SettingsPage {
                 title: "Folder Icons",
                 description: "Whether to show folder icons or chevrons for directories in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.folder_icons"),
                     pick: |settings_content| {
                         settings_content
@@ -4695,7 +5024,7 @@ fn panels_page() -> SettingsPage {
                             .folder_icons
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4709,11 +5038,12 @@ fn panels_page() -> SettingsPage {
                 title: "Git Status",
                 description: "Show the Git status in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.git_status"),
                     pick: |settings_content| {
                         settings_content.project_panel.as_ref()?.git_status.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4727,6 +5057,7 @@ fn panels_page() -> SettingsPage {
                 title: "Indent Size",
                 description: "Amount of indentation for nested items.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.indent_size"),
                     pick: |settings_content| {
                         settings_content
@@ -4735,7 +5066,7 @@ fn panels_page() -> SettingsPage {
                             .indent_size
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4749,6 +5080,7 @@ fn panels_page() -> SettingsPage {
                 title: "Auto Reveal Entries",
                 description: "Whether to reveal entries in the project panel automatically when a corresponding project entry becomes active.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.auto_reveal_entries"),
                     pick: |settings_content| {
                         settings_content
@@ -4757,7 +5089,7 @@ fn panels_page() -> SettingsPage {
                             .auto_reveal_entries
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4771,6 +5103,7 @@ fn panels_page() -> SettingsPage {
                 title: "Starts Open",
                 description: "Whether the project panel should open on startup.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.starts_open"),
                     pick: |settings_content| {
                         settings_content
@@ -4779,7 +5112,7 @@ fn panels_page() -> SettingsPage {
                             .starts_open
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4793,6 +5126,7 @@ fn panels_page() -> SettingsPage {
                 title: "Auto Fold Directories",
                 description: "Whether to fold directories automatically and show compact folders when a directory has only one subdirectory inside.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.auto_fold_dirs"),
                     pick: |settings_content| {
                         settings_content
@@ -4801,7 +5135,7 @@ fn panels_page() -> SettingsPage {
                             .auto_fold_dirs
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4815,6 +5149,7 @@ fn panels_page() -> SettingsPage {
                 title: "Bold Folder Labels",
                 description: "Whether to show folder names with bold text in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.bold_folder_labels"),
                     pick: |settings_content| {
                         settings_content
@@ -4823,7 +5158,7 @@ fn panels_page() -> SettingsPage {
                             .bold_folder_labels
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4837,6 +5172,7 @@ fn panels_page() -> SettingsPage {
                 title: "Show Scrollbar",
                 description: "Show the scrollbar in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.scrollbar.show"),
                     pick: |settings_content| {
                         show_scrollbar_or_editor(settings_content, |settings_content| {
@@ -4849,7 +5185,7 @@ fn panels_page() -> SettingsPage {
                                 .as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4865,6 +5201,7 @@ fn panels_page() -> SettingsPage {
                 title: "Horizontal Scroll",
                 description: "Whether to allow horizontal scrolling in the project panel. When disabled, the view is always locked to the leftmost position and long file names are clipped.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.scrollbar.horizontal_scroll"),
                     pick: |settings_content| {
                         settings_content
@@ -4875,7 +5212,7 @@ fn panels_page() -> SettingsPage {
                             .horizontal_scroll
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4891,6 +5228,7 @@ fn panels_page() -> SettingsPage {
                 title: "Show Diagnostics",
                 description: "Which files containing diagnostic errors/warnings to mark in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.show_diagnostics"),
                     pick: |settings_content| {
                         settings_content
@@ -4899,7 +5237,7 @@ fn panels_page() -> SettingsPage {
                             .show_diagnostics
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4913,6 +5251,7 @@ fn panels_page() -> SettingsPage {
                 title: "Diagnostic Badges",
                 description: "Show error and warning count badges next to file names in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.diagnostic_badges"),
                     pick: |settings_content| {
                         settings_content
@@ -4921,7 +5260,7 @@ fn panels_page() -> SettingsPage {
                             .diagnostic_badges
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4935,6 +5274,7 @@ fn panels_page() -> SettingsPage {
                 title: "Git Status Indicator",
                 description: "Show a git status indicator next to file names in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.git_status_indicator"),
                     pick: |settings_content| {
                         settings_content
@@ -4943,7 +5283,7 @@ fn panels_page() -> SettingsPage {
                             .git_status_indicator
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4957,6 +5297,7 @@ fn panels_page() -> SettingsPage {
                 title: "Sticky Scroll",
                 description: "Whether to stick parent directories at top of the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.sticky_scroll"),
                     pick: |settings_content| {
                         settings_content
@@ -4965,7 +5306,7 @@ fn panels_page() -> SettingsPage {
                             .sticky_scroll
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -4980,6 +5321,7 @@ fn panels_page() -> SettingsPage {
                 title: "Show Indent Guides",
                 description: "Show indent guides in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.indent_guides.show"),
                     pick: |settings_content| {
                         settings_content
@@ -4990,7 +5332,7 @@ fn panels_page() -> SettingsPage {
                             .show
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -5005,6 +5347,7 @@ fn panels_page() -> SettingsPage {
                 title: "Drag and Drop",
                 description: "Whether to enable drag-and-drop operations in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.drag_and_drop"),
                     pick: |settings_content| {
                         settings_content
@@ -5013,7 +5356,7 @@ fn panels_page() -> SettingsPage {
                             .drag_and_drop
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -5027,11 +5370,12 @@ fn panels_page() -> SettingsPage {
                 title: "Hide Root",
                 description: "Whether to hide the root entry when only one folder is open in the window.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.hide_root"),
                     pick: |settings_content| {
                         settings_content.project_panel.as_ref()?.hide_root.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -5045,6 +5389,7 @@ fn panels_page() -> SettingsPage {
                 title: "Hide Hidden",
                 description: "Whether to hide the hidden entries in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.hide_hidden"),
                     pick: |settings_content| {
                         settings_content
@@ -5053,7 +5398,7 @@ fn panels_page() -> SettingsPage {
                             .hide_hidden
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -5067,11 +5412,12 @@ fn panels_page() -> SettingsPage {
                 title: "Sort Mode",
                 description: "Sort order for entries in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.sort_mode"),
                     pick: |settings_content| {
                         settings_content.project_panel.as_ref()?.sort_mode.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -5085,10 +5431,11 @@ fn panels_page() -> SettingsPage {
                 title: "Sort Order",
                 description: "Whether to sort file and folder names case-sensitively in the project panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     pick: |settings_content| {
                         settings_content.project_panel.as_ref()?.sort_order.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -5103,6 +5450,7 @@ fn panels_page() -> SettingsPage {
                 title: "Auto Open Files On Create",
                 description: "Whether to automatically open newly created files in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.auto_open.on_create"),
                     pick: |settings_content| {
                         settings_content
@@ -5113,7 +5461,7 @@ fn panels_page() -> SettingsPage {
                             .on_create
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -5129,6 +5477,7 @@ fn panels_page() -> SettingsPage {
                 title: "Auto Open Files On Paste",
                 description: "Whether to automatically open files after pasting or duplicating them.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.auto_open.on_paste"),
                     pick: |settings_content| {
                         settings_content
@@ -5139,7 +5488,7 @@ fn panels_page() -> SettingsPage {
                             .on_paste
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -5155,6 +5504,7 @@ fn panels_page() -> SettingsPage {
                 title: "Auto Open Files On Drop",
                 description: "Whether to automatically open files dropped from external sources.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("project_panel.auto_open.on_drop"),
                     pick: |settings_content| {
                         settings_content
@@ -5165,7 +5515,7 @@ fn panels_page() -> SettingsPage {
                             .on_drop
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project_panel
                             .get_or_insert_default()
@@ -5182,11 +5532,12 @@ fn panels_page() -> SettingsPage {
                 description: "Globs to match files that will be considered \"hidden\" and can be hidden from the project panel.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("worktree.hidden_files"),
                         pick: |settings_content| {
                             settings_content.project.worktree.hidden_files.as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content.project.worktree.hidden_files = value;
                         },
                     }
@@ -5205,9 +5556,10 @@ fn panels_page() -> SettingsPage {
                 title: "Terminal Dock",
                 description: "Where to dock the terminal panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.dock"),
                     pick: |settings_content| settings_content.terminal.as_ref()?.dock.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.terminal.get_or_insert_default().dock = value;
                     },
                 }),
@@ -5218,9 +5570,10 @@ fn panels_page() -> SettingsPage {
                 title: "Terminal Panel Flexible Sizing",
                 description: "Whether the terminal panel should use flexible (proportional) sizing when docked to the left or right.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.flexible"),
                     pick: |settings_content| settings_content.terminal.as_ref()?.flexible.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.terminal.get_or_insert_default().flexible = value;
                     },
                 }),
@@ -5231,6 +5584,7 @@ fn panels_page() -> SettingsPage {
                 title: "Show Count Badge",
                 description: "Show a badge on the terminal panel icon with the count of open terminals.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.show_count_badge"),
                     pick: |settings_content| {
                         settings_content
@@ -5239,7 +5593,7 @@ fn panels_page() -> SettingsPage {
                             .show_count_badge
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -5259,11 +5613,12 @@ fn panels_page() -> SettingsPage {
                 title: "Outline Panel Button",
                 description: "Show the outline panel button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.button"),
                     pick: |settings_content| {
                         settings_content.outline_panel.as_ref()?.button.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .outline_panel
                             .get_or_insert_default()
@@ -5277,9 +5632,10 @@ fn panels_page() -> SettingsPage {
                 title: "Outline Panel Dock",
                 description: "Where to dock the outline panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.dock"),
                     pick: |settings_content| settings_content.outline_panel.as_ref()?.dock.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.outline_panel.get_or_insert_default().dock = value;
                     },
                 }),
@@ -5290,6 +5646,7 @@ fn panels_page() -> SettingsPage {
                 title: "Outline Panel Default Width",
                 description: "Default width of the outline panel in pixels.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.default_width"),
                     pick: |settings_content| {
                         settings_content
@@ -5298,7 +5655,7 @@ fn panels_page() -> SettingsPage {
                             .default_width
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .outline_panel
                             .get_or_insert_default()
@@ -5312,11 +5669,12 @@ fn panels_page() -> SettingsPage {
                 title: "File Icons",
                 description: "Show file icons in the outline panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.file_icons"),
                     pick: |settings_content| {
                         settings_content.outline_panel.as_ref()?.file_icons.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .outline_panel
                             .get_or_insert_default()
@@ -5330,6 +5688,7 @@ fn panels_page() -> SettingsPage {
                 title: "Folder Icons",
                 description: "Whether to show folder icons or chevrons for directories in the outline panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.folder_icons"),
                     pick: |settings_content| {
                         settings_content
@@ -5338,7 +5697,7 @@ fn panels_page() -> SettingsPage {
                             .folder_icons
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .outline_panel
                             .get_or_insert_default()
@@ -5352,11 +5711,12 @@ fn panels_page() -> SettingsPage {
                 title: "Git Status",
                 description: "Show the Git status in the outline panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.git_status"),
                     pick: |settings_content| {
                         settings_content.outline_panel.as_ref()?.git_status.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .outline_panel
                             .get_or_insert_default()
@@ -5370,6 +5730,7 @@ fn panels_page() -> SettingsPage {
                 title: "Indent Size",
                 description: "Amount of indentation for nested items.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.indent_size"),
                     pick: |settings_content| {
                         settings_content
@@ -5378,7 +5739,7 @@ fn panels_page() -> SettingsPage {
                             .indent_size
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .outline_panel
                             .get_or_insert_default()
@@ -5392,6 +5753,7 @@ fn panels_page() -> SettingsPage {
                 title: "Auto Reveal Entries",
                 description: "Whether to reveal when a corresponding outline entry becomes active.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.auto_reveal_entries"),
                     pick: |settings_content| {
                         settings_content
@@ -5400,7 +5762,7 @@ fn panels_page() -> SettingsPage {
                             .auto_reveal_entries
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .outline_panel
                             .get_or_insert_default()
@@ -5414,6 +5776,7 @@ fn panels_page() -> SettingsPage {
                 title: "Auto Fold Directories",
                 description: "Whether to fold directories automatically when a directory contains only one subdirectory.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.auto_fold_dirs"),
                     pick: |settings_content| {
                         settings_content
@@ -5422,7 +5785,7 @@ fn panels_page() -> SettingsPage {
                             .auto_fold_dirs
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .outline_panel
                             .get_or_insert_default()
@@ -5437,6 +5800,7 @@ fn panels_page() -> SettingsPage {
                 title: "Show Indent Guides",
                 description: "When to show indent guides in the outline panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("outline_panel.indent_guides.show"),
                     pick: |settings_content| {
                         settings_content
@@ -5447,7 +5811,7 @@ fn panels_page() -> SettingsPage {
                             .show
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .outline_panel
                             .get_or_insert_default()
@@ -5461,16 +5825,17 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn git_panel_section() -> [SettingsPageItem; 14] {
+    fn git_panel_section() -> [SettingsPageItem; 17] {
         [
             SettingsPageItem::SectionHeader("Git Panel"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Git Panel Button",
                 description: "Show the Git panel button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.button"),
                     pick: |settings_content| settings_content.git_panel.as_ref()?.button.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.git_panel.get_or_insert_default().button = value;
                     },
                 }),
@@ -5481,9 +5846,10 @@ fn panels_page() -> SettingsPage {
                 title: "Git Panel Dock",
                 description: "Where to dock the Git panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.dock"),
                     pick: |settings_content| settings_content.git_panel.as_ref()?.dock.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.git_panel.get_or_insert_default().dock = value;
                     },
                 }),
@@ -5494,11 +5860,12 @@ fn panels_page() -> SettingsPage {
                 title: "Git Panel Default Width",
                 description: "Default width of the Git panel in pixels.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.default_width"),
                     pick: |settings_content| {
                         settings_content.git_panel.as_ref()?.default_width.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git_panel
                             .get_or_insert_default()
@@ -5512,11 +5879,12 @@ fn panels_page() -> SettingsPage {
                 title: "Git Panel Status Style",
                 description: "How entry statuses are displayed.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.status_style"),
                     pick: |settings_content| {
                         settings_content.git_panel.as_ref()?.status_style.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git_panel
                             .get_or_insert_default()
@@ -5530,6 +5898,7 @@ fn panels_page() -> SettingsPage {
                 title: "Fallback Branch Name",
                 description: "Default branch name will be when init.defaultbranch is not set in Git.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.fallback_branch_name"),
                     pick: |settings_content| {
                         settings_content
@@ -5538,7 +5907,7 @@ fn panels_page() -> SettingsPage {
                             .fallback_branch_name
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git_panel
                             .get_or_insert_default()
@@ -5549,18 +5918,28 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Sort By Path",
-                description: "Enable to sort entries in the panel by path, disable to sort by status.",
+                title: "Sort By",
+                description: "How to sort entries in the git panel.",
                 field: Box::new(SettingField {
-                    json_path: Some("git_panel.sort_by_path"),
-                    pick: |settings_content| {
-                        settings_content.git_panel.as_ref()?.sort_by_path.as_ref()
+                    organization_override: None,
+                    json_path: Some("git_panel.sort_by"),
+                    pick: |settings_content| settings_content.git_panel.as_ref()?.sort_by.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.git_panel.get_or_insert_default().sort_by = value;
                     },
-                    write: |settings_content, value| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .sort_by_path = value;
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Group By",
+                description: "How to group entries in the git panel.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git_panel.group_by"),
+                    pick: |settings_content| settings_content.git_panel.as_ref()?.group_by.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.git_panel.get_or_insert_default().group_by = value;
                     },
                 }),
                 metadata: None,
@@ -5570,6 +5949,7 @@ fn panels_page() -> SettingsPage {
                 title: "Collapse Untracked Diff",
                 description: "Whether to collapse untracked files in the diff panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.collapse_untracked_diff"),
                     pick: |settings_content| {
                         settings_content
@@ -5578,7 +5958,7 @@ fn panels_page() -> SettingsPage {
                             .collapse_untracked_diff
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git_panel
                             .get_or_insert_default()
@@ -5592,11 +5972,12 @@ fn panels_page() -> SettingsPage {
                 title: "Tree View",
                 description: "Enable to show entries in tree view list, disable to show in flat view list.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.tree_view"),
                     pick: |settings_content| {
                         settings_content.git_panel.as_ref()?.tree_view.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.git_panel.get_or_insert_default().tree_view = value;
                     },
                 }),
@@ -5607,11 +5988,12 @@ fn panels_page() -> SettingsPage {
                 title: "File Icons",
                 description: "Show file icons next to the Git status icon.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.file_icons"),
                     pick: |settings_content| {
                         settings_content.git_panel.as_ref()?.file_icons.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git_panel
                             .get_or_insert_default()
@@ -5625,11 +6007,12 @@ fn panels_page() -> SettingsPage {
                 title: "Folder Icons",
                 description: "Whether to show folder icons or chevrons for directories in the git panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.folder_icons"),
                     pick: |settings_content| {
                         settings_content.git_panel.as_ref()?.folder_icons.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git_panel
                             .get_or_insert_default()
@@ -5643,11 +6026,12 @@ fn panels_page() -> SettingsPage {
                 title: "Diff Stats",
                 description: "Whether to show the addition/deletion change count next to each file in the Git panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.diff_stats"),
                     pick: |settings_content| {
                         settings_content.git_panel.as_ref()?.diff_stats.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git_panel
                             .get_or_insert_default()
@@ -5658,9 +6042,33 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Primary Click Behavior",
+                description: "Default action when clicking a changed file in the Git panel.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git_panel.entry_primary_click_action"),
+                    pick: |settings_content| {
+                        settings_content
+                            .git_panel
+                            .as_ref()?
+                            .entry_primary_click_action
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .git_panel
+                            .get_or_insert_default()
+                            .entry_primary_click_action = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Count Badge",
                 description: "Whether to show a badge on the git panel icon with the count of uncommitted changes.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.show_count_badge"),
                     pick: |settings_content| {
                         settings_content
@@ -5669,7 +6077,7 @@ fn panels_page() -> SettingsPage {
                             .show_count_badge
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git_panel
                             .get_or_insert_default()
@@ -5680,9 +6088,33 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Commit Title Max Length",
+                description: "Maximum length of the commit message title before a warning is shown. Set to 0 to disable.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git_panel.commit_title_max_length"),
+                    pick: |settings_content| {
+                        settings_content
+                            .git_panel
+                            .as_ref()?
+                            .commit_title_max_length
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .git_panel
+                            .get_or_insert_default()
+                            .commit_title_max_length = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Scroll Bar",
                 description: "How and when the scrollbar should be displayed.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git_panel.scrollbar.show"),
                     pick: |settings_content| {
                         show_scrollbar_or_editor(settings_content, |settings_content| {
@@ -5695,7 +6127,7 @@ fn panels_page() -> SettingsPage {
                                 .as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git_panel
                             .get_or_insert_default()
@@ -5717,9 +6149,10 @@ fn panels_page() -> SettingsPage {
                 title: "Debugger Panel Dock",
                 description: "The dock position of the debug panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("debugger.dock"),
                     pick: |settings_content| settings_content.debugger.as_ref()?.dock.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.debugger.get_or_insert_default().dock = value;
                     },
                 }),
@@ -5736,6 +6169,7 @@ fn panels_page() -> SettingsPage {
                 title: "Collaboration Panel Button",
                 description: "Show the collaboration panel button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("collaboration_panel.button"),
                     pick: |settings_content| {
                         settings_content
@@ -5744,7 +6178,7 @@ fn panels_page() -> SettingsPage {
                             .button
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .collaboration_panel
                             .get_or_insert_default()
@@ -5758,11 +6192,12 @@ fn panels_page() -> SettingsPage {
                 title: "Collaboration Panel Dock",
                 description: "Where to dock the collaboration panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("collaboration_panel.dock"),
                     pick: |settings_content| {
                         settings_content.collaboration_panel.as_ref()?.dock.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .collaboration_panel
                             .get_or_insert_default()
@@ -5776,6 +6211,7 @@ fn panels_page() -> SettingsPage {
                 title: "Collaboration Panel Default Width",
                 description: "Default width of the collaboration panel in pixels.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("collaboration_panel.dock"),
                     pick: |settings_content| {
                         settings_content
@@ -5784,7 +6220,7 @@ fn panels_page() -> SettingsPage {
                             .default_width
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .collaboration_panel
                             .get_or_insert_default()
@@ -5804,9 +6240,10 @@ fn panels_page() -> SettingsPage {
                 title: "Agent Panel Button",
                 description: "Whether to show the agent panel button in the status bar.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.button"),
                     pick: |settings_content| settings_content.agent.as_ref()?.button.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.agent.get_or_insert_default().button = value;
                     },
                 }),
@@ -5817,9 +6254,10 @@ fn panels_page() -> SettingsPage {
                 title: "Agent Panel Dock",
                 description: "Where to dock the agent panel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.dock"),
                     pick: |settings_content| settings_content.agent.as_ref()?.dock.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.agent.get_or_insert_default().dock = value;
                     },
                 }),
@@ -5830,9 +6268,10 @@ fn panels_page() -> SettingsPage {
                 title: "Agent Panel Flexible Sizing",
                 description: "Whether the agent panel should use flexible (proportional) sizing when docked to the left or right.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.flexible"),
                     pick: |settings_content| settings_content.agent.as_ref()?.flexible.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.agent.get_or_insert_default().flexible = value;
                     },
                 }),
@@ -5843,11 +6282,12 @@ fn panels_page() -> SettingsPage {
                 title: "Agent Panel Default Width",
                 description: "Default width when the agent panel is docked to the left or right.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.default_width"),
                     pick: |settings_content| {
                         settings_content.agent.as_ref()?.default_width.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.agent.get_or_insert_default().default_width = value;
                     },
                 }),
@@ -5858,11 +6298,12 @@ fn panels_page() -> SettingsPage {
                 title: "Agent Panel Default Height",
                 description: "Default height when the agent panel is docked to the bottom.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.default_height"),
                     pick: |settings_content| {
                         settings_content.agent.as_ref()?.default_height.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -5878,6 +6319,7 @@ fn panels_page() -> SettingsPage {
                     title: "Limit Content Width",
                     description: "Whether to constrain the agent panel content to a maximum width, centering it when the panel is wider, for optimal readability.",
                     field: Box::new(SettingField::<bool> {
+                        organization_override: None,
                         json_path: Some("agent.limit_content_width"),
                         pick: |settings_content| {
                             settings_content
@@ -5886,7 +6328,7 @@ fn panels_page() -> SettingsPage {
                                 .limit_content_width
                                 .as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content
                                 .agent
                                 .get_or_insert_default()
@@ -5910,11 +6352,12 @@ fn panels_page() -> SettingsPage {
                         title: "Max Content Width",
                         description: "Maximum content width in pixels. Content will be centered when the panel is wider than this value.",
                         field: Box::new(SettingField {
+                            organization_override: None,
                             json_path: Some("agent.max_content_width"),
                             pick: |settings_content| {
                                 settings_content.agent.as_ref()?.max_content_width.as_ref()
                             },
-                            write: |settings_content, value| {
+                            write: |settings_content, value, _| {
                                 settings_content
                                     .agent
                                     .get_or_insert_default()
@@ -5950,6 +6393,7 @@ fn debugger_page() -> SettingsPage {
                 title: "Stepping Granularity",
                 description: "Determines the stepping granularity for debug operations.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("debugger.stepping_granularity"),
                     pick: |settings_content| {
                         settings_content
@@ -5958,7 +6402,7 @@ fn debugger_page() -> SettingsPage {
                             .stepping_granularity
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .debugger
                             .get_or_insert_default()
@@ -5972,6 +6416,7 @@ fn debugger_page() -> SettingsPage {
                 title: "Save Breakpoints",
                 description: "Whether breakpoints should be reused across Zed sessions.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("debugger.save_breakpoints"),
                     pick: |settings_content| {
                         settings_content
@@ -5980,7 +6425,7 @@ fn debugger_page() -> SettingsPage {
                             .save_breakpoints
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .debugger
                             .get_or_insert_default()
@@ -5994,9 +6439,10 @@ fn debugger_page() -> SettingsPage {
                 title: "Timeout",
                 description: "Time in milliseconds until timeout error when connecting to a TCP debug adapter.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("debugger.timeout"),
                     pick: |settings_content| settings_content.debugger.as_ref()?.timeout.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.debugger.get_or_insert_default().timeout = value;
                     },
                 }),
@@ -6007,6 +6453,7 @@ fn debugger_page() -> SettingsPage {
                 title: "Log DAP Communications",
                 description: "Whether to log messages between active debug adapters and Zed.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("debugger.log_dap_communications"),
                     pick: |settings_content| {
                         settings_content
@@ -6015,7 +6462,7 @@ fn debugger_page() -> SettingsPage {
                             .log_dap_communications
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .debugger
                             .get_or_insert_default()
@@ -6029,6 +6476,7 @@ fn debugger_page() -> SettingsPage {
                 title: "Format DAP Log Messages",
                 description: "Whether to format DAP messages when adding them to debug adapter logger.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("debugger.format_dap_log_messages"),
                     pick: |settings_content| {
                         settings_content
@@ -6037,7 +6485,7 @@ fn debugger_page() -> SettingsPage {
                             .format_dap_log_messages
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .debugger
                             .get_or_insert_default()
@@ -6066,6 +6514,7 @@ fn terminal_page() -> SettingsPage {
                         title: "Shell",
                         description: "What shell to use when opening a terminal.",
                         field: Box::new(SettingField {
+                            organization_override: None,
                             json_path: Some("terminal.shell$"),
                             pick: |settings_content| {
                                 Some(&dynamic_variants::<settings::Shell>()[
@@ -6078,7 +6527,7 @@ fn terminal_page() -> SettingsPage {
                                         .discriminant() as usize
                                 ])
                             },
-                            write: |settings_content, value| {
+                            write: |settings_content, value, _| {
                                 let Some(value) = value else {
                                     if let Some(terminal) = settings_content.terminal.as_mut() {
                                         terminal.project.shell = None;
@@ -6147,13 +6596,14 @@ fn terminal_page() -> SettingsPage {
                                 title: "Program",
                                 description: "The shell program to use.",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("terminal.shell"),
                                     pick: |settings_content| match settings_content.terminal.as_ref()?.project.shell.as_ref()
                                     {
                                         Some(settings::Shell::Program(program)) => Some(program),
                                         _ => None,
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         let Some(value) = value else {
                                             return;
                                         };
@@ -6177,6 +6627,7 @@ fn terminal_page() -> SettingsPage {
                                     title: "Program",
                                     description: "The shell program to run.",
                                     field: Box::new(SettingField {
+                                        organization_override: None,
                                         json_path: Some("terminal.shell.program"),
                                         pick: |settings_content| {
                                             match settings_content.terminal.as_ref()?.project.shell.as_ref() {
@@ -6184,7 +6635,7 @@ fn terminal_page() -> SettingsPage {
                                                 _ => None,
                                             }
                                         },
-                                        write: |settings_content, value| {
+                                        write: |settings_content, value, _| {
                                             let Some(value) = value else {
                                                 return;
                                             };
@@ -6210,6 +6661,7 @@ fn terminal_page() -> SettingsPage {
                                     description: "The arguments to pass to the shell program.",
                                     field: Box::new(
                                         SettingField {
+                                            organization_override: None,
                                             json_path: Some("terminal.shell.args"),
                                             pick: |settings_content| {
                                                 match settings_content.terminal.as_ref()?.project.shell.as_ref() {
@@ -6217,7 +6669,7 @@ fn terminal_page() -> SettingsPage {
                                                     _ => None,
                                                 }
                                             },
-                                            write: |settings_content, value| {
+                                            write: |settings_content, value, _| {
                                                 let Some(value) = value else {
                                                     return;
                                                 };
@@ -6242,6 +6694,7 @@ fn terminal_page() -> SettingsPage {
                                     title: "Title Override",
                                     description: "An optional string to override the title of the terminal tab.",
                                     field: Box::new(SettingField {
+                                        organization_override: None,
                                         json_path: Some("terminal.shell.title_override"),
                                         pick: |settings_content| {
                                             match settings_content.terminal.as_ref()?.project.shell.as_ref() {
@@ -6251,7 +6704,7 @@ fn terminal_page() -> SettingsPage {
                                                 _ => None,
                                             }
                                         },
-                                        write: |settings_content, value| {
+                                        write: |settings_content, value, _| {
                                             match settings_content
                                                 .terminal
                                                 .get_or_insert_default()
@@ -6278,6 +6731,7 @@ fn terminal_page() -> SettingsPage {
                         title: "Working Directory",
                         description: "What working directory to use when launching the terminal.",
                         field: Box::new(SettingField {
+                            organization_override: None,
                             json_path: Some("terminal.working_directory$"),
                             pick: |settings_content| {
                                 Some(&dynamic_variants::<settings::WorkingDirectory>()[
@@ -6290,7 +6744,7 @@ fn terminal_page() -> SettingsPage {
                                         .discriminant() as usize
                                 ])
                             },
-                            write: |settings_content, value| {
+                            write: |settings_content, value, _| {
                                 let Some(value) = value else {
                                     if let Some(terminal) = settings_content.terminal.as_mut() {
                                         terminal.project.working_directory = None;
@@ -6351,6 +6805,7 @@ fn terminal_page() -> SettingsPage {
                                 title: "Directory",
                                 description: "The directory path to use (will be shell expanded).",
                                 field: Box::new(SettingField {
+                                    organization_override: None,
                                     json_path: Some("terminal.working_directory.always"),
                                     pick: |settings_content| {
                                         match settings_content.terminal.as_ref()?.project.working_directory.as_ref() {
@@ -6358,7 +6813,7 @@ fn terminal_page() -> SettingsPage {
                                             _ => None,
                                         }
                                     },
-                                    write: |settings_content, value| {
+                                    write: |settings_content, value, _| {
                                         let value = value.unwrap_or_default();
                                         match settings_content
                                             .terminal
@@ -6382,9 +6837,10 @@ fn terminal_page() -> SettingsPage {
                     description: "Key-value pairs to add to the terminal's environment.",
                     field: Box::new(
                         SettingField {
+                            organization_override: None,
                             json_path: Some("terminal.env"),
                             pick: |settings_content| settings_content.terminal.as_ref()?.project.env.as_ref(),
-                            write: |settings_content, value| {
+                            write: |settings_content, value, _| {
                                 settings_content.terminal.get_or_insert_default().project.env = value;
                             },
                         }
@@ -6398,9 +6854,10 @@ fn terminal_page() -> SettingsPage {
                     description: "Activates the Python virtual environment, if one is found, in the terminal's working directory.",
                     field: Box::new(
                         SettingField {
+                            organization_override: None,
                             json_path: Some("terminal.detect_venv"),
                             pick: |settings_content| settings_content.terminal.as_ref()?.project.detect_venv.as_ref(),
-                            write: |settings_content, value| {
+                            write: |settings_content, value, _| {
                                 settings_content
                                     .terminal
                                     .get_or_insert_default()
@@ -6423,6 +6880,7 @@ fn terminal_page() -> SettingsPage {
                 title: "Font Size",
                 description: "Font size for terminal text. If not set, defaults to buffer font size.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.font_size"),
                     pick: |settings_content| {
                         settings_content
@@ -6431,7 +6889,7 @@ fn terminal_page() -> SettingsPage {
                             .and_then(|terminal| terminal.font_size.as_ref())
                             .or(settings_content.theme.buffer_font_size.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.terminal.get_or_insert_default().font_size = value;
                     },
                 }),
@@ -6442,6 +6900,7 @@ fn terminal_page() -> SettingsPage {
                 title: "Font Family",
                 description: "Font family for terminal text. If not set, defaults to buffer font family.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.font_family"),
                     pick: |settings_content| {
                         settings_content
@@ -6450,7 +6909,7 @@ fn terminal_page() -> SettingsPage {
                             .and_then(|terminal| terminal.font_family.as_ref())
                             .or(settings_content.theme.buffer_font_family.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6465,6 +6924,7 @@ fn terminal_page() -> SettingsPage {
                 description: "Font fallbacks for terminal text. If not set, defaults to buffer font fallbacks.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("terminal.font_fallbacks"),
                         pick: |settings_content| {
                             settings_content
@@ -6473,7 +6933,7 @@ fn terminal_page() -> SettingsPage {
                                 .and_then(|terminal| terminal.font_fallbacks.as_ref())
                                 .or(settings_content.theme.buffer_font_fallbacks.as_ref())
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content
                                 .terminal
                                 .get_or_insert_default()
@@ -6489,11 +6949,12 @@ fn terminal_page() -> SettingsPage {
                 title: "Font Weight",
                 description: "Font weight for terminal text in CSS weight units (100-900).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.font_weight"),
                     pick: |settings_content| {
                         settings_content.terminal.as_ref()?.font_weight.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6508,6 +6969,7 @@ fn terminal_page() -> SettingsPage {
                 description: "Font features for terminal text.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("terminal.font_features"),
                         pick: |settings_content| {
                             settings_content
@@ -6516,7 +6978,7 @@ fn terminal_page() -> SettingsPage {
                                 .and_then(|terminal| terminal.font_features.as_ref())
                                 .or(settings_content.theme.buffer_font_features.as_ref())
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content
                                 .terminal
                                 .get_or_insert_default()
@@ -6539,11 +7001,12 @@ fn terminal_page() -> SettingsPage {
                 description: "Line height for terminal text.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("terminal.line_height"),
                         pick: |settings_content| {
                             settings_content.terminal.as_ref()?.line_height.as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content
                                 .terminal
                                 .get_or_insert_default()
@@ -6559,11 +7022,12 @@ fn terminal_page() -> SettingsPage {
                 title: "Cursor Shape",
                 description: "Default cursor shape for the terminal (bar, block, underline, or hollow).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.cursor_shape"),
                     pick: |settings_content| {
                         settings_content.terminal.as_ref()?.cursor_shape.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6577,9 +7041,10 @@ fn terminal_page() -> SettingsPage {
                 title: "Cursor Blinking",
                 description: "Sets the cursor blinking behavior in the terminal.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.blinking"),
                     pick: |settings_content| settings_content.terminal.as_ref()?.blinking.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.terminal.get_or_insert_default().blinking = value;
                     },
                 }),
@@ -6590,6 +7055,7 @@ fn terminal_page() -> SettingsPage {
                 title: "Alternate Scroll",
                 description: "Whether alternate scroll mode is active by default (converts mouse scroll to arrow keys in apps like Vim).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.alternate_scroll"),
                     pick: |settings_content| {
                         settings_content
@@ -6598,7 +7064,7 @@ fn terminal_page() -> SettingsPage {
                             .alternate_scroll
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6612,6 +7078,7 @@ fn terminal_page() -> SettingsPage {
                 title: "Minimum Contrast",
                 description: "The minimum APCA perceptual contrast between foreground and background colors (0-106).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.minimum_contrast"),
                     pick: |settings_content| {
                         settings_content
@@ -6620,7 +7087,7 @@ fn terminal_page() -> SettingsPage {
                             .minimum_contrast
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6640,11 +7107,12 @@ fn terminal_page() -> SettingsPage {
                 title: "Option As Meta",
                 description: "Whether the option key behaves as the meta key.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.option_as_meta"),
                     pick: |settings_content| {
                         settings_content.terminal.as_ref()?.option_as_meta.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6658,11 +7126,12 @@ fn terminal_page() -> SettingsPage {
                 title: "Copy On Select",
                 description: "Whether selecting text in the terminal automatically copies to the system clipboard.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.copy_on_select"),
                     pick: |settings_content| {
                         settings_content.terminal.as_ref()?.copy_on_select.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6676,6 +7145,7 @@ fn terminal_page() -> SettingsPage {
                 title: "Keep Selection On Copy",
                 description: "Whether to keep the text selection after copying it to the clipboard.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.keep_selection_on_copy"),
                     pick: |settings_content| {
                         settings_content
@@ -6684,7 +7154,7 @@ fn terminal_page() -> SettingsPage {
                             .keep_selection_on_copy
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6704,11 +7174,12 @@ fn terminal_page() -> SettingsPage {
                 title: "Default Width",
                 description: "Default width when the terminal is docked to the left or right (in pixels).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.default_width"),
                     pick: |settings_content| {
                         settings_content.terminal.as_ref()?.default_width.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6722,11 +7193,12 @@ fn terminal_page() -> SettingsPage {
                 title: "Default Height",
                 description: "Default height when the terminal is docked to the bottom (in pixels).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.default_height"),
                     pick: |settings_content| {
                         settings_content.terminal.as_ref()?.default_height.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6746,6 +7218,7 @@ fn terminal_page() -> SettingsPage {
                 title: "Max Scroll History Lines",
                 description: "Maximum number of lines to keep in scrollback history (max: 100,000; 0 disables scrolling).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.max_scroll_history_lines"),
                     pick: |settings_content| {
                         settings_content
@@ -6754,7 +7227,7 @@ fn terminal_page() -> SettingsPage {
                             .max_scroll_history_lines
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6768,6 +7241,7 @@ fn terminal_page() -> SettingsPage {
                 title: "Scroll Multiplier",
                 description: "The multiplier for scrolling in the terminal with the mouse wheel",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.scroll_multiplier"),
                     pick: |settings_content| {
                         settings_content
@@ -6776,7 +7250,7 @@ fn terminal_page() -> SettingsPage {
                             .scroll_multiplier
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6796,6 +7270,7 @@ fn terminal_page() -> SettingsPage {
                 title: "Breadcrumbs",
                 description: "Display the terminal title in breadcrumbs inside the terminal pane.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.toolbar.breadcrumbs"),
                     pick: |settings_content| {
                         settings_content
@@ -6806,7 +7281,7 @@ fn terminal_page() -> SettingsPage {
                             .breadcrumbs
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6828,6 +7303,7 @@ fn terminal_page() -> SettingsPage {
                 title: "Show Scrollbar",
                 description: "When to show the scrollbar in the terminal.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("terminal.scrollbar.show"),
                     pick: |settings_content| {
                         show_scrollbar_or_editor(settings_content, |settings_content| {
@@ -6840,7 +7316,7 @@ fn terminal_page() -> SettingsPage {
                                 .as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .terminal
                             .get_or_insert_default()
@@ -6880,6 +7356,7 @@ fn version_control_page() -> SettingsPage {
                     title: "Disable Git Integration",
                     description: "Disable all Git integration features in Zed.",
                     field: Box::new(SettingField::<bool> {
+                        organization_override: None,
                         json_path: Some("git.disable_git"),
                         pick: |settings_content| {
                             settings_content
@@ -6890,7 +7367,7 @@ fn version_control_page() -> SettingsPage {
                                 .disable_git
                                 .as_ref()
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             settings_content
                                 .git
                                 .get_or_insert_default()
@@ -6919,6 +7396,7 @@ fn version_control_page() -> SettingsPage {
                             title: "Enable Git Status",
                             description: "Show Git status information in the editor.",
                             field: Box::new(SettingField::<bool> {
+                                organization_override: None,
                                 json_path: Some("git.enable_status"),
                                 pick: |settings_content| {
                                     settings_content
@@ -6929,7 +7407,7 @@ fn version_control_page() -> SettingsPage {
                                         .enable_status
                                         .as_ref()
                                 },
-                                write: |settings_content, value| {
+                                write: |settings_content, value, _| {
                                     settings_content
                                         .git
                                         .get_or_insert_default()
@@ -6945,6 +7423,7 @@ fn version_control_page() -> SettingsPage {
                             title: "Enable Git Diff",
                             description: "Show Git diff information in the editor.",
                             field: Box::new(SettingField::<bool> {
+                                organization_override: None,
                                 json_path: Some("git.enable_diff"),
                                 pick: |settings_content| {
                                     settings_content
@@ -6955,7 +7434,7 @@ fn version_control_page() -> SettingsPage {
                                         .enable_diff
                                         .as_ref()
                                 },
-                                write: |settings_content, value| {
+                                write: |settings_content, value, _| {
                                     settings_content
                                         .git
                                         .get_or_insert_default()
@@ -6979,9 +7458,10 @@ fn version_control_page() -> SettingsPage {
                 title: "Visibility",
                 description: "Control whether Git status is shown in the editor's gutter.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.git_gutter"),
                     pick: |settings_content| settings_content.git.as_ref()?.git_gutter.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.git.get_or_insert_default().git_gutter = value;
                     },
                 }),
@@ -6993,11 +7473,12 @@ fn version_control_page() -> SettingsPage {
                 title: "Debounce",
                 description: "Debounce threshold in milliseconds after which changes are reflected in the Git gutter.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.gutter_debounce"),
                     pick: |settings_content| {
                         settings_content.git.as_ref()?.gutter_debounce.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.git.get_or_insert_default().gutter_debounce = value;
                     },
                 }),
@@ -7010,36 +7491,81 @@ fn version_control_page() -> SettingsPage {
     fn inline_git_blame_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("Inline Git Blame"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Enabled",
-                description: "Whether or not to show Git blame data inline in the currently focused line.",
-                field: Box::new(SettingField {
-                    json_path: Some("git.inline_blame.enabled"),
-                    pick: |settings_content| {
-                        settings_content
+            SettingsPageItem::DynamicItem(DynamicItem {
+                discriminant: SettingItem {
+                    title: "Enabled",
+                    description: "Whether or not to show Git blame data for the currently focused line.",
+                    field: Box::new(SettingField {
+                        organization_override: None,
+                        json_path: Some("git.inline_blame.enabled"),
+                        pick: |settings_content| {
+                            settings_content
+                                .git
+                                .as_ref()?
+                                .inline_blame
+                                .as_ref()?
+                                .enabled
+                                .as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content
+                                .git
+                                .get_or_insert_default()
+                                .inline_blame
+                                .get_or_insert_default()
+                                .enabled = value;
+                        },
+                    }),
+                    metadata: None,
+                    files: USER,
+                },
+                pick_discriminant: |settings_content| {
+                    Some(
+                        *settings_content
                             .git
                             .as_ref()?
                             .inline_blame
                             .as_ref()?
                             .enabled
-                            .as_ref()
-                    },
-                    write: |settings_content, value| {
-                        settings_content
-                            .git
-                            .get_or_insert_default()
-                            .inline_blame
-                            .get_or_insert_default()
-                            .enabled = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
+                            .as_ref()? as usize,
+                    )
+                },
+                fields: vec![
+                    vec![],
+                    vec![SettingItem {
+                        title: "Location",
+                        description: "Where to render Git blame when it is enabled.",
+                        field: Box::new(SettingField {
+                            organization_override: None,
+                            json_path: Some("git.inline_blame.location"),
+                            pick: |settings_content| {
+                                settings_content
+                                    .git
+                                    .as_ref()?
+                                    .inline_blame
+                                    .as_ref()?
+                                    .location
+                                    .as_ref()
+                            },
+                            write: |settings_content, value, _| {
+                                settings_content
+                                    .git
+                                    .get_or_insert_default()
+                                    .inline_blame
+                                    .get_or_insert_default()
+                                    .location = value;
+                            },
+                        }),
+                        metadata: None,
+                        files: USER,
+                    }],
+                ],
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Delay",
                 description: "The delay after which the inline blame information is shown.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.inline_blame.delay_ms"),
                     pick: |settings_content| {
                         settings_content
@@ -7050,7 +7576,7 @@ fn version_control_page() -> SettingsPage {
                             .delay_ms
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git
                             .get_or_insert_default()
@@ -7066,6 +7592,7 @@ fn version_control_page() -> SettingsPage {
                 title: "Padding",
                 description: "Padding between the end of the source line and the start of the inline blame in columns.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.inline_blame.padding"),
                     pick: |settings_content| {
                         settings_content
@@ -7076,7 +7603,7 @@ fn version_control_page() -> SettingsPage {
                             .padding
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git
                             .get_or_insert_default()
@@ -7092,6 +7619,7 @@ fn version_control_page() -> SettingsPage {
                 title: "Minimum Column",
                 description: "The minimum column number at which to show the inline blame information.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.inline_blame.min_column"),
                     pick: |settings_content| {
                         settings_content
@@ -7102,7 +7630,7 @@ fn version_control_page() -> SettingsPage {
                             .min_column
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git
                             .get_or_insert_default()
@@ -7118,6 +7646,7 @@ fn version_control_page() -> SettingsPage {
                 title: "Show Commit Summary",
                 description: "Show commit summary as part of the inline blame.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.inline_blame.show_commit_summary"),
                     pick: |settings_content| {
                         settings_content
@@ -7128,7 +7657,7 @@ fn version_control_page() -> SettingsPage {
                             .show_commit_summary
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git
                             .get_or_insert_default()
@@ -7150,6 +7679,7 @@ fn version_control_page() -> SettingsPage {
                 title: "Show Avatar",
                 description: "Show the avatar of the author of the commit.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.blame.show_avatar"),
                     pick: |settings_content| {
                         settings_content
@@ -7160,7 +7690,7 @@ fn version_control_page() -> SettingsPage {
                             .show_avatar
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git
                             .get_or_insert_default()
@@ -7182,6 +7712,7 @@ fn version_control_page() -> SettingsPage {
                 title: "Show Author Name",
                 description: "Show author name as part of the commit information in branch picker.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.branch_picker.show_author_name"),
                     pick: |settings_content| {
                         settings_content
@@ -7192,7 +7723,7 @@ fn version_control_page() -> SettingsPage {
                             .show_author_name
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git
                             .get_or_insert_default()
@@ -7214,9 +7745,10 @@ fn version_control_page() -> SettingsPage {
                 title: "Hunk Style",
                 description: "How Git hunks are displayed visually in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.hunk_style"),
                     pick: |settings_content| settings_content.git.as_ref()?.hunk_style.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.git.get_or_insert_default().hunk_style = value;
                     },
                 }),
@@ -7227,9 +7759,10 @@ fn version_control_page() -> SettingsPage {
                 title: "Path Style",
                 description: "Should the name or path be displayed first in the git view.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.path_style"),
                     pick: |settings_content| settings_content.git.as_ref()?.path_style.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.git.get_or_insert_default().path_style = value;
                     },
                 }),
@@ -7240,6 +7773,7 @@ fn version_control_page() -> SettingsPage {
                 title: "Show Stage/Restore Buttons",
                 description: "Whether to show the stage and restore buttons on diff hunks.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("git.show_stage_restore_buttons"),
                     pick: |settings_content| {
                         settings_content
@@ -7248,7 +7782,7 @@ fn version_control_page() -> SettingsPage {
                             .show_stage_restore_buttons
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .git
                             .get_or_insert_default()
@@ -7282,9 +7816,10 @@ fn collaboration_page() -> SettingsPage {
                 title: "Mute On Join",
                 description: "Whether the microphone should be muted when joining a channel or a call.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("calls.mute_on_join"),
                     pick: |settings_content| settings_content.calls.as_ref()?.mute_on_join.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.calls.get_or_insert_default().mute_on_join = value;
                     },
                 }),
@@ -7295,11 +7830,12 @@ fn collaboration_page() -> SettingsPage {
                 title: "Share On Join",
                 description: "Whether your current project should be shared when joining an empty channel.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("calls.share_on_join"),
                     pick: |settings_content| {
                         settings_content.calls.as_ref()?.share_on_join.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.calls.get_or_insert_default().share_on_join = value;
                     },
                 }),
@@ -7324,6 +7860,7 @@ fn collaboration_page() -> SettingsPage {
                 title: "Output Audio Device",
                 description: "Select output audio device",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("audio.experimental.output_audio_device"),
                     pick: |settings_content| {
                         settings_content
@@ -7333,7 +7870,7 @@ fn collaboration_page() -> SettingsPage {
                             .as_ref()
                             .or(DEFAULT_EMPTY_AUDIO_OUTPUT)
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .audio
                             .get_or_insert_default()
@@ -7347,6 +7884,7 @@ fn collaboration_page() -> SettingsPage {
                 title: "Input Audio Device",
                 description: "Select input audio device",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("audio.experimental.input_audio_device"),
                     pick: |settings_content| {
                         settings_content
@@ -7356,7 +7894,7 @@ fn collaboration_page() -> SettingsPage {
                             .as_ref()
                             .or(DEFAULT_EMPTY_AUDIO_INPUT)
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .audio
                             .get_or_insert_default()
@@ -7383,9 +7921,10 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Disable AI",
                 description: "Whether to disable all AI features in Zed.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("disable_ai"),
                     pick: |settings_content| settings_content.project.disable_ai.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.project.disable_ai = value;
                     },
                 }),
@@ -7396,9 +7935,10 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Threads Sidebar Side",
                 description: "Which side of the window the threads sidebar appears on.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.sidebar_side"),
                     pick: |settings_content| settings_content.agent.as_ref()?.sidebar_side.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.agent.get_or_insert_default().sidebar_side = value;
                     },
                 }),
@@ -7408,9 +7948,49 @@ fn ai_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn agent_configuration_section(_cx: &App) -> Box<[SettingsPageItem]> {
-        let mut items = vec![
-            SettingsPageItem::SectionHeader("Agent Configuration"),
+    fn agent_configuration_section(cx: &App) -> Box<[SettingsPageItem]> {
+        use feature_flags::FeatureFlagAppExt as _;
+
+        // The LLM provider and MCP server pages are gated behind a feature flag
+        // while their configuration is being moved out of the agent panel.
+        let agent_settings_ui_enabled = cx.has_flag::<feature_flags::AgentSettingsUiFeatureFlag>();
+
+        let mut items = vec![SettingsPageItem::SectionHeader("Agent Configuration")];
+
+        if agent_settings_ui_enabled {
+            items.push(SettingsPageItem::SubPageLink(SubPageLink {
+                title: "LLM Providers".into(),
+                r#type: Default::default(),
+                json_path: Some("llm_providers"),
+                description: Some("Configure API keys and settings for LLM providers.".into()),
+                in_json: false,
+                files: USER,
+                render: render_llm_providers_page,
+            }));
+        }
+
+        items.extend([
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Skills".into(),
+                r#type: Default::default(),
+                json_path: Some(zed_actions::AGENT_SKILLS_SETTINGS_PATH),
+                description: Some("View and manage agent skills installed globally or in project worktrees.".into()),
+                in_json: false,
+                files: USER | PROJECT,
+                render: render_skills_setup_page,
+            }),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "Sandbox".into(),
+                r#type: Default::default(),
+                json_path: Some(zed_actions::AGENT_SANDBOX_SETTINGS_PATH),
+                description: Some(
+                    "Review and change the elevated terminal sandbox permissions that are always allowed without prompting."
+                        .into(),
+                ),
+                in_json: true,
+                files: USER,
+                render: render_sandbox_settings_page,
+            }),
             SettingsPageItem::SubPageLink(SubPageLink {
                 title: "Tool Permissions".into(),
                 r#type: Default::default(),
@@ -7420,12 +8000,39 @@ fn ai_page(cx: &App) -> SettingsPage {
                 files: USER,
                 render: render_tool_permissions_setup_page,
             }),
-        ];
+        ]);
+
+        if agent_settings_ui_enabled {
+            items.push(SettingsPageItem::SubPageLink(SubPageLink {
+                title: "MCP Servers".into(),
+                r#type: Default::default(),
+                json_path: Some("context_servers"),
+                description: Some(
+                    "View, add, configure, and remove Model Context Protocol servers.".into(),
+                ),
+                in_json: false,
+                files: USER,
+                render: render_mcp_servers_page,
+            }));
+            items.push(SettingsPageItem::SubPageLink(SubPageLink {
+                title: "External Agents".into(),
+                r#type: Default::default(),
+                json_path: Some("agent_servers"),
+                description: Some(
+                    "View, add, and remove agents connected through the Agent Client Protocol."
+                        .into(),
+                ),
+                in_json: false,
+                files: USER,
+                render: render_external_agents_page,
+            }));
+        }
 
         items.push(SettingsPageItem::SettingItem(SettingItem {
             title: "New Thread Location",
             description: "Whether to start a new thread in the current local project or in a new Git worktree.",
             field: Box::new(SettingField {
+                organization_override: None,
                 json_path: Some("agent.new_thread_location"),
                 pick: |settings_content| {
                     settings_content
@@ -7434,7 +8041,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                         .new_thread_location
                         .as_ref()
                 },
-                write: |settings_content, value| {
+                write: |settings_content, value, _| {
                     settings_content
                         .agent
                         .get_or_insert_default()
@@ -7450,11 +8057,12 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Single File Review",
                 description: "When enabled, agent edits will also be displayed in single-file buffers for review.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.single_file_review"),
                     pick: |settings_content| {
                         settings_content.agent.as_ref()?.single_file_review.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7468,11 +8076,16 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Enable Feedback",
                 description: "Show voting thumbs up/down icon buttons for feedback on agent edits.",
                 field: Box::new(SettingField {
+                    organization_override: Some(|org_config| if org_config.is_agent_thread_feedback_enabled {
+                        None
+                    } else {
+                        Some(&false)
+                    }),
                     json_path: Some("agent.enable_feedback"),
                     pick: |settings_content| {
                         settings_content.agent.as_ref()?.enable_feedback.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7486,6 +8099,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Notify When Agent Waiting",
                 description: "Where to show notifications when the agent has completed its response or needs confirmation before running a tool action.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.notify_when_agent_waiting"),
                     pick: |settings_content| {
                         settings_content
@@ -7494,7 +8108,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                             .notify_when_agent_waiting
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7508,6 +8122,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Play Sound When Agent Done",
                 description: "When to play a sound when the agent has either completed its response, or needs user input.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.play_sound_when_agent_done"),
                     pick: |settings_content| {
                         settings_content
@@ -7516,7 +8131,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                             .play_sound_when_agent_done
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7530,11 +8145,12 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Expand Edit Card",
                 description: "Whether to have edit cards in the agent panel expanded, showing a Preview of the diff.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.expand_edit_card"),
                     pick: |settings_content| {
                         settings_content.agent.as_ref()?.expand_edit_card.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7548,6 +8164,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Expand Terminal Card",
                 description: "Whether to have terminal cards in the agent panel expanded, showing the whole command output.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.expand_terminal_card"),
                     pick: |settings_content| {
                         settings_content
@@ -7556,7 +8173,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                             .expand_terminal_card
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7567,9 +8184,40 @@ fn ai_page(cx: &App) -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Terminal Thread Init Command",
+                description: "Command to automatically run when Zed creates a Terminal Thread shell in the agent panel. Runs in your configured shell.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.terminal_init_command"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent
+                            .as_ref()?
+                            .terminal_init_command
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .terminal_init_command = value;
+                    },
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    placeholder: Some("e.g. claude"),
+                    display_confirm_button: true,
+                    display_clear_button: true,
+                    confirm_on_focus_out: true,
+                    treat_missing_text_as_empty: true,
+                    ..Default::default()
+                })),
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Thinking Display",
                 description: "How thinking blocks should be displayed by default. 'Auto' fully expands during streaming, then auto-collapses when done. 'Preview' auto-expands with a height constraint during streaming. 'Always Expanded' shows full content. 'Always Collapsed' keeps them collapsed.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.thinking_display"),
                     pick: |settings_content| {
                         settings_content
@@ -7578,7 +8226,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                             .thinking_display
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7592,6 +8240,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Cancel Generation On Terminal Stop",
                 description: "Whether clicking the stop button on a running terminal tool should also cancel the agent's generation. Note that this only applies to the stop button, not to ctrl+c inside the terminal.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.cancel_generation_on_terminal_stop"),
                     pick: |settings_content| {
                         settings_content
@@ -7600,7 +8249,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                             .cancel_generation_on_terminal_stop
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7614,6 +8263,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Use Modifier To Send",
                 description: "Whether to always use cmd-enter (or ctrl-enter on Linux or Windows) to send messages.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.use_modifier_to_send"),
                     pick: |settings_content| {
                         settings_content
@@ -7622,7 +8272,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                             .use_modifier_to_send
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7636,6 +8286,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Message Editor Min Lines",
                 description: "Minimum number of lines to display in the agent message editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.message_editor_min_lines"),
                     pick: |settings_content| {
                         settings_content
@@ -7644,7 +8295,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                             .message_editor_min_lines
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7658,11 +8309,12 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Show Turn Stats",
                 description: "Whether to show turn statistics like elapsed time during generation and final turn duration.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.show_turn_stats"),
                     pick: |settings_content| {
                         settings_content.agent.as_ref()?.show_turn_stats.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7676,11 +8328,12 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Show Merge Conflict Indicator",
                 description: "Whether to show the merge conflict indicator in the status bar that offers to resolve conflicts using the agent.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("agent.show_merge_conflict_indicator"),
                     pick: |settings_content| {
                         settings_content.agent.as_ref()?.show_merge_conflict_indicator.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .agent
                             .get_or_insert_default()
@@ -7688,6 +8341,66 @@ fn ai_page(cx: &App) -> SettingsPage {
                     },
                 }),
                 metadata: None,
+                files: USER,
+            }),
+        ]);
+
+        items.extend([
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Auto Compact",
+                description: "Automatically compact the agent's context when it grows too large, summarizing earlier messages to free up room in the model's context window.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.auto_compact.enabled"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent
+                            .as_ref()?
+                            .auto_compact
+                            .as_ref()?
+                            .enabled
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .auto_compact
+                            .get_or_insert_default()
+                            .enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Auto Compact Threshold",
+                description: "When auto compaction runs. A percentage string like \"90%\" is measured against the context window. A positive integer is the number of used tokens to compact after. A negative integer is the number of tokens remaining in the context window before compacting.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.auto_compact.threshold"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent
+                            .as_ref()?
+                            .auto_compact
+                            .as_ref()?
+                            .threshold
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .auto_compact
+                            .get_or_insert_default()
+                            .threshold = value;
+                    },
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    placeholder: Some("90%"),
+                    ..Default::default()
+                })),
                 files: USER,
             }),
         ]);
@@ -7702,11 +8415,12 @@ fn ai_page(cx: &App) -> SettingsPage {
                 title: "Context Server Timeout",
                 description: "Default timeout in seconds for context server tool calls. Can be overridden per-server in context_servers configuration.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("context_server_timeout"),
                     pick: |settings_content| {
                         settings_content.project.context_server_timeout.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.project.context_server_timeout = value;
                     },
                 }),
@@ -7721,6 +8435,7 @@ fn ai_page(cx: &App) -> SettingsPage {
             title: "Display Mode",
             description: "When to show edit predictions previews in buffer. The eager mode displays them inline, while the subtle mode displays them only when holding a modifier key.",
             field: Box::new(SettingField {
+                organization_override: None,
                 json_path: Some("edit_prediction.display_mode"),
                 pick: |settings_content| {
                     settings_content
@@ -7731,7 +8446,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                         .mode
                         .as_ref()
                 },
-                write: |settings_content, value| {
+                write: |settings_content, value, _| {
                     settings_content
                         .project
                         .all_languages
@@ -7745,15 +8460,30 @@ fn ai_page(cx: &App) -> SettingsPage {
         })]
     }
 
+    use feature_flags::FeatureFlagAppExt as _;
+
+    // When the agent settings UI is enabled, the context server timeout is shown
+    // inside the MCP Servers sub-page. Otherwise it remains a standalone section
+    // here so it stays reachable.
+    let agent_settings_ui_enabled = cx.has_flag::<feature_flags::AgentSettingsUiFeatureFlag>();
+
+    let mut items = concat_sections!(
+        @vec,
+        general_section(),
+        agent_configuration_section(cx),
+    );
+    if !agent_settings_ui_enabled {
+        items.extend(context_servers_section());
+    }
+    items.extend(concat_sections!(
+        @vec,
+        edit_prediction_language_settings_section(),
+        edit_prediction_display_sub_section(),
+    ));
+
     SettingsPage {
         title: "AI",
-        items: concat_sections![
-            general_section(),
-            agent_configuration_section(cx),
-            context_servers_section(),
-            edit_prediction_language_settings_section(),
-            edit_prediction_display_sub_section()
-        ],
+        items: items.into(),
     }
 }
 
@@ -7765,9 +8495,10 @@ fn network_page() -> SettingsPage {
                 title: "Proxy",
                 description: "The proxy to use for network requests.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("proxy"),
                     pick: |settings_content| settings_content.proxy.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.proxy = value;
                     },
                 }),
@@ -7781,9 +8512,10 @@ fn network_page() -> SettingsPage {
                 title: "Server URL",
                 description: "The URL of the Zed server to connect to.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("server_url"),
                     pick: |settings_content| settings_content.server_url.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.server_url = value;
                     },
                 }),
@@ -7845,13 +8577,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Tab Size",
                 description: "How many columns a tab should occupy.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).tab_size"), // TODO(cameron): not JQ syntax because not URL-safe
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.tab_size.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.tab_size = value;
                         })
@@ -7864,13 +8597,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Hard Tabs",
                 description: "Whether to indent lines using tab characters, as opposed to multiple spaces.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).hard_tabs"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.hard_tabs.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.hard_tabs = value;
                         })
@@ -7883,13 +8617,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Auto Indent",
                 description: "Controls automatic indentation behavior when typing.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).auto_indent"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.auto_indent.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.auto_indent = value;
                         })
@@ -7902,13 +8637,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Auto Indent On Paste",
                 description: "Whether indentation of pasted content should be adjusted based on the context.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).auto_indent_on_paste"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.auto_indent_on_paste.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.auto_indent_on_paste = value;
                         })
@@ -7927,13 +8663,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Soft Wrap",
                 description: "How to soft-wrap long lines of text.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).soft_wrap"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.soft_wrap.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.soft_wrap = value;
                         })
@@ -7946,13 +8683,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Show Wrap Guides",
                 description: "Show wrap guides in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).show_wrap_guides"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.show_wrap_guides.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.show_wrap_guides = value;
                         })
@@ -7965,13 +8703,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Preferred Line Length",
                 description: "The column at which to soft-wrap lines, for buffers where soft-wrap is enabled.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).preferred_line_length"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.preferred_line_length.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.preferred_line_length = value;
                         })
@@ -7985,13 +8724,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "Character counts at which to show wrap guides in the editor.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).wrap_guides"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.wrap_guides.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -8010,13 +8750,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Allow Rewrap",
                 description: "Controls where the `editor::rewrap` action is allowed for this language.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).allow_rewrap"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.allow_rewrap.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.allow_rewrap = value;
                         })
@@ -8035,6 +8776,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Enabled",
                 description: "Display indent guides in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).indent_guides.enabled"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
@@ -8044,7 +8786,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                                 .and_then(|indent_guides| indent_guides.enabled.as_ref())
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.indent_guides.get_or_insert_default().enabled = value;
                         })
@@ -8057,6 +8799,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Line Width",
                 description: "The width of the indent guides in pixels, between 1 and 10.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).indent_guides.line_width"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
@@ -8066,7 +8809,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                                 .and_then(|indent_guides| indent_guides.line_width.as_ref())
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.indent_guides.get_or_insert_default().line_width = value;
                         })
@@ -8079,6 +8822,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Active Line Width",
                 description: "The width of the active indent guide in pixels, between 1 and 10.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).indent_guides.active_line_width"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
@@ -8088,7 +8832,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                                 .and_then(|indent_guides| indent_guides.active_line_width.as_ref())
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language
                                 .indent_guides
@@ -8104,6 +8848,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Coloring",
                 description: "Determines how indent guides are colored.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).indent_guides.coloring"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
@@ -8113,7 +8858,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                                 .and_then(|indent_guides| indent_guides.coloring.as_ref())
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.indent_guides.get_or_insert_default().coloring = value;
                         })
@@ -8126,6 +8871,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Background Coloring",
                 description: "Determines how indent guide backgrounds are colored.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).indent_guides.background_coloring"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
@@ -8134,7 +8880,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                             })
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language
                                 .indent_guides
@@ -8158,13 +8904,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 field: Box::new(
                     // TODO(settings_ui): this setting should just be a bool
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).format_on_save"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.format_on_save.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -8182,13 +8929,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Remove Trailing Whitespace On Save",
                 description: "Whether or not to remove any trailing whitespace from lines of a buffer before saving it.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).remove_trailing_whitespace_on_save"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.remove_trailing_whitespace_on_save.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.remove_trailing_whitespace_on_save = value;
                         })
@@ -8201,13 +8949,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Ensure Final Newline On Save",
                 description: "Whether or not to ensure there's a single newline at the end of a buffer when saving it.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).ensure_final_newline_on_save"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.ensure_final_newline_on_save.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.ensure_final_newline_on_save = value;
                         })
@@ -8220,13 +8969,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Line Ending",
                 description: "How line endings should be handled for new files and during format and save operations.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).line_ending"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.line_ending.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.line_ending = value;
                         })
@@ -8243,13 +8993,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "How to perform a buffer format.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).formatter"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.formatter.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -8268,13 +9019,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Use On Type Format",
                 description: "Whether to use additional LSP queries to format (and amend) the code after every \"trigger\" symbol input, defined by LSP server capabilities",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).use_on_type_format"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.use_on_type_format.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.use_on_type_format = value;
                         })
@@ -8288,13 +9040,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "Additional code actions to run when formatting.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).code_actions_on_format"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.code_actions_on_format.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -8319,13 +9072,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Use Autoclose",
                 description: "Whether to automatically type closing characters for you. For example, when you type '(', Zed will automatically add a closing ')' at the correct position.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).use_autoclose"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.use_autoclose.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.use_autoclose = value;
                         })
@@ -8338,13 +9092,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Use Auto Surround",
                 description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Zed will automatically surround text with ().",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).use_auto_surround"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.use_auto_surround.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.use_auto_surround = value;
                         })
@@ -8357,13 +9112,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Always Treat Brackets As Autoclosed",
                 description: "Controls whether the closing characters are always skipped over and auto-removed no matter how they were inserted.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).always_treat_brackets_as_autoclosed"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.always_treat_brackets_as_autoclosed.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.always_treat_brackets_as_autoclosed = value;
                         })
@@ -8376,6 +9132,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "JSX Tag Auto Close",
                 description: "Whether to automatically close JSX tags.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).jsx_tag_auto_close"),
                     // TODO(settings_ui): this setting should just be a bool
                     pick: |settings_content| {
@@ -8383,7 +9140,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                             language.jsx_tag_auto_close.as_ref()?.enabled.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.jsx_tag_auto_close.get_or_insert_default().enabled = value;
                         })
@@ -8402,13 +9159,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Show Whitespaces",
                 description: "Whether to show tabs and spaces in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).show_whitespaces"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.show_whitespaces.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.show_whitespaces = value;
                         })
@@ -8422,13 +9180,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "Visible character used to render space characters when show_whitespaces is enabled (default: \"•\")",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).whitespace_map.space"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.whitespace_map.as_ref()?.space.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -8448,13 +9207,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "Visible character used to render tab characters when show_whitespaces is enabled (default: \"→\")",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).whitespace_map.tab"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.whitespace_map.as_ref()?.tab.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -8479,13 +9239,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Show Completions On Input",
                 description: "Whether to pop the completions menu while typing in an editor without explicitly requesting it.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).show_completions_on_input"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.show_completions_on_input.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.show_completions_on_input = value;
                         })
@@ -8498,13 +9259,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Show Completion Documentation",
                 description: "Whether to display inline and alongside documentation for items in the completions menu.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).show_completion_documentation"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.show_completion_documentation.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.show_completion_documentation = value;
                         })
@@ -8517,13 +9279,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Words",
                 description: "Controls how words are completed.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).completions.words"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.completions.as_ref()?.words.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.completions.get_or_insert_default().words = value;
                         })
@@ -8536,13 +9299,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Words Min Length",
                 description: "How many characters has to be in the completions query to automatically show the words-based completions.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).completions.words_min_length"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.completions.as_ref()?.words_min_length.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language
                                 .completions
@@ -8558,11 +9322,12 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Completion Menu Scrollbar",
                 description: "When to show the scrollbar in the completion menu.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("editor.completion_menu_scrollbar"),
                     pick: |settings_content| {
                         settings_content.editor.completion_menu_scrollbar.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.completion_menu_scrollbar = value;
                     },
                 }),
@@ -8573,11 +9338,12 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Completion Detail Alignment",
                 description: "Whether to align detail text in code completions context menus left or right.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("editor.completion_detail_alignment"),
                     pick: |settings_content| {
                         settings_content.editor.completion_detail_alignment.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.completion_detail_alignment = value;
                     },
                 }),
@@ -8588,11 +9354,12 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Completion Menu Item Kind",
                 description: "How to display the LSP item kind (function, method, variable, etc.) of each entry in the completions menu.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("editor.completion_menu_item_kind"),
                     pick: |settings_content| {
                         settings_content.editor.completion_menu_item_kind.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.completion_menu_item_kind = value;
                     },
                 }),
@@ -8609,13 +9376,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Enabled",
                 description: "Global switch to toggle hints on and off.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).inlay_hints.enabled"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.inlay_hints.as_ref()?.enabled.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.inlay_hints.get_or_insert_default().enabled = value;
                         })
@@ -8628,13 +9396,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Show Value Hints",
                 description: "Global switch to toggle inline values on and off when debugging.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).inlay_hints.show_value_hints"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.inlay_hints.as_ref()?.show_value_hints.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language
                                 .inlay_hints
@@ -8650,13 +9419,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Show Type Hints",
                 description: "Whether type hints should be shown.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).inlay_hints.show_type_hints"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.inlay_hints.as_ref()?.show_type_hints.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.inlay_hints.get_or_insert_default().show_type_hints = value;
                         })
@@ -8669,13 +9439,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Show Parameter Hints",
                 description: "Whether parameter hints should be shown.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).inlay_hints.show_parameter_hints"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.inlay_hints.as_ref()?.show_parameter_hints.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language
                                 .inlay_hints
@@ -8691,13 +9462,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Show Other Hints",
                 description: "Whether other hints should be shown.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).inlay_hints.show_other_hints"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.inlay_hints.as_ref()?.show_other_hints.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language
                                 .inlay_hints
@@ -8713,13 +9485,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Show Background",
                 description: "Show a background for inlay hints.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).inlay_hints.show_background"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.inlay_hints.as_ref()?.show_background.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.inlay_hints.get_or_insert_default().show_background = value;
                         })
@@ -8732,13 +9505,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Edit Debounce Ms",
                 description: "Whether or not to debounce inlay hints updates after buffer edits (set to 0 to disable debouncing).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).inlay_hints.edit_debounce_ms"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.inlay_hints.as_ref()?.edit_debounce_ms.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language
                                 .inlay_hints
@@ -8754,13 +9528,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Scroll Debounce Ms",
                 description: "Whether or not to debounce inlay hints updates after buffer scrolls (set to 0 to disable debouncing).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).inlay_hints.scroll_debounce_ms"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.inlay_hints.as_ref()?.scroll_debounce_ms.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language
                                 .inlay_hints
@@ -8777,6 +9552,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "Toggles inlay hints (hides or shows) when the user presses the modifiers specified.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some(
                             "languages.$(language).inlay_hints.toggle_on_modifiers_press",
                         ),
@@ -8789,7 +9565,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                                     .as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -8817,13 +9593,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Enabled",
                 description: "Whether tasks are enabled for this language.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).tasks.enabled"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.tasks.as_ref()?.enabled.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.tasks.get_or_insert_default().enabled = value;
                         })
@@ -8837,13 +9614,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "Extra task variables to set for a particular language.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).tasks.variables"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.tasks.as_ref()?.variables.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -8862,13 +9640,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Prefer LSP",
                 description: "Use LSP tasks over Zed language extension tasks.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).tasks.prefer_lsp"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.tasks.as_ref()?.prefer_lsp.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.tasks.get_or_insert_default().prefer_lsp = value;
                         })
@@ -8887,13 +9666,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Word Diff Enabled",
                 description: "Whether to enable word diff highlighting in the editor. When enabled, changed words within modified lines are highlighted to show exactly what changed.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).word_diff_enabled"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.word_diff_enabled.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.word_diff_enabled = value;
                         })
@@ -8907,13 +9687,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "Preferred debuggers for this language.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).debuggers"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.debuggers.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -8932,9 +9713,10 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Middle Click Paste",
                 description: "Enable middle-click paste on Linux.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).editor.middle_click_paste"),
                     pick: |settings_content| settings_content.editor.middle_click_paste.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.middle_click_paste = value;
                     },
                 }),
@@ -8945,13 +9727,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Extend Comment On Newline",
                 description: "Whether to start a new line with a comment when a previous line is a comment as well.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).extend_comment_on_newline"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.extend_comment_on_newline.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.extend_comment_on_newline = value;
                         })
@@ -8964,13 +9747,14 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Colorize Brackets",
                 description: "Whether to colorize brackets in the editor.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).colorize_brackets"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.colorize_brackets.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.colorize_brackets = value;
                         })
@@ -8983,9 +9767,10 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Vim/Emacs Modeline Support",
                 description: "Number of lines to search for modelines (set to 0 to disable).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("modeline_lines"),
                     pick: |settings_content| settings_content.modeline_lines.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.modeline_lines = value;
                     },
                 }),
@@ -8995,12 +9780,13 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
         ]
     }
 
-    fn global_only_miscellaneous_sub_section() -> [SettingsPageItem; 3] {
+    fn global_only_miscellaneous_sub_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Image Viewer",
                 description: "The unit for image file sizes.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("image_viewer.unit"),
                     pick: |settings_content| {
                         settings_content
@@ -9008,17 +9794,77 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                             .as_ref()
                             .and_then(|image_viewer| image_viewer.unit.as_ref())
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.image_viewer.get_or_insert_default().unit = value;
                     },
                 }),
                 metadata: None,
                 files: USER,
             }),
+            SettingsPageItem::DynamicItem(DynamicItem {
+                discriminant: SettingItem {
+                    files: USER,
+                    title: "Limit Markdown Preview Width",
+                    description: "Whether to constrain the markdown preview content to a maximum width, centering it when the pane is wider, for optimal readability.",
+                    field: Box::new(SettingField::<bool> {
+                        organization_override: None,
+                        json_path: Some("markdown_preview.limit_content_width"),
+                        pick: |settings_content| {
+                            settings_content
+                                .markdown_preview
+                                .as_ref()?
+                                .limit_content_width
+                                .as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content
+                                .markdown_preview
+                                .get_or_insert_default()
+                                .limit_content_width = value;
+                        },
+                    }),
+                    metadata: None,
+                },
+                pick_discriminant: |settings_content| {
+                    let enabled = settings_content
+                        .markdown_preview
+                        .as_ref()?
+                        .limit_content_width
+                        .unwrap_or(true);
+                    Some(if enabled { 1 } else { 0 })
+                },
+                fields: vec![
+                    vec![],
+                    vec![SettingItem {
+                        files: USER,
+                        title: "Max Width",
+                        description: "Maximum content width in pixels. Content will be centered when the pane is wider than this value.",
+                        field: Box::new(SettingField {
+                            organization_override: None,
+                            json_path: Some("markdown_preview.max_width"),
+                            pick: |settings_content| {
+                                settings_content
+                                    .markdown_preview
+                                    .as_ref()?
+                                    .max_width
+                                    .as_ref()
+                            },
+                            write: |settings_content, value, _| {
+                                settings_content
+                                    .markdown_preview
+                                    .get_or_insert_default()
+                                    .max_width = value;
+                            },
+                        }),
+                        metadata: None,
+                    }],
+                ],
+            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Auto Replace Emoji Shortcode",
                 description: "Whether to automatically replace emoji shortcodes with emoji characters.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("message_editor.auto_replace_emoji_shortcode"),
                     pick: |settings_content| {
                         settings_content
@@ -9028,7 +9874,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                                 message_editor.auto_replace_emoji_shortcode.as_ref()
                             })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .message_editor
                             .get_or_insert_default()
@@ -9042,9 +9888,10 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Drop Size Target",
                 description: "Relative size of the drop target in the editor that will open dropped file as a split pane.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("drop_target_size"),
                     pick: |settings_content| settings_content.workspace.drop_target_size.as_ref(),
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.workspace.drop_target_size = value;
                     },
                 }),
@@ -9060,9 +9907,10 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
         title: "Code Lens",
         description: "Whether and how to display code lenses from language servers.",
         field: Box::new(SettingField {
+            organization_override: None,
             json_path: Some("code_lens"),
             pick: |settings_content| settings_content.editor.code_lens.as_ref(),
-            write: |settings_content, value| {
+            write: |settings_content, value, _| {
                 settings_content.editor.code_lens = value;
             },
         }),
@@ -9074,9 +9922,10 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
         title: "LSP Document Colors",
         description: "How to render LSP color previews in the editor.",
         field: Box::new(SettingField {
+            organization_override: None,
             json_path: Some("lsp_document_colors"),
             pick: |settings_content| settings_content.editor.lsp_document_colors.as_ref(),
-            write: |settings_content, value| {
+            write: |settings_content, value, _| {
                 settings_content.editor.lsp_document_colors = value;
             },
         }),
@@ -9120,20 +9969,21 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
 /// LanguageSettings items that should be included in the "Languages & Tools" page
 /// not the "Editor" page
 fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
-    fn lsp_section() -> [SettingsPageItem; 8] {
+    fn lsp_section() -> [SettingsPageItem; 9] {
         [
             SettingsPageItem::SectionHeader("LSP"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Enable Language Server",
                 description: "Whether to use language servers to provide code intelligence.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).enable_language_server"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.enable_language_server.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.enable_language_server = value;
                         })
@@ -9147,13 +9997,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "The list of language servers to use (or disable) for this language.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).language_servers"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.language_servers.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -9172,13 +10023,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Linked Edits",
                 description: "Whether to perform linked edits of associated ranges, if the LS supports it. For example, when editing opening <html> tag, the contents of the closing </html> tag will be edited as well.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).linked_edits"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.linked_edits.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.linked_edits = value;
                         })
@@ -9191,12 +10043,32 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Go To Definition Fallback",
                 description: "Whether to follow-up empty Go to definition responses from the language server.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("go_to_definition_fallback"),
                     pick: |settings_content| {
                         settings_content.editor.go_to_definition_fallback.as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content.editor.go_to_definition_fallback = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Go To Definition Scroll Strategy",
+                description: "How to scroll the target into view when navigating to a definition or reference.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("go_to_definition_scroll_strategy"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .go_to_definition_scroll_strategy
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.editor.go_to_definition_scroll_strategy = value;
                     },
                 }),
                 metadata: None,
@@ -9217,6 +10089,7 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                     })
                 },
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).semantic_tokens"),
                     pick: |settings_content| {
                         settings_content
@@ -9226,7 +10099,7 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                             .semantic_tokens
                             .as_ref()
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         settings_content
                             .project
                             .all_languages
@@ -9241,13 +10114,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "LSP Folding Ranges",
                 description: "When enabled, use folding ranges from the language server instead of indent-based folding.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).document_folding_ranges"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.document_folding_ranges.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.document_folding_ranges = value;
                         })
@@ -9260,13 +10134,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "LSP Document Symbols",
                 description: "When enabled, use the language server's document symbols for outlines and breadcrumbs instead of tree-sitter.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).document_symbols"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.document_symbols.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.document_symbols = value;
                         })
@@ -9285,13 +10160,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Enabled",
                 description: "Whether to fetch LSP completions or not.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).completions.lsp"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.completions.as_ref()?.lsp.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.completions.get_or_insert_default().lsp = value;
                         })
@@ -9304,13 +10180,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Fetch Timeout (milliseconds)",
                 description: "When fetching LSP completions, determines how long to wait for a response of a particular server (set to 0 to wait indefinitely).",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).completions.lsp_fetch_timeout_ms"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.completions.as_ref()?.lsp_fetch_timeout_ms.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language
                                 .completions
@@ -9326,13 +10203,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Insert Mode",
                 description: "Controls how LSP completions are inserted.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).completions.lsp_insert_mode"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.completions.as_ref()?.lsp_insert_mode.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.completions.get_or_insert_default().lsp_insert_mode = value;
                         })
@@ -9352,13 +10230,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "Preferred debuggers for this language.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).debuggers"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.debuggers.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -9383,13 +10262,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Allowed",
                 description: "Enables or disables formatting with Prettier for a given language.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).prettier.allowed"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.prettier.as_ref()?.allowed.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.prettier.get_or_insert_default().allowed = value;
                         })
@@ -9402,13 +10282,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 title: "Parser",
                 description: "Forces Prettier integration to use a specific parser name when formatting files with the language.",
                 field: Box::new(SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).prettier.parser"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.prettier.as_ref()?.parser.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.prettier.get_or_insert_default().parser = value;
                         })
@@ -9422,13 +10303,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "Forces Prettier integration to use specific plugins when formatting files with the language.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).prettier.plugins"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.prettier.as_ref()?.plugins.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -9448,13 +10330,14 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
                 description: "Default Prettier options, in the format as in package.json section for Prettier.",
                 field: Box::new(
                     SettingField {
+                        organization_override: None,
                         json_path: Some("languages.$(language).prettier.options"),
                         pick: |settings_content| {
                             language_settings_field(settings_content, |language| {
                                 language.prettier.as_ref()?.options.as_ref()
                             })
                         },
-                        write: |settings_content, value| {
+                        write: |settings_content, value, _| {
                             language_settings_field_mut(
                                 settings_content,
                                 value,
@@ -9480,7 +10363,7 @@ fn non_editor_language_settings_data() -> Box<[SettingsPageItem]> {
     )
 }
 
-fn edit_prediction_language_settings_section() -> [SettingsPageItem; 4] {
+fn edit_prediction_language_settings_section() -> [SettingsPageItem; 5] {
     [
         SettingsPageItem::SectionHeader("Edit Predictions"),
         SettingsPageItem::SubPageLink(SubPageLink {
@@ -9493,16 +10376,52 @@ fn edit_prediction_language_settings_section() -> [SettingsPageItem; 4] {
             render: render_edit_prediction_setup_page
         }),
         SettingsPageItem::SettingItem(SettingItem {
+            title: "Data Collection",
+            description: "Controls whether Zed may collect training data when using Zed's Edit Predictions. Data is only collected for files in projects detected as open source. The default value uses the preference previously set via the status-bar toggle, or false if no preference has been stored.",
+            field: Box::new(SettingField {
+                organization_override: Some(|org_settings| {
+                    const DATA_COLLECTION_DISABLED: EditPredictionDataCollectionChoice = EditPredictionDataCollectionChoice::No;
+
+                    if !org_settings.edit_prediction.is_feedback_enabled {
+                        Some(&DATA_COLLECTION_DISABLED)
+                    } else {
+                        None
+                    }
+                }),
+                json_path: Some("edit_predictions.allow_data_collection"),
+                pick: |settings_content| {
+                    settings_content
+                        .project
+                        .all_languages
+                        .edit_predictions
+                        .as_ref()?
+                        .allow_data_collection
+                        .as_ref()
+                },
+                write: |settings_content, value, _app| {
+                    settings_content
+                        .project
+                        .all_languages
+                        .edit_predictions
+                        .get_or_insert_default()
+                        .allow_data_collection = value;
+                },
+            }),
+            metadata: None,
+            files: USER,
+        }),
+        SettingsPageItem::SettingItem(SettingItem {
             title: "Show Edit Predictions",
             description: "Controls whether edit predictions are shown immediately or manually.",
             field: Box::new(SettingField {
+                organization_override: None,
                 json_path: Some("languages.$(language).show_edit_predictions"),
                 pick: |settings_content| {
                     language_settings_field(settings_content, |language| {
                         language.show_edit_predictions.as_ref()
                     })
                 },
-                write: |settings_content, value| {
+                write: |settings_content, value, _| {
                     language_settings_field_mut(settings_content, value, |language, value| {
                         language.show_edit_predictions = value;
                     })
@@ -9516,13 +10435,14 @@ fn edit_prediction_language_settings_section() -> [SettingsPageItem; 4] {
             description: "Controls whether edit predictions are shown in the given language scopes.",
             field: Box::new(
                 SettingField {
+                    organization_override: None,
                     json_path: Some("languages.$(language).edit_predictions_disabled_in"),
                     pick: |settings_content| {
                         language_settings_field(settings_content, |language| {
                             language.edit_predictions_disabled_in.as_ref()
                         })
                     },
-                    write: |settings_content, value| {
+                    write: |settings_content, value, _| {
                         language_settings_field_mut(settings_content, value, |language, value| {
                             language.edit_predictions_disabled_in = value;
                         })
@@ -9557,7 +10477,11 @@ where
 
 /// Updates the `vim_mode` setting, disabling `helix_mode` if present and
 /// `vim_mode` is being enabled.
-fn write_vim_mode(settings: &mut SettingsContent, value: Option<bool>) {
+fn write_vim_mode(settings: &mut SettingsContent, value: Option<bool>, _: &App) {
+    write_vim_mode_inner(settings, value);
+}
+
+fn write_vim_mode_inner(settings: &mut SettingsContent, value: Option<bool>) {
     if value == Some(true) && settings.helix_mode == Some(true) {
         settings.helix_mode = Some(false);
     }
@@ -9566,7 +10490,11 @@ fn write_vim_mode(settings: &mut SettingsContent, value: Option<bool>) {
 
 /// Updates the `helix_mode` setting, disabling `vim_mode` if present and
 /// `helix_mode` is being enabled.
-fn write_helix_mode(settings: &mut SettingsContent, value: Option<bool>) {
+fn write_helix_mode(settings: &mut SettingsContent, value: Option<bool>, _: &App) {
+    write_helix_mode_inner(settings, value);
+}
+
+fn write_helix_mode_inner(settings: &mut SettingsContent, value: Option<bool>) {
     if value == Some(true) && settings.vim_mode == Some(true) {
         settings.vim_mode = Some(false);
     }
@@ -9582,38 +10510,38 @@ mod tests {
         // Enabling vim mode while `vim_mode` and `helix_mode` are not yet set
         // should only update the `vim_mode` setting.
         let mut settings = SettingsContent::default();
-        write_vim_mode(&mut settings, Some(true));
+        write_vim_mode_inner(&mut settings, Some(true));
         assert_eq!(settings.vim_mode, Some(true));
         assert_eq!(settings.helix_mode, None);
 
         // Enabling helix mode while `vim_mode` and `helix_mode` are not yet set
         // should only update the `helix_mode` setting.
         let mut settings = SettingsContent::default();
-        write_helix_mode(&mut settings, Some(true));
+        write_helix_mode_inner(&mut settings, Some(true));
         assert_eq!(settings.helix_mode, Some(true));
         assert_eq!(settings.vim_mode, None);
 
         // Disabling helix mode should only touch `helix_mode` setting when
         // `vim_mode` is not set.
-        write_helix_mode(&mut settings, Some(false));
+        write_helix_mode_inner(&mut settings, Some(false));
         assert_eq!(settings.helix_mode, Some(false));
         assert_eq!(settings.vim_mode, None);
 
         // Enabling vim mode should update `vim_mode` but leave `helix_mode`
         // untouched.
-        write_vim_mode(&mut settings, Some(true));
+        write_vim_mode_inner(&mut settings, Some(true));
         assert_eq!(settings.vim_mode, Some(true));
         assert_eq!(settings.helix_mode, Some(false));
 
         // Enabling helix mode should update `helix_mode` and disable
         // `vim_mode`.
-        write_helix_mode(&mut settings, Some(true));
+        write_helix_mode_inner(&mut settings, Some(true));
         assert_eq!(settings.helix_mode, Some(true));
         assert_eq!(settings.vim_mode, Some(false));
 
         // Enabling vim mode should update `vim_mode` and disable
         // `helix_mode`.
-        write_vim_mode(&mut settings, Some(true));
+        write_vim_mode_inner(&mut settings, Some(true));
         assert_eq!(settings.vim_mode, Some(true));
         assert_eq!(settings.helix_mode, Some(false));
     }

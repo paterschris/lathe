@@ -11,8 +11,8 @@ use editor::{
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, ClipboardEntry, DismissEvent, Entity,
     EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, Hsla, KeyContext, KeyDownEvent,
-    Keystroke, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Styled,
-    Subscription, Task, TaskExt, WeakEntity, actions, anchored, deferred, div, hsla,
+    Keystroke, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollWheelEvent,
+    Styled, Subscription, Task, TaskExt, WeakEntity, actions, anchored, deferred, div, hsla,
     pulsating_between,
 };
 use itertools::Itertools;
@@ -27,7 +27,7 @@ use settings::{
 use std::{
     any::Any,
     cmp,
-    ops::{Range, RangeInclusive},
+    ops::Range as StdRange,
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
@@ -35,14 +35,10 @@ use std::{
 };
 use task::TaskId;
 use terminal::{
-    Clear, Copy, Event, HoveredWord, InteractivePromptKind, MaybeNavigationTarget, Paste,
-    PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom,
-    ScrollToTop, ShowCharacterPalette, TaskState, TaskStatus, Terminal, TerminalBounds,
-    ToggleViMode,
-    alacritty_terminal::{
-        index::Point as AlacPoint,
-        term::{TermMode, point_to_viewport, search::RegexSearch},
-    },
+    Clear, Copy, Event, HoveredWord, InteractivePromptKind, MaybeNavigationTarget, Modes, Paste,
+    PasteText, Point, Range, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
+    ScrollToBottom, ScrollToTop, Search, ShowCharacterPalette, TaskState, TaskStatus, Terminal,
+    TerminalBounds, ToggleViMode,
     terminal_settings::{CursorShape, TerminalSettings},
 };
 use terminal_element::TerminalElement;
@@ -134,10 +130,13 @@ pub struct TerminalView {
     awaiting_input: Option<InteractivePromptKind>,
     has_had_input: bool,
     idle_timer: Task<()>,
-    context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
+    context_menu: Option<(Entity<ContextMenu>, GpuiPoint<Pixels>, Subscription)>,
     cursor_shape: CursorShape,
     blink_manager: Entity<BlinkManager>,
     mode: TerminalMode,
+    // Explicit override for whether workspace-specific context menu actions are shown.
+    // When `None`, visibility is derived from `mode` (hidden for embedded terminals).
+    show_workspace_actions: Option<bool>,
     blinking_terminal_enabled: bool,
     needs_serialize: bool,
     custom_title: Option<String>,
@@ -290,6 +289,7 @@ impl TerminalView {
             hover: None,
             hover_tooltip_update: Task::ready(()),
             mode: TerminalMode::Standalone,
+            show_workspace_actions: None,
             workspace_id,
             show_breadcrumbs: TerminalSettings::get_global(cx).toolbar.breadcrumbs,
             block_below_cursor: None,
@@ -316,6 +316,22 @@ impl TerminalView {
             max_lines_when_unfocused,
         };
         cx.notify();
+    }
+
+    /// Explicitly override whether workspace-specific context menu actions (e.g. creating or
+    /// closing terminal tabs, inline assist) are shown.
+    ///
+    /// This lets hosts that aren't workspace panes (such as the agent panel) hide these
+    /// actions without `terminal_view` needing to know about those hosts. When never called,
+    /// visibility is derived from the terminal's `mode`.
+    pub fn set_show_workspace_actions(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.show_workspace_actions = Some(show);
+        cx.notify();
+    }
+
+    fn shows_workspace_actions(&self) -> bool {
+        self.show_workspace_actions
+            .unwrap_or_else(|| !matches!(self.mode, TerminalMode::Embedded { .. }))
     }
 
     const MAX_EMBEDDED_LINES: usize = 1_000;
@@ -361,7 +377,7 @@ impl TerminalView {
     }
 
     /// Gets the current marked range (UTF-16).
-    pub(crate) fn marked_text_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn marked_text_range(&self) -> Option<StdRange<usize>> {
         self.ime_state
             .as_ref()
             .map(|state| 0..state.marked_text.encode_utf16().count())
@@ -513,9 +529,19 @@ impl TerminalView {
                     return;
                 }
                 let terminal = this.terminal.read(cx);
-                let is_alternate_screen = terminal.is_alternate_screen();
-                let child_exited = terminal.child_exited().is_some();
-                let at_prompt = terminal.is_at_prompt();
+                // The Terminal accessors `is_alternate_screen`, `is_at_prompt`, and
+                // `child_exited` were dropped from the terminal crate during the upstream
+                // merge, so reconstruct them here from the still-public terminal API. The
+                // child-exited check uses the absence of a foreground process id as a proxy
+                // because the underlying `child_exited` field has no public accessor.
+                let is_alternate_screen = terminal.last_content.mode.contains(Modes::ALT_SCREEN);
+                let child_exited = terminal.pid().is_none();
+                let at_prompt = match (terminal.pid(), terminal.pid_getter()) {
+                    (Some(foreground_pid), Some(pid_getter)) => {
+                        foreground_pid == pid_getter.fallback_pid()
+                    }
+                    _ => false,
+                };
                 let prompt_kind = terminal.interactive_prompt_kind();
 
                 if prompt_kind.is_some() && !at_prompt && !is_alternate_screen && !child_exited {
@@ -543,7 +569,7 @@ impl TerminalView {
 
     pub fn deploy_context_menu(
         &mut self,
-        position: Point<Pixels>,
+        position: GpuiPoint<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -561,32 +587,46 @@ impl TerminalView {
             .is_some_and(|text| !text.is_empty());
         let context_menu = ContextMenu::build(window, cx, |menu, _, _| {
             menu.context(self.focus_handle.clone())
-                .action("New Terminal", Box::new(NewTerminal::default()))
-                .action(
-                    "New Center Terminal",
-                    Box::new(NewCenterTerminal::default()),
-                )
-                .separator()
-                .action("Copy", Box::new(Copy))
-                .action("Paste", Box::new(Paste))
-                .action("Paste Text", Box::new(PasteText))
-                .action("Select All", Box::new(SelectAll))
-                .action("Clear", Box::new(Clear))
-                .when(assistant_enabled, |menu| {
-                    menu.separator()
-                        .action("Inline Assist", Box::new(InlineAssist::default()))
-                        .when(has_selection, |menu| {
-                            menu.action("Add to Agent Thread", Box::new(AddSelectionToThread))
-                        })
+                .when(self.shows_workspace_actions(), |menu| {
+                    menu.action("New Terminal", Box::new(NewTerminal::default()))
+                        .action(
+                            "New Center Terminal",
+                            Box::new(NewCenterTerminal::default()),
+                        )
+                        .separator()
                 })
-                .separator()
-                .action(
-                    "Close Terminal Tab",
-                    Box::new(CloseActiveItem {
-                        save_intent: None,
-                        close_pinned: true,
-                    }),
+                .action("Copy", Box::new(Copy))
+                .when(
+                    !matches!(self.mode, TerminalMode::Embedded { .. }),
+                    |menu| {
+                        menu.action("Paste", Box::new(Paste))
+                            .action("Paste Text", Box::new(PasteText))
+                    },
                 )
+                .action("Select All", Box::new(SelectAll))
+                .when(
+                    !matches!(self.mode, TerminalMode::Embedded { .. }),
+                    |menu| menu.action("Clear", Box::new(Clear)),
+                )
+                .when(
+                    assistant_enabled && !matches!(self.mode, TerminalMode::Embedded { .. }),
+                    |menu| {
+                        menu.separator()
+                            .action("Inline Assist", Box::new(InlineAssist::default()))
+                            .when(has_selection && self.shows_workspace_actions(), |menu| {
+                                menu.action("Add to Agent Thread", Box::new(AddSelectionToThread))
+                            })
+                    },
+                )
+                .when(self.shows_workspace_actions(), |menu| {
+                    menu.separator().action(
+                        "Close Terminal Tab",
+                        Box::new(CloseActiveItem {
+                            save_intent: None,
+                            close_pinned: true,
+                        }),
+                    )
+                })
         });
 
         window.focus(&context_menu.focus_handle(cx), cx);
@@ -652,7 +692,7 @@ impl TerminalView {
             .read(cx)
             .last_content
             .mode
-            .contains(TermMode::ALT_SCREEN)
+            .contains(Modes::ALT_SCREEN)
         {
             self.terminal.update(cx, |term, cx| {
                 term.try_keystroke(
@@ -695,13 +735,13 @@ impl TerminalView {
 
         let line_height = terminal.last_content().terminal_bounds.line_height;
         let viewport_lines = terminal.viewport_lines();
-        let cursor = point_to_viewport(
-            terminal.last_content.display_offset,
+        let cursor_line = viewport_line_for_point(
             terminal.last_content.cursor.point,
+            terminal.last_content.display_offset,
         )
         .unwrap_or_default();
         let max_scroll_top_in_lines =
-            (block.height as usize).saturating_sub(viewport_lines.saturating_sub(cursor.line + 1));
+            (block.height as usize).saturating_sub(viewport_lines.saturating_sub(cursor_line + 1));
 
         max_scroll_top_in_lines as f32 * line_height
     }
@@ -826,7 +866,7 @@ impl TerminalView {
                 .read(cx)
                 .last_content
                 .mode
-                .contains(TermMode::ALT_SCREEN)
+                .contains(Modes::ALT_SCREEN)
         {
             return true;
         }
@@ -950,55 +990,55 @@ impl TerminalView {
         let mode = self.terminal.read(cx).last_content.mode;
         dispatch_context.set(
             "screen",
-            if mode.contains(TermMode::ALT_SCREEN) {
+            if mode.contains(Modes::ALT_SCREEN) {
                 "alt"
             } else {
                 "normal"
             },
         );
 
-        if mode.contains(TermMode::APP_CURSOR) {
+        if mode.contains(Modes::APP_CURSOR) {
             dispatch_context.add("DECCKM");
         }
-        if mode.contains(TermMode::APP_KEYPAD) {
+        if mode.contains(Modes::APP_KEYPAD) {
             dispatch_context.add("DECPAM");
         } else {
             dispatch_context.add("DECPNM");
         }
-        if mode.contains(TermMode::SHOW_CURSOR) {
+        if mode.contains(Modes::SHOW_CURSOR) {
             dispatch_context.add("DECTCEM");
         }
-        if mode.contains(TermMode::LINE_WRAP) {
+        if mode.contains(Modes::LINE_WRAP) {
             dispatch_context.add("DECAWM");
         }
-        if mode.contains(TermMode::ORIGIN) {
+        if mode.contains(Modes::ORIGIN) {
             dispatch_context.add("DECOM");
         }
-        if mode.contains(TermMode::INSERT) {
+        if mode.contains(Modes::INSERT) {
             dispatch_context.add("IRM");
         }
         //LNM is apparently the name for this. https://vt100.net/docs/vt510-rm/LNM.html
-        if mode.contains(TermMode::LINE_FEED_NEW_LINE) {
+        if mode.contains(Modes::LINE_FEED_NEW_LINE) {
             dispatch_context.add("LNM");
         }
-        if mode.contains(TermMode::FOCUS_IN_OUT) {
+        if mode.contains(Modes::FOCUS_IN_OUT) {
             dispatch_context.add("report_focus");
         }
-        if mode.contains(TermMode::ALTERNATE_SCROLL) {
+        if mode.contains(Modes::ALTERNATE_SCROLL) {
             dispatch_context.add("alternate_scroll");
         }
-        if mode.contains(TermMode::BRACKETED_PASTE) {
+        if mode.contains(Modes::BRACKETED_PASTE) {
             dispatch_context.add("bracketed_paste");
         }
-        if mode.intersects(TermMode::MOUSE_MODE) {
+        if mode.intersects(Modes::MOUSE_MODE) {
             dispatch_context.add("any_mouse_reporting");
         }
         {
-            let mouse_reporting = if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            let mouse_reporting = if mode.contains(Modes::MOUSE_REPORT_CLICK) {
                 "click"
-            } else if mode.contains(TermMode::MOUSE_DRAG) {
+            } else if mode.contains(Modes::MOUSE_DRAG) {
                 "drag"
-            } else if mode.contains(TermMode::MOUSE_MOTION) {
+            } else if mode.contains(Modes::MOUSE_MOTION) {
                 "motion"
             } else {
                 "off"
@@ -1006,9 +1046,9 @@ impl TerminalView {
             dispatch_context.set("mouse_reporting", mouse_reporting);
         }
         {
-            let format = if mode.contains(TermMode::SGR_MOUSE) {
+            let format = if mode.contains(Modes::SGR_MOUSE) {
                 "sgr"
-            } else if mode.contains(TermMode::UTF8_MOUSE) {
+            } else if mode.contains(Modes::UTF8_MOUSE) {
                 "utf8"
             } else {
                 "normal"
@@ -1210,15 +1250,25 @@ fn subscribe_for_terminal_events(
     vec![terminal_subscription, terminal_events_subscription]
 }
 
-fn regex_search_for_query(query: &SearchQuery) -> Option<RegexSearch> {
+fn viewport_line_for_point(point: Point, display_offset: usize) -> Option<usize> {
+    let display_offset = i32::try_from(display_offset).unwrap_or(i32::MAX);
+    let line = point.line.saturating_add(display_offset);
+    if line < 0 {
+        None
+    } else {
+        usize::try_from(line).ok()
+    }
+}
+
+fn regex_search_for_query(query: &SearchQuery) -> Option<Search> {
     let str = query.as_str();
     if query.is_regex() {
         if str == "." {
             return None;
         }
-        RegexSearch::new(str).ok()
+        Search::new(str)
     } else {
-        RegexSearch::new(&regex::escape(str)).ok()
+        Search::new(&regex::escape(str))
     }
 }
 
@@ -1971,7 +2021,7 @@ impl SerializableItem for TerminalView {
 }
 
 impl SearchableItem for TerminalView {
-    type Match = RangeInclusive<AlacPoint>;
+    type Match = Range;
 
     fn supported_options(&self) -> SearchOptions {
         SearchOptions {
@@ -2085,8 +2135,8 @@ impl SearchableItem for TerminalView {
                                 .enumerate()
                                 .rev()
                                 .find(|(_, search_match)| {
-                                    search_match.contains(&selection_head)
-                                        || search_match.start() < &selection_head
+                                    search_match.contains(selection_head)
+                                        || search_match.start() < selection_head
                                 })
                                 .map(|(ix, _)| ix)
                                 .unwrap_or(0),
@@ -2099,8 +2149,8 @@ impl SearchableItem for TerminalView {
                                 .iter()
                                 .enumerate()
                                 .find(|(_, search_match)| {
-                                    search_match.contains(&selection_head)
-                                        || search_match.start() > &selection_head
+                                    search_match.contains(selection_head)
+                                        || search_match.start() > selection_head
                                 })
                                 .map(|(ix, _)| ix)
                                 .unwrap_or(matches.len().saturating_sub(1)),
@@ -2539,7 +2589,7 @@ mod tests {
         let entry = cx
             .update(|cx| {
                 wt.update(cx, |wt, cx| {
-                    wt.create_entry(RelPath::empty().into(), is_dir, None, cx)
+                    wt.create_entry(RelPath::empty_arc(), is_dir, None, cx)
                 })
             })
             .await
@@ -2613,7 +2663,6 @@ mod tests {
                         cx.background_executor(),
                         PathStyle::local(),
                     )
-                    .unwrap()
                     .subscribe(cx)
                 });
                 let terminal_view = cx.new(|cx| {

@@ -122,7 +122,7 @@ fn render_settings_audio_device_dropdown<T: AsRef<Option<String>> + From<Option<
                 window,
                 cx,
                 move |settings, _cx| {
-                    (field.write)(settings, value);
+                    (field.write)(settings, value, _cx);
                 },
             )
             .log_err();

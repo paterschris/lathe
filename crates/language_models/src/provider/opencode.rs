@@ -23,7 +23,8 @@ use util::ResultExt;
 use crate::provider::anthropic::{AnthropicEventMapper, into_anthropic};
 use crate::provider::google::{GoogleEventMapper, into_google};
 use crate::provider::open_ai::{
-    OpenAiEventMapper, OpenAiResponseEventMapper, into_open_ai, into_open_ai_response,
+    ChatCompletionMaxTokensParameter, OpenAiEventMapper, OpenAiResponseEventMapper, into_open_ai,
+    into_open_ai_response,
 };
 
 fn normalize_reasoning_effort(effort: &str) -> Option<ReasoningEffort> {
@@ -33,7 +34,8 @@ fn normalize_reasoning_effort(effort: &str) -> Option<ReasoningEffort> {
         "low" => Some(ReasoningEffort::Low),
         "medium" => Some(ReasoningEffort::Medium),
         "high" => Some(ReasoningEffort::High),
-        "max" | "xhigh" => Some(ReasoningEffort::XHigh),
+        "xhigh" => Some(ReasoningEffort::XHigh),
+        "max" => Some(ReasoningEffort::Max),
         _ => None,
     }
 }
@@ -45,7 +47,8 @@ fn reasoning_effort_display(effort: ReasoningEffort) -> (&'static str, &'static 
         ReasoningEffort::Low => ("Low", "low"),
         ReasoningEffort::Medium => ("Medium", "medium"),
         ReasoningEffort::High => ("High", "high"),
-        ReasoningEffort::XHigh => ("Max", "max"),
+        ReasoningEffort::XHigh => ("XHigh", "xhigh"),
+        ReasoningEffort::Max => ("Max", "max"),
     }
 }
 
@@ -513,11 +516,11 @@ impl LanguageModel for OpenCodeLanguageModel {
     }
 
     fn max_token_count(&self) -> u64 {
-        self.model.max_token_count()
+        self.model.max_token_count(self.subscription)
     }
 
     fn max_output_tokens(&self) -> Option<u64> {
-        self.model.max_output_tokens()
+        self.model.max_output_tokens(self.subscription)
     }
 
     fn stream_completion(
@@ -545,13 +548,13 @@ impl LanguageModel for OpenCodeLanguageModel {
                     request,
                     self.model.id().to_string(),
                     1.0,
-                    self.model.max_output_tokens().unwrap_or(8192),
+                    self.model.max_output_tokens(self.subscription).unwrap_or(8192),
                     mode,
                     anthropic::completion::AnthropicPromptCacheMode::Automatic,
                 );
                 let stream = self.stream_anthropic(anthropic_request, cx);
                 async move {
-                    let mapper = AnthropicEventMapper::new();
+                    let mapper = AnthropicEventMapper::new(PROVIDER_NAME);
                     Ok(mapper.map_stream(stream.await?).boxed())
                 }
                 .boxed()
@@ -570,7 +573,8 @@ impl LanguageModel for OpenCodeLanguageModel {
                     self.model.id(),
                     false,
                     false,
-                    self.model.max_output_tokens(),
+                    self.model.max_output_tokens(self.subscription),
+                    ChatCompletionMaxTokensParameter::MaxCompletionTokens,
                     reasoning_effort,
                     self.model.interleaved_reasoning(),
                 );
@@ -591,7 +595,7 @@ impl LanguageModel for OpenCodeLanguageModel {
                     self.model.id(),
                     false,
                     false,
-                    self.model.max_output_tokens(),
+                    self.model.max_output_tokens(self.subscription),
                     None,
                     supports_none_reasoning_effort,
                 );

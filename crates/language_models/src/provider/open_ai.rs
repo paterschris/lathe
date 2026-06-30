@@ -5,11 +5,12 @@ use futures::{FutureExt, StreamExt, future::BoxFuture};
 use gpui::{AnyView, App, AsyncApp, Context, Entity, SharedString, Task, TaskExt, Window};
 use http_client::HttpClient;
 use language_model::{
-    ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, LanguageModel, LanguageModelCompletionError,
-    LanguageModelCompletionEvent, LanguageModelEffortLevel, LanguageModelId, LanguageModelName,
-    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
-    LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice, OPEN_AI_PROVIDER_ID,
-    OPEN_AI_PROVIDER_NAME, RateLimiter, env_var,
+    ApiKeyState, AuthenticateError, EnvVar, FastModeConfirmation, IconOrSvg, LanguageModel,
+    LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelEffortLevel,
+    LanguageModelId, LanguageModelName, LanguageModelProvider, LanguageModelProviderId,
+    LanguageModelProviderName, LanguageModelProviderState, LanguageModelRequest,
+    LanguageModelToolChoice, OPEN_AI_PROVIDER_ID, OPEN_AI_PROVIDER_NAME, ProviderConfigurationView,
+    RateLimiter, env_var,
 };
 use menu;
 use open_ai::{
@@ -25,7 +26,8 @@ use ui_input::InputField;
 use util::ResultExt;
 
 pub use open_ai::completion::{
-    OpenAiEventMapper, OpenAiResponseEventMapper, into_open_ai, into_open_ai_response,
+    ChatCompletionMaxTokensParameter, OpenAiEventMapper, OpenAiResponseEventMapper, into_open_ai,
+    into_open_ai_response,
 };
 
 const PROVIDER_ID: LanguageModelProviderId = OPEN_AI_PROVIDER_ID;
@@ -215,6 +217,40 @@ impl LanguageModelProvider for OpenAiLanguageModelProvider {
         self.state
             .update(cx, |state, cx| state.set_api_key(None, cx))
     }
+
+    fn configuration_view_v2(
+        &self,
+        _target_agent: language_model::ConfigurationViewTargetAgent,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> ProviderConfigurationView {
+        let state = self.state.clone();
+        ProviderConfigurationView::Inline(
+            cx.new(|cx| {
+                crate::ApiKeyEditor::new(
+                    state,
+                    "https://platform.openai.com/api-keys",
+                    "sk-...",
+                    |state, _cx| crate::api_key_status(&state.api_key_state),
+                    |state, key, cx| state.update(cx, |state, cx| state.set_api_key(Some(key), cx)),
+                    |state, cx| state.update(cx, |state, cx| state.set_api_key(None, cx)),
+                    window,
+                    cx,
+                )
+            })
+            .into(),
+        )
+    }
+
+    fn fast_mode_confirmation(&self, _cx: &App) -> Option<FastModeConfirmation> {
+        Some(FastModeConfirmation {
+            title: "Enable Fast Mode for OpenAI?".into(),
+            message: "Fast mode sends requests using OpenAI's Priority processing tier, which \
+                targets significantly lower latency than the standard tier and is billed at a \
+                premium per-token rate."
+                .into(),
+        })
+    }
 }
 
 fn default_thinking_reasoning_effort(model: &open_ai::Model) -> Option<open_ai::ReasoningEffort> {
@@ -222,7 +258,7 @@ fn default_thinking_reasoning_effort(model: &open_ai::Model) -> Option<open_ai::
 
     model
         .reasoning_effort()
-        .filter(|effort| *effort != ReasoningEffort::None)
+        .filter(|effort| open_ai_reasoning_effort_is_supported(*effort))
         .or_else(|| {
             let supported_efforts = model.supported_reasoning_efforts();
             if supported_efforts.contains(&ReasoningEffort::Medium) {
@@ -231,9 +267,31 @@ fn default_thinking_reasoning_effort(model: &open_ai::Model) -> Option<open_ai::
                 supported_efforts
                     .iter()
                     .copied()
-                    .find(|effort| *effort != ReasoningEffort::None)
+                    .find(|effort| open_ai_reasoning_effort_is_supported(*effort))
             }
         })
+}
+
+fn open_ai_reasoning_effort_is_supported(effort: open_ai::ReasoningEffort) -> bool {
+    effort != open_ai::ReasoningEffort::None
+}
+
+fn normalize_open_ai_response_thinking_effort(
+    request: &mut LanguageModelRequest,
+    model: &open_ai::Model,
+) {
+    let selected_effort_is_supported = request
+        .thinking_effort
+        .as_deref()
+        .and_then(|effort| effort.parse::<open_ai::ReasoningEffort>().ok())
+        .is_some_and(|effort| {
+            open_ai_reasoning_effort_is_supported(effort)
+                && model.supported_reasoning_efforts().contains(&effort)
+        });
+
+    if !selected_effort_is_supported {
+        request.thinking_effort = None;
+    }
 }
 
 fn supports_selectable_thinking_effort(model: &open_ai::Model) -> bool {
@@ -241,7 +299,7 @@ fn supports_selectable_thinking_effort(model: &open_ai::Model) -> bool {
         && model
             .supported_reasoning_efforts()
             .iter()
-            .any(|effort| *effort != open_ai::ReasoningEffort::None)
+            .any(|effort| open_ai_reasoning_effort_is_supported(*effort))
 }
 
 fn supported_thinking_effort_levels(model: &open_ai::Model) -> Vec<LanguageModelEffortLevel> {
@@ -255,18 +313,13 @@ fn supported_thinking_effort_levels(model: &open_ai::Model) -> Vec<LanguageModel
         .iter()
         .copied()
         .filter_map(|effort| {
-            let (name, value) = match effort {
-                open_ai::ReasoningEffort::None => return None,
-                open_ai::ReasoningEffort::Minimal => ("Minimal", "minimal"),
-                open_ai::ReasoningEffort::Low => ("Low", "low"),
-                open_ai::ReasoningEffort::Medium => ("Medium", "medium"),
-                open_ai::ReasoningEffort::High => ("High", "high"),
-                open_ai::ReasoningEffort::XHigh => ("Extra High", "xhigh"),
-            };
+            if !open_ai_reasoning_effort_is_supported(effort) {
+                return None;
+            }
 
             Some(LanguageModelEffortLevel {
-                name: name.into(),
-                value: value.into(),
+                name: effort.label().into(),
+                value: effort.value().into(),
                 is_default: Some(effort) == default_effort,
             })
         })
@@ -454,6 +507,14 @@ impl LanguageModel for OpenAiLanguageModel {
         supports_selectable_thinking_effort(&self.model)
     }
 
+    fn supports_fast_mode(&self) -> bool {
+        self.model.supports_priority()
+    }
+
+    fn supports_server_side_compaction(&self) -> bool {
+        self.model.supports_compaction()
+    }
+
     fn supported_effort_levels(&self) -> Vec<LanguageModelEffortLevel> {
         supported_thinking_effort_levels(&self.model)
     }
@@ -476,7 +537,7 @@ impl LanguageModel for OpenAiLanguageModel {
 
     fn stream_completion(
         &self,
-        request: LanguageModelRequest,
+        mut request: LanguageModelRequest,
         cx: &AsyncApp,
     ) -> BoxFuture<
         'static,
@@ -489,6 +550,7 @@ impl LanguageModel for OpenAiLanguageModel {
         >,
     > {
         if self.model.uses_responses_api() {
+            normalize_open_ai_response_thinking_effort(&mut request, &self.model);
             let request = into_open_ai_response(
                 request,
                 self.model.id(),
@@ -513,6 +575,7 @@ impl LanguageModel for OpenAiLanguageModel {
                 self.model.supports_parallel_tool_calls(),
                 self.model.supports_prompt_cache_key(),
                 self.max_output_tokens(),
+                ChatCompletionMaxTokensParameter::MaxCompletionTokens,
                 None,
                 false,
             );

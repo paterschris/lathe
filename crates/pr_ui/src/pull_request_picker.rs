@@ -56,7 +56,7 @@ impl PullRequestPicker {
         };
         let picker = cx.new(|cx| {
             Picker::uniform_list(delegate, window, cx)
-                .max_height(Some(ui::rems(24.).into()))
+                .max_height(ui::rems(24.))
                 .show_scrollbar(true)
         });
         let weak_picker = picker.downgrade();
@@ -185,6 +185,10 @@ async fn load_pull_requests(
 
 impl PickerDelegate for PullRequestPickerDelegate {
     type ListItem = ListItem;
+
+    fn name() -> &'static str {
+        "pull request picker"
+    }
 
     fn match_count(&self) -> usize {
         match self.status {

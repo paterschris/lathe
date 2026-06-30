@@ -6,7 +6,7 @@ use futures::{FutureExt, StreamExt, future::BoxFuture, future::Shared};
 use gpui::{AnyView, App, AsyncApp, Context, Entity, SharedString, Task, Window};
 use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 use language_model::{
-    AuthenticateError, IconOrSvg, LanguageModel, LanguageModelCompletionError,
+    AuthenticateError, FastModeConfirmation, IconOrSvg, LanguageModel, LanguageModelCompletionError,
     LanguageModelCompletionEvent, LanguageModelEffortLevel, LanguageModelId, LanguageModelName,
     LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
     LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice, RateLimiter,
@@ -251,6 +251,28 @@ impl LanguageModelProvider for OpenAiSubscribedProvider {
     fn reset_credentials(&self, cx: &mut App) -> Task<Result<()>> {
         self.sign_out(cx)
     }
+
+    fn authentication_error_message(&self) -> SharedString {
+        "Your ChatGPT subscription session is invalid or has expired. \
+        Sign in again via the Agent Panel settings to continue."
+            .into()
+    }
+
+    fn missing_credentials_error_message(&self) -> SharedString {
+        "You are not signed in to your ChatGPT account. \
+        Sign in via the Agent Panel settings to continue."
+            .into()
+    }
+
+    fn fast_mode_confirmation(&self, _cx: &App) -> Option<FastModeConfirmation> {
+        Some(FastModeConfirmation {
+            title: "Enable Fast Mode for OpenAI?".into(),
+            message: "Fast mode sends requests using OpenAI's Priority processing tier, which \
+                targets significantly lower latency than the standard tier and is billed at a \
+                premium per-token rate."
+                .into(),
+        })
+    }
 }
 
 //
@@ -262,9 +284,9 @@ impl LanguageModelProvider for OpenAiSubscribedProvider {
 // `GET <codex_base_url>/models?client_version=...` (see
 // codex-rs/codex-api/src/endpoint/models.rs in openai/codex) and falls back to
 // a bundled models.json. Beyond going stale, the static approach also can't
-// model per-account access (e.g. free accounts cannot use gpt-5.4 or
-// gpt-5.3-codex even though paid accounts can), so the backend still rejects
-// some requests. The bundled list at
+// model per-account access (e.g. free accounts cannot use gpt-5.4 even though
+// paid accounts can), so the backend still rejects some requests. The bundled
+// list at
 // codex-rs/models-manager/models.json (openai/codex) is the closest
 // approximation; the entries below mirror that file's picker-visible models.
 #[derive(Clone, Debug, PartialEq)]
@@ -272,19 +294,11 @@ enum ChatGptModel {
     Gpt55,
     Gpt54,
     Gpt54Mini,
-    Gpt53Codex,
-    Gpt52,
 }
 
 impl ChatGptModel {
     fn all() -> Vec<Self> {
-        vec![
-            Self::Gpt55,
-            Self::Gpt54,
-            Self::Gpt54Mini,
-            Self::Gpt53Codex,
-            Self::Gpt52,
-        ]
+        vec![Self::Gpt55, Self::Gpt54, Self::Gpt54Mini]
     }
 
     fn id(&self) -> &str {
@@ -292,8 +306,6 @@ impl ChatGptModel {
             Self::Gpt55 => "gpt-5.5",
             Self::Gpt54 => "gpt-5.4",
             Self::Gpt54Mini => "gpt-5.4-mini",
-            Self::Gpt53Codex => "gpt-5.3-codex",
-            Self::Gpt52 => "gpt-5.2",
         }
     }
 
@@ -302,21 +314,21 @@ impl ChatGptModel {
             Self::Gpt55 => "GPT-5.5",
             Self::Gpt54 => "GPT-5.4",
             Self::Gpt54Mini => "GPT-5.4 Mini",
-            Self::Gpt53Codex => "GPT-5.3 Codex",
-            Self::Gpt52 => "GPT-5.2",
         }
     }
 
     fn max_token_count(&self) -> u64 {
-        // All Codex-supported models share the backend's 272K input cap, even
-        // when the raw model exposes a larger context window via the public
-        // API (e.g. gpt-5.4 has max_context_window 1M, but the Codex backend
-        // caps it at 272K). Source: openai/codex models-manager/models.json.
+        // All Codex-supported models use a 272K context window in the Codex
+        // backend, even when the raw model exposes a larger context window via the
+        // public API (e.g. gpt-5.4 has max_context_window 1M, but Codex uses
+        // context_window 272K). Source: openai/codex models-manager/models.json.
         272_000
     }
 
     fn max_output_tokens(&self) -> Option<u64> {
-        Some(128_000)
+        // Codex model metadata does not expose a max output token cap for these
+        // models. Source: openai/codex models-manager/models.json.
+        None
     }
 
     fn supports_images(&self) -> bool {
@@ -344,6 +356,13 @@ impl ChatGptModel {
 
     fn supports_prompt_cache_key(&self) -> bool {
         true
+    }
+
+    fn supports_priority(&self) -> bool {
+        match self {
+            Self::Gpt55 | Self::Gpt54 => true,
+            Self::Gpt54Mini => false,
+        }
     }
 }
 
@@ -392,6 +411,10 @@ impl LanguageModel for OpenAiSubscribedLanguageModel {
         true
     }
 
+    fn supports_fast_mode(&self) -> bool {
+        self.model.supports_priority()
+    }
+
     fn supported_effort_levels(&self) -> Vec<LanguageModelEffortLevel> {
         let default_effort = self.model.default_reasoning_effort();
         self.model
@@ -406,6 +429,7 @@ impl LanguageModel for OpenAiSubscribedLanguageModel {
                     ReasoningEffort::Medium => ("Medium", "medium"),
                     ReasoningEffort::High => ("High", "high"),
                     ReasoningEffort::XHigh => ("Extra High", "xhigh"),
+                    ReasoningEffort::Max => return None, // Not supported by any OpenAI models
                 };
 
                 Some(LanguageModelEffortLevel {
