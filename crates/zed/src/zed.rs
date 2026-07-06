@@ -5561,6 +5561,7 @@ mod tests {
             editor::init(cx);
             collab_ui::init(&app_state, cx);
             git_ui::init(cx);
+            lathe_hooks::init(cx);
             pr_ui::init(cx);
             mobile_dev::init(cx);
             project_panel::init(cx);
