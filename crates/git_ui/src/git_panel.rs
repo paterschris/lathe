@@ -102,6 +102,9 @@ use workspace::{
     },
 };
 
+#[path = "git_panel_lathe.rs"]
+mod lathe;
+
 const GIT_PANEL_KEY: &str = "GitPanel";
 const UPDATE_DEBOUNCE: Duration = Duration::from_millis(50);
 // TODO: We should revise this part. It seems the indentation width is not aligned with the one in project panel
@@ -5472,7 +5475,7 @@ impl GitPanel {
                                 format!("stdout:\n{}\nstderr:\n{}", output.stdout, output.stderr);
                             workspace_weak
                                 .update(cx, move |workspace, cx| {
-                                    open_output(operation, workspace, &output, window, cx)
+                                    lathe::open_output(operation, workspace, &output, window, cx)
                                 })
                                 .ok();
                         })
@@ -7404,7 +7407,7 @@ impl GitPanel {
                 menu = menu.entry("Checkout", None, move |_, cx| {
                     let receiver =
                         repo.update(cx, |repo, _| repo.change_branch(name.to_string()));
-                    run_branch_op(cx, workspace.clone(), panel.clone(), receiver, "checkout");
+                    lathe::run_branch_op(cx, workspace.clone(), panel.clone(), receiver, "checkout");
                 });
             }
 
@@ -7461,7 +7464,7 @@ impl GitPanel {
                         let receiver = repo_merge.update(cx, |repo, _| {
                             repo.merge(name.to_string(), MergeOptions::default())
                         });
-                        run_branch_op(cx, workspace_m.clone(), panel_m.clone(), receiver, "merge");
+                        lathe::run_branch_op(cx, workspace_m.clone(), panel_m.clone(), receiver, "merge");
                     },
                 );
 
@@ -7476,7 +7479,7 @@ impl GitPanel {
                         let receiver = repo_rebase.update(cx, |repo, _| {
                             repo.rebase(name.to_string(), RebaseOptions::default())
                         });
-                        run_branch_op(cx, workspace_r.clone(), panel_r.clone(), receiver, "rebase");
+                        lathe::run_branch_op(cx, workspace_r.clone(), panel_r.clone(), receiver, "rebase");
                     },
                 );
             }
@@ -7496,7 +7499,7 @@ impl GitPanel {
                     let receiver = repo_del.update(cx, |repo, _| {
                         repo.delete_branch(is_remote, name.to_string(), false)
                     });
-                    run_branch_op(cx, workspace_d.clone(), panel_d.clone(), receiver, "delete branch");
+                    lathe::run_branch_op(cx, workspace_d.clone(), panel_d.clone(), receiver, "delete branch");
                 });
 
                 if let Some((remote_name, remote_branch_name)) = upstream_for_remote_delete {
@@ -7552,7 +7555,7 @@ impl GitPanel {
                 let repo = repo.clone();
                 let workspace = workspace.clone();
                 menu = menu.entry("Apply Stash", None, move |_, cx| {
-                    run_stash_op(cx, workspace.clone(), repo.clone(), StashOp::Apply, index);
+                    lathe::run_stash_op(cx, workspace.clone(), repo.clone(), lathe::StashOp::Apply, index);
                 });
             }
 
@@ -7560,7 +7563,7 @@ impl GitPanel {
                 let repo = repo.clone();
                 let workspace = workspace.clone();
                 menu = menu.entry("Pop Stash", None, move |_, cx| {
-                    run_stash_op(cx, workspace.clone(), repo.clone(), StashOp::Pop, index);
+                    lathe::run_stash_op(cx, workspace.clone(), repo.clone(), lathe::StashOp::Pop, index);
                 });
             }
 
@@ -7581,7 +7584,7 @@ impl GitPanel {
                 let panel = panel.clone();
                 menu = menu.entry("Delete Stash", None, move |_, cx| {
                     let receiver = repo.update(cx, |repo, cx| repo.stash_drop(Some(index), cx));
-                    run_branch_op(cx, workspace.clone(), panel.clone(), receiver, "stash drop");
+                    lathe::run_branch_op(cx, workspace.clone(), panel.clone(), receiver, "stash drop");
                 });
             }
 
@@ -10318,62 +10321,6 @@ impl Component for PanelRepoFooter {
     }
 }
 
-fn open_output(
-    operation: impl Into<SharedString>,
-    workspace: &mut Workspace,
-    output: &str,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    let operation = operation.into();
-
-    let mut handler = GitOutputHandler::default();
-    let mut processor = ansi::Processor::<ansi::StdSyncHandler>::default();
-    processor.advance(&mut handler, output.as_bytes());
-    let plain_text = handler.output;
-
-    let buffer = cx.new(|cx| Buffer::local(plain_text.as_str(), cx));
-    buffer.update(cx, |buffer, cx| {
-        buffer.set_capability(language::Capability::ReadOnly, cx);
-    });
-    let editor = cx.new(|cx| {
-        let mut editor = Editor::for_buffer(buffer, None, window, cx);
-        editor.buffer().update(cx, |buffer, cx| {
-            buffer.set_title(format!("Output from git {operation}"), cx);
-        });
-        editor.set_read_only(true);
-        editor
-    });
-
-    workspace.add_item_to_center(Box::new(editor), window, cx);
-}
-
-#[derive(Default)]
-struct GitOutputHandler {
-    output: String,
-    line_start: usize,
-}
-
-impl ansi::Handler for GitOutputHandler {
-    fn input(&mut self, c: char) {
-        self.output.push(c);
-    }
-
-    fn linefeed(&mut self) {
-        self.output.push('\n');
-        self.line_start = self.output.len();
-    }
-
-    fn carriage_return(&mut self) {
-        self.output.truncate(self.line_start);
-    }
-
-    fn put_tab(&mut self, count: u16) {
-        self.output
-            .extend(std::iter::repeat_n('\t', count as usize));
-    }
-}
-
 pub(crate) fn show_error_toast(
     workspace: Entity<Workspace>,
     action: impl Into<SharedString>,
@@ -10401,7 +10348,7 @@ pub(crate) fn show_error_toast(
                     let action = action.clone();
                     workspace_weak
                         .update(cx, move |workspace, cx| {
-                            open_output(action, workspace, &message, window, cx)
+                            lathe::open_output(action, workspace, &message, window, cx)
                         })
                         .ok();
                 })
@@ -10409,74 +10356,6 @@ pub(crate) fn show_error_toast(
             workspace.toggle_status_toast(toast, cx)
         });
     }
-}
-
-#[derive(Clone, Copy)]
-enum StashOp {
-    Pop,
-    Apply,
-}
-
-impl StashOp {
-    fn label(self) -> &'static str {
-        match self {
-            StashOp::Pop => "stash pop",
-            StashOp::Apply => "stash apply",
-        }
-    }
-}
-
-fn run_stash_op(
-    cx: &mut App,
-    workspace: WeakEntity<Workspace>,
-    repo: Entity<Repository>,
-    op: StashOp,
-    index: usize,
-) {
-    let label = op.label();
-    cx.spawn(async move |cx| {
-        let task = repo.update(cx, |repo, cx| match op {
-            StashOp::Pop => repo.stash_pop(Some(index), cx),
-            StashOp::Apply => repo.stash_apply(Some(index), cx),
-        });
-        if let Err(err) = task.await {
-            let Some(workspace) = workspace.upgrade() else {
-                log::error!("git {label} failed: {err:?}");
-                return;
-            };
-            cx.update(|cx| show_error_toast(workspace, label, err, cx));
-        }
-    })
-    .detach();
-}
-
-fn run_branch_op(
-    cx: &mut App,
-    workspace: WeakEntity<Workspace>,
-    panel: WeakEntity<GitPanel>,
-    receiver: oneshot::Receiver<anyhow::Result<()>>,
-    action: impl Into<SharedString>,
-) {
-    let action = action.into();
-    cx.spawn(async move |cx| {
-        let result = receiver.await;
-        let err = match result {
-            Ok(Ok(())) => {
-                panel
-                    .update(cx, |panel, cx| panel.refresh_explorer_data(cx))
-                    .ok();
-                return;
-            }
-            Ok(Err(e)) => e,
-            Err(_) => anyhow::anyhow!("operation cancelled"),
-        };
-        let Ok(workspace) = workspace.upgrade().ok_or(()) else {
-            log::error!("git {action} failed: {err:?}");
-            return;
-        };
-        let _ = cx.update(|cx| show_error_toast(workspace, action, err, cx));
-    })
-    .detach();
 }
 
 fn rpc_error_raw_message_from_chain(error: &anyhow::Error) -> Option<&str> {
@@ -12650,25 +12529,6 @@ mod tests {
         // "Update tracked"
         let message = panel.update(cx, |panel, cx| panel.suggest_commit_message(cx));
         assert_eq!(message, Some("Update tracked".to_string()));
-    }
-
-    #[test]
-    fn test_git_output_handler_strips_ansi_codes() {
-        use alacritty_terminal::vte::ansi;
-
-        let cases = [
-            ("no escape codes here\n", "no escape codes here\n"),
-            ("\x1b[31mhello\x1b[0m", "hello"),
-            ("\x1b[1;32mfoo\x1b[0m bar", "foo bar"),
-            ("progress 10%\rprogress 100%\n", "progress 100%\n"),
-        ];
-
-        for (input, expected) in cases {
-            let mut handler = GitOutputHandler::default();
-            let mut processor = ansi::Processor::<ansi::StdSyncHandler>::default();
-            processor.advance(&mut handler, input.as_bytes());
-            assert_eq!(handler.output, expected);
-        }
     }
 
     #[gpui::test]
