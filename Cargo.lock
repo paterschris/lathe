@@ -10078,6 +10078,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lathe"
+version = "0.1.0"
+dependencies = [
+ "git_graph",
+ "gpui",
+ "lathe_hooks",
+ "mobile_dev",
+ "pr_ui",
+]
+
+[[package]]
 name = "lathe_hooks"
 version = "0.1.0"
 dependencies = [
@@ -23190,6 +23201,7 @@ dependencies = [
  "language_selector",
  "language_tools",
  "languages",
+ "lathe",
  "lathe_hooks",
  "line_ending_selector",
  "log",

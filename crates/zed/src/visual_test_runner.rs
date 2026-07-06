@@ -209,8 +209,7 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         );
         language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
         git_ui::init(cx);
-        lathe_hooks::init(cx);
-        pr_ui::init(cx);
+        lathe::init(cx);
         project::AgentRegistryStore::init_global(
             cx,
             app_state.fs.clone(),

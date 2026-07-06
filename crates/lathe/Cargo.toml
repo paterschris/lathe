@@ -1,0 +1,20 @@
+[package]
+name = "lathe"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lathe.rs"
+doctest = false
+
+[dependencies]
+gpui.workspace = true
+lathe_hooks.workspace = true
+pr_ui.workspace = true
+git_graph.workspace = true
+mobile_dev.workspace = true
