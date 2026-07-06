@@ -1897,6 +1897,359 @@ impl super::GitPanel {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(super) struct GitHunkEntry {
+    pub(super) repo_path: RepoPath,
+    /// Stable identifier within the hunk list so the stage handler can refetch
+    /// the live `DiffHunk` (anchors stay valid across edits but the index in
+    /// the list does not).
+    hunk_index: usize,
+    line_label: SharedString,
+    is_staged: bool,
+}
+
+/// Cached buffer + diff for a file whose hunks have been (or are being)
+/// surfaced in the panel. Stored on `GitPanel.hunk_states` keyed by repo path.
+pub(super) enum HunkLoadState {
+    Loading,
+    Loaded {
+        buffer: Entity<Buffer>,
+        diff: Entity<buffer_diff::BufferDiff>,
+        /// Subscription that listens for changes to the diff (e.g. the user
+        /// stages, unstages, or restores a hunk from the diff view) and
+        /// marks the panel as needing a hunk-row rebuild.
+        _diff_subscription: Subscription,
+    },
+    Failed(SharedString),
+}
+
+impl super::GitPanel {
+    pub(super) fn build_hunk_list_entries(
+        &self,
+        repo_path: &RepoPath,
+        cx: &Context<Self>,
+    ) -> Vec<GitListEntry> {
+        let Some(state) = self.hunk_states.get(repo_path) else {
+            return vec![GitListEntry::HunkLoading {
+                repo_path: repo_path.clone(),
+            }];
+        };
+        match state {
+            HunkLoadState::Loading => vec![GitListEntry::HunkLoading {
+                repo_path: repo_path.clone(),
+            }],
+            HunkLoadState::Failed(message) => vec![GitListEntry::HunkError {
+                repo_path: repo_path.clone(),
+                message: message.clone(),
+            }],
+            HunkLoadState::Loaded { buffer, diff, .. } => {
+                let buffer_snapshot = buffer.read(cx).snapshot();
+                let diff_snapshot = diff.read(cx).snapshot(cx);
+                diff_snapshot
+                    .hunks(&buffer_snapshot.text)
+                    .enumerate()
+                    .map(|(idx, hunk)| {
+                        let start = hunk
+                            .buffer_range
+                            .start
+                            .to_point(&buffer_snapshot.text)
+                            .row
+                            + 1;
+                        let end = hunk
+                            .buffer_range
+                            .end
+                            .to_point(&buffer_snapshot.text)
+                            .row
+                            + 1;
+                        let line_label: SharedString = if start == end {
+                            format!("Line {start}").into()
+                        } else {
+                            format!("Lines {start}-{end}").into()
+                        };
+                        GitListEntry::Hunk(GitHunkEntry {
+                            repo_path: repo_path.clone(),
+                            hunk_index: idx,
+                            line_label,
+                            is_staged: !hunk.status().has_secondary_hunk(),
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Flip the expanded state for a file's hunk subtree. When expanding for
+    /// the first time, kicks off an async load of the buffer + unstaged diff;
+    /// the panel rebuilds entries when the load completes (via the BufferDiff
+    /// subscription installed in `ensure_hunks_loaded`).
+    pub(super) fn toggle_file_expansion(
+        &mut self,
+        repo_path: RepoPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.expanded_files.contains(&repo_path) {
+            self.expanded_files.remove(&repo_path);
+            self.hunk_states.remove(&repo_path);
+            self.update_visible_entries(window, cx);
+            return;
+        }
+        self.expanded_files.insert(repo_path.clone());
+        self.ensure_hunks_loaded(repo_path, window, cx);
+        self.update_visible_entries(window, cx);
+    }
+
+    fn ensure_hunks_loaded(
+        &mut self,
+        repo_path: RepoPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.hunk_states.get(&repo_path), Some(HunkLoadState::Loaded { .. })) {
+            return;
+        }
+        self.hunk_states
+            .insert(repo_path.clone(), HunkLoadState::Loading);
+        let Some(repo) = self.active_repository.clone() else {
+            return;
+        };
+        let project = self.project.clone();
+        let git_store = project.read(cx).git_store().clone();
+        let Some(project_path) = repo
+            .read(cx)
+            .repo_path_to_project_path(&repo_path, cx)
+        else {
+            self.hunk_states.insert(
+                repo_path,
+                HunkLoadState::Failed("no project path for repo path".into()),
+            );
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            // `project` and `git_store` are strong handles; `Entity::update`
+            // via `AppContext` returns the closure value directly (no Result
+            // wrapper), so we don't `?` after these calls.
+            let open_task = project
+                .update(cx, |project, cx| project.open_buffer(project_path, cx));
+            let buffer = match open_task.await {
+                Ok(buffer) => buffer,
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.hunk_states.insert(
+                            repo_path.clone(),
+                            HunkLoadState::Failed(format!("open buffer failed: {err}").into()),
+                        );
+                        cx.notify();
+                    })
+                    .ok();
+                    return anyhow::Ok(());
+                }
+            };
+            // `open_uncommitted_diff` returns a BufferDiff whose
+            // `secondary_diff` is wired up to the unstaged diff — required for
+            // `stage_or_unstage_hunks` to compute a new index text. The plain
+            // `open_unstaged_diff` returns a diff with `secondary_diff = None`,
+            // which makes the stage/unstage call a no-op.
+            let diff_task = git_store
+                .update(cx, |store, cx| {
+                    store.open_uncommitted_diff(buffer.clone(), cx)
+                });
+            let diff = match diff_task.await {
+                Ok(diff) => diff,
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.hunk_states.insert(
+                            repo_path.clone(),
+                            HunkLoadState::Failed(format!("load diff failed: {err}").into()),
+                        );
+                        cx.notify();
+                    })
+                    .ok();
+                    return anyhow::Ok(());
+                }
+            };
+            this.update_in(cx, |this, window, cx| {
+                let subscription = cx.subscribe(&diff, |this, _diff, _event, cx| {
+                    this.pending_hunk_refresh = true;
+                    cx.notify();
+                });
+                this.hunk_states.insert(
+                    repo_path.clone(),
+                    HunkLoadState::Loaded {
+                        buffer,
+                        diff,
+                        _diff_subscription: subscription,
+                    },
+                );
+                this.update_visible_entries(window, cx);
+            })
+            .ok();
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Discard a single hunk: replace its buffer range with the original
+    /// content from the diff base (HEAD for uncommitted diffs). Mirrors the
+    /// editor's `restore_diff_hunks` flow — also unstages the hunk so the
+    /// discard is reflected in both worktree and index. No-op if the file is
+    /// newly created (no diff base to revert to).
+    fn discard_hunk(
+        &mut self,
+        repo_path: &RepoPath,
+        hunk_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(HunkLoadState::Loaded { buffer, diff, .. }) = self.hunk_states.get(repo_path)
+        else {
+            return;
+        };
+        let buffer = buffer.clone();
+        let diff = diff.clone();
+        let buffer_snapshot = buffer.read(cx).snapshot();
+        let file_exists = buffer_snapshot
+            .file()
+            .is_some_and(|file| file.disk_state().exists());
+        let diff_snapshot = diff.read(cx).snapshot(cx);
+        let hunks: Vec<_> = diff_snapshot.hunks(&buffer_snapshot.text).collect();
+        let Some(hunk) = hunks.get(hunk_index).cloned() else {
+            return;
+        };
+
+        // Newly-created files have no base text to revert to; the equivalent
+        // is "delete this hunk's lines from the buffer", which is what
+        // `restore_diff_hunks` skips in the editor. We do the same.
+        if hunk.diff_base_byte_range.is_empty()
+            && hunk.buffer_range.start == hunk.buffer_range.end
+        {
+            return;
+        }
+
+        let original = diff_snapshot
+            .base_text()
+            .as_rope()
+            .slice(hunk.diff_base_byte_range.clone())
+            .to_string();
+
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(hunk.buffer_range.clone(), original)], None, cx);
+        });
+
+        // Also unstage the hunk so the discard is reflected in the index.
+        diff.update(cx, |diff, cx| {
+            diff.stage_or_unstage_hunks(false, &[hunk], &buffer_snapshot, file_exists, cx);
+        });
+        cx.notify();
+    }
+
+    /// Apply (or revert) a single hunk's edit against the buffer's index via
+    /// the existing `BufferDiff::stage_or_unstage_hunks` primitive. Refetches
+    /// the live `DiffHunk` so any edits between expanding the row and clicking
+    /// the button are reflected.
+    fn toggle_hunk_stage(
+        &mut self,
+        repo_path: &RepoPath,
+        hunk_index: usize,
+        stage: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(HunkLoadState::Loaded { buffer, diff, .. }) = self.hunk_states.get(repo_path)
+        else {
+            return;
+        };
+        let buffer = buffer.clone();
+        let diff = diff.clone();
+        let buffer_snapshot = buffer.read(cx).snapshot();
+        let file_exists = buffer_snapshot
+            .file()
+            .is_some_and(|file| file.disk_state().exists());
+        let diff_snapshot = diff.read(cx).snapshot(cx);
+        let hunks: Vec<_> = diff_snapshot.hunks(&buffer_snapshot.text).collect();
+        let Some(hunk) = hunks.get(hunk_index).cloned() else {
+            return;
+        };
+        diff.update(cx, |diff, cx| {
+            diff.stage_or_unstage_hunks(stage, &[hunk], &buffer_snapshot, file_exists, cx);
+        });
+        cx.notify();
+    }
+
+    pub(super) fn render_hunk_entry(
+        &self,
+        ix: usize,
+        hunk: &GitHunkEntry,
+        has_write_access: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let label = hunk.line_label.clone();
+        let is_staged = hunk.is_staged;
+        let repo_path = hunk.repo_path.clone();
+        let repo_path_for_discard = hunk.repo_path.clone();
+        let hunk_index = hunk.hunk_index;
+        let action_label = if is_staged { "Unstage hunk" } else { "Stage hunk" };
+
+        h_flex()
+            .id(("git-hunk-row", ix))
+            .h(rems(1.5))
+            .pl(px(28.))
+            .pr_2()
+            .gap_2()
+            .child(
+                Icon::new(IconName::Hash)
+                    .size(IconSize::XSmall)
+                    .color(if is_staged { Color::Accent } else { Color::Muted }),
+            )
+            .child(
+                Label::new(label)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Button::new(("hunk-toggle", ix), action_label)
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .disabled(!has_write_access)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.toggle_hunk_stage(&repo_path, hunk_index, !is_staged, cx);
+                    })),
+            )
+            .child(
+                Button::new(("hunk-discard", ix), "Discard")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .color(Color::Error)
+                    .disabled(!has_write_access)
+                    .tooltip(Tooltip::text(
+                        "Revert this hunk to its HEAD content (also unstages)",
+                    ))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.discard_hunk(&repo_path_for_discard, hunk_index, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn render_hunk_placeholder(
+        &self,
+        ix: usize,
+        message: impl Into<SharedString>,
+        color: Color,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .id(("git-hunk-placeholder", ix))
+            .h(rems(1.5))
+            .pl(px(28.))
+            .pr_2()
+            .child(
+                Label::new(message.into())
+                    .size(LabelSize::XSmall)
+                    .color(color),
+            )
+            .into_any_element()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
