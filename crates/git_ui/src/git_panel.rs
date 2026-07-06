@@ -1769,88 +1769,6 @@ impl GitPanel {
         });
     }
 
-    fn file_history(&mut self, _: &git::FileHistory, window: &mut Window, cx: &mut Context<Self>) {
-        maybe!({
-            let entry = self.entries.get(self.selected_entry?)?.status_entry()?;
-            let active_repo = self.active_repository.as_ref()?;
-            let repo_path = entry.repo_path.clone();
-            let git_store = self.project.read(cx).git_store();
-
-            FileHistoryView::open(
-                repo_path,
-                git_store.downgrade(),
-                active_repo.downgrade(),
-                self.workspace.clone(),
-                window,
-                cx,
-            );
-
-            Some(())
-        });
-    }
-
-    fn open_file(
-        &mut self,
-        _: &menu::SecondaryConfirm,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        maybe!({
-            let entry = self.entries.get(self.selected_entry?)?.status_entry()?;
-            let active_repo = self.active_repository.as_ref()?;
-            let path = active_repo
-                .read(cx)
-                .repo_path_to_project_path(&entry.repo_path, cx)?;
-            if entry.status.is_deleted() {
-                return None;
-            }
-
-            let open_task = self
-                .workspace
-                .update(cx, |workspace, cx| {
-                    workspace.open_path_preview(path, None, false, false, true, window, cx)
-                })
-                .ok()?;
-
-            let workspace = self.workspace.clone();
-            cx.spawn_in(window, async move |_, mut cx| {
-                let item = open_task
-                    .await
-                    .notify_workspace_async_err(workspace, &mut cx)
-                    .ok_or_else(|| anyhow::anyhow!("Failed to open file"))?;
-                if let Some(active_editor) = item.downcast::<Editor>() {
-                    if let Some(diff_task) =
-                        active_editor.update(cx, |editor, _cx| editor.wait_for_diff_to_load())
-                    {
-                        diff_task.await;
-                    }
-
-                    cx.update(|window, cx| {
-                        active_editor.update(cx, |editor, cx| {
-                            editor.expand_all_diff_hunks(&ExpandAllDiffHunks, window, cx);
-
-                            let snapshot = editor.snapshot(window, cx);
-                            editor.go_to_hunk_before_or_after_position(
-                                &snapshot,
-                                language::Point::new(0, 0),
-                                Direction::Next,
-                                true,
-                                window,
-                                cx,
-                            );
-                        })
-                    })
-                    .log_err();
-                }
-
-                anyhow::Ok(())
-            })
-            .detach();
-
-            Some(())
-        });
-    }
-
     fn view_file(&mut self, _: &ViewFile, window: &mut Window, cx: &mut Context<Self>) {
         maybe!({
             let entry = self.entries.get(self.selected_entry?)?.status_entry()?;
@@ -3359,20 +3277,6 @@ impl GitPanel {
         }
     }
 
-    async fn load_commit_message_prompt(cx: &mut AsyncApp) -> String {
-        let load = async {
-            let store = cx.update(|cx| PromptStore::global(cx)).await.ok()?;
-            store
-                .update(cx, |s, cx| {
-                    s.load(PromptId::BuiltIn(BuiltInPrompt::CommitMessage), cx)
-                })
-                .await
-                .ok()
-        };
-        load.await
-            .unwrap_or_else(|| BuiltInPrompt::CommitMessage.default_content().to_string())
-    }
-
     /// Generates a commit message using an LLM.
     pub fn generate_commit_message(&mut self, cx: &mut Context<Self>) {
         if !self.can_commit() || !AgentSettings::get_global(cx).enabled(cx) {
@@ -4144,32 +4048,6 @@ impl GitPanel {
     /// is bound to a collab account and the active repo's push URL points at
     /// github.com. Other remotes (bitbucket, gitlab, self-hosted, …) return
     /// `None` so git's own user.name/user.email resolution stays in charge.
-    fn github_commit_author(&self, cx: &App) -> Option<(SharedString, SharedString)> {
-        let workspace = self.workspace.upgrade()?;
-        let workspace = workspace.read(cx);
-        let bound_id = workspace.bound_collab_account_id()?.to_string();
-        let client = workspace.client().clone();
-
-        let remote_url = self.active_repository.as_ref()?.read(cx).default_remote_url()?;
-        let provider_registry = GitHostingProviderRegistry::global(cx);
-        let (provider, _) = git::parse_git_remote_url(provider_registry, &remote_url)?;
-        if provider.name() != "GitHub" {
-            return None;
-        }
-
-        let account = client
-            .list_accounts()
-            .into_iter()
-            .find(|a| a.id == bound_id)?;
-        let login = account.login.as_deref()?;
-        let name = SharedString::from(login.to_string());
-        let email = SharedString::from(format!(
-            "{}+{}@users.noreply.github.com",
-            account.user_id, login
-        ));
-        Some((name, email))
-    }
-
     fn toggle_fill_co_authors(
         &mut self,
         _: &ToggleFillCoAuthors,
@@ -6059,15 +5937,6 @@ impl GitPanel {
         cx: &mut Context<Self>,
     ) {
         self.set_active_tab(GitPanelTab::History, window, cx);
-    }
-
-    fn activate_explorer_tab(
-        &mut self,
-        _: &ActivateExplorerTab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_active_tab(GitPanelTab::Explorer, window, cx);
     }
 
     fn set_active_tab(&mut self, tab: GitPanelTab, window: &mut Window, cx: &mut Context<Self>) {
