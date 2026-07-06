@@ -11739,10 +11739,11 @@ impl Focusable for Editor {
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut style = self.create_style(cx);
-        if matches!(
-            self.mode,
-            EditorMode::Full { .. } | EditorMode::Minimap { .. }
-        ) {
+        // Apply the per-window buffer font size (zoom) only to full editors.
+        // The minimap keeps the smaller font size set via its text_style_refinement
+        // (MINIMAP_FONT_SIZE); overriding it here would render the minimap at full
+        // zoom instead of as a miniaturized overview.
+        if matches!(self.mode, EditorMode::Full { .. }) {
             style.text.font_size = ThemeSettings::get_global(cx)
                 .buffer_font_size_in_window(window, cx)
                 .into();
