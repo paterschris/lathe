@@ -14,6 +14,239 @@
 
 use super::*;
 
+/// One rendered row in the Explorer's flat row list. Headers are interleaved
+/// with their section's entries, indexed back into `explorer_entries`.
+enum ExplorerRow {
+    Header {
+        section: ExplorerSection,
+        count: usize,
+        collapsed: bool,
+    },
+    Folder {
+        section: ExplorerSection,
+        path: SharedString,
+        name: SharedString,
+        depth: usize,
+        collapsed: bool,
+        count: usize,
+    },
+    Entry {
+        entry_ix: usize,
+        depth: usize,
+    },
+}
+
+/// One of the four section headers in the Explorer tab. Section order is
+/// fixed at Local → Remote → Worktrees → Stashes; this enum identifies which
+/// row was clicked so callers can pick the right action (checkout / activate
+/// worktree / apply stash).
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub(crate) enum ExplorerSection {
+    Local,
+    Remote,
+    Worktrees,
+    Stashes,
+}
+
+impl ExplorerSection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Local => "LOCAL",
+            Self::Remote => "REMOTE",
+            Self::Worktrees => "WORKTREES",
+            Self::Stashes => "STASHES",
+        }
+    }
+}
+
+/// Sourced rows for the Explorer tab. Each row is whatever the section list
+/// renders one of: a branch entry (local or remote), a linked-worktree entry,
+/// or a stash entry. Held in a single `Vec` keyed by index so keyboard
+/// navigation and selection can stay flat.
+#[derive(Debug, Clone)]
+pub(crate) enum ExplorerEntry {
+    LocalBranch(Branch),
+    RemoteBranch(Branch),
+    Worktree(::git::repository::Worktree),
+    Stash(::git::stash::StashEntry),
+}
+
+/// Payload for the explorer-row drag-and-drop. Carries the source branch name
+/// from the row being dragged. Dropping it onto another branch row triggers a
+/// rebase of source onto target.
+#[derive(Clone)]
+pub(crate) struct DraggedExplorerBranch {
+    pub name: SharedString,
+}
+
+pub(crate) struct DraggedBranchView {
+    pub name: SharedString,
+}
+
+impl Render for DraggedBranchView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .bg(cx.theme().colors().background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .rounded_md()
+            .px_2()
+            .py_0p5()
+            .gap_1()
+            .child(
+                Icon::new(IconName::GitBranch)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(Label::new(self.name.clone()).size(LabelSize::Small))
+    }
+}
+
+impl ExplorerEntry {
+    fn section(&self) -> ExplorerSection {
+        match self {
+            Self::LocalBranch(_) => ExplorerSection::Local,
+            Self::RemoteBranch(_) => ExplorerSection::Remote,
+            Self::Worktree(_) => ExplorerSection::Worktrees,
+            Self::Stash(_) => ExplorerSection::Stashes,
+        }
+    }
+
+    /// User-visible label used both for rendering and for filter matching.
+    fn label(&self) -> SharedString {
+        match self {
+            Self::LocalBranch(branch) | Self::RemoteBranch(branch) => {
+                SharedString::from(branch.name().to_string())
+            }
+            Self::Worktree(worktree) => worktree
+                .ref_name
+                .clone()
+                .unwrap_or_else(|| SharedString::from(worktree.sha.to_string())),
+            Self::Stash(stash) => SharedString::from(stash.message.clone()),
+        }
+    }
+
+    /// Commit the row points at. Used by the auto-scroll-to-commit
+    /// integration with the graph view. `None` for entries that don't have a
+    /// single resolvable commit (e.g. a worktree whose head couldn't be
+    /// parsed as an oid).
+    fn target_commit(&self) -> Option<::git::Oid> {
+        match self {
+            Self::LocalBranch(branch) | Self::RemoteBranch(branch) => branch
+                .most_recent_commit
+                .as_ref()
+                .and_then(|commit| ::std::str::FromStr::from_str(commit.sha.as_ref()).ok()),
+            Self::Worktree(worktree) => ::std::str::FromStr::from_str(worktree.sha.as_ref()).ok(),
+            Self::Stash(stash) => Some(stash.oid),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ExplorerFolderNode {
+    name: SharedString,
+    full_path: SharedString,
+    children: BTreeMap<SharedString, ExplorerFolderNode>,
+    entry_ix: Option<usize>,
+}
+
+impl ExplorerFolderNode {
+    fn leaf_count(&self) -> usize {
+        let mut total = if self.entry_ix.is_some() { 1 } else { 0 };
+        for child in self.children.values() {
+            total += child.leaf_count();
+        }
+        total
+    }
+}
+
+fn build_explorer_folder_tree(
+    explorer_entries: &[ExplorerEntry],
+    indices: &[usize],
+) -> ExplorerFolderNode {
+    let mut root = ExplorerFolderNode::default();
+    for &ix in indices {
+        let Some(entry) = explorer_entries.get(ix) else {
+            continue;
+        };
+        let label = entry.label();
+        let parts: Vec<&str> = label.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let mut node = &mut root;
+        let mut full_path = String::new();
+        let last = parts.len() - 1;
+        for (i, part) in parts.iter().enumerate() {
+            if !full_path.is_empty() {
+                full_path.push('/');
+            }
+            full_path.push_str(part);
+            let segment = SharedString::from(part.to_string());
+            let path = SharedString::from(full_path.clone());
+            node = node
+                .children
+                .entry(segment.clone())
+                .or_insert_with(|| ExplorerFolderNode {
+                    name: segment,
+                    full_path: path,
+                    children: BTreeMap::new(),
+                    entry_ix: None,
+                });
+            if i == last {
+                node.entry_ix = Some(ix);
+            }
+        }
+    }
+    root
+}
+
+fn flatten_folder_tree(
+    node: &ExplorerFolderNode,
+    section: ExplorerSection,
+    depth: usize,
+    rows: &mut Vec<ExplorerRow>,
+    collapsed_folders: &HashSet<(ExplorerSection, SharedString)>,
+) {
+    // GitKraken-style ordering: folders (alphabetical) first at each level,
+    // then leaf entries (alphabetical) at the same level.
+    let mut child_folders = Vec::new();
+    let mut child_leaves = Vec::new();
+    for child in node.children.values() {
+        if child.children.is_empty() && child.entry_ix.is_some() {
+            child_leaves.push(child);
+        } else {
+            child_folders.push(child);
+        }
+    }
+    for folder in child_folders {
+        let key = (section, folder.full_path.clone());
+        let is_collapsed = collapsed_folders.contains(&key);
+        rows.push(ExplorerRow::Folder {
+            section,
+            path: folder.full_path.clone(),
+            name: folder.name.clone(),
+            depth,
+            collapsed: is_collapsed,
+            count: folder.leaf_count(),
+        });
+        if !is_collapsed {
+            flatten_folder_tree(folder, section, depth + 1, rows, collapsed_folders);
+        }
+        // A "folder" that also has its own entry (e.g. a branch named exactly
+        // the same as a parent of another branch) gets a leaf row right after
+        // its folder subtree at the same depth.
+        if let Some(ix) = folder.entry_ix {
+            rows.push(ExplorerRow::Entry { entry_ix: ix, depth });
+        }
+    }
+    for leaf in child_leaves {
+        if let Some(ix) = leaf.entry_ix {
+            rows.push(ExplorerRow::Entry { entry_ix: ix, depth });
+        }
+    }
+}
+
 /// Open the raw output of a git command in a read-only editor in the center
 /// group. Used by the error toast's "View Log" action and the push-result
 /// toast. ANSI control codes are stripped via [`GitOutputHandler`] so the log
