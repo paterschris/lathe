@@ -11,7 +11,7 @@ use project::{DisableAiSettings, Project};
 use remote::RemoteConnectionOptions;
 use settings::Settings;
 pub use settings::SidebarSide;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -304,6 +304,15 @@ pub struct MultiWorkspace {
     _subscriptions: Vec<Subscription>,
     previous_focus_handle: Option<FocusHandle>,
     workspace_group_name: Option<String>,
+    /// Group-name mirror shared with each member `Workspace` so they can render
+    /// the window title's `[group]` prefix without reading this `MultiWorkspace`
+    /// entity. Reading the entity from `Workspace::apply_window_title` would
+    /// double-lease and abort when the title is refreshed from inside
+    /// `activate` (which already holds a mutable borrow of `MultiWorkspace`).
+    /// This mirrors the `active_workspace_id` cell used for chrome ownership.
+    /// `MultiWorkspace` is the only writer; workspaces only read. Kept in sync
+    /// with `workspace_group_name`.
+    shared_group_name: Rc<RefCell<Option<String>>>,
 }
 
 impl EventEmitter<MultiWorkspaceEvent> for MultiWorkspace {}
@@ -347,8 +356,14 @@ impl MultiWorkspace {
         Self::subscribe_to_workspace(&workspace, window, cx);
         let weak_self = cx.weak_entity();
         let active_workspace_id = Rc::new(Cell::new(workspace.entity_id()));
+        let shared_group_name = Rc::new(RefCell::new(None));
         workspace.update(cx, |workspace, cx| {
-            workspace.set_multi_workspace(weak_self, active_workspace_id.clone(), cx);
+            workspace.set_multi_workspace(
+                weak_self,
+                active_workspace_id.clone(),
+                shared_group_name.clone(),
+                cx,
+            );
         });
         Self {
             window_id: window.window_handle().window_id(),
@@ -356,6 +371,7 @@ impl MultiWorkspace {
             project_groups: Vec::new(),
             active_workspace: workspace,
             active_workspace_id,
+            shared_group_name,
             sidebar: None,
             sidebar_open: false,
             sidebar_overlay: None,
@@ -758,8 +774,14 @@ impl MultiWorkspace {
         Self::subscribe_to_workspace(workspace, window, cx);
         let weak_self = cx.weak_entity();
         let active_workspace_id = self.active_workspace_id.clone();
+        let shared_group_name = self.shared_group_name.clone();
         workspace.update(cx, |workspace, cx| {
-            workspace.set_multi_workspace(weak_self, active_workspace_id, cx);
+            workspace.set_multi_workspace(
+                weak_self,
+                active_workspace_id,
+                shared_group_name,
+                cx,
+            );
         });
 
         let entity = cx.entity();
@@ -1455,6 +1477,7 @@ impl MultiWorkspace {
     }
 
     pub fn set_workspace_group_name(&mut self, name: Option<String>) {
+        *self.shared_group_name.borrow_mut() = name.clone();
         self.workspace_group_name = name;
     }
 

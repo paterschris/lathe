@@ -1428,6 +1428,12 @@ pub struct Workspace {
     /// use this instead of going through the `multi_workspace` field to avoid
     /// reading it as we might end up in a double lease otherwise.
     active_workspace_id: Option<Rc<Cell<EntityId>>>,
+    /// Group name shared from the parent `MultiWorkspace`, read when building
+    /// the window title's `[group]` prefix. We read this instead of the
+    /// `multi_workspace` entity to avoid a double lease: `apply_window_title`
+    /// can be invoked while `MultiWorkspace` is already mutably borrowed (during
+    /// `activate` -> `refresh_window_state`), and reading the entity there aborts.
+    shared_group_name: Option<Rc<RefCell<Option<String>>>>,
     active_worktree_creation: ActiveWorktreeCreation,
     deferred_save_items: Vec<Box<dyn WeakItemHandle>>,
     bound_collab_account_id: Option<String>,
@@ -1878,6 +1884,7 @@ impl Workspace {
             sidebar_focus_handle: None,
             multi_workspace,
             active_workspace_id: None,
+            shared_group_name: None,
             active_worktree_creation: ActiveWorktreeCreation::default(),
             open_in_dev_container: false,
             _dev_container_task: None,
@@ -2615,6 +2622,7 @@ impl Workspace {
         &mut self,
         multi_workspace: WeakEntity<MultiWorkspace>,
         active_workspace_id: Rc<Cell<EntityId>>,
+        shared_group_name: Rc<RefCell<Option<String>>>,
         cx: &mut App,
     ) {
         self.status_bar.update(cx, |status_bar, cx| {
@@ -2622,6 +2630,7 @@ impl Workspace {
         });
         self.multi_workspace = Some(multi_workspace);
         self.active_workspace_id = Some(active_workspace_id);
+        self.shared_group_name = Some(shared_group_name);
     }
 
     pub fn app_state(&self) -> &Arc<AppState> {
@@ -6369,11 +6378,15 @@ impl Workspace {
         let project = self.project().read(cx);
         let mut title = String::new();
 
+        // Read the group name from the shared cell rather than
+        // `self.multi_workspace.read(cx)`: this can run while `MultiWorkspace` is
+        // already mutably borrowed (from `activate` -> `refresh_window_state`), so
+        // reading the entity here would double-lease and abort. `try_borrow`
+        // keeps this panic-free even if the cell is somehow borrowed concurrently.
         if let Some(name) = self
-            .multi_workspace
+            .shared_group_name
             .as_ref()
-            .and_then(|mw| mw.upgrade())
-            .and_then(|mw| mw.read(cx).workspace_group_name().map(str::to_owned))
+            .and_then(|cell| cell.try_borrow().ok().and_then(|name| name.clone()))
         {
             title.push('[');
             title.push_str(&name);
