@@ -379,7 +379,14 @@ pub fn panic_hook(crash_client: Arc<Client>, message: &str, location: Option<&Lo
     log::error!("triggering a crash to generate a minidump...");
 
     #[cfg(target_os = "macos")]
-    macos::set_panic_thread_id();
+    {
+        macos::set_panic_thread_id();
+        // Tell the user we're going down before we abort. This panic hook is only
+        // installed for GUI launches (see `crashes::init` in the app's `main`);
+        // terminal/dev runs use `force_backtrace` instead, so this never fires in
+        // headless or test contexts.
+        macos::notify_user_of_crash(&location);
+    }
     #[cfg(target_os = "windows")]
     {
         // https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-
@@ -431,6 +438,46 @@ mod macos {
             if t != current {
                 unsafe { mach2::thread_act::thread_resume(t) };
             }
+        }
+    }
+
+    /// Show a native alert telling the user Lathe hit an unexpected error and is
+    /// quitting, then return immediately. We spawn `osascript` without waiting so
+    /// the dialog outlives our imminent `abort()` (the child is reparented to
+    /// `launchd`) and the crash-reporting path is never blocked. `giving up
+    /// after` bounds the dialog's lifetime so an unattended session (e.g. a
+    /// non-pty GUI launch on a build machine) can't leave it up forever.
+    pub(super) fn notify_user_of_crash(location: &str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Only the first thread to panic gets to notify; abort() takes the rest
+        // down, so a second dialog would be noise.
+        static NOTIFIED: AtomicBool = AtomicBool::new(false);
+        if NOTIFIED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+
+        // Strip characters that would break out of the AppleScript string literal.
+        let sanitized_location: String = location
+            .chars()
+            .filter(|character| !matches!(character, '"' | '\\'))
+            .collect();
+        let script = format!(
+            "display dialog \"Lathe hit an unexpected error and needs to quit.\n\n\
+             A crash report has been saved. Location: {sanitized_location}\" \
+             with title \"Lathe quit unexpectedly\" with icon stop \
+             buttons {{\"OK\"}} default button \"OK\" giving up after 30"
+        );
+
+        if let Err(error) = std::process::Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(&script)
+            .spawn()
+        {
+            eprintln!("failed to show crash notification dialog: {error:?}");
         }
     }
 }
