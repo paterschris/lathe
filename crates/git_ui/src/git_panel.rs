@@ -847,7 +847,7 @@ pub struct GitPanel {
     /// inline switcher + bulk actions; expanded by default so the repository
     /// list is visible on launch. Only shown for multi-repo workspaces.
     repos_strip_expanded: bool,
-    /// Set whenever a cached `HunkLoadState` BufferDiff emits a change so the
+    /// Set whenever a cached `lathe::HunkLoadState` BufferDiff emits a change so the
     /// next render rebuilds visible entries. Required to keep the hunk
     /// subtree in sync with stage / unstage / restore performed in the diff
     /// view (which edits the buffer + diff but doesn't otherwise notify the
@@ -2643,42 +2643,6 @@ impl GitPanel {
     /// `stash_entries_with_message` under the hood (the same plumbing the
     /// discard-with-safety-net flow uses) so single-file stashes show up in
     /// `git stash list` like any other entry.
-    pub fn stash_selected(
-        &mut self,
-        _: &StashFile,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(active_repository) = self.active_repository.clone() else {
-            return;
-        };
-        let Some(status_entry) = self
-            .get_selected_entry()
-            .and_then(|entry| entry.status_entry())
-            .cloned()
-        else {
-            return;
-        };
-
-        let path = status_entry.repo_path;
-        let message = format!("lathe-stash-file {}", path.as_unix_str());
-
-        cx.spawn(async move |this, cx| {
-            let stash_task = active_repository.update(cx, |repo, cx| {
-                repo.stash_entries_with_message(vec![path], message, cx)
-            });
-            let result = stash_task.await;
-            this.update(cx, |this, cx| {
-                if let Err(error) = result {
-                    this.show_error_toast("stash file", error, cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     pub fn commit_message_buffer(&self, cx: &App) -> Entity<Buffer> {
         self.commit_editor
             .read(cx)

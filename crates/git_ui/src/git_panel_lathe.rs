@@ -2250,6 +2250,44 @@ impl super::GitPanel {
     }
 }
 
+impl super::GitPanel {
+    pub(super) fn stash_selected(
+        &mut self,
+        _: &StashFile,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active_repository) = self.active_repository.clone() else {
+            return;
+        };
+        let Some(status_entry) = self
+            .get_selected_entry()
+            .and_then(|entry| entry.status_entry())
+            .cloned()
+        else {
+            return;
+        };
+
+        let path = status_entry.repo_path;
+        let message = format!("lathe-stash-file {}", path.as_unix_str());
+
+        cx.spawn(async move |this, cx| {
+            let stash_task = active_repository.update(cx, |repo, cx| {
+                repo.stash_entries_with_message(vec![path], message, cx)
+            });
+            let result = stash_task.await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.show_error_toast("stash file", error, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
