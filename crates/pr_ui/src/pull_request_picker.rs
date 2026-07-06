@@ -73,7 +73,12 @@ impl PullRequestPicker {
                         }
                         Err(error) => {
                             picker.delegate.status =
-                                PickerStatus::Failed(format!("{error}").into());
+                                match error.downcast_ref::<git::PullRequestAuthError>() {
+                                    Some(auth_error) => PickerStatus::AuthExpired {
+                                        host: auth_error.host.clone(),
+                                    },
+                                    None => PickerStatus::Failed(format!("{error}").into()),
+                                };
                         }
                     }
                     cx.notify();
@@ -110,6 +115,8 @@ enum PickerStatus {
     Loading,
     Loaded,
     Failed(SharedString),
+    /// A pull-request call returned HTTP 401; the row offers a reconnect.
+    AuthExpired { host: SharedString },
 }
 
 pub struct PullRequestPickerDelegate {
@@ -161,6 +168,7 @@ async fn load_pull_requests(
     let filter = PullRequestListFilter {
         states: Some(vec![PullRequestState::Open]),
         author: None,
+        reviewer_is_me: false,
         limit: Some(50),
     };
     // Cloning the parsed remote requires reconstruction since the struct
@@ -316,6 +324,29 @@ impl PickerDelegate for PullRequestPickerDelegate {
                         .size(LabelSize::Small),
                 ),
             ),
+            PickerStatus::AuthExpired { host } => {
+                let host_for_action = host.to_string();
+                let display = git::git_host_credentials::GitHostKind::from_host(host)
+                    .map(|kind| kind.display_name())
+                    .unwrap_or("the git host");
+                Some(
+                    ListItem::new(ix)
+                        .inset(true)
+                        .on_click(move |_, window, cx| {
+                            window.dispatch_action(
+                                Box::new(zed_actions::ConnectGitHost {
+                                    host: host_for_action.clone(),
+                                }),
+                                cx,
+                            );
+                        })
+                        .child(
+                            Label::new(format!("{display} sign-in expired. Click to reconnect."))
+                                .color(Color::Error)
+                                .size(LabelSize::Small),
+                        ),
+                )
+            }
             PickerStatus::Loaded => {
                 if self.filtered_entries.is_empty() {
                     return Some(

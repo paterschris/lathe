@@ -1528,8 +1528,11 @@ impl EditorElement {
                 editor.buffer.read(cx).as_singleton().as_ref(),
                 cx,
             );
+        // The PR review "add comment" gutter button reuses this hover indicator
+        // but is not gated behind the diff-review feature flag or AI settings.
+        let show_gutter_review_button = show_diff_review || editor.show_pr_comment_gutter_button();
 
-        let diff_review_indicator = if gutter_hovered && show_diff_review {
+        let diff_review_indicator = if gutter_hovered && show_gutter_review_button {
             let is_visible = editor
                 .gutter_diff_review_indicator
                 .0
@@ -3492,13 +3495,16 @@ impl EditorElement {
         snapshot: &EditorSnapshot,
         cx: &App,
     ) -> Option<(DisplayRow, Option<u32>)> {
-        if !cx.has_flag::<DiffReviewFeatureFlag>() {
-            return None;
-        }
-
-        let show_diff_review_button = self.editor.read(cx).show_diff_review_button();
-        if !show_diff_review_button {
-            return None;
+        // The PR review "add comment" button reuses this hover indicator but is
+        // not gated behind the diff-review feature flag; the local diff-review
+        // button requires both the flag and its own toggle.
+        if !self.editor.read(cx).show_pr_comment_gutter_button() {
+            if !cx.has_flag::<DiffReviewFeatureFlag>() {
+                return None;
+            }
+            if !self.editor.read(cx).show_diff_review_button() {
+                return None;
+            }
         }
 
         let indicator = self.editor.read(cx).gutter_diff_review_indicator.0?;
@@ -11285,9 +11291,19 @@ impl Element for EditorElement {
                             };
 
                             let button = self.editor.update(cx, |editor, cx| {
-                                editor
-                                    .render_diff_review_button(display_row, button_width, cx)
-                                    .into_any_element()
+                                if editor.show_pr_comment_gutter_button() {
+                                    editor
+                                        .render_pr_comment_gutter_button(
+                                            display_row,
+                                            button_width,
+                                            cx,
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    editor
+                                        .render_diff_review_button(display_row, button_width, cx)
+                                        .into_any_element()
+                                }
                             });
                             gutter.prepaint_button(button, display_row, window, cx)
                         });

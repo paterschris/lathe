@@ -12,14 +12,16 @@ use itertools::Itertools as _;
 use regex::Regex;
 use serde::{Deserialize, de::DeserializeOwned};
 use url::Url;
+use urlencoding::encode;
+use util::ResultExt as _;
 
 use git::{
-    BuildCommitPermalinkParams, BuildPermalinkParams, GitHostAuth, GitHostingProvider,
-    ParsedGitRemote, PullRequest, PullRequestDetail, PullRequestListFilter, PullRequestMergeMethod,
-    PullRequestReviewComment, PullRequestReviewVerdict, PullRequestState, PullRequestSummary,
-    RemoteUrl,
+    BuildCommitPermalinkParams, BuildPermalinkParams, DiffCommentSide, GitHostAuth,
+    GitHostingProvider, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
+    PullRequestListFilter,
+    PullRequestMergeMethod, PullRequestReviewComment, PullRequestReviewVerdict, PullRequestReviewer,
+    PullRequestState, PullRequestSummary, RemoteUrl,
 };
-use urlencoding::encode;
 
 use crate::get_host_from_git_remote_url;
 
@@ -191,6 +193,27 @@ impl Bitbucket {
                 .map(|commit| commit.author.user.links.avatar.map(|link| link.href))
         }
         .context("failed to deserialize BitBucket commit details")
+    }
+
+    /// Fetch the UUID of the user the supplied credential authenticates as, so
+    /// the PR list can be filtered to reviews assigned to them. Requires the
+    /// credential to carry the `account` scope.
+    async fn fetch_authenticated_uuid(
+        &self,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("Bitbucket base URL has no host")?;
+        let url = format!("https://api.{host}/2.0/user");
+        let request = bitbucket_request(BitbucketMethod::Get, &url, auth, None)?;
+        let bytes =
+            bitbucket_send(http_client, request, "fetching authenticated Bitbucket user").await?;
+        let user: AuthenticatedBitbucketUser =
+            serde_json::from_slice(&bytes).context("parsing authenticated Bitbucket user")?;
+        Ok(user.uuid.map(SharedString::from))
     }
 }
 
@@ -371,21 +394,91 @@ impl GitHostingProvider for Bitbucket {
             bail!("pull request operations are only supported on Bitbucket Cloud");
         }
         let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let limit = filter.limit.unwrap_or(50);
+        let viewer_uuid = if filter.reviewer_is_me {
+            Some(
+                self.fetch_authenticated_uuid(&auth, &http_client)
+                    .await?
+                    .context(
+                        "could not determine the authenticated Bitbucket user; \
+                         the credential may lack the account scope",
+                    )?,
+            )
+        } else {
+            None
+        };
+        // "Awaiting my review" can't be filtered server-side: Bitbucket's query
+        // language only indexes `reviewers`/`author`, not `participants`
+        // (`participants.uuid` 400s), and the top-level `reviewers` array omits
+        // still-awaiting default/group reviewers. So scan open PRs with their
+        // participants pulled inline (`+values.participants`) and filter
+        // client-side below. Scan well past `limit` since most rows get dropped.
+        let scan_cap = if viewer_uuid.is_some() {
+            (limit as usize).max(200)
+        } else {
+            limit as usize
+        };
         let state_query = bitbucket_states(&filter)
             .iter()
             .map(|state| format!("state={state}"))
             .collect::<Vec<_>>()
             .join("&");
-        let limit = filter.limit.unwrap_or(50);
-        let first_url = format!("{api_base}/pullrequests?{state_query}&pagelen=50&sort=-updated_on");
-        let raw: Vec<BitbucketPullRequest> = bitbucket_get_paginated(
+        let first_url = if viewer_uuid.is_some() {
+            format!(
+                "{api_base}/pullrequests?{state_query}&pagelen=50&sort=-updated_on&fields=%2Bvalues.participants"
+            )
+        } else {
+            format!("{api_base}/pullrequests?{state_query}&pagelen=50&sort=-updated_on")
+        };
+        let mut raw: Vec<BitbucketPullRequest> = bitbucket_get_paginated(
             &http_client,
             first_url,
             &auth,
             "listing Bitbucket pull requests",
-            limit as usize,
+            scan_cap,
         )
         .await?;
+
+        // Fallback: some Bitbucket responses ignore `+values.participants` on the
+        // list endpoint (participants only ride along on the single-PR detail). If
+        // no row carried any participants, hydrate them per-PR with bounded
+        // concurrency so the reviewer filter still has data to work with.
+        if viewer_uuid.is_some()
+            && !raw.is_empty()
+            && raw.iter().all(|pr| pr.participants.is_empty())
+        {
+            let mut hydrated: HashMap<u32, Vec<BitbucketParticipant>> = HashMap::new();
+            for chunk in raw.chunks(8) {
+                let fetches = chunk.iter().map(|pr| {
+                    let http_client = http_client.clone();
+                    let auth = auth.clone();
+                    let url = format!("{api_base}/pullrequests/{}", pr.id);
+                    let id = pr.id;
+                    async move {
+                        let request = bitbucket_request(BitbucketMethod::Get, &url, &auth, None)?;
+                        let bytes = bitbucket_send(
+                            &http_client,
+                            request,
+                            "hydrating Bitbucket pull request participants",
+                        )
+                        .await?;
+                        let detail: BitbucketPullRequest = serde_json::from_slice(&bytes)
+                            .context("parsing Bitbucket pull request")?;
+                        anyhow::Ok((id, detail.participants))
+                    }
+                });
+                for (id, participants) in
+                    futures::future::join_all(fetches).await.into_iter().flatten()
+                {
+                    hydrated.insert(id, participants);
+                }
+            }
+            for pr in &mut raw {
+                if let Some(participants) = hydrated.remove(&pr.id) {
+                    pr.participants = participants;
+                }
+            }
+        }
 
         let mut summaries = Vec::new();
         for pr in raw {
@@ -397,6 +490,14 @@ impl GitHostingProvider for Bitbucket {
                     .map(|account| account.login())
                     .unwrap_or_default();
                 if !login.to_lowercase().contains(&author.to_lowercase()) {
+                    continue;
+                }
+            }
+            // "Awaiting my review": keep only PRs where I'm a reviewer who hasn't
+            // approved or requested changes yet. Comment-only participation still
+            // counts as awaiting, matching the host's own "needs my review" view.
+            if let Some(uuid) = &viewer_uuid {
+                if !pr.is_awaiting_reviewer(uuid) {
                     continue;
                 }
             }
@@ -424,7 +525,57 @@ impl GitHostingProvider for Bitbucket {
         let bytes = bitbucket_send(&http_client, request, "fetching Bitbucket pull request").await?;
         let pr: BitbucketPullRequest =
             serde_json::from_slice(&bytes).context("parsing Bitbucket pull request")?;
-        pr.into_detail()
+        // Resolve the viewer's own review from the participants before consuming
+        // `pr`. Best-effort: failing to resolve the account uuid just leaves the
+        // review state unknown rather than failing the load.
+        let viewer_uuid = self
+            .fetch_authenticated_uuid(&auth, &http_client)
+            .await
+            .log_err()
+            .flatten();
+        let viewer_review = viewer_uuid.as_deref().and_then(|uuid| pr.viewer_review(uuid));
+        let reviewers = pr.reviewers(viewer_uuid.as_deref());
+        let mut detail = pr.into_detail()?;
+        detail.viewer_review = viewer_review;
+        detail.reviewers = reviewers;
+        // The PR object carries no commit count, so fetch the commits and count
+        // them. This is best-effort: a failure leaves `commits` unset rather than
+        // failing the whole PR load. `max_items` bounds the walk for very large
+        // PRs, in which case the count is a lower bound.
+        let commits_url = format!("{api_base}/pullrequests/{number}/commits?pagelen=100");
+        detail.commits = bitbucket_get_paginated::<BitbucketCommitId>(
+            &http_client,
+            commits_url,
+            &auth,
+            "fetching Bitbucket pull request commits",
+            250,
+        )
+        .await
+        .log_err()
+        .map(|commits| commits.len() as u32);
+        Ok(detail)
+    }
+
+    async fn pull_request_review_state(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<PullRequestReviewVerdict>> {
+        if self.is_self_hosted() {
+            return Ok(None);
+        }
+        let Some(uuid) = self.fetch_authenticated_uuid(&auth, &http_client).await? else {
+            return Ok(None);
+        };
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let url = format!("{api_base}/pullrequests/{number}");
+        let request = bitbucket_request(BitbucketMethod::Get, &url, &auth, None)?;
+        let bytes = bitbucket_send(&http_client, request, "fetching Bitbucket pull request").await?;
+        let pr: BitbucketPullRequest =
+            serde_json::from_slice(&bytes).context("parsing Bitbucket pull request")?;
+        Ok(pr.viewer_review(uuid.as_ref()))
     }
 
     async fn get_pull_request_diff(
@@ -595,6 +746,40 @@ impl GitHostingProvider for Bitbucket {
         bitbucket_send(&http_client, request, "posting Bitbucket review comment").await?;
         Ok(())
     }
+
+    async fn create_review_comment(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        _commit_id: SharedString,
+        path: SharedString,
+        line: u32,
+        side: DiffCommentSide,
+        body: SharedString,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        if self.is_self_hosted() {
+            bail!("pull request operations are only supported on Bitbucket Cloud");
+        }
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let url = format!("{api_base}/pullrequests/{number}/comments");
+        // Bitbucket anchors an inline comment by file path and a line number on
+        // one side of the diff: `to` is the destination (post-image) line, `from`
+        // is the source (pre-image) line.
+        let inline = match side {
+            DiffCommentSide::Right => serde_json::json!({ "path": path.to_string(), "to": line }),
+            DiffCommentSide::Left => serde_json::json!({ "path": path.to_string(), "from": line }),
+        };
+        let payload = serde_json::json!({
+            "content": { "raw": body.to_string() },
+            "inline": inline,
+        });
+        let body = serde_json::to_vec(&payload)?;
+        let request = bitbucket_request(BitbucketMethod::Post, &url, &auth, Some(body))?;
+        bitbucket_send(&http_client, request, "creating Bitbucket review comment").await?;
+        Ok(())
+    }
 }
 
 enum BitbucketMethod {
@@ -665,6 +850,12 @@ async fn bitbucket_send(
         .with_context(|| format!("error while {context}"))?;
     let mut bytes = Vec::new();
     response.body_mut().read_to_end(&mut bytes).await?;
+    if response.status().as_u16() == 401 {
+        return Err(PullRequestAuthError {
+            host: "bitbucket.org".into(),
+        }
+        .into());
+    }
     if !response.status().is_success() {
         let text = String::from_utf8_lossy(&bytes);
         bail!(
@@ -729,6 +920,17 @@ fn bitbucket_states(filter: &PullRequestListFilter) -> Vec<&'static str> {
             result
         }
     }
+}
+
+/// A pull request commit. Only the number of these is used (for the header's
+/// commit count), so no fields are deserialized.
+#[derive(Deserialize)]
+struct BitbucketCommitId {}
+
+#[derive(Deserialize)]
+struct AuthenticatedBitbucketUser {
+    #[serde(default)]
+    uuid: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -823,12 +1025,113 @@ struct BitbucketPullRequest {
     #[serde(default)]
     updated_on: Option<String>,
     #[serde(default)]
+    created_on: Option<String>,
+    #[serde(default)]
     summary: Option<BitbucketContent>,
     #[serde(default)]
     draft: bool,
+    /// Reviewers and other participants, each carrying their own approval state.
+    /// Present on the single-PR detail response; absent from list summaries.
+    #[serde(default)]
+    participants: Vec<BitbucketParticipant>,
+}
+
+/// A participant on a Bitbucket pull request. `approved` and `state` together
+/// describe a reviewer's verdict: `state` is `"approved"`, `"changes_requested"`,
+/// or absent when they have not weighed in.
+#[derive(Deserialize)]
+struct BitbucketParticipant {
+    #[serde(default)]
+    user: Option<BitbucketAccount>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    approved: bool,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+/// Maps a Bitbucket participant's approval flags to a review verdict: a blocking
+/// review is `state == "changes_requested"`; an approval is `approved == true`
+/// (Bitbucket also sets `state == "approved"`).
+fn participant_verdict(participant: &BitbucketParticipant) -> Option<PullRequestReviewVerdict> {
+    if participant.state.as_deref() == Some("changes_requested") {
+        Some(PullRequestReviewVerdict::RequestChanges)
+    } else if participant.approved || participant.state.as_deref() == Some("approved") {
+        Some(PullRequestReviewVerdict::Approve)
+    } else {
+        None
+    }
 }
 
 impl BitbucketPullRequest {
+    /// The authenticated user's current review verdict, resolved by matching
+    /// their account uuid against the PR participants. Bitbucket reports a
+    /// blocking review as `state == "changes_requested"` and an approval as
+    /// `approved == true` (alongside `state == "approved"`).
+    fn viewer_review(&self, viewer_uuid: &str) -> Option<PullRequestReviewVerdict> {
+        let participant = self.participants.iter().find(|participant| {
+            participant
+                .user
+                .as_ref()
+                .and_then(|user| user.uuid.as_deref())
+                .is_some_and(|uuid| uuid == viewer_uuid)
+        })?;
+        participant_verdict(participant)
+    }
+
+    /// Whether the authenticated user (matched by account uuid) is a designated
+    /// reviewer on this PR who has not yet approved or requested changes.
+    /// Comment-only participation still counts as awaiting, matching Bitbucket's
+    /// own "needs my review" view. Reviewers added via a default-reviewer group
+    /// are materialized as participants with role REVIEWER, so this catches them
+    /// even when the top-level `reviewers` array omits them.
+    fn is_awaiting_reviewer(&self, viewer_uuid: &str) -> bool {
+        self.participants
+            .iter()
+            .find(|participant| {
+                participant
+                    .user
+                    .as_ref()
+                    .and_then(|user| user.uuid.as_deref())
+                    == Some(viewer_uuid)
+            })
+            .is_some_and(|participant| {
+                participant
+                    .role
+                    .as_deref()
+                    .is_some_and(|role| role.eq_ignore_ascii_case("REVIEWER"))
+                    && participant_verdict(participant).is_none()
+            })
+    }
+
+    /// All reviewers (participants with the REVIEWER role) and their verdicts, in
+    /// the order Bitbucket returns them. `viewer_uuid` marks the authenticated
+    /// user's own entry.
+    fn reviewers(&self, viewer_uuid: Option<&str>) -> Vec<PullRequestReviewer> {
+        self.participants
+            .iter()
+            .filter(|participant| {
+                participant
+                    .role
+                    .as_deref()
+                    .is_some_and(|role| role.eq_ignore_ascii_case("REVIEWER"))
+            })
+            .map(|participant| {
+                let user = participant.user.as_ref();
+                let uuid = user.and_then(|user| user.uuid.as_deref());
+                let login = user
+                    .and_then(|user| user.display_name.as_deref().or(user.nickname.as_deref()))
+                    .unwrap_or("Reviewer");
+                PullRequestReviewer {
+                    login: SharedString::from(login.to_string()),
+                    verdict: participant_verdict(participant),
+                    is_me: matches!((uuid, viewer_uuid), (Some(a), Some(b)) if a == b),
+                }
+            })
+            .collect()
+    }
+
     fn pull_request_state(&self) -> PullRequestState {
         match self.state.as_str() {
             "MERGED" => PullRequestState::Merged,
@@ -891,6 +1194,7 @@ impl BitbucketPullRequest {
         let base_sha = Self::commit_hash(&self.destination);
         let url = self.html_url()?;
         let updated_at: SharedString = self.updated_on.clone().unwrap_or_default().into();
+        let created_at: SharedString = self.created_on.clone().unwrap_or_default().into();
         let body: SharedString = self
             .summary
             .as_ref()
@@ -908,6 +1212,7 @@ impl BitbucketPullRequest {
             head_sha,
             base_sha,
             url,
+            created_at,
             updated_at,
             is_draft: self.draft,
             // Bitbucket does not expose mergeability or line-change stats on the
@@ -916,6 +1221,13 @@ impl BitbucketPullRequest {
             additions: 0,
             deletions: 0,
             changed_files: 0,
+            // Filled in by `get_pull_request` via a separate commits request; the
+            // PR object itself carries no commit count.
+            commits: None,
+            // Resolved by `get_pull_request` from the PR's participants once the
+            // authenticated account's uuid is known.
+            viewer_review: None,
+            reviewers: Vec::new(),
         })
     }
 }
@@ -1013,6 +1325,47 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use http_client::FakeHttpClient;
+
+    #[test]
+    fn test_bitbucket_send_maps_401_to_auth_error() {
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(|_request| async move {
+            Ok(http_client::Response::builder()
+                .status(401)
+                .body("Unauthorized".into())
+                .unwrap())
+        });
+        let request = Request::get("https://api.bitbucket.org/2.0/user")
+            .body(AsyncBody::empty())
+            .unwrap();
+
+        let error = futures::executor::block_on(bitbucket_send(&client, request, "load user"))
+            .expect_err("a 401 response should be an error");
+        let auth_error = error
+            .downcast_ref::<PullRequestAuthError>()
+            .expect("a 401 should map to PullRequestAuthError");
+        assert_eq!(auth_error.host.as_ref(), "bitbucket.org");
+    }
+
+    #[test]
+    fn test_bitbucket_send_non_401_failure_is_generic() {
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(|_request| async move {
+            Ok(http_client::Response::builder()
+                .status(500)
+                .body("boom".into())
+                .unwrap())
+        });
+        let request = Request::get("https://api.bitbucket.org/2.0/user")
+            .body(AsyncBody::empty())
+            .unwrap();
+
+        let error = futures::executor::block_on(bitbucket_send(&client, request, "load user"))
+            .expect_err("a 500 response should be an error");
+        assert!(
+            error.downcast_ref::<PullRequestAuthError>().is_none(),
+            "non-401 failures should not be treated as an auth error"
+        );
+    }
 
     #[test]
     fn test_parse_remote_url_given_ssh_url() {
@@ -1380,6 +1733,7 @@ mod tests {
             "destination": { "branch": { "name": "main" }, "commit": { "hash": "basesha" } },
             "links": { "html": { "href": "https://bitbucket.org/owner/repo/pull-requests/7" } },
             "updated_on": "2026-01-03T00:00:00Z",
+            "created_on": "2026-01-01T00:00:00Z",
             "summary": { "raw": "Detailed body" }
         }"#;
         let pr: BitbucketPullRequest = serde_json::from_str(json).unwrap();
@@ -1391,11 +1745,43 @@ mod tests {
         assert_eq!(detail.base_sha.to_string(), "basesha");
         // display_name is used when nickname is absent.
         assert_eq!(detail.author_login.to_string(), "Octo Cat");
+        assert_eq!(detail.created_at.to_string(), "2026-01-01T00:00:00Z");
         // Bitbucket Cloud does not report these on the PR object.
         assert_eq!(detail.is_mergeable, None);
         assert_eq!(detail.additions, 0);
         assert_eq!(detail.deletions, 0);
         assert_eq!(detail.changed_files, 0);
+        // The commit count comes from a separate request in `get_pull_request`.
+        assert_eq!(detail.commits, None);
+    }
+
+    #[test]
+    fn test_bitbucket_viewer_review_from_participants() {
+        let json = r#"{
+            "id": 9,
+            "title": "Tinted buttons",
+            "state": "OPEN",
+            "links": { "html": { "href": "https://bitbucket.org/owner/repo/pull-requests/9" } },
+            "participants": [
+                { "user": { "uuid": "{approver}" }, "approved": true, "state": "approved" },
+                { "user": { "uuid": "{blocker}" }, "approved": false, "state": "changes_requested" },
+                { "user": { "uuid": "{lurker}" }, "approved": false, "state": null }
+            ]
+        }"#;
+        let pr: BitbucketPullRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            pr.viewer_review("{approver}"),
+            Some(PullRequestReviewVerdict::Approve)
+        );
+        assert_eq!(
+            pr.viewer_review("{blocker}"),
+            Some(PullRequestReviewVerdict::RequestChanges)
+        );
+        // A participant who has neither approved nor blocked has no verdict.
+        assert_eq!(pr.viewer_review("{lurker}"), None);
+        // An account that is not a participant has no verdict.
+        assert_eq!(pr.viewer_review("{stranger}"), None);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use collections::HashMap;
 use credentials_provider::CredentialsProvider;
-use gpui::{App, AsyncApp, Global};
+use gpui::{App, AsyncApp, Context, Global, Subscription};
 
 use crate::hosting_provider::GitHostAuth;
 
@@ -145,4 +145,16 @@ pub fn refresh_connections(cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// Registers `on_change` to run whenever the set of connected git hosts changes
+/// (a host is connected or disconnected, which goes through `refresh_connections`
+/// after [`set`] / [`clear`]). Pull-request views use this to reload after the
+/// user reconnects an expired account. The returned [`Subscription`] must be
+/// retained for the callback to stay active.
+pub fn observe_connections<T: 'static>(
+    cx: &mut Context<T>,
+    on_change: impl FnMut(&mut T, &mut Context<T>) + 'static,
+) -> Subscription {
+    cx.observe_global::<GitHostConnections>(on_change)
 }

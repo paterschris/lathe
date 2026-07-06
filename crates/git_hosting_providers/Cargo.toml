@@ -33,3 +33,4 @@ indoc.workspace = true
 serde_json.workspace = true
 pretty_assertions.workspace = true
 git = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }

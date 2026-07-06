@@ -48,6 +48,14 @@ pub struct PullRequestListFilter {
     pub states: Option<Vec<PullRequestState>>,
     /// Restrict to PRs authored by this login (substring match).
     pub author: Option<SharedString>,
+    /// When `true`, restrict to PRs where the authenticated user is a requested
+    /// reviewer. The provider resolves "me" itself (GitHub matches the login in
+    /// `requested_reviewers`; Bitbucket queries `reviewers.uuid`). Note the
+    /// semantics differ slightly per host: GitHub drops a reviewer from
+    /// `requested_reviewers` once they submit a review, so this surfaces PRs
+    /// still awaiting your review, whereas Bitbucket keeps you in `reviewers`
+    /// regardless of whether you have already reviewed.
+    pub reviewer_is_me: bool,
     /// Cap on returned PRs. `None` = whatever the provider's default is.
     pub limit: Option<u32>,
 }
@@ -67,6 +75,9 @@ pub struct PullRequestDetail {
     pub head_sha: SharedString,
     pub base_sha: SharedString,
     pub url: Url,
+    /// ISO-8601 timestamp string for when the PR was opened, as returned by the
+    /// host. The detail view renders it as a calendar date in the header.
+    pub created_at: SharedString,
     pub updated_at: SharedString,
     pub is_draft: bool,
     /// `Some(true)` if the host can fast-forward or auto-merge; `Some(false)`
@@ -75,6 +86,31 @@ pub struct PullRequestDetail {
     pub additions: u32,
     pub deletions: u32,
     pub changed_files: u32,
+    /// Number of commits on the PR when the host reports it. `None` when the
+    /// host doesn't expose a count; the header omits the commit chip in that case.
+    pub commits: Option<u32>,
+    /// The authenticated user's own current review on this PR, when known.
+    /// `Some(Approve)` if they have approved, `Some(RequestChanges)` if they
+    /// have a blocking review, `Some(Comment)` for a comment-only review, and
+    /// `None` when they have not reviewed (or the host didn't report it). Lets
+    /// the detail view reflect what the viewer has already done rather than
+    /// always offering a fresh Approve / Request changes. Best-effort: providers
+    /// resolve it with extra requests and leave it `None` on any failure.
+    pub viewer_review: Option<PullRequestReviewVerdict>,
+    /// All reviewers on the PR and their latest verdict. `verdict: None` means a
+    /// requested reviewer who has not submitted a review yet (pending). Best-effort:
+    /// providers populate it where the host exposes it and leave it empty on failure.
+    pub reviewers: Vec<PullRequestReviewer>,
+}
+
+/// A reviewer on a pull request and their latest review state.
+#[derive(Debug, Clone)]
+pub struct PullRequestReviewer {
+    pub login: SharedString,
+    /// Latest verdict, or `None` if requested but not yet reviewed (pending).
+    pub verdict: Option<PullRequestReviewVerdict>,
+    /// True when this reviewer is the authenticated user.
+    pub is_me: bool,
 }
 
 /// How a pull request should be combined into the target branch.
@@ -153,6 +189,28 @@ impl std::fmt::Debug for GitHostAuth {
         }
     }
 }
+
+/// Returned by pull-request operations when the host rejects the supplied
+/// credential with HTTP 401 (an expired or revoked token, or a wrong app
+/// password). Carries the canonical host so the UI can offer a targeted
+/// reconnect for that account, rather than the generic error shown for other
+/// 4xx responses (rate limits, permission denials) that reconnecting cannot fix.
+#[derive(Debug, Clone)]
+pub struct PullRequestAuthError {
+    pub host: SharedString,
+}
+
+impl std::fmt::Display for PullRequestAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "authentication with {} failed; the stored credential is expired or invalid",
+            self.host
+        )
+    }
+}
+
+impl std::error::Error for PullRequestAuthError {}
 
 #[derive(Clone)]
 pub struct GitRemote {
@@ -390,6 +448,49 @@ pub trait GitHostingProvider {
     ) -> Result<()> {
         anyhow::bail!("posting review comments is not supported by this hosting provider")
     }
+
+    /// Create a NEW top-level inline review comment on a diff line (as opposed to
+    /// `post_review_comment`, which replies to an existing thread). `line` is the
+    /// 1-based line number on `side` of the diff for `path`; `commit_id` is the
+    /// head commit the comment anchors to (required by GitHub, ignored by hosts
+    /// that anchor by line alone). Hosts without inline review comments report
+    /// "not supported".
+    async fn create_review_comment(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _commit_id: SharedString,
+        _path: SharedString,
+        _line: u32,
+        _side: DiffCommentSide,
+        _body: SharedString,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        anyhow::bail!("creating review comments is not supported by this hosting provider")
+    }
+
+    /// The authenticated user's own latest review verdict on a single PR, or
+    /// `None` if they haven't reviewed it. Lighter than `get_pull_request`: used
+    /// to tint already-reviewed rows in the PR list. Hosts that can't report it
+    /// return `Ok(None)`.
+    async fn pull_request_review_state(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<PullRequestReviewVerdict>> {
+        Ok(None)
+    }
+}
+
+/// Which side of a diff an inline review comment anchors to. `Right` is the
+/// post-image (added / context lines); `Left` is the pre-image (deleted lines).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffCommentSide {
+    Right,
+    Left,
 }
 
 #[derive(Default, Deref, DerefMut)]

@@ -10,12 +10,14 @@ use regex::Regex;
 use serde::Deserialize;
 use url::Url;
 use urlencoding::encode;
+use util::ResultExt as _;
 
 use git::{
-    BuildCommitPermalinkParams, BuildPermalinkParams, GitHostAuth, GitHostingProvider,
-    ParsedGitRemote, PullRequest, PullRequestDetail, PullRequestListFilter, PullRequestMergeMethod,
-    PullRequestReviewComment, PullRequestReviewVerdict, PullRequestState, PullRequestSummary,
-    RemoteUrl,
+    BuildCommitPermalinkParams, BuildPermalinkParams, DiffCommentSide, GitHostAuth,
+    GitHostingProvider, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
+    PullRequestListFilter,
+    PullRequestMergeMethod, PullRequestReviewComment, PullRequestReviewVerdict, PullRequestReviewer,
+    PullRequestState, PullRequestSummary, RemoteUrl,
 };
 
 use crate::get_host_from_git_remote_url;
@@ -165,6 +167,141 @@ impl Github {
             .map(|commit| commit.author)
             .context("failed to deserialize GitHub commit details")
     }
+
+    /// Fetch the login of the user the supplied credential authenticates as, so
+    /// the PR list can be filtered down to review requests addressed to them.
+    async fn fetch_authenticated_login(
+        &self,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let url = format!("https://api.{host}/user");
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github+json",
+            auth,
+            None,
+        )?;
+        let bytes =
+            github_send(http_client, request, "fetching authenticated GitHub user").await?;
+        let user: AuthenticatedGithubUser =
+            serde_json::from_slice(&bytes).context("parsing authenticated GitHub user")?;
+        Ok(Some(user.login.into()))
+    }
+
+    /// Best-effort lookup of the authenticated user's current review verdict on a
+    /// PR, so the detail view can reflect what they've already done. Returns
+    /// `Ok(None)` when they have no approving or blocking review; the caller logs
+    /// and ignores any error, leaving the buttons in their default state.
+    /// Fetch all submitted reviews on a PR. Used to derive both the viewer's own
+    /// verdict (list tint) and the full reviewer list (detail panel). Paginated to
+    /// 100, which comfortably covers a PR's reviewers.
+    async fn fetch_reviews(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<Vec<GithubReview>> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github+json",
+            auth,
+            None,
+        )?;
+        let bytes = github_send(http_client, request, "fetching GitHub reviews").await?;
+        serde_json::from_slice(&bytes).context("parsing GitHub reviews")
+    }
+}
+
+/// The viewer's current verdict from their chronological review history: the most
+/// recent approving or blocking review wins; comment-only and pending entries
+/// don't change a prior verdict; a later DISMISSED clears it.
+fn viewer_verdict_from_reviews(
+    reviews: &[GithubReview],
+    login: &str,
+) -> Option<PullRequestReviewVerdict> {
+    let mut verdict = None;
+    for review in reviews {
+        let is_viewer = review
+            .user
+            .as_ref()
+            .is_some_and(|user| user.login.eq_ignore_ascii_case(login));
+        if !is_viewer {
+            continue;
+        }
+        match review.state.as_str() {
+            "APPROVED" => verdict = Some(PullRequestReviewVerdict::Approve),
+            "CHANGES_REQUESTED" => verdict = Some(PullRequestReviewVerdict::RequestChanges),
+            "DISMISSED" => verdict = None,
+            _ => {}
+        }
+    }
+    verdict
+}
+
+/// The full reviewer list: everyone who submitted a review (with their latest
+/// verdict, in first-seen order) plus still-requested reviewers as pending
+/// (`verdict: None`). `viewer_login` marks the authenticated user's own entry.
+fn build_github_reviewers(
+    reviews: &[GithubReview],
+    requested: &[SharedString],
+    viewer_login: Option<&str>,
+) -> Vec<PullRequestReviewer> {
+    let mut ordered: Vec<(String, Option<PullRequestReviewVerdict>)> = Vec::new();
+    for review in reviews {
+        let Some(user) = review.user.as_ref() else {
+            continue;
+        };
+        if !ordered
+            .iter()
+            .any(|(login, _)| login.eq_ignore_ascii_case(&user.login))
+        {
+            ordered.push((user.login.clone(), None));
+        }
+        if let Some(entry) = ordered
+            .iter_mut()
+            .find(|(login, _)| login.eq_ignore_ascii_case(&user.login))
+        {
+            match review.state.as_str() {
+                "APPROVED" => entry.1 = Some(PullRequestReviewVerdict::Approve),
+                "CHANGES_REQUESTED" => entry.1 = Some(PullRequestReviewVerdict::RequestChanges),
+                "DISMISSED" => entry.1 = None,
+                _ => {}
+            }
+        }
+    }
+    for login in requested {
+        if !ordered
+            .iter()
+            .any(|(existing, _)| existing.eq_ignore_ascii_case(login))
+        {
+            ordered.push((login.to_string(), None));
+        }
+    }
+    ordered
+        .into_iter()
+        .map(|(login, verdict)| PullRequestReviewer {
+            is_me: viewer_login.is_some_and(|viewer| viewer.eq_ignore_ascii_case(&login)),
+            login: login.into(),
+            verdict,
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -312,6 +449,18 @@ impl GitHostingProvider for Github {
             .base_url
             .host_str()
             .context("GitHub base URL has no host")?;
+        // Resolving "review requested from me" needs the caller's own login, so
+        // fetch it once up front and match it against each PR's requested
+        // reviewers below.
+        let reviewer_login = if filter.reviewer_is_me {
+            Some(
+                self.fetch_authenticated_login(&auth, &http_client)
+                    .await?
+                    .context("could not determine the authenticated GitHub user")?,
+            )
+        } else {
+            None
+        };
         let state = github_list_state(&filter);
         let per_page = filter.limit.unwrap_or(50).clamp(1, 100);
         let url = format!(
@@ -343,6 +492,14 @@ impl GitHostingProvider for Github {
                 if !login.to_lowercase().contains(&author.to_lowercase()) {
                     continue;
                 }
+            }
+            if let Some(login) = &reviewer_login
+                && !pr
+                    .requested_reviewers
+                    .iter()
+                    .any(|reviewer| reviewer.login.eq_ignore_ascii_case(login.as_ref()))
+            {
+                continue;
             }
             summaries.push(pr.into_summary(pr_state)?);
             if let Some(limit) = filter.limit
@@ -380,7 +537,46 @@ impl GitHostingProvider for Github {
         let bytes = github_send(&http_client, request, "fetching GitHub pull request").await?;
         let pr: GithubPullRequest =
             serde_json::from_slice(&bytes).context("parsing GitHub pull request")?;
-        pr.into_detail()
+        let requested: Vec<SharedString> = pr
+            .requested_reviewers
+            .iter()
+            .map(|user| SharedString::from(user.login.clone()))
+            .collect();
+        let mut detail = pr.into_detail()?;
+        // Reviews are best-effort: on failure the detail still renders, just
+        // without verdict/reviewers. One reviews fetch feeds both.
+        if let Some(reviews) = self
+            .fetch_reviews(remote, number, &auth, &http_client)
+            .await
+            .log_err()
+        {
+            let viewer_login = self
+                .fetch_authenticated_login(&auth, &http_client)
+                .await
+                .log_err()
+                .flatten();
+            let reviewers = build_github_reviewers(&reviews, &requested, viewer_login.as_deref());
+            detail.viewer_review = reviewers
+                .iter()
+                .find(|reviewer| reviewer.is_me)
+                .and_then(|reviewer| reviewer.verdict);
+            detail.reviewers = reviewers;
+        }
+        Ok(detail)
+    }
+
+    async fn pull_request_review_state(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<PullRequestReviewVerdict>> {
+        let Some(login) = self.fetch_authenticated_login(&auth, &http_client).await? else {
+            return Ok(None);
+        };
+        let reviews = self.fetch_reviews(remote, number, &auth, &http_client).await?;
+        Ok(viewer_verdict_from_reviews(&reviews, login.as_ref()))
     }
 
     async fn get_pull_request_diff(
@@ -570,6 +766,49 @@ impl GitHostingProvider for Github {
         github_send(&http_client, request, "posting GitHub review comment").await?;
         Ok(())
     }
+
+    async fn create_review_comment(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        commit_id: SharedString,
+        path: SharedString,
+        line: u32,
+        side: DiffCommentSide,
+        body: SharedString,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/comments",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let side = match side {
+            DiffCommentSide::Right => "RIGHT",
+            DiffCommentSide::Left => "LEFT",
+        };
+        let body = serde_json::to_vec(&serde_json::json!({
+            "body": body.to_string(),
+            "commit_id": commit_id.to_string(),
+            "path": path.to_string(),
+            "line": line,
+            "side": side,
+        }))?;
+        let request = github_request(
+            GithubMethod::Post,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            Some(body),
+        )?;
+        github_send(&http_client, request, "creating GitHub review comment").await?;
+        Ok(())
+    }
 }
 
 enum GithubMethod {
@@ -634,6 +873,12 @@ async fn github_send(
         .with_context(|| format!("error while {context}"))?;
     let mut bytes = Vec::new();
     response.body_mut().read_to_end(&mut bytes).await?;
+    if response.status().as_u16() == 401 {
+        return Err(PullRequestAuthError {
+            host: "github.com".into(),
+        }
+        .into());
+    }
     if !response.status().is_success() {
         let text = String::from_utf8_lossy(&bytes);
         bail!(
@@ -669,6 +914,11 @@ struct GithubUserRef {
 }
 
 #[derive(Deserialize)]
+struct AuthenticatedGithubUser {
+    login: String,
+}
+
+#[derive(Deserialize)]
 struct GithubBranchRef {
     #[serde(rename = "ref")]
     ref_name: String,
@@ -686,10 +936,18 @@ struct GithubPullRequest {
     draft: bool,
     #[serde(default)]
     user: Option<GithubUserRef>,
+    /// Users whose review is still pending. GitHub removes a user from this
+    /// list once they submit a review, so it represents outstanding requests.
+    #[serde(default)]
+    requested_reviewers: Vec<GithubUserRef>,
     head: GithubBranchRef,
     base: GithubBranchRef,
     html_url: String,
     updated_at: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    commits: Option<u32>,
     #[serde(default)]
     merged_at: Option<String>,
     #[serde(default)]
@@ -751,14 +1009,29 @@ impl GithubPullRequest {
             head_sha: self.head.sha.into(),
             base_sha: self.base.sha.into(),
             url,
+            created_at: self.created_at.into(),
             updated_at: self.updated_at.into(),
             is_draft: self.draft,
             is_mergeable: self.mergeable,
             additions: self.additions.unwrap_or(0),
             deletions: self.deletions.unwrap_or(0),
             changed_files: self.changed_files.unwrap_or(0),
+            commits: self.commits,
+            // Filled in by `get_pull_request` from a separate reviews request.
+            viewer_review: None,
+            reviewers: Vec::new(),
         })
     }
+}
+
+/// A submitted review on a pull request. Only the author and state are needed
+/// to resolve the authenticated user's current verdict.
+#[derive(Deserialize)]
+struct GithubReview {
+    #[serde(default)]
+    user: Option<GithubUserRef>,
+    #[serde(default)]
+    state: String,
 }
 
 #[derive(Deserialize)]
@@ -806,6 +1079,65 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use http_client::FakeHttpClient;
+
+    #[test]
+    fn test_github_send_maps_401_to_auth_error() {
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(|_request| async move {
+            Ok(http_client::Response::builder()
+                .status(401)
+                .body("Bad credentials".into())
+                .unwrap())
+        });
+        let request = Request::get("https://api.github.com/user")
+            .body(AsyncBody::empty())
+            .unwrap();
+
+        let error = futures::executor::block_on(github_send(&client, request, "load user"))
+            .expect_err("a 401 response should be an error");
+        let auth_error = error
+            .downcast_ref::<PullRequestAuthError>()
+            .expect("a 401 should map to PullRequestAuthError");
+        assert_eq!(auth_error.host.as_ref(), "github.com");
+    }
+
+    #[test]
+    fn test_github_send_non_401_failure_is_generic() {
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(|_request| async move {
+            Ok(http_client::Response::builder()
+                .status(500)
+                .body("boom".into())
+                .unwrap())
+        });
+        let request = Request::get("https://api.github.com/user")
+            .body(AsyncBody::empty())
+            .unwrap();
+
+        let error = futures::executor::block_on(github_send(&client, request, "load user"))
+            .expect_err("a 500 response should be an error");
+        assert!(
+            error.downcast_ref::<PullRequestAuthError>().is_none(),
+            "non-401 failures should not be treated as an auth error"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_auth_error_survives_context() {
+        // The UI downcasts to PullRequestAuthError after intermediate layers
+        // wrap the error with `.context()`; anyhow must preserve the concrete
+        // type through that wrapping for the reconnect prompt to appear.
+        let error: anyhow::Error = PullRequestAuthError {
+            host: "github.com".into(),
+        }
+        .into();
+        let wrapped = error
+            .context("listing pull requests")
+            .context("refreshing pull request panel");
+        let auth_error = wrapped
+            .downcast_ref::<PullRequestAuthError>()
+            .expect("auth error should survive context wrapping");
+        assert_eq!(auth_error.host.as_ref(), "github.com");
+    }
 
     #[test]
     fn test_remote_url_with_root_slash() {
@@ -1207,12 +1539,14 @@ mod tests {
             "head": { "ref": "topic", "sha": "headsha" },
             "base": { "ref": "main", "sha": "basesha" },
             "html_url": "https://github.com/owner/repo/pull/7",
+            "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-03T00:00:00Z",
             "merged_at": "2026-01-03T00:00:00Z",
             "mergeable": true,
             "additions": 12,
             "deletions": 3,
-            "changed_files": 2
+            "changed_files": 2,
+            "commits": 4
         }"#;
         let pr: GithubPullRequest = serde_json::from_str(json).unwrap();
         let detail = pr.into_detail().unwrap();
@@ -1225,6 +1559,8 @@ mod tests {
         assert_eq!(detail.additions, 12);
         assert_eq!(detail.deletions, 3);
         assert_eq!(detail.changed_files, 2);
+        assert_eq!(detail.created_at.to_string(), "2026-01-01T00:00:00Z");
+        assert_eq!(detail.commits, Some(4));
     }
 
     #[test]
@@ -1273,5 +1609,58 @@ mod tests {
             mapped.url.as_str(),
             "https://github.com/owner/repo/pull/7#discussion_r9001"
         );
+    }
+
+    #[test]
+    fn test_github_list_filters_to_requested_reviewer() {
+        // With `reviewer_is_me`, the provider first resolves the caller's login
+        // via `/user`, then keeps only PRs whose `requested_reviewers` include it.
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(|request| async move {
+            let path = request.uri().path();
+            let body = if path == "/user" {
+                r#"{"login":"octocat"}"#
+            } else if path.ends_with("/pulls") {
+                r#"[
+                    {"number":1,"title":"Mine to review","state":"open",
+                     "user":{"login":"alice"},
+                     "requested_reviewers":[{"login":"octocat"}],
+                     "head":{"ref":"a","sha":"a1"},"base":{"ref":"main","sha":"b1"},
+                     "html_url":"https://github.com/owner/repo/pull/1","updated_at":"2026-01-02T00:00:00Z"},
+                    {"number":2,"title":"Not mine","state":"open",
+                     "user":{"login":"bob"},
+                     "requested_reviewers":[{"login":"carol"}],
+                     "head":{"ref":"c","sha":"c1"},"base":{"ref":"main","sha":"b2"},
+                     "html_url":"https://github.com/owner/repo/pull/2","updated_at":"2026-01-01T00:00:00Z"}
+                ]"#
+            } else {
+                "[]"
+            };
+            Ok(http_client::Response::builder()
+                .status(200)
+                .body(body.into())
+                .unwrap())
+        });
+
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let filter = PullRequestListFilter {
+            states: Some(vec![PullRequestState::Open]),
+            author: None,
+            reviewer_is_me: true,
+            limit: Some(50),
+        };
+        let summaries = futures::executor::block_on(Github::public_instance().list_pull_requests(
+            &remote,
+            filter,
+            Some(GitHostAuth::Bearer("token".into())),
+            client,
+        ))
+        .unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].number, 1);
+        assert_eq!(summaries[0].title.to_string(), "Mine to review");
     }
 }

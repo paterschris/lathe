@@ -1,12 +1,12 @@
 use std::time::Duration;
 
-use editor::Editor;
 use git::git_host_credentials::{self, GitHostKind};
 use git_hosting_providers::{DeviceTokenPoll, fetch_login, poll_for_token, request_device_code};
 use gpui::{
     ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task, WeakEntity,
 };
 use ui::prelude::*;
+use ui_input::InputField;
 use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 
@@ -37,8 +37,12 @@ fn disconnect(
     cx: &mut Context<Workspace>,
 ) {
     let host = action.host.clone();
-    cx.spawn(async move |_, cx| {
-        git_host_credentials::clear(cx, &host).await.log_err();
+    cx.spawn(async move |workspace, cx| {
+        if let Err(error) = git_host_credentials::clear(cx, &host).await {
+            workspace
+                .update(cx, |workspace, cx| workspace.show_error(error, cx))
+                .log_err();
+        }
     })
     .detach();
 }
@@ -53,8 +57,8 @@ pub struct ConnectGitHostModal {
     busy: bool,
     user_code: Option<SharedString>,
     verification_uri: Option<SharedString>,
-    username_editor: Entity<Editor>,
-    secret_editor: Entity<Editor>,
+    username_input: Entity<InputField>,
+    secret_input: Entity<InputField>,
     _task: Option<Task<()>>,
 }
 
@@ -65,19 +69,23 @@ impl ConnectGitHostModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let username_editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Bitbucket username", window, cx);
-            editor
+        // `tab_index` registers each field as a tab stop so the modal's
+        // SelectNext/SelectPrevious handlers can move focus between them; the
+        // secret is masked since it is an app password or API token.
+        let username_input = cx.new(|cx| {
+            InputField::new(window, cx, "Bitbucket username")
+                .label("Username")
+                .tab_index(1)
         });
-        let secret_editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("App password or API token", window, cx);
-            editor
+        let secret_input = cx.new(|cx| {
+            InputField::new(window, cx, "App password or API token")
+                .label("App password or API token")
+                .masked(true)
+                .tab_index(2)
         });
 
         if kind == GitHostKind::BitbucketCloud {
-            window.focus(&username_editor.focus_handle(cx), cx);
+            window.focus(&username_input.focus_handle(cx), cx);
         }
 
         let mut this = Self {
@@ -87,8 +95,8 @@ impl ConnectGitHostModal {
             busy: false,
             user_code: None,
             verification_uri: None,
-            username_editor,
-            secret_editor,
+            username_input,
+            secret_input,
             _task: None,
         };
 
@@ -168,8 +176,8 @@ impl ConnectGitHostModal {
     }
 
     fn submit_bitbucket(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let username = self.username_editor.read(cx).text(cx).trim().to_string();
-        let secret = self.secret_editor.read(cx).text(cx).trim().to_string();
+        let username = self.username_input.read(cx).text(cx).trim().to_string();
+        let secret = self.secret_input.read(cx).text(cx).trim().to_string();
         if username.is_empty() || secret.is_empty() {
             self.error =
                 Some("Enter your Bitbucket username and an app password or API token.".into());
@@ -194,6 +202,19 @@ impl ConnectGitHostModal {
             .ok();
         });
         self._task = Some(task);
+    }
+
+    fn on_tab(&mut self, _: &menu::SelectNext, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus_next(cx);
+    }
+
+    fn on_tab_prev(
+        &mut self,
+        _: &menu::SelectPrevious,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus_prev(cx);
     }
 
     fn render_github(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -238,16 +259,6 @@ impl ConnectGitHostModal {
     }
 
     fn render_bitbucket(&self, cx: &mut Context<Self>) -> AnyElement {
-        let input = |editor: &Entity<Editor>| {
-            div()
-                .w_full()
-                .px_2()
-                .py_1()
-                .border_1()
-                .border_color(cx.theme().colors().border)
-                .rounded_md()
-                .child(editor.clone())
-        };
         v_flex()
             .gap_2()
             .child(
@@ -257,8 +268,8 @@ impl ConnectGitHostModal {
                 .color(Color::Muted)
                 .size(LabelSize::Small),
             )
-            .child(input(&self.username_editor))
-            .child(input(&self.secret_editor))
+            .child(self.username_input.clone())
+            .child(self.secret_input.clone())
             .child(
                 h_flex()
                     .gap_2()
@@ -298,6 +309,8 @@ impl Render for ConnectGitHostModal {
         v_flex()
             .key_context("ConnectGitHostModal")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::on_tab))
+            .on_action(cx.listener(Self::on_tab_prev))
             .elevation_3(cx)
             .w(rems(28.))
             .p_4()

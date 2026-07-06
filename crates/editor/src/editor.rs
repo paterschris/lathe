@@ -990,6 +990,7 @@ pub struct Editor {
     show_bookmarks: Option<bool>,
     show_breakpoints: Option<bool>,
     show_diff_review_button: bool,
+    show_pr_comment_gutter_button: bool,
     show_wrap_guides: Option<bool>,
     show_indent_guides: Option<bool>,
     buffers_with_disabled_indent_guides: HashSet<BufferId>,
@@ -2204,6 +2205,7 @@ impl Editor {
             show_bookmarks: None,
             show_breakpoints: None,
             show_diff_review_button: false,
+            show_pr_comment_gutter_button: false,
             show_wrap_guides: None,
             show_indent_guides,
             buffers_with_disabled_indent_guides: HashSet::default(),
@@ -11652,6 +11654,11 @@ pub enum EditorEvent {
     ReviewCommentsChanged {
         /// The new total count of review comments.
         total_count: usize,
+    },
+    /// Emitted when the user clicks the PR review "add comment" gutter button on a
+    /// diff row. `anchor` is the multibuffer anchor at the start of that row.
+    AddPrCommentRequested {
+        anchor: Anchor,
     },
     InputIgnored {
         text: Arc<str>,

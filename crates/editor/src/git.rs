@@ -867,6 +867,68 @@ impl Editor {
             )
     }
 
+    pub(super) fn show_pr_comment_gutter_button(&self) -> bool {
+        self.show_pr_comment_gutter_button
+    }
+
+    /// Enable a per-line "+" in the gutter that, when clicked, emits
+    /// `EditorEvent::AddPrCommentRequested` with the buffer anchor at that row.
+    /// The PR review view uses this to start a new inline review comment; it is
+    /// independent of the local diff-review button above.
+    pub fn set_show_pr_comment_gutter_button(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.show_pr_comment_gutter_button != show {
+            self.show_pr_comment_gutter_button = show;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn render_pr_comment_gutter_button(
+        &self,
+        display_row: DisplayRow,
+        width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let text_color = cx.theme().colors().text;
+        let icon_color = cx.theme().colors().icon_accent;
+
+        h_flex()
+            .id("pr_comment_gutter_button")
+            .cursor_pointer()
+            .w(width - px(1.))
+            .h(relative(0.9))
+            .justify_center()
+            .rounded_sm()
+            .border_1()
+            .border_color(text_color.opacity(0.1))
+            .bg(text_color.opacity(0.15))
+            .hover(|s| {
+                s.bg(icon_color.opacity(0.4))
+                    .border_color(icon_color.opacity(0.5))
+            })
+            .child(Icon::new(IconName::Plus).size(IconSize::Small))
+            .tooltip(Tooltip::text("Add a comment"))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |editor, _event: &gpui::MouseDownEvent, window, cx| {
+                    editor.request_pr_comment_at_row(display_row, window, cx);
+                }),
+            )
+    }
+
+    fn request_pr_comment_at_row(
+        &mut self,
+        display_row: DisplayRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let snapshot = self.snapshot(window, cx);
+        let point = snapshot
+            .display_snapshot
+            .display_point_to_point(DisplayPoint::new(display_row, 0), Bias::Left);
+        let anchor = snapshot.buffer_snapshot().anchor_before(point);
+        cx.emit(EditorEvent::AddPrCommentRequested { anchor });
+    }
+
     pub(super) fn start_diff_review_drag(
         &mut self,
         display_row: DisplayRow,

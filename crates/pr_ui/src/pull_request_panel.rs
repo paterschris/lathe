@@ -2,7 +2,7 @@ use crate::pull_request_view::PullRequestView;
 use anyhow::{Context as _, Result};
 use git::{
     GitHostingProvider, GitHostingProviderRegistry, ParsedGitRemote, PullRequestListFilter,
-    PullRequestState, PullRequestSummary, parse_git_remote_url,
+    PullRequestReviewVerdict, PullRequestState, PullRequestSummary, parse_git_remote_url,
 };
 use gpui::{
     Action, AppContext as _, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable,
@@ -14,6 +14,7 @@ use project::{
     Project,
     git_store::{GitStore, GitStoreEvent},
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use crate::pull_request_panel_settings::PullRequestPanelSettings;
 use settings::Settings;
@@ -47,6 +48,9 @@ enum LoadState {
     Loaded(Vec<PullRequestSummary>),
     NoHost(SharedString),
     Failed(SharedString),
+    /// A pull-request call returned HTTP 401; the stored credential for `host`
+    /// is expired or invalid, so the user is offered a targeted reconnect.
+    AuthExpired { host: SharedString },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,9 +89,16 @@ pub struct PullRequestPanel {
     host_context: Option<(Arc<dyn GitHostingProvider + Send + Sync>, ParsedGitRemote)>,
     scroll_handle: UniformListScrollHandle,
     filter: StateFilter,
+    /// When set, restrict the list to PRs the connected account is a requested
+    /// reviewer of. Combines with `filter` (the state selection).
+    reviewing: bool,
     /// PR number most recently opened from this panel; highlighted in the list.
     selected_pr: Option<u32>,
     _load_task: Option<Task<()>>,
+    /// Cached "my review verdict" per PR number, filled in lazily in the
+    /// background after the list loads so already-reviewed rows can be tinted.
+    viewer_reviews: HashMap<u32, Option<PullRequestReviewVerdict>>,
+    _enrich_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -112,7 +123,16 @@ impl PullRequestPanel {
             // Re-resolve host + reload when the active repository changes;
             // each repo can point at a different hosting provider, so the
             // cached `host_context` is per-active-repo.
-            let subscriptions = vec![cx.subscribe(&git_store, Self::on_git_store_event)];
+            let subscriptions = vec![
+                cx.subscribe(&git_store, Self::on_git_store_event),
+                // Reload when a host is connected or disconnected, so a
+                // reconnected account leaves the AuthExpired state without the
+                // user reopening the panel.
+                git::git_host_credentials::observe_connections(cx, |this, cx| {
+                    this.host_context = None;
+                    this.kick_off_refresh(cx);
+                }),
+            ];
             let mut this = Self {
                 workspace: workspace_weak,
                 project,
@@ -121,8 +141,11 @@ impl PullRequestPanel {
                 host_context: None,
                 scroll_handle: UniformListScrollHandle::default(),
                 filter: StateFilter::Open,
+                reviewing: false,
                 selected_pr: None,
                 _load_task: None,
+                viewer_reviews: HashMap::new(),
+                _enrich_task: None,
                 _subscriptions: subscriptions,
             };
             this.kick_off_refresh(cx);
@@ -166,8 +189,9 @@ impl PullRequestPanel {
         let project = self.project.clone();
         let http_client = cx.http_client();
         let filter = self.filter;
+        let reviewing = self.reviewing;
         let task = cx.spawn(async move |this, cx| {
-            let result = load_pull_requests(project, filter, http_client, cx).await;
+            let result = load_pull_requests(project, filter, reviewing, http_client, cx).await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(LoadOutcome::Loaded {
@@ -177,6 +201,7 @@ impl PullRequestPanel {
                     }) => {
                         this.host_context = Some((provider, remote));
                         this.state = LoadState::Loaded(prs);
+                        this.start_review_enrichment(cx);
                     }
                     Ok(LoadOutcome::NoHost(reason)) => {
                         this.host_context = None;
@@ -184,7 +209,12 @@ impl PullRequestPanel {
                     }
                     Err(error) => {
                         this.host_context = None;
-                        this.state = LoadState::Failed(format!("{error}").into());
+                        this.state = match error.downcast_ref::<git::PullRequestAuthError>() {
+                            Some(auth_error) => LoadState::AuthExpired {
+                                host: auth_error.host.clone(),
+                            },
+                            None => LoadState::Failed(format!("{error}").into()),
+                        };
                     }
                 }
                 cx.notify();
@@ -192,6 +222,85 @@ impl PullRequestPanel {
             .ok();
         });
         self._load_task = Some(task);
+    }
+
+    /// After the list loads, fetch each PR's own review verdict in the background
+    /// (bounded concurrency) so already-reviewed rows can be tinted. One request
+    /// per PR, cached; the task is replaced (cancelled) on the next load.
+    fn start_review_enrichment(&mut self, cx: &mut Context<Self>) {
+        self.viewer_reviews.clear();
+        let LoadState::Loaded(prs) = &self.state else {
+            return;
+        };
+        let numbers: Vec<u32> = prs.iter().map(|summary| summary.number).collect();
+        let Some((provider, remote)) = self.host_context.as_ref() else {
+            return;
+        };
+        if numbers.is_empty() {
+            return;
+        }
+        let provider = provider.clone();
+        let remote = ParsedGitRemote {
+            owner: remote.owner.clone(),
+            repo: remote.repo.clone(),
+        };
+        let http_client = cx.http_client();
+        let host = provider.base_url().host_str().map(|host| host.to_string());
+        self._enrich_task = Some(cx.spawn(async move |this, cx| {
+            let auth = match host.as_deref() {
+                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            // Process in small chunks so a large list doesn't fire dozens of
+            // simultaneous requests at the host.
+            for chunk in numbers.chunks(5) {
+                let results = futures::future::join_all(chunk.iter().map(|&number| {
+                    let provider = provider.clone();
+                    let remote = ParsedGitRemote {
+                        owner: remote.owner.clone(),
+                        repo: remote.repo.clone(),
+                    };
+                    let auth = auth.clone();
+                    let http_client = http_client.clone();
+                    async move {
+                        let verdict = provider
+                            .pull_request_review_state(&remote, number, auth, http_client)
+                            .await
+                            .ok()
+                            .flatten();
+                        (number, verdict)
+                    }
+                }))
+                .await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        for (number, verdict) in results {
+                            this.viewer_reviews.insert(number, verdict);
+                        }
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Whether the connected account has already responded to this PR's review
+    /// with a verdict. Comment-only reviews and not-yet-reviewed PRs are not a
+    /// response, so they still count as "awaiting my review". Returns false while
+    /// a PR's verdict is still being fetched (it stays visible until known).
+    fn has_responded_to_review(&self, number: u32) -> bool {
+        matches!(
+            self.viewer_reviews.get(&number),
+            Some(Some(
+                PullRequestReviewVerdict::Approve | PullRequestReviewVerdict::RequestChanges
+            ))
+        )
     }
 
     fn open_pull_request(
@@ -285,10 +394,16 @@ impl PullRequestPanel {
 
     fn render_filter_picker(&self, cx: &Context<Self>) -> impl IntoElement {
         let current = self.filter;
+        let reviewing = self.reviewing;
         let weak_self = cx.entity().downgrade();
+        let trigger_label: SharedString = if reviewing {
+            format!("{}, my reviews", current.label()).into()
+        } else {
+            current.label().into()
+        };
         PopoverMenu::new("pr-panel-filter")
             .trigger(
-                Button::new("pr-panel-filter-trigger", current.label())
+                Button::new("pr-panel-filter-trigger", trigger_label)
                     .label_size(LabelSize::Small)
                     .end_icon(
                         Icon::new(IconName::ChevronDown)
@@ -325,6 +440,23 @@ impl PullRequestPanel {
                             },
                         );
                     }
+                    // Reviewer scope is an independent toggle layered on top of the
+                    // state selection above, so it sits below a separator rather
+                    // than in the mutually-exclusive state group.
+                    menu = menu.separator().toggleable_entry(
+                        "Awaiting my review",
+                        reviewing,
+                        ui::IconPosition::End,
+                        None,
+                        move |_window, cx| {
+                            weak_self
+                                .update(cx, |this, cx| {
+                                    this.reviewing = !this.reviewing;
+                                    this.kick_off_refresh(cx);
+                                })
+                                .ok();
+                        },
+                    );
                     menu
                 }))
             })
@@ -361,6 +493,20 @@ impl PullRequestPanel {
             } else {
                 gpui::transparent_black()
             })
+            // Tint rows the connected account has already reviewed (filled in
+            // lazily by `start_review_enrichment`). Selection/hover override it.
+            .when_some(
+                self.viewer_reviews.get(&number).copied().flatten(),
+                |this, verdict| match verdict {
+                    PullRequestReviewVerdict::Approve => {
+                        this.bg(Color::Success.color(cx).opacity(0.12))
+                    }
+                    PullRequestReviewVerdict::RequestChanges => {
+                        this.bg(Color::Error.color(cx).opacity(0.12))
+                    }
+                    PullRequestReviewVerdict::Comment => this,
+                },
+            )
             .when(is_selected, |this| {
                 this.bg(cx.theme().colors().element_selected)
             })
@@ -433,6 +579,7 @@ enum CandidateResolution {
 async fn load_pull_requests(
     project: Entity<Project>,
     filter: StateFilter,
+    reviewing: bool,
     http_client: Arc<dyn HttpClient>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<LoadOutcome> {
@@ -510,6 +657,7 @@ async fn load_pull_requests(
         let filter = PullRequestListFilter {
             states: filter.states(),
             author: None,
+            reviewer_is_me: reviewing,
             limit: Some(50),
         };
         let remote_for_call = ParsedGitRemote {
@@ -570,47 +718,65 @@ impl Render for PullRequestPanel {
                         .color(Color::Muted),
                 )
                 .into_any_element(),
-            LoadState::Loaded(ref prs) if prs.is_empty() => {
-                let queried = self
-                    .host_context
-                    .as_ref()
-                    .map(|(_, remote)| format!("{}/{}", remote.owner, remote.repo));
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .child(
-                        Label::new("No open pull requests")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .when_some(queried, |this, q| {
-                        this.child(
-                            Label::new(format!("(queried {q})"))
-                                .size(LabelSize::XSmall)
+            LoadState::Loaded(rows) => {
+                // In "awaiting my review" mode, hide PRs the connected account has
+                // already responded to (approved or requested changes). Comment-only
+                // reviews and not-yet-reviewed PRs stay visible. GitHub already
+                // excludes responded PRs via its `requested_reviewers` query; this
+                // makes Bitbucket (which keeps you as a reviewer regardless) match.
+                let rows: Vec<PullRequestSummary> = if self.reviewing {
+                    rows.into_iter()
+                        .filter(|summary| !self.has_responded_to_review(summary.number))
+                        .collect()
+                } else {
+                    rows
+                };
+                if rows.is_empty() {
+                    let queried = self
+                        .host_context
+                        .as_ref()
+                        .map(|(_, remote)| format!("{}/{}", remote.owner, remote.repo));
+                    let empty_message = if self.reviewing {
+                        "No pull requests awaiting your review"
+                    } else {
+                        "No open pull requests"
+                    };
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_1()
+                        .child(
+                            Label::new(empty_message)
+                                .size(LabelSize::Small)
                                 .color(Color::Muted),
                         )
-                    })
+                        .when_some(queried, |this, q| {
+                            this.child(
+                                Label::new(format!("(queried {q})"))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                        })
+                        .into_any_element()
+                } else {
+                    let count = rows.len();
+                    uniform_list(
+                        "pull-request-panel-rows",
+                        count,
+                        cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                            range
+                                .filter_map(|ix| {
+                                    let summary = rows.get(ix)?.clone();
+                                    Some(this.render_row(ix, summary, cx).into_any_element())
+                                })
+                                .collect()
+                        }),
+                    )
+                    .size_full()
+                    .track_scroll(&self.scroll_handle)
                     .into_any_element()
-            }
-            LoadState::Loaded(rows) => {
-                let count = rows.len();
-                uniform_list(
-                    "pull-request-panel-rows",
-                    count,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                        range
-                            .filter_map(|ix| {
-                                let summary = rows.get(ix)?.clone();
-                                Some(this.render_row(ix, summary, cx).into_any_element())
-                            })
-                            .collect()
-                    }),
-                )
-                .size_full()
-                .track_scroll(&self.scroll_handle)
-                .into_any_element()
+                }
             }
             LoadState::NoHost(reason) => v_flex()
                 .flex_1()
@@ -644,6 +810,42 @@ impl Render for PullRequestPanel {
                         .color(Color::Muted),
                 )
                 .into_any_element(),
+            LoadState::AuthExpired { host } => {
+                let host_for_action = host.to_string();
+                let display = git::git_host_credentials::GitHostKind::from_host(&host)
+                    .map(|kind| kind.display_name())
+                    .unwrap_or("the git host");
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(
+                        Label::new("Connection expired")
+                            .size(LabelSize::Small)
+                            .color(Color::Error),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "Your {display} sign-in is no longer valid. Reconnect to continue."
+                        ))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        Button::new("pull-request-panel-reconnect", "Reconnect").on_click(
+                            cx.listener(move |_, _, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(zed_actions::ConnectGitHost {
+                                        host: host_for_action.clone(),
+                                    }),
+                                    cx,
+                                );
+                            }),
+                        ),
+                    )
+                    .into_any_element()
+            }
         };
 
         v_flex()

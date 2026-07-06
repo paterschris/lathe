@@ -3,29 +3,30 @@ use buffer_diff::BufferDiff;
 use collections::{HashMap, HashSet};
 use std::ops::Range;
 use editor::{
-    Anchor, Editor, MultiBuffer, multibuffer_context_lines,
-    display_map::{BlockContext, BlockPlacement, BlockProperties, BlockStyle},
+    Anchor, Editor, EditorEvent, MultiBuffer, multibuffer_context_lines,
+    display_map::{BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
 };
 use language::{
     Buffer, Capability, DiskState, File, LanguageRegistry, LineEnding, Point, ReplicaId, Rope,
     TextBuffer,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
-use multi_buffer::PathKey;
+use multi_buffer::{PathKey, ToPoint as _};
 use project::{Project, WorktreeId};
 use std::path::PathBuf;
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use git::{
-    GitHostAuth, GitHostingProvider, ParsedGitRemote, PullRequestDetail, PullRequestMergeMethod,
-    PullRequestReviewComment, PullRequestReviewVerdict, PullRequestState,
+    DiffCommentSide, GitHostAuth, GitHostingProvider, ParsedGitRemote, PullRequestDetail,
+    PullRequestMergeMethod, PullRequestReviewComment, PullRequestReviewVerdict, PullRequestReviewer,
+    PullRequestState,
 };
 use gpui::{
-    AsyncApp, Empty, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription, Task,
-    WeakEntity, http_client::HttpClient,
+    AsyncApp, ClickEvent, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable,
+    Pixels, SharedString, Subscription, Task, WeakEntity, http_client::HttpClient,
 };
 use notifications::status_toast::StatusToast;
 use std::sync::Arc;
-use ui::{Button, ButtonCommon, ButtonStyle, Clickable, Divider, prelude::*};
+use ui::{Button, ButtonCommon, ButtonStyle, Clickable, Disclosure, Divider, TintColor, prelude::*};
 use workspace::{
     Workspace,
     item::{Item, ItemEvent},
@@ -57,13 +58,25 @@ pub struct PullRequestView {
     /// Root ids of resolved threads the user has manually expanded. Resolved
     /// threads render collapsed by default; expanding one adds it here.
     expanded_threads: HashSet<u64>,
+    /// Whether the description section is expanded (collapse hides its body but
+    /// keeps the action buttons).
+    description_expanded: bool,
+    /// Custom description body height once the user drags the resize handle;
+    /// `None` uses the default max height.
+    description_height: Option<Pixels>,
     /// Markdown render entities for the inline comments, kept alive and observed
     /// so the diff editor re-measures (and grows) its comment blocks once their
     /// async parsing finishes. Without this, freshly-parsed comments overflow
     /// the single row a block is initially given.
     _comment_markdowns: Vec<Entity<Markdown>>,
     _comment_md_subscriptions: Vec<Subscription>,
+    /// Reloads the view when a git host is (re)connected, so an expired account
+    /// the user reconnects refreshes without reopening the pull request.
+    _connection_subscription: Subscription,
     error: Option<SharedString>,
+    /// Set instead of `error` when a load fails with HTTP 401, so the view can
+    /// offer a targeted reconnect for this host rather than a generic failure.
+    auth_error_host: Option<SharedString>,
     loading: bool,
     /// True while an approve / request-changes / merge call is in flight; the
     /// header buttons disable themselves to prevent double-fires.
@@ -77,6 +90,27 @@ pub struct PullRequestView {
     _load_task: Option<Task<()>>,
     _action_task: Option<Task<()>>,
     _reply_task: Option<Task<()>>,
+    /// Per-file maps (path, buffer, line<->row) retained from the last diff build
+    /// so a gutter "+" click can be resolved back to (path, new-file line).
+    diff_file_maps: Vec<DiffFileMap>,
+    /// State for an open "new inline comment" composer, opened from the diff
+    /// gutter "+"; distinct from the reply composer above.
+    new_comment: Option<NewComment>,
+    new_comment_editor: Option<Entity<Editor>>,
+    new_comment_in_flight: bool,
+    _new_comment_task: Option<Task<()>>,
+    /// Subscription to the current diff editor for its `AddPrCommentRequested`
+    /// gutter events; re-created whenever the diff editor is (re)built.
+    _diff_editor_subscription: Option<Subscription>,
+}
+
+/// An open composer for a brand-new inline review comment anchored at a diff
+/// line (as opposed to a reply). `block_id` is the composer's decoration in the
+/// diff editor, removed on cancel or successful submit.
+struct NewComment {
+    path: String,
+    line: u32,
+    block_id: Option<CustomBlockId>,
 }
 
 impl PullRequestView {
@@ -87,6 +121,8 @@ impl PullRequestView {
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let connection_subscription =
+            git::git_host_credentials::observe_connections(cx, |this, cx| this.refresh(cx));
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             provider,
@@ -100,9 +136,13 @@ impl PullRequestView {
             diff_editor: None,
             comment_threads: Vec::new(),
             expanded_threads: HashSet::default(),
+            description_expanded: true,
+            description_height: None,
             _comment_markdowns: Vec::new(),
             _comment_md_subscriptions: Vec::new(),
+            _connection_subscription: connection_subscription,
             error: None,
+            auth_error_host: None,
             loading: true,
             in_flight_action: false,
             reply_target: None,
@@ -111,6 +151,12 @@ impl PullRequestView {
             _load_task: None,
             _action_task: None,
             _reply_task: None,
+            diff_file_maps: Vec::new(),
+            new_comment: None,
+            new_comment_editor: None,
+            new_comment_in_flight: false,
+            _new_comment_task: None,
+            _diff_editor_subscription: None,
         };
         this.refresh(cx);
         this
@@ -161,7 +207,7 @@ impl PullRequestView {
                     Err(error) => {
                         surface_toast(
                             &workspace,
-                            format!("Review failed: {error}").into(),
+                            action_error_message("Review", &error),
                             cx,
                         );
                     }
@@ -212,7 +258,7 @@ impl PullRequestView {
                     ),
                     Err(error) => surface_toast(
                         &workspace,
-                        format!("Merge failed: {error}").into(),
+                        action_error_message("Merge", &error),
                         cx,
                     ),
                 }
@@ -302,7 +348,7 @@ impl PullRequestView {
                         this.refresh(cx);
                     }
                     Err(error) => {
-                        surface_toast(&workspace, format!("Reply failed: {error}").into(), cx)
+                        surface_toast(&workspace, action_error_message("Reply", &error), cx)
                     }
                 }
                 cx.notify();
@@ -310,6 +356,187 @@ impl PullRequestView {
             .ok();
         });
         self._reply_task = Some(task);
+    }
+
+    fn handle_diff_editor_event(
+        &mut self,
+        _editor: &Entity<Editor>,
+        event: &EditorEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let EditorEvent::AddPrCommentRequested { anchor } = event {
+            self.start_new_comment(*anchor, window, cx);
+        }
+    }
+
+    /// Resolve a diff-editor gutter anchor back to (file path, new-file line) and
+    /// open an inline composer block there for a new RIGHT-side review comment.
+    fn start_new_comment(&mut self, anchor: Anchor, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(multibuffer) = self.diff_multibuffer.clone() else {
+            return;
+        };
+        let mb_snapshot = multibuffer.read(cx).snapshot(cx);
+        let point = anchor.to_point(&mb_snapshot);
+        let Some((buffer_snapshot, buffer_point)) = mb_snapshot.point_to_buffer_point(point) else {
+            return;
+        };
+        let buffer_id = buffer_snapshot.remote_id();
+        let row = buffer_point.row;
+        let Some(map) = self
+            .diff_file_maps
+            .iter()
+            .find(|map| map.buffer.read(cx).remote_id() == buffer_id)
+        else {
+            return;
+        };
+        let path = map.path.clone();
+        // Only RIGHT-side (new-file) lines are supported for now. Full-content
+        // buffers map row R to new-file line R+1; patch buffers carry an explicit
+        // line->row map that we reverse. A row with no new-file line (a pure
+        // deletion) cannot anchor a RIGHT-side comment yet.
+        let line = if map.full_content {
+            row + 1
+        } else {
+            match map
+                .line_to_row
+                .iter()
+                .find(|entry| *entry.1 == row)
+                .map(|entry| *entry.0)
+            {
+                Some(line) => line,
+                None => {
+                    surface_toast(
+                        &self.workspace,
+                        "Inline comments can only be added on added or context lines.".into(),
+                        cx,
+                    );
+                    return;
+                }
+            }
+        };
+
+        // Replace any composer that is already open.
+        self.cancel_new_comment(cx);
+
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::auto_height(1, 8, window, cx);
+            editor.set_placeholder_text("Comment…", window, cx);
+            editor
+        });
+        editor.focus_handle(cx).focus(window, cx);
+        self.new_comment_editor = Some(editor);
+
+        let weak_view = cx.weak_entity();
+        let block_id = self.diff_editor.as_ref().and_then(|diff_editor| {
+            diff_editor.update(cx, |diff_editor, cx| {
+                diff_editor
+                    .insert_blocks(
+                        vec![BlockProperties {
+                            placement: BlockPlacement::Below(anchor),
+                            height: Some(1),
+                            style: BlockStyle::Flex,
+                            render: Arc::new(move |block_cx| {
+                                render_new_comment_composer(&weak_view, block_cx)
+                            }),
+                            priority: 0,
+                        }],
+                        None,
+                        cx,
+                    )
+                    .into_iter()
+                    .next()
+            })
+        });
+
+        self.new_comment = Some(NewComment {
+            path,
+            line,
+            block_id,
+        });
+        cx.notify();
+    }
+
+    fn cancel_new_comment(&mut self, cx: &mut Context<Self>) {
+        if let Some(new_comment) = self.new_comment.take() {
+            if let (Some(block_id), Some(diff_editor)) =
+                (new_comment.block_id, self.diff_editor.clone())
+            {
+                diff_editor.update(cx, |diff_editor, cx| {
+                    diff_editor.remove_blocks(HashSet::from_iter([block_id]), None, cx);
+                });
+            }
+        }
+        self.new_comment_editor = None;
+        cx.notify();
+    }
+
+    fn submit_new_comment(&mut self, cx: &mut Context<Self>) {
+        if self.new_comment_in_flight {
+            return;
+        }
+        let Some(new_comment) = self.new_comment.as_ref() else {
+            return;
+        };
+        let (path, line) = (new_comment.path.clone(), new_comment.line);
+        let Some(editor) = self.new_comment_editor.clone() else {
+            return;
+        };
+        let body = editor.read(cx).text(cx).trim().to_string();
+        if body.is_empty() {
+            return;
+        }
+        let commit_id = self
+            .detail
+            .as_ref()
+            .map(|detail| detail.head_sha.clone())
+            .unwrap_or_default();
+        let provider = self.provider.clone();
+        let host = provider.base_url().host_str().map(|host| host.to_string());
+        let remote = clone_remote(&self.remote);
+        let number = self.number;
+        let http_client = cx.http_client();
+        let workspace = self.workspace.clone();
+        self.new_comment_in_flight = true;
+        cx.notify();
+        let task = cx.spawn(async move |this, cx| {
+            let auth = match host.as_deref() {
+                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            let result = provider
+                .create_review_comment(
+                    &remote,
+                    number,
+                    commit_id,
+                    path.into(),
+                    line,
+                    DiffCommentSide::Right,
+                    body.into(),
+                    auth,
+                    http_client,
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                this.new_comment_in_flight = false;
+                match result {
+                    Ok(()) => {
+                        this.cancel_new_comment(cx);
+                        surface_toast(&workspace, "Posted comment".into(), cx);
+                        this.refresh(cx);
+                    }
+                    Err(error) => {
+                        surface_toast(&workspace, action_error_message("Comment", &error), cx)
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self._new_comment_task = Some(task);
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -320,6 +547,7 @@ impl PullRequestView {
         let http_client = cx.http_client();
         self.loading = true;
         self.error = None;
+        self.auth_error_host = None;
         cx.notify();
         let task = cx.spawn(async move |this, cx| {
             let auth = match host.as_deref() {
@@ -408,13 +636,26 @@ impl PullRequestView {
                         };
                         this.detail = Some(detail);
                     }
-                    Err(e) => this.error = Some(format!("{e}").into()),
+                    Err(e) => match e.downcast_ref::<git::PullRequestAuthError>() {
+                        Some(auth_error) => {
+                            this.auth_error_host = Some(auth_error.host.clone())
+                        }
+                        None => this.error = Some(format!("{e}").into()),
+                    },
                 }
                 this.comment_threads =
                     resolve_comment_threads(&comments, &file_maps, multibuffer.as_ref(), cx);
+                this.diff_file_maps = file_maps;
                 this.diff_files = files;
                 this.diff_multibuffer = multibuffer;
                 this.diff_editor = None;
+                // The diff editor is rebuilt by `ensure_diff_editor`, so drop any
+                // open new-comment composer and its subscription to the old editor.
+                this._diff_editor_subscription = None;
+                this.new_comment = None;
+                this.new_comment_editor = None;
+                this.new_comment_in_flight = false;
+                this._new_comment_task = None;
                 this.loading = false;
                 cx.notify();
             })
@@ -1131,6 +1372,10 @@ fn off_diff_location(comment: &PullRequestReviewComment, file_matched: bool) -> 
 /// the surrounding text and from fenced code blocks.
 fn pr_markdown_style(window: &Window, cx: &App) -> MarkdownStyle {
     let mut style = MarkdownStyle::themed(MarkdownFont::Editor, window, cx);
+    // Render the description prose at the same size as the small header labels so
+    // it reads as part of the metadata block sitting above the action buttons,
+    // rather than a larger prose section. Code spans/blocks keep the buffer font.
+    style.base_text_style.font_size = ui::TextSize::Small.rems(cx).into();
     let orange: gpui::Hsla = gpui::rgb(0xE5_8E_2A).into();
     style.inline_code.color = Some(orange);
     style.inline_code.background_color = Some(orange.opacity(0.12));
@@ -1143,6 +1388,113 @@ fn pr_markdown_style(window: &Window, cx: &App) -> MarkdownStyle {
 /// a composer in place; reading the open-reply state off the view here is safe
 /// because block rendering runs during the diff editor's layout, after the view's
 /// own `render` has returned.
+/// Drag payload identifying the description resize handle.
+#[derive(Clone)]
+struct DescriptionResizeDrag;
+
+/// A reviewer chip for the PR header: the reviewer's name plus a verdict icon
+/// (green check = approved, red x = changes requested, muted dash = pending).
+fn render_reviewer_chip(reviewer: &PullRequestReviewer) -> impl IntoElement {
+    let (icon, color) = match reviewer.verdict {
+        Some(PullRequestReviewVerdict::Approve) => (IconName::Check, Color::Success),
+        Some(PullRequestReviewVerdict::RequestChanges) => (IconName::Close, Color::Error),
+        // Comment-only and not-yet-reviewed both read as "no verdict yet".
+        Some(PullRequestReviewVerdict::Comment) | None => (IconName::Dash, Color::Muted),
+    };
+    h_flex()
+        .gap_1()
+        .child(Icon::new(icon).size(IconSize::Small).color(color))
+        .child(
+            Label::new(reviewer.login.clone())
+                .size(LabelSize::Small)
+                .color(if reviewer.is_me {
+                    Color::Default
+                } else {
+                    Color::Muted
+                }),
+        )
+}
+
+/// Renders the inline composer block for a brand-new review comment, anchored at
+/// the clicked diff line. Mirrors the reply composer footer.
+fn render_new_comment_composer(
+    weak_view: &WeakEntity<PullRequestView>,
+    block_cx: &mut BlockContext,
+) -> AnyElement {
+    let accent = block_cx.app.theme().colors().border_focused;
+    let editor_background = block_cx.app.theme().colors().editor_background;
+
+    let Some(view) = weak_view.upgrade() else {
+        return Empty.into_any_element();
+    };
+    let (editor, in_flight, location) = {
+        let view = view.read(block_cx.app);
+        let location = view
+            .new_comment
+            .as_ref()
+            .map(|comment| format!("{}:{}", comment.path, comment.line));
+        (
+            view.new_comment_editor.clone(),
+            view.new_comment_in_flight,
+            location,
+        )
+    };
+    let (Some(editor), Some(location)) = (editor, location) else {
+        return Empty.into_any_element();
+    };
+
+    v_flex()
+        .gap_1()
+        .child(
+            Label::new(format!("New comment on {location}"))
+                .color(Color::Muted)
+                .size(LabelSize::Small),
+        )
+        .child(
+            div()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(accent)
+                .bg(editor_background)
+                .child(editor),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("pr-new-comment-send", "Comment")
+                        .style(ButtonStyle::Filled)
+                        .disabled(in_flight)
+                        .on_click({
+                            let weak_view = weak_view.clone();
+                            move |_, _window, cx| {
+                                weak_view
+                                    .update(cx, |view, cx| view.submit_new_comment(cx))
+                                    .ok();
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("pr-new-comment-cancel", "Cancel")
+                        .style(ButtonStyle::Outlined)
+                        .disabled(in_flight)
+                        .on_click({
+                            let weak_view = weak_view.clone();
+                            move |_, _window, cx| {
+                                weak_view
+                                    .update(cx, |view, cx| view.cancel_new_comment(cx))
+                                    .ok();
+                            }
+                        }),
+                )
+                .when(in_flight, |this| {
+                    this.child(Label::new("…").color(Color::Muted).size(LabelSize::Small))
+                }),
+        )
+        .into_any_element()
+}
+
 fn render_comment_thread(
     comments: &[(ThreadComment, Entity<Markdown>)],
     root_id: u64,
@@ -1493,6 +1845,26 @@ fn clone_remote(remote: &ParsedGitRemote) -> ParsedGitRemote {
 }
 
 /// Fire a small status toast through the workspace if it's still alive.
+/// Builds the toast message for a failed PR action, turning an HTTP 401 into a
+/// clear reconnect instruction instead of a raw error string. The action's
+/// surface (panel / picker) is where the reconnect button lives, so the toast
+/// points there rather than carrying its own button.
+fn action_error_message(action: &str, error: &anyhow::Error) -> SharedString {
+    match error.downcast_ref::<git::PullRequestAuthError>() {
+        Some(auth_error) => {
+            let display = git::git_host_credentials::GitHostKind::from_host(&auth_error.host)
+                .map(|kind| kind.display_name())
+                .unwrap_or("the git host");
+            format!(
+                "{action} failed: your {display} sign-in has expired. \
+                 Reconnect from the pull request panel."
+            )
+            .into()
+        }
+        None => format!("{action} failed: {error}").into(),
+    }
+}
+
 fn surface_toast<C>(workspace: &WeakEntity<Workspace>, message: SharedString, cx: &mut C)
 where
     C: gpui::AppContext,
@@ -1543,6 +1915,27 @@ impl Item for PullRequestView {
     }
 }
 
+/// Extracts the `YYYY-MM-DD` calendar date from an ISO-8601 timestamp such as
+/// `2026-05-19T12:34:56+00:00`, matching how the host's own UI labels PR dates.
+/// Returns `None` for empty or malformed input so the header omits the chip
+/// rather than rendering a partial timestamp.
+fn iso_calendar_date(timestamp: &str) -> Option<SharedString> {
+    let date = timestamp.split('T').next().unwrap_or_default();
+    let mut parts = date.split('-');
+    let (Some(year), Some(month), Some(day), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let well_formed = year.len() == 4
+        && month.len() == 2
+        && day.len() == 2
+        && [year, month, day]
+            .iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()));
+    well_formed.then(|| SharedString::from(date.to_owned()))
+}
+
 impl Render for PullRequestView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_diff_editor(window, cx);
@@ -1553,6 +1946,41 @@ impl Render for PullRequestView {
                 .justify_center()
                 .gap_2()
                 .child(Label::new(format!("Loading PR #{}…", self.number)))
+                .into_any_element();
+        }
+
+        if let Some(host) = self.auth_error_host.clone()
+            && self.detail.is_none()
+        {
+            let host_for_action = host.to_string();
+            let display = git::git_host_credentials::GitHostKind::from_host(&host)
+                .map(|kind| kind.display_name())
+                .unwrap_or("the git host");
+            return v_flex()
+                .size_full()
+                .p_4()
+                .gap_2()
+                .child(Label::new("Connection expired").color(Color::Error))
+                .child(
+                    Label::new(format!(
+                        "Your {display} sign-in is no longer valid. \
+                         Reconnect to reload this pull request."
+                    ))
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+                )
+                .child(
+                    Button::new("pull-request-view-reconnect", "Reconnect").on_click(cx.listener(
+                        move |_, _, window, cx| {
+                            window.dispatch_action(
+                                Box::new(zed_actions::ConnectGitHost {
+                                    host: host_for_action.clone(),
+                                }),
+                                cx,
+                            );
+                        },
+                    )),
+                )
                 .into_any_element();
         }
 
@@ -1580,10 +2008,12 @@ impl Render for PullRequestView {
         };
 
         let in_flight = self.in_flight_action;
-        let header = self.render_header(detail, in_flight, cx);
-        let body = self.render_body(window, cx);
+        let description = self
+            .description_md
+            .is_some()
+            .then(|| self.render_body(window, cx));
+        let header = self.render_header(detail, in_flight, description, cx);
         let editor_bg = cx.theme().colors().editor_background;
-        let has_description = self.description_md.is_some();
         let diff_editor = self.diff_editor.clone();
         let loading = self.loading;
 
@@ -1592,22 +2022,8 @@ impl Render for PullRequestView {
             .bg(editor_bg)
             .child(header)
             .child(Divider::horizontal())
-            // The description sits in a bounded, independently scrolling strip so
-            // the diff editor below owns the remaining height and scrolls on its
-            // own. Inline comments render anchored inside the diff editor itself.
-            .when(has_description, |this| {
-                this.child(
-                    v_flex()
-                        .id("pr-view-description")
-                        .flex_none()
-                        .max_h(rems(13.))
-                        .w_full()
-                        .overflow_y_scroll()
-                        .p_4()
-                        .child(body),
-                )
-                .child(Divider::horizontal())
-            })
+            // Inline comments render anchored inside the diff editor itself; the
+            // description now lives in the header strip above the action buttons.
             .map(|this| match diff_editor {
                 Some(editor) => this.child(div().flex_1().min_h_0().w_full().child(editor)),
                 None => this.child(
@@ -1630,6 +2046,7 @@ impl PullRequestView {
         &self,
         detail: &PullRequestDetail,
         in_flight: bool,
+        description: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let state_label = match detail.state {
@@ -1651,7 +2068,15 @@ impl PullRequestView {
         };
         // Action buttons are only relevant while the PR is open.
         let actions_enabled = matches!(detail.state, PullRequestState::Open) && !in_flight;
-        let merge_enabled = actions_enabled && detail.is_mergeable.unwrap_or(false);
+        // Enable merge unless the host reports a real conflict. Bitbucket never
+        // reports mergeability and GitHub computes it lazily, so treating
+        // "unknown" as mergeable keeps the buttons usable for anyone with merge
+        // rights; the host still enforces permission and surfaces a rejection on
+        // click for anyone who lacks them.
+        let merge_enabled = actions_enabled && detail.is_mergeable != Some(false);
+        let viewer_approved = detail.viewer_review == Some(PullRequestReviewVerdict::Approve);
+        let viewer_requested_changes =
+            detail.viewer_review == Some(PullRequestReviewVerdict::RequestChanges);
 
         v_flex()
             .w_full()
@@ -1675,6 +2100,7 @@ impl PullRequestView {
             .child(
                 h_flex()
                     .gap_3()
+                    .flex_wrap()
                     .child(
                         Label::new(detail.author_login.clone())
                             .color(Color::Muted)
@@ -1688,6 +2114,20 @@ impl PullRequestView {
                         .color(Color::Muted)
                         .size(LabelSize::Small),
                     )
+                    .when_some(iso_calendar_date(&detail.created_at), |this, date| {
+                        this.child(
+                            Label::new(format!("Created {date}"))
+                                .color(Color::Muted)
+                                .size(LabelSize::Small),
+                        )
+                    })
+                    .when_some(iso_calendar_date(&detail.updated_at), |this, date| {
+                        this.child(
+                            Label::new(format!("Updated {date}"))
+                                .color(Color::Muted)
+                                .size(LabelSize::Small),
+                        )
+                    })
                     .child({
                         // Bitbucket's PR detail omits these counts; fall back to
                         // the numbers parsed from the unified diff.
@@ -1706,34 +2146,140 @@ impl PullRequestView {
                         Label::new(format!("{files} file(s), +{additions} -{deletions}"))
                             .color(Color::Muted)
                             .size(LabelSize::Small)
+                    })
+                    .when_some(detail.commits, |this, commits| {
+                        this.child(
+                            Label::new(format!(
+                                "{commits} commit{}",
+                                if commits == 1 { "" } else { "s" }
+                            ))
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                        )
                     }),
             )
+            .when_some(description, |this, description| {
+                // Collapsible + drag-resizable description. Collapsing hides the
+                // body but leaves the action buttons below in place; the buttons
+                // live in a sibling row so a long body never pushes them off.
+                let expanded = self.description_expanded;
+                let height = self.description_height;
+                this.child(
+                    v_flex()
+                        .flex_none()
+                        .w_full()
+                        .pt_2()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Disclosure::new("pr-view-description-disclosure", expanded)
+                                        .on_toggle_expanded(Arc::new(cx.listener(
+                                            |this, _, _window, cx| {
+                                                this.description_expanded =
+                                                    !this.description_expanded;
+                                                cx.notify();
+                                            },
+                                        ))
+                                            as Arc<dyn Fn(&ClickEvent, &mut Window, &mut App)>),
+                                )
+                                .child(
+                                    Label::new("Description")
+                                        .color(Color::Muted)
+                                        .size(LabelSize::Small),
+                                ),
+                        )
+                        .when(expanded, |this| {
+                            let body = v_flex()
+                                .id("pr-view-description")
+                                .flex_none()
+                                .w_full()
+                                .overflow_y_scroll()
+                                .child(description)
+                                .on_drag_move(cx.listener(
+                                    |this,
+                                     event: &DragMoveEvent<DescriptionResizeDrag>,
+                                     _window,
+                                     cx| {
+                                        // Body top is fixed; the mouse Y sets the
+                                        // new bottom, so height = mouse.y - top.
+                                        let raw = event.event.position.y - event.bounds.top();
+                                        let min = px(48.);
+                                        let max = px(720.);
+                                        this.description_height = Some(if raw < min {
+                                            min
+                                        } else if raw > max {
+                                            max
+                                        } else {
+                                            raw
+                                        });
+                                        cx.notify();
+                                    },
+                                ));
+                            let body = match height {
+                                Some(height) => body.h(height),
+                                None => body.max_h(rems(13.)),
+                            };
+                            this.child(body).child(
+                                div()
+                                    .id("pr-view-description-resize")
+                                    .h(px(6.))
+                                    .w_full()
+                                    .cursor_row_resize()
+                                    .on_drag(DescriptionResizeDrag, |_, _, _, cx| cx.new(|_| Empty)),
+                            )
+                        }),
+                )
+            })
+            .when(!detail.reviewers.is_empty(), |this| {
+                this.child(
+                    h_flex()
+                        .gap_3()
+                        .pt_2()
+                        .flex_wrap()
+                        .children(detail.reviewers.iter().map(render_reviewer_chip)),
+                )
+            })
             .child(
                 h_flex()
                     .gap_2()
                     .pt_2()
                     .child(
-                        Button::new("pr-approve", "Approve")
-                            .style(ButtonStyle::Outlined)
-                            .disabled(!actions_enabled)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.submit_review(PullRequestReviewVerdict::Approve, cx);
-                            })),
+                        Button::new(
+                            "pr-approve",
+                            if viewer_approved { "Approved" } else { "Approve" },
+                        )
+                        .style(ButtonStyle::Tinted(TintColor::Success))
+                        .when(viewer_approved, |button| {
+                            button.start_icon(Icon::new(IconName::Check))
+                        })
+                        .disabled(!actions_enabled)
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.submit_review(PullRequestReviewVerdict::Approve, cx);
+                        })),
                     )
                     .child(
-                        Button::new("pr-request-changes", "Request changes")
-                            .style(ButtonStyle::Outlined)
-                            .disabled(!actions_enabled)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.submit_review(
-                                    PullRequestReviewVerdict::RequestChanges,
-                                    cx,
-                                );
-                            })),
+                        Button::new(
+                            "pr-request-changes",
+                            if viewer_requested_changes {
+                                "Changes requested"
+                            } else {
+                                "Request changes"
+                            },
+                        )
+                        .style(ButtonStyle::Tinted(TintColor::Error))
+                        .when(viewer_requested_changes, |button| {
+                            button.start_icon(Icon::new(IconName::Close))
+                        })
+                        .disabled(!actions_enabled)
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.submit_review(PullRequestReviewVerdict::RequestChanges, cx);
+                        })),
                     )
                     .child(
                         Button::new("pr-merge", "Merge")
-                            .style(ButtonStyle::Filled)
+                            .style(ButtonStyle::Tinted(TintColor::Accent))
                             .disabled(!merge_enabled)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.merge(PullRequestMergeMethod::Merge, cx);
@@ -1741,7 +2287,7 @@ impl PullRequestView {
                     )
                     .child(
                         Button::new("pr-squash", "Squash & merge")
-                            .style(ButtonStyle::Outlined)
+                            .style(ButtonStyle::Tinted(TintColor::Accent))
                             .disabled(!merge_enabled)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.merge(PullRequestMergeMethod::Squash, cx);
@@ -1820,6 +2366,7 @@ impl PullRequestView {
             editor.set_show_bookmarks(false, cx);
             editor.set_show_breakpoints(false, cx);
             editor.set_expand_all_diff_hunks(cx);
+            editor.set_show_pr_comment_gutter_button(true, cx);
             if !rendered_threads.is_empty() {
                 let blocks = rendered_threads
                     .into_iter()
@@ -1864,6 +2411,8 @@ impl PullRequestView {
             })
             .collect();
         self._comment_markdowns = markdowns;
+        self._diff_editor_subscription =
+            Some(cx.subscribe_in(&editor, window, Self::handle_diff_editor_event));
         self.diff_editor = Some(editor);
     }
 
@@ -1885,5 +2434,33 @@ impl PullRequestView {
         }
         (self.diff_files.len(), additions, deletions)
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::iso_calendar_date;
+
+    #[test]
+    fn iso_calendar_date_extracts_date_portion() {
+        // Bitbucket-style timestamp with fractional seconds and offset.
+        assert_eq!(
+            iso_calendar_date("2026-05-19T12:34:56.789000+00:00").as_deref(),
+            Some("2026-05-19")
+        );
+        // GitHub-style timestamp with a `Z` suffix.
+        assert_eq!(
+            iso_calendar_date("2026-01-04T05:06:07Z").as_deref(),
+            Some("2026-01-04")
+        );
+        // A bare date is accepted as-is.
+        assert_eq!(iso_calendar_date("2026-05-19").as_deref(), Some("2026-05-19"));
+    }
+
+    #[test]
+    fn iso_calendar_date_rejects_malformed_input() {
+        assert_eq!(iso_calendar_date(""), None);
+        assert_eq!(iso_calendar_date("not-a-date"), None);
+        assert_eq!(iso_calendar_date("2026-5-9T00:00:00Z"), None);
+        assert_eq!(iso_calendar_date("20260519"), None);
+    }
 }
