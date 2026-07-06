@@ -56,6 +56,21 @@ if security find-identity -v -p codesigning | grep -q "$signing_identity"; then
         --sign "$signing_identity" "$dest"
 else
     echo "Developer ID not found, using ad-hoc signature..."
+    if [ "$channel" != "dev" ]; then
+        # Non-dev channels store credentials in the system keychain. An ad-hoc
+        # signature has no Team ID and cannot read or write it, so the PR panel
+        # shows "host not connected" and connecting an account fails with a
+        # keychain error. This usually means the Developer ID key was not
+        # unlocked in this shell (common for background/non-interactive runs).
+        echo "" >&2
+        echo "WARNING: ad-hoc signing a '${channel}' build; the system keychain will be" >&2
+        echo "  inaccessible (PR panel auth and 'connect account' will fail). Re-run" >&2
+        echo "  script/install-fork from an interactive Terminal, or re-sign with:" >&2
+        echo "    codesign --force --deep --options runtime \\" >&2
+        echo "      --entitlements crates/zed/resources/zed.entitlements \\" >&2
+        echo "      --sign \"${signing_identity}\" \"${dest}\"" >&2
+        echo "" >&2
+    fi
     entitlements_tmp=$(mktemp)
     sed '/com.apple.developer.associated-domains/,+1d' \
         crates/zed/resources/zed.entitlements > "$entitlements_tmp"

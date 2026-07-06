@@ -4,6 +4,73 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# --- Argument parsing ---
+CLEAN_BUILD=false
+for arg in "$@"; do
+    case "$arg" in
+        --clean) CLEAN_BUILD=true ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: script/build-fork [--clean]
+
+  --clean    Wipe target/ before building, for a guaranteed from-scratch build.
+  -h, --help Show this help.
+
+Cached (incremental) builds are the default and stay fast. Because cargo never
+garbage-collects target/, this script also auto-manages its size: once target/
+exceeds LATHE_TARGET_SOFT_GB (default 80) it prunes always-regenerable cache
+(incremental dirs + rust-analyzer's flycheck dirs); past LATHE_TARGET_HARD_GB
+(default 200) it does a full reset. Set either cap to 0 to disable that tier.
+EOF
+            exit 0 ;;
+        *) echo "Unknown argument: $arg (try --help)"; exit 1 ;;
+    esac
+done
+
+# --- Storage management ---
+# Cargo never garbage-collects target/, so across many upstream merges (each
+# changing dependency hashes) plus rust-analyzer's separate check builds
+# (target/debug + target/flycheck*), it can grow into the hundreds of GB. Keep
+# cached builds fast, but bound growth: prune always-regenerable cache past a
+# soft cap, and fully reset past a hard cap. Caps are whole GB; 0 disables.
+target_size_gb() {
+    [ -d target ] || { echo 0; return; }
+    local kb
+    kb=$(du -sk target 2>/dev/null | awk '{print $1}')
+    echo $(( ${kb:-0} / 1024 / 1024 ))
+}
+
+manage_target_storage() {
+    if [ "$CLEAN_BUILD" = true ]; then
+        echo "Clean build requested — wiping target/ ..."
+        cargo clean 2>/dev/null || rm -rf target
+        return
+    fi
+
+    [ -d target ] || return
+
+    local soft_gb="${LATHE_TARGET_SOFT_GB:-80}"
+    local hard_gb="${LATHE_TARGET_HARD_GB:-200}"
+    local size_gb
+    size_gb=$(target_size_gb)
+    echo "target/ is currently ${size_gb} GB"
+
+    if [ "$hard_gb" -gt 0 ] && [ "$size_gb" -ge "$hard_gb" ]; then
+        echo "Exceeds hard cap (${hard_gb} GB) — full reset via cargo clean ..."
+        cargo clean 2>/dev/null || rm -rf target
+        return
+    fi
+
+    if [ "$soft_gb" -gt 0 ] && [ "$size_gb" -ge "$soft_gb" ]; then
+        echo "Exceeds soft cap (${soft_gb} GB) — pruning regenerable cache ..."
+        # incremental/ dirs and rust-analyzer's flycheck dir are always rebuilt
+        # on demand; deleting them never breaks a build, only slows the next one.
+        find target -type d -name incremental -prune -exec rm -rf {} + 2>/dev/null || true
+        rm -rf target/flycheck* 2>/dev/null || true
+        echo "Pruned to $(target_size_gb) GB"
+    fi
+}
+
 echo "=== Building Lathe ==="
 
 # --- Prerequisites ---
@@ -103,6 +170,10 @@ host_line=$(echo "$version_info" | grep host)
 target_triple=${host_line#*: }
 
 echo "Target: $target_triple"
+
+# Bound target/ growth before kicking off the (cache-reusing) release build.
+manage_target_storage
+
 echo "Building release binary..."
 
 cargo build --release --package zed --package cli --target "$target_triple"
