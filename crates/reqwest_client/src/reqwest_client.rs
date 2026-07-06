@@ -30,15 +30,22 @@ impl ReqwestClient {
         reqwest::Client::builder()
             .use_rustls_tls()
             .connect_timeout(Duration::from_secs(10))
-            // Detect and drop connections that have silently gone bad on a
-            // flaky path (NAT timeouts, resets) instead of reusing them. A
-            // stale reused HTTP/2 connection is a common source of
-            // `BadRecordMac` TLS errors against long-lived endpoints.
-            .tcp_keepalive(Duration::from_secs(30))
+            // The pool would otherwise hand out connections that a NAT, VPN,
+            // firewall, or sleep/wake silently half-closed: writes succeed into
+            // the void and the request hangs until the process restarts. TCP
+            // keepalive lets the OS notice the dead peer and the idle timeout
+            // recycles unused connections well before the 90s default.
+            //
+            // Do NOT add `.read_timeout(..)` here. reqwest implements it by
+            // wrapping the response body in a `ReadTimeoutBody` that calls
+            // `tokio::time::sleep` on every poll. We hand the body back to
+            // GPUI's executor and read it outside any Tokio runtime, so that
+            // sleep hits `Handle::current()` with no runtime and panics, which
+            // our panic hook turns into an abort on the first HTTP body read at
+            // startup. Connect-level timeouts are fine because the connect
+            // future is driven inside the Tokio runtime.
+            .tcp_keepalive(Duration::from_secs(60))
             .pool_idle_timeout(Duration::from_secs(30))
-            .http2_keep_alive_interval(Duration::from_secs(15))
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .http2_keep_alive_while_idle(true)
     }
 
     pub fn new() -> Self {
