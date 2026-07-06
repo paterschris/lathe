@@ -2744,15 +2744,21 @@ impl Terminal {
                                 .unwrap_or_default();
 
                             let argv = fpi.argv.as_slice();
-                            let process_name = format!(
-                                "{}{}",
-                                fpi.name,
-                                if !argv.is_empty() {
-                                    format!(" {}", (argv[1..]).join(" "))
-                                } else {
-                                    "".to_string()
-                                }
-                            );
+                            // Lathe: keep the noisy `--dangerously-skip-permissions`
+                            // flag (used to launch agent CLIs) out of the tab title.
+                            let args = argv
+                                .get(1..)
+                                .unwrap_or_default()
+                                .iter()
+                                .filter(|arg| arg.as_str() != "--dangerously-skip-permissions")
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            let process_name = if args.is_empty() {
+                                fpi.name.clone()
+                            } else {
+                                format!("{} {}", fpi.name, args)
+                            };
                             let (process_file, process_name) = if truncate {
                                 (
                                     truncate_and_trailoff(&process_file, MAX_CHARS),
