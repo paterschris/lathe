@@ -10,8 +10,8 @@ use git::{
     blame::Blame,
     repository::{
         AskPassDelegate, Branch, BranchesScanResult, CommitData, CommitDataReader, CommitDetails,
-        CommitOptions,
-        CreateWorktreeTarget, FetchOptions, FileHistoryChangedFileSets, GRAPH_CHUNK_SIZE,
+        CommitOptions, CommitSummary, CreateWorktreeTarget, FetchOptions,
+        FileHistoryChangedFileSets, GRAPH_CHUNK_SIZE,
         GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource,
         MergeOptions, PushOptions, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, RefEdit,
         ReflogEntry, Remote, RepoPath, ResetMode, SearchCommitArgs, Tag, Worktree,
@@ -1687,6 +1687,10 @@ impl GitRepository for FakeGitRepository {
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
         async { bail!("rebase not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn commits_in_range(&self, _range: String) -> BoxFuture<'_, Result<Vec<CommitSummary>>> {
+        async { Ok(Vec::new()) }.boxed()
     }
 
     fn rebase_interactive(

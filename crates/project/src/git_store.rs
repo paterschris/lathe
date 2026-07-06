@@ -36,9 +36,9 @@ use git::{
     parse_git_remote_url,
     repository::{
         Branch, BranchesScanResult, CommitData, CommitDetails, CommitDiff, CommitFile,
-        CommitOptions, CreateWorktreeTarget, DiffType, FetchOptions, GitCommitTemplate,
-        GitProgressEvent, GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder,
-        LogSource,
+        CommitOptions, CommitSummary, CreateWorktreeTarget, DiffType, FetchOptions,
+        GitCommitTemplate, GitProgressEvent, GitRepository, GitRepositoryCheckpoint,
+        InitialGraphCommitData, LogOrder, LogSource,
         MergeOptions, PushOptions, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry,
         ReflogEntry, Remote, RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, Tag,
         UpstreamTrackingStatus, Worktree as GitWorktree, delete_branch_flag,
@@ -8438,6 +8438,27 @@ impl Repository {
                 }
             }
         })
+    }
+
+    pub fn commits_in_range(
+        &mut self,
+        range: String,
+    ) -> oneshot::Receiver<Result<Vec<CommitSummary>>> {
+        let label: SharedString = format!("git log {range}").into();
+        self.send_job(
+            "commits_in_range",
+            Some(label),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.commits_in_range(range).await
+                    }
+                    RepositoryState::Remote(_) => {
+                        bail!("listing commits in a range is not yet supported on remote projects")
+                    }
+                }
+            },
+        )
     }
 
     pub fn rebase(

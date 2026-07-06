@@ -959,6 +959,11 @@ pub trait GitRepository: Send + Sync {
 
     fn show(&self, commit: String) -> BoxFuture<'_, Result<CommitDetails>>;
 
+    /// Lists the commits contained in the given revision range (for example
+    /// `"main..feature"`), newest first to match `git log` ordering. Used to
+    /// preview a rebase and to build its interactive plan before running it.
+    fn commits_in_range(&self, range: String) -> BoxFuture<'_, Result<Vec<CommitSummary>>>;
+
     fn load_commit(&self, commit: String, cx: AsyncApp) -> BoxFuture<'_, Result<CommitDiff>>;
     fn blame(
         &self,
@@ -3998,6 +4003,45 @@ impl GitRepository for RealGitRepository {
                 String::from_utf8_lossy(&output.stderr),
             );
             Ok(())
+        }
+        .boxed()
+    }
+
+    fn commits_in_range(&self, range: String) -> BoxFuture<'_, Result<Vec<CommitSummary>>> {
+        let git_binary = self.git_binary();
+        async move {
+            let git = git_binary;
+            // NUL-delimited fields per line: <full-sha>\0<subject>\0<author>\0<commit-timestamp>.
+            // NUL separators keep subjects containing arbitrary characters parseable.
+            let format = "--format=%H%x00%s%x00%an%x00%ct";
+            let args = vec!["log", "--no-color", format, range.as_str()];
+            let output = git.build_command(&args).output().await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Failed to list commits:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut commits = Vec::new();
+            for line in stdout.lines() {
+                if line.is_empty() {
+                    continue;
+                }
+                let mut fields = line.split('\0');
+                let (Some(sha), Some(subject), Some(author_name), Some(timestamp)) =
+                    (fields.next(), fields.next(), fields.next(), fields.next())
+                else {
+                    continue;
+                };
+                commits.push(CommitSummary {
+                    sha: sha.to_string().into(),
+                    subject: subject.to_string().into(),
+                    commit_timestamp: timestamp.trim().parse().unwrap_or(0),
+                    author_name: author_name.to_string().into(),
+                    has_parent: true,
+                });
+            }
+            Ok(commits)
         }
         .boxed()
     }

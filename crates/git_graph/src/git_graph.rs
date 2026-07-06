@@ -16,6 +16,7 @@ use git_ui::{
     commit_view::CommitView,
     git_status_icon,
     interactive_rebase_modal::{InteractiveRebaseModal, RebasePlanEntry},
+    rebase_confirm_modal::RebaseConfirmModal,
 };
 use gpui::{
     Action, Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardItem, DefiniteLength,
@@ -1849,13 +1850,13 @@ impl GitGraph {
                                                     }
                                                 })
                                                 .on_drop::<DraggedGraphRef>(
-                                                    move |payload, _, cx| {
+                                                    move |payload, window, cx| {
                                                         let payload = payload.clone();
                                                         let target = target_branch_for_ref.clone();
                                                         weak_for_ref_drop
                                                             .update(cx, |this, cx| {
                                                                 this.handle_ref_drop_on_ref(
-                                                                    target, payload, cx,
+                                                                    target, payload, window, cx,
                                                                 );
                                                             })
                                                             .ok();
@@ -3663,12 +3664,14 @@ impl GitGraph {
     }
 
     /// Drag-and-drop: dropping ref `payload.branch_name` onto ref `target`
-    /// rebases the source branch onto the target. Performs a `git switch` if
-    /// the source isn't already checked out, then runs `git rebase <target>`.
+    /// opens a confirmation that previews the commits a rebase would replay and
+    /// offers either a plain or an interactive rebase of the source onto the
+    /// target, rather than rewriting history immediately.
     fn handle_ref_drop_on_ref(
         &mut self,
         target_branch: String,
         payload: DraggedGraphRef,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if payload.repo_id != self.repo_id {
@@ -3678,76 +3681,36 @@ impl GitGraph {
             return;
         }
 
-        let git_store = self.git_store.clone();
-        let workspace = self.workspace.clone();
         let repo_id = self.repo_id;
+        let git_store = self.git_store.clone();
+        let Some(repository) = git_store.read(cx).repositories().get(&repo_id).cloned() else {
+            return;
+        };
         let DraggedGraphRef {
             branch_name: source,
-            current_tip_sha,
             is_current: source_is_current,
             ..
         } = payload;
+        let workspace = self.workspace.clone();
+        let workspace_for_modal = self.workspace.clone();
 
-        let Some(repo) = git_store.read(cx).repositories().get(&repo_id).cloned() else {
-            return;
-        };
-
-        let checkout_receiver = if source_is_current {
-            None
-        } else {
-            Some(repo.update(cx, |repo, _| repo.change_branch(source.clone())))
-        };
-        let rebase_target = target_branch;
-        let undo_branch = source.clone();
-        let undo_sha = current_tip_sha;
-        let label = format!("Rebase {source} onto {rebase_target}");
-
-        cx.spawn(async move |this, cx| {
-            if let Some(receiver) = checkout_receiver {
-                match receiver.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        log::error!("checkout before rebase failed: {error:?}");
-                        return;
-                    }
-                    Err(_) => return,
-                }
-            }
-            let rebase_receiver = this
-                .update(cx, |this, cx| {
-                    this.git_store
-                        .read(cx)
-                        .repositories()
-                        .get(&this.repo_id)
-                        .cloned()
-                        .map(|repo| {
-                            repo.update(cx, |repo, _| {
-                                repo.rebase(rebase_target.clone(), RebaseOptions::default())
-                            })
-                        })
-                })
-                .ok()
-                .flatten();
-            let Some(receiver) = rebase_receiver else {
-                return;
-            };
-            let _ = cx.update(|cx| {
-                detach_op_with_undo(
-                    cx,
-                    receiver,
-                    git_store,
-                    workspace,
-                    repo_id,
-                    label,
-                    UndoAction::RestoreBranchTip {
-                        branch: undo_branch,
-                        sha: undo_sha,
-                        is_current: true,
-                    },
-                );
-            });
-        })
-        .detach();
+        workspace
+            .update(cx, move |workspace, cx| {
+                workspace.toggle_modal(window, cx, move |_window, cx| {
+                    RebaseConfirmModal::new(
+                        source.clone(),
+                        source_is_current,
+                        target_branch.clone(),
+                        target_branch.clone(),
+                        repo_id,
+                        git_store,
+                        repository,
+                        workspace_for_modal,
+                        cx,
+                    )
+                });
+            })
+            .ok();
     }
 
     fn handle_graph_right_click(

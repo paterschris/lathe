@@ -7230,80 +7230,48 @@ impl GitPanel {
     /// `git switch <source>` (so the source branch is checked out) and then
     /// `git rebase <target>`. Both steps run on the foreground; errors surface
     /// via the standard git-panel error toast.
+    /// Drag-and-drop handler: confirm before rebasing `source` onto `target`.
+    /// Instead of rewriting history immediately, this opens a modal that
+    /// previews the commits to be replayed and offers a plain or interactive
+    /// rebase.
     fn rebase_branch_onto(
         &mut self,
         source: String,
         target: String,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
-        let workspace = self.workspace.clone();
-        let already_on_source = repo
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let repo_id = repo.read(cx).id;
+        let source_is_current = repo
             .read(cx)
             .branch
             .as_ref()
-            .map(|b| b.name() == source)
+            .map(|branch| branch.name() == source)
             .unwrap_or(false);
-        let checkout_receiver = if already_on_source {
-            None
-        } else {
-            Some(repo.update(cx, |repo, _| repo.change_branch(source.clone())))
-        };
-        let target_label = target.clone();
-        cx.spawn(async move |this, cx| {
-            if let Some(receiver) = checkout_receiver {
-                match receiver.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        if let Some(workspace) = workspace.upgrade() {
-                            let _ = cx.update(|cx| {
-                                show_error_toast(
-                                    workspace,
-                                    format!("checkout {source}"),
-                                    error,
-                                    cx,
-                                )
-                            });
-                        }
-                        return;
-                    }
-                    Err(_) => return,
-                }
-            }
-            let rebase_receiver = this
-                .update(cx, |this, cx| {
-                    this.active_repository.as_ref().map(|repo| {
-                        repo.update(cx, |repo, _| {
-                            repo.rebase(target.clone(), RebaseOptions::default())
-                        })
-                    })
-                })
-                .ok()
-                .flatten();
-            let Some(receiver) = rebase_receiver else {
-                return;
-            };
-            match receiver.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    if let Some(workspace) = workspace.upgrade() {
-                        let _ = cx.update(|cx| {
-                            show_error_toast(
-                                workspace,
-                                format!("rebase onto {target_label}"),
-                                error,
-                                cx,
-                            )
-                        });
-                    }
-                }
-                Err(_) => {}
-            }
-        })
-        .detach();
+        let git_store = self.project.read(cx).git_store().clone();
+        let workspace_weak = self.workspace.clone();
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, |_window, cx| {
+                crate::rebase_confirm_modal::RebaseConfirmModal::new(
+                    source.clone(),
+                    source_is_current,
+                    target.clone(),
+                    target.clone(),
+                    repo_id,
+                    git_store,
+                    repo,
+                    workspace_weak,
+                    cx,
+                )
+            });
+        });
     }
 
     /// Push an empty source refspec (`:<remote_branch>`) to delete the
