@@ -1193,7 +1193,17 @@ impl Platform for MacPlatform {
                 query_attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
 
                 let status = SecItemDelete(query_attrs.as_concrete_TypeRef());
-                anyhow::ensure!(status == errSecSuccess, "delete password failed: {status}");
+                match status {
+                    // A successful delete and "there was nothing to delete"
+                    // both satisfy the caller's goal: no credential remains for
+                    // this url. Treat them alike so disconnecting an already
+                    // absent account is an idempotent no-op instead of an
+                    // error, matching read_credentials' tolerance above. Other
+                    // statuses (e.g. a denied keychain authorization) are real
+                    // failures and must surface.
+                    security::errSecSuccess | security::errSecItemNotFound => {}
+                    _ => anyhow::bail!("delete password failed: {status}"),
+                }
             }
             Ok(())
         })
