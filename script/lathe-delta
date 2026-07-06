@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+#
+# lathe-delta: scorecard for the Lathe-vs-upstream extraction effort.
+#
+# The KPI for the extraction plan (see EDOC/lathe-extraction-plan.md) is the
+# number of Lathe lines living inside upstream-owned files. This script measures
+# it against the upstream base and prints the worst offenders, so progress can be
+# tracked after each work package and re-baselined after each upstream merge.
+#
+# "Upstream base" = the second parent of the most recent "Merge upstream" merge
+# commit, i.e. the upstream side of that merge. Override by passing a ref as the
+# first argument.
+#
+# Usage:
+#   script/lathe-delta            # auto-detect base, show top 40
+#   script/lathe-delta <base-ref> # measure against an explicit base
+#   TOP=60 script/lathe-delta     # show top 60
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+top="${TOP:-40}"
+
+if [ "$#" -ge 1 ]; then
+    base="$1"
+else
+    merge_commit="$(git log --merges --grep='Merge upstream' --format='%H' -n1 || true)"
+    if [ -z "$merge_commit" ]; then
+        echo "error: could not find a 'Merge upstream' merge commit; pass a base ref explicitly." >&2
+        exit 1
+    fi
+    base="${merge_commit}^2"
+fi
+
+base_sha="$(git rev-parse --short "$base")"
+
+# Paths excluded from the KPI: not extractable feature logic. Branding assets,
+# fork-only workflows/scripts, docs, generated lockfiles, and the Lathe-owned
+# crates themselves (their whole point is to live outside upstream files).
+exclude=(
+    ':!Cargo.lock'
+    ':!README.md'
+    ':!RELEASE_NOTES.md'
+    ':!assets/**'
+    ':!docs/**'
+    ':!script/**'
+    ':!.github/**'
+    ':!crates/lathe'
+    ':!crates/lathe_hooks'
+    ':!crates/pr_ui'
+    ':!crates/git_graph'
+    ':!crates/mobile_dev'
+    ':!crates/ai_accounts'
+)
+
+echo "Lathe delta scorecard"
+echo "  upstream base: ${base_sha} ($(git log -1 --format='%s' "$base" | cut -c1-60))"
+echo "  HEAD:          $(git rev-parse --short HEAD) ($(git log -1 --format='%s' HEAD | cut -c1-60))"
+echo
+
+# KPI: Lathe lines inside MODIFIED upstream files (added files are Lathe-owned).
+numstat="$(git diff --diff-filter=M --numstat "$base"..HEAD -- "${exclude[@]}")"
+
+if [ -z "$numstat" ]; then
+    echo "No modified upstream files. KPI = 0."
+    exit 0
+fi
+
+echo "Top ${top} modified upstream files (added+removed Lathe lines, worst first):"
+printf '%s\n' "$numstat" \
+    | awk '{ churn = $1 + $2; printf "%7d  +%-6d -%-6d  %s\n", churn, $1, $2, $3 }' \
+    | sort -rn \
+    | head -n "$top"
+
+echo
+printf '%s\n' "$numstat" | awk '
+    { added += $1; removed += $2; files += 1 }
+    END {
+        printf "KPI totals across %d modified upstream files:\n", files
+        printf "  +%d added, -%d removed, %d total churn\n", added, removed, added + removed
+    }
+'
