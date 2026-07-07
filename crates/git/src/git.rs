@@ -2,6 +2,7 @@ pub mod blame;
 pub mod commit;
 pub mod git_host_credentials;
 mod hosting_provider;
+mod lathe_repository;
 mod remote;
 pub mod repository;
 pub mod stash;
