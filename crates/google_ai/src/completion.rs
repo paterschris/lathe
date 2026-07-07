@@ -12,7 +12,8 @@ use std::sync::atomic::{self, AtomicU64};
 use crate::{
     Content, FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration,
     GenerateContentResponse, GenerationConfig, GenerativeContentBlob, GoogleModelMode,
-    InlineDataPart, ModelName, Part, SystemInstruction, TextPart, ThinkingConfig, ToolConfig,
+    InlineDataPart, ModelName, Part, SystemInstruction, TextPart, ThinkingConfig, ThinkingLevel,
+    ToolConfig,
     UsageMetadata,
 };
 
@@ -27,19 +28,24 @@ pub fn into_google(
             .flat_map(|content| match content {
                 MessageContent::Text(text) => {
                     if !text.is_empty() {
-                        vec![Part::TextPart(TextPart { text })]
+                        vec![Part::TextPart(TextPart {
+                            text,
+                            thought: false,
+                            thought_signature: None,
+                        })]
                     } else {
                         vec![]
                     }
                 }
                 MessageContent::Thinking {
-                    text: _,
+                    text,
                     signature: Some(signature),
                 } => {
                     if !signature.is_empty() {
-                        vec![Part::ThoughtPart(crate::ThoughtPart {
+                        vec![Part::TextPart(TextPart {
+                            text,
                             thought: true,
-                            thought_signature: signature,
+                            thought_signature: Some(signature),
                         })]
                     } else {
                         vec![]
@@ -121,6 +127,8 @@ pub fn into_google(
         None
     };
 
+    let thinking_config = thinking_config_for_request(&request, &model_id, mode);
+
     crate::GenerateContentRequest {
         model: ModelName { model_id },
         system_instruction: system_instructions,
@@ -148,12 +156,7 @@ pub fn into_google(
             stop_sequences: Some(request.stop),
             max_output_tokens: None,
             temperature: request.temperature.map(|t| t as f64).or(Some(1.0)),
-            thinking_config: match (request.thinking_allowed, mode) {
-                (true, GoogleModelMode::Thinking { budget_tokens }) => {
-                    budget_tokens.map(|thinking_budget| ThinkingConfig { thinking_budget })
-                }
-                _ => None,
-            },
+            thinking_config,
             top_p: None,
             top_k: None,
         }),
@@ -182,6 +185,76 @@ pub fn into_google(
             },
         }),
     }
+}
+
+fn thinking_config_for_request(
+    request: &LanguageModelRequest,
+    model_id: &str,
+    mode: GoogleModelMode,
+) -> Option<ThinkingConfig> {
+    let supports_thinking =
+        matches!(mode, GoogleModelMode::Thinking { .. }) || is_google_thinking_model(model_id);
+    if !supports_thinking {
+        return None;
+    }
+
+    let mut config = ThinkingConfig::default();
+
+    if request.thinking_allowed {
+        config.include_thoughts = Some(true);
+        config.thinking_level = request
+            .thinking_effort
+            .as_deref()
+            .and_then(ThinkingLevel::from_effort);
+
+        if config.thinking_level.is_none()
+            && let GoogleModelMode::Thinking {
+                budget_tokens: Some(budget_tokens),
+            } = mode
+        {
+            config.thinking_budget = Some(budget_tokens);
+        }
+    } else if let Some(thinking_level) = disabled_thinking_level(model_id) {
+        config.thinking_level = Some(thinking_level);
+    } else if supports_thinking_budget_disable(model_id) {
+        config.thinking_budget = Some(0);
+    }
+
+    (!config.is_empty()).then_some(config)
+}
+
+impl ThinkingConfig {
+    fn is_empty(&self) -> bool {
+        self.thinking_budget.is_none()
+            && self.thinking_level.is_none()
+            && self.include_thoughts.is_none()
+    }
+}
+
+fn is_google_thinking_model(model_id: &str) -> bool {
+    model_id.starts_with("gemini-2.5-") || model_id.starts_with("gemini-3")
+}
+
+fn disabled_thinking_level(model_id: &str) -> Option<ThinkingLevel> {
+    match model_id {
+        model_id if model_id.starts_with("gemini-3") && model_id.contains("-pro") => {
+            Some(ThinkingLevel::Low)
+        }
+        model_id if model_id.starts_with("gemini-3") => Some(ThinkingLevel::Minimal),
+        _ => None,
+    }
+}
+
+fn supports_thinking_budget_disable(model_id: &str) -> bool {
+    matches!(
+        model_id,
+        "gemini-2.5-flash"
+            | "gemini-2.5-flash-lite"
+            | "gemini-2.5-flash-preview-latest"
+            | "gemini-2.5-flash-preview-04-17"
+            | "gemini-2.5-flash-preview-05-20"
+            | "gemini-2.5-flash-lite-preview-06-17"
+    )
 }
 
 pub struct GoogleEventMapper {
@@ -266,7 +339,28 @@ impl GoogleEventMapper {
                     .into_iter()
                     .for_each(|part| match part {
                         Part::TextPart(text_part) => {
-                            events.push(Ok(LanguageModelCompletionEvent::Text(text_part.text)))
+                            let thought_signature =
+                                text_part.thought_signature.filter(|s| !s.is_empty());
+                            if text_part.thought {
+                                if !text_part.text.is_empty() || thought_signature.is_some() {
+                                    events.push(Ok(LanguageModelCompletionEvent::Thinking {
+                                        text: text_part.text,
+                                        signature: thought_signature,
+                                    }))
+                                }
+                            } else {
+                                if let Some(thought_signature) = thought_signature {
+                                    events.push(Ok(LanguageModelCompletionEvent::Thinking {
+                                        text: String::new(),
+                                        signature: Some(thought_signature),
+                                    }));
+                                }
+                                if !text_part.text.is_empty() {
+                                    events.push(Ok(LanguageModelCompletionEvent::Text(
+                                        text_part.text,
+                                    )));
+                                }
+                            }
                         }
                         Part::InlineDataPart(_) => {}
                         Part::FunctionCallPart(function_call_part) => {
@@ -294,12 +388,6 @@ impl GoogleEventMapper {
                             )));
                         }
                         Part::FunctionResponsePart(_) => {}
-                        Part::ThoughtPart(part) => {
-                            events.push(Ok(LanguageModelCompletionEvent::Thinking {
-                                text: "(Encrypted thought)".to_string(), // TODO: Can we populate this from thought summaries?
-                                signature: Some(part.thought_signature),
-                            }));
-                        }
                     });
             }
         }
