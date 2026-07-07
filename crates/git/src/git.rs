@@ -3,6 +3,7 @@ pub mod commit;
 pub mod git_host_credentials;
 mod hosting_provider;
 mod lathe_repository;
+mod pull_requests;
 mod remote;
 pub mod repository;
 pub mod stash;
