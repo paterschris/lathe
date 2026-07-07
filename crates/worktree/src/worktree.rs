@@ -3013,8 +3013,14 @@ impl LocalSnapshot {
 }
 
 impl BackgroundScannerState {
-    fn should_scan_directory(&self, entry: &Entry) -> bool {
-        (self.scanning_enabled && !entry.is_external && (!entry.is_ignored || entry.is_always_included))
+    fn should_scan_directory(&self, entry: &Entry, scan_symlinks_always: bool) -> bool {
+        // `scan_symlinks_always` restores the upstream behavior: when the
+        // `scan_symlinks` setting is `Always`, recurse into external (symlinked)
+        // directories rather than stopping at the symlink. The caller supplies
+        // it because `settings` lives on `BackgroundScanner`, not this state.
+        (self.scanning_enabled
+            && (!entry.is_external || scan_symlinks_always)
+            && (!entry.is_ignored || entry.is_always_included))
             || entry.path.file_name() == Some(DOT_GIT)
             || entry.path.file_name() == Some(local_settings_folder_name())
             || entry.path.file_name() == Some(local_vscode_folder_name())
@@ -5211,7 +5217,10 @@ impl BackgroundScanner {
         for entry in &mut new_entries {
             state.reuse_entry_id(entry);
             if entry.is_dir() {
-                if state.should_scan_directory(entry) {
+                if state.should_scan_directory(
+                    entry,
+                    self.settings.scan_symlinks == settings::ScanSymlinksSetting::Always,
+                ) {
                     job_ix += 1;
                 } else {
                     log::debug!("defer scanning directory {:?}", entry.path);
@@ -5346,7 +5355,10 @@ impl BackgroundScanner {
                     fs_entry.is_hidden = self.settings.is_path_hidden(path);
 
                     if let (Some(scan_queue_tx), true) = (&scan_queue_tx, is_dir) {
-                        if state.should_scan_directory(&fs_entry)
+                        if state.should_scan_directory(
+                            &fs_entry,
+                            self.settings.scan_symlinks == settings::ScanSymlinksSetting::Always,
+                        )
                             || (self.track_git_repositories
                                 && fs_entry.path.is_empty()
                                 && abs_path.file_name() == Some(OsStr::new(DOT_GIT)))
@@ -5650,7 +5662,10 @@ impl BackgroundScanner {
                 // Scan any directories that were previously ignored and weren't previously scanned.
                 if was_ignored && !entry.is_ignored && entry.kind.is_unloaded() {
                     let state = self.state.lock().await;
-                    if state.should_scan_directory(&entry) {
+                    if state.should_scan_directory(
+                        &entry,
+                        self.settings.scan_symlinks == settings::ScanSymlinksSetting::Always,
+                    ) {
                         state
                             .enqueue_scan_dir(
                                 abs_path.clone(),
