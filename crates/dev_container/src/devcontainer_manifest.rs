@@ -1,3 +1,21 @@
+//! lathe: this module intentionally diverges from upstream Zed's dev-container
+//! manifest handling. The large deletion versus upstream is deliberate, not a
+//! merge artifact, so do NOT "restore upstream" wholesale here:
+//!
+//! 1. Feature fetching is OCI-only. `download_feature_and_dockerfile_resources`
+//!    resolves feature refs via `parse_oci_feature_ref` and errors on non-OCI
+//!    refs, fetching through the OCI registry (`get_oci_manifest` /
+//!    `download_oci_tarball`). Upstream's local-feature copy path
+//!    (`copy_local_feature` / `is_local_feature_ref`) was intentionally removed.
+//! 2. `project_name` is a simple synchronous derivation (dev-container name or
+//!    workspace base name). Upstream's async compose-aware version (parsing
+//!    `COMPOSE_PROJECT_NAME` from `.env` and compose fragments) and its helpers
+//!    were intentionally dropped.
+//!
+//! Re-adopting either upstream behavior is a product decision (add local-feature
+//! support back alongside OCI; restore compose-aware naming), not a mechanical
+//! reconciliation.
+
 use std::{
     collections::HashMap,
     fmt::Debug,
