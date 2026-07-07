@@ -120,7 +120,11 @@ impl EditorElement {
                 cx,
             );
 
-        let diff_review_indicator = if gutter_hovered && show_diff_review {
+        // The PR review "add comment" gutter button reuses this hover indicator
+        // but is not gated behind the diff-review feature flag or AI settings.
+        let show_gutter_review_button = show_diff_review || editor.show_pr_comment_gutter_button();
+
+        let diff_review_indicator = if gutter_hovered && show_gutter_review_button {
             let is_visible = editor
                 .gutter_diff_review_indicator
                 .0
