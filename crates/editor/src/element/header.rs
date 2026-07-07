@@ -403,10 +403,10 @@ impl EditorElement {
         let text_bounds = layout.position_map.text_hitbox.bounds;
         let border_top = text_bounds.top() + last_line_offset + layout.position_map.line_height;
         let separator_height = px(1.);
-        let border_bounds = window.pixel_snap_bounds(Bounds::from_corners(
+        let border_bounds = Bounds::from_corners(
             point(layout.gutter_hitbox.bounds.left(), border_top),
             point(text_bounds.right(), border_top + separator_height),
-        ));
+        );
         window.paint_quad(fill(border_bounds, cx.theme().colors().border_variant));
 
         layout.sticky_headers = Some(sticky_headers);
