@@ -2783,6 +2783,11 @@ impl Pane {
 
         let project_path = item.project_path(cx);
 
+        // lathe: git-status-aware tab coloring. When the `git_status` item setting
+        // is on, editor tabs are tinted by their file's git status (conflict /
+        // modified / created) via the matching `tab_*_foreground`/`_background`
+        // theme colors. This block and the `tab_bg_override` block below are the
+        // Lathe additions in this file; keep them across upstream merges.
         let tab_text_color_override = if ItemSettings::get_global(cx).git_status {
             project_path
                 .as_ref()
