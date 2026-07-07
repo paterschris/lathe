@@ -4690,3 +4690,377 @@ async fn test_deferred_watch_symlinks_pointing_outside(cx: &mut TestAppContext) 
     })
     .await;
 }
+
+#[gpui::test]
+async fn test_scan_symlinks_expanded(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    // scan_symlinks defaults to Expanded — no settings change needed.
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/root",
+        json!({
+            "dir1": {
+                "deps": {
+                    // symlink target placed here by create_symlink below
+                },
+                "src": {
+                    "a.rs": "",
+                },
+            },
+            "dir2": {
+                "src": {
+                    "b.rs": "",
+                }
+            }
+        }),
+    )
+    .await;
+
+    fs.create_symlink("/root/dir1/deps/dep-dir2".as_ref(), "../../dir2".into())
+        .await
+        .unwrap();
+
+    let tree = Worktree::local(
+        Path::new("/root/dir1"),
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    // With the default scan_symlinks = Expanded, the symlinked directory
+    // should appear as an UnloadedDir entry with no children visible.
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-dir2"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+
+        assert_eq!(
+            tree.entry_for_path(rel_path("deps/dep-dir2")).unwrap().kind,
+            EntryKind::UnloadedDir
+        );
+    });
+
+    // Manually expand the symlinked directory.
+    tree.read_with(cx, |tree, _| {
+        tree.as_local()
+            .unwrap()
+            .refresh_entries_for_paths(vec![rel_path("deps/dep-dir2").into()])
+    })
+    .recv()
+    .await;
+
+    // After expansion, dep-dir2's immediate children are visible. Subdirectories
+    // within it are present but not yet scanned.
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-dir2"), true),
+                (rel_path("deps/dep-dir2/src"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+
+        assert_eq!(
+            tree.entry_for_path(rel_path("deps/dep-dir2/src"))
+                .unwrap()
+                .kind,
+            EntryKind::UnloadedDir
+        );
+    });
+
+    // Expand the subdirectory inside the symlinked directory.
+    tree.read_with(cx, |tree, _| {
+        tree.as_local()
+            .unwrap()
+            .refresh_entries_for_paths(vec![rel_path("deps/dep-dir2/src").into()])
+    })
+    .recv()
+    .await;
+
+    // After expanding the subdirectory, its files are visible.
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-dir2"), true),
+                (rel_path("deps/dep-dir2/src"), true),
+                (rel_path("deps/dep-dir2/src/b.rs"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+async fn test_real_fs_scan_symlinks_expanded(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    init_test(cx);
+
+    // scan_symlinks defaults to Expanded — no settings change needed.
+
+    let temp_root = TempTree::new(json!({
+        "project": {
+            "deps": {},
+            "src": {
+                "a.rs": "",
+            },
+        },
+        "external": {
+            "src": {
+                "b.rs": "",
+            },
+        },
+    }));
+
+    std::os::unix::fs::symlink(
+        "../../external",
+        temp_root.path().join("project/deps/dep-external"),
+    )
+    .unwrap();
+
+    let project_root = temp_root.path().join("project");
+    let tree = Worktree::local(
+        project_root.as_path(),
+        true,
+        Arc::new(RealFs::new(None, cx.executor())),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    // Before expansion, the symlinked directory should appear as an UnloadedDir
+    // with no children visible.
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-external"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+
+        assert_eq!(
+            tree.entry_for_path(rel_path("deps/dep-external"))
+                .unwrap()
+                .kind,
+            EntryKind::UnloadedDir
+        );
+    });
+
+    // Manually expand the symlinked directory. This is the case #51382 was
+    // added to fix; if this assertion fails it's a regression of that fix on
+    // real filesystems.
+    tree.read_with(cx, |tree, _| {
+        tree.as_local()
+            .unwrap()
+            .refresh_entries_for_paths(vec![rel_path("deps/dep-external").into()])
+    })
+    .recv()
+    .await;
+
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-external"), true),
+                (rel_path("deps/dep-external/src"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_dot_git_dir_event_does_not_suppress_children(
+    executor: BackgroundExecutor,
+    cx: &mut TestAppContext,
+) {
+    // On Windows, modifying a file inside .git causes ReadDirectoryChangesW to also emit
+    // a Modify event for the .git directory itself (because its last-write timestamp changes).
+    // When these events arrive in the same batch, a naive ancestor-based dedup would collapse
+    // all child events into the .git directory event, losing the information about which
+    // specific files changed. This test verifies that the git-related event processing happens
+    // before the dedup, so that meaningful .git child events still trigger UpdatedGitRepositories.
+    init_test(cx);
+
+    let fs = FakeFs::new(executor.clone());
+    let project_dir = Path::new(path!("/project"));
+    fs.insert_tree(
+        project_dir,
+        json!({
+            ".git": {},
+            "src": {
+                "main.rs": "fn main() {}",
+            },
+        }),
+    )
+    .await;
+
+    let worktree = Worktree::local(
+        project_dir,
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+    worktree
+        .update(cx, |worktree, _| {
+            worktree.as_local().unwrap().scan_complete()
+        })
+        .await;
+    cx.run_until_parked();
+
+    let dot_git = project_dir.join(DOT_GIT);
+
+    // Case 1: Events for .git AND .git/index.lock should NOT emit UpdatedGitRepositories
+    // (index.lock is in the skipped files list)
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(dot_git.clone(), Some(PathEventKind::Changed));
+        fs.emit_fs_event(dot_git.join("index.lock"), Some(PathEventKind::Created));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            !got_git_update,
+            "should NOT emit UpdatedGitRepositories when .git batch only contains index.lock"
+        );
+    }
+
+    // Case 2: Event for just .git (bare directory event) should NOT emit UpdatedGitRepositories
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(dot_git.clone(), Some(PathEventKind::Changed));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            !got_git_update,
+            "should NOT emit UpdatedGitRepositories for a bare .git directory event"
+        );
+    }
+
+    // Case 3: Events for .git AND .git/index should emit UpdatedGitRepositories
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(dot_git.clone(), Some(PathEventKind::Changed));
+        fs.emit_fs_event(dot_git.join("index"), Some(PathEventKind::Changed));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            got_git_update,
+            "should emit UpdatedGitRepositories when .git batch contains index"
+        );
+    }
+
+    // Case 4: Event for .git/index only should emit UpdatedGitRepositories
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(dot_git.join("index"), Some(PathEventKind::Changed));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            got_git_update,
+            "should emit UpdatedGitRepositories for a .git/index event"
+        );
+    }
+
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(dot_git, Some(PathEventKind::Rescan));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            got_git_update,
+            "should emit UpdatedGitRepositories for a .git rescan event"
+        );
+    }
+
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(project_dir, Some(PathEventKind::Rescan));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            got_git_update,
+            "should emit UpdatedGitRepositories for a .git rescan event"
+        );
+    }
+}
+
+fn drain_git_repo_updates(events: &mut futures::channel::mpsc::UnboundedReceiver<Event>) -> bool {
+    let mut found = false;
+    while let Ok(event) = events.try_recv() {
+        if matches!(event, Event::UpdatedGitRepositories(_)) {
+            found = true;
+        }
+    }
+    found
+}
