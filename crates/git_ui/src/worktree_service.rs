@@ -16,6 +16,10 @@ use zed_actions::NewWorktreeBranchTarget;
 
 use util::ResultExt as _;
 
+use askpass::AskPassDelegate;
+use git::repository::{FetchOptions, Remote};
+
+use crate::askpass_modal::AskPassModal;
 use crate::git_panel::show_error_toast;
 use crate::worktree_names;
 
@@ -383,6 +387,82 @@ fn maybe_propagate_worktree_trust(
 
 /// Handles the `CreateWorktree` action generically, without any agent panel involvement.
 /// Creates a new git worktree, opens the workspace, restores layout and files.
+fn remote_branch_to_fetch(branch_target: &NewWorktreeBranchTarget) -> Option<(&str, &str)> {
+    match branch_target {
+        NewWorktreeBranchTarget::RemoteBranch {
+            remote_name,
+            branch_name,
+        } => Some((remote_name, branch_name)),
+        NewWorktreeBranchTarget::CurrentBranch | NewWorktreeBranchTarget::ExistingBranch { .. } => {
+            None
+        }
+    }
+}
+
+fn create_worktree_askpass_delegate(
+    workspace: WeakEntity<Workspace>,
+    operation: impl Into<SharedString>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<Workspace>,
+) -> AskPassDelegate {
+    let operation = operation.into();
+    let window = window.window_handle();
+    AskPassDelegate::new(&mut cx.to_async(), move |prompt, tx, cx| {
+        window
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.toggle_modal(window, cx, |window, cx| {
+                        AskPassModal::new(operation.clone(), prompt.into(), tx, window, cx)
+                    });
+                })
+            })
+            .ok();
+    })
+}
+
+/// Fetches `remote_name` in every git repo before a worktree is created from a
+/// remote branch, so the new worktree is based on the latest upstream tip rather
+/// than a stale local ref. One askpass delegate per repo is required. Returns an
+/// error (aborting worktree creation) if any fetch fails, so we never create off
+/// a stale base.
+async fn fetch_remote_for_worktree_base(
+    git_repos: &[Entity<Repository>],
+    remote_name: String,
+    askpass_delegates: Vec<AskPassDelegate>,
+    cx: &mut AsyncWindowContext,
+) -> anyhow::Result<()> {
+    if askpass_delegates.len() != git_repos.len() {
+        return Err(anyhow!(
+            "Unable to fetch {remote_name}: missing credential prompt delegate"
+        ));
+    }
+
+    let fetches = cx.update(|_, cx| {
+        git_repos
+            .iter()
+            .cloned()
+            .zip(askpass_delegates)
+            .map(|(repo, askpass)| {
+                repo.update(cx, |repo, cx| {
+                    repo.fetch(
+                        FetchOptions::Remote(Remote {
+                            name: remote_name.clone().into(),
+                        }),
+                        askpass,
+                        cx,
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    })?;
+
+    for fetch in futures::future::join_all(fetches).await {
+        fetch??;
+    }
+
+    Ok(())
+}
+
 pub fn handle_create_worktree(
     workspace: &mut Workspace,
     action: &zed_actions::CreateWorktree,
@@ -450,6 +530,26 @@ pub fn handle_create_worktree(
 
     workspace.set_active_worktree_creation(Some(display_name), false, cx);
 
+    // Build one askpass delegate per git repo when the worktree base is a remote
+    // branch, so do_create_worktree (which runs in an AsyncWindowContext without a
+    // Window) can fetch the remote first. Non-remote targets pass an empty vec and
+    // never fetch.
+    let fetch_askpass_delegates: Vec<AskPassDelegate> =
+        if remote_branch_to_fetch(&branch_target).is_some() {
+            let mut delegates = Vec::with_capacity(git_repos.len());
+            for _ in &git_repos {
+                delegates.push(create_worktree_askpass_delegate(
+                    workspace_handle.clone(),
+                    "git fetch",
+                    window,
+                    cx,
+                ));
+            }
+            delegates
+        } else {
+            Vec::new()
+        };
+
     cx.spawn_in(window, async move |_workspace_entity, mut cx| {
         let result = do_create_worktree(
             git_repos,
@@ -460,6 +560,7 @@ pub fn handle_create_worktree(
             workspace_handle.clone(),
             window_handle,
             remote_connection_options,
+            fetch_askpass_delegates,
             &mut cx,
         )
         .await;
@@ -558,6 +659,7 @@ async fn do_create_worktree(
     workspace: WeakEntity<Workspace>,
     window_handle: Option<gpui::WindowHandle<MultiWorkspace>>,
     remote_connection_options: Option<RemoteConnectionOptions>,
+    fetch_askpass_delegates: Vec<AskPassDelegate>,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<()> {
     // List existing worktrees from all repos to detect name collisions
@@ -599,6 +701,19 @@ async fn do_create_worktree(
     }
 
     let mut rng = rand::rng();
+
+    // Fetch the remote first so the new worktree is based on the latest upstream
+    // tip rather than a stale local ref. Only remote-branch targets fetch; on
+    // failure we abort rather than create off a stale base.
+    if let Some((remote_name, _branch_name)) = remote_branch_to_fetch(&branch_target) {
+        fetch_remote_for_worktree_base(
+            &git_repos,
+            remote_name.to_string(),
+            fetch_askpass_delegates,
+            cx,
+        )
+        .await?;
+    }
 
     let base_ref = resolve_worktree_branch_target(&branch_target);
 
