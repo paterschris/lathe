@@ -8,6 +8,157 @@
 use super::*;
 
 impl super::Workspace {
+    fn collect_portable_workspace_folders(&self, cx: &App) -> Result<Vec<PathBuf>> {
+        let mut local_folder_paths: Vec<PathBuf> = Vec::new();
+        let mut remote_folder_count: usize = 0;
+        for worktree in self.visible_worktrees(cx) {
+            let worktree = worktree.read(cx);
+            if let Some(local) = worktree.as_local() {
+                local_folder_paths.push(local.abs_path().to_path_buf());
+            } else {
+                remote_folder_count += 1;
+            }
+        }
+
+        if remote_folder_count > 0 {
+            anyhow::bail!(
+                "Cannot save portable workspace: {remote_folder_count} remote folder(s) are open. \
+                 Portable workspace files only support local folders for now. \
+                 Close the remote folders, or save them as a workspace from their own session."
+            );
+        }
+        if local_folder_paths.is_empty() {
+            anyhow::bail!("No project folders to save.");
+        }
+        Ok(local_folder_paths)
+    }
+
+    pub fn save_workspace_as(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        use crate::portable_workspace::{
+            PORTABLE_WORKSPACE_EXTENSION, PortableWorkspace, ensure_portable_workspace_extension,
+        };
+
+        let local_folder_paths = match self.collect_portable_workspace_folders(cx) {
+            Ok(paths) => paths,
+            Err(err) => return Task::ready(Err(err)),
+        };
+
+        let suggested_name = local_folder_paths
+            .first()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|n| format!("{n}.{PORTABLE_WORKSPACE_EXTENSION}"));
+
+        let fs = self.app_state.fs.clone();
+        let lister = DirectoryLister::Local(self.project.clone(), fs.clone());
+        let prompt = self.prompt_for_new_path(lister, suggested_name, window, cx);
+
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(chosen) = prompt.await.ok().flatten() else {
+                return Ok(());
+            };
+            let Some(mut path) = chosen.into_iter().next() else {
+                return Ok(());
+            };
+            ensure_portable_workspace_extension(&mut path);
+            PortableWorkspace::save(fs, &path, &local_folder_paths).await?;
+            this.update(cx, move |workspace, _cx| {
+                workspace.portable_workspace_path = Some(path);
+            })?;
+            Ok(())
+        })
+    }
+
+    pub fn save_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        use crate::portable_workspace::PortableWorkspace;
+
+        let Some(path) = self.portable_workspace_path.clone() else {
+            return self.save_workspace_as(window, cx);
+        };
+
+        let local_folder_paths = match self.collect_portable_workspace_folders(cx) {
+            Ok(paths) => paths,
+            Err(err) => return Task::ready(Err(err)),
+        };
+
+        let fs = self.app_state.fs.clone();
+        cx.background_spawn(
+            async move { PortableWorkspace::save(fs, &path, &local_folder_paths).await },
+        )
+    }
+
+    pub fn portable_workspace_path(&self) -> Option<&Path> {
+        self.portable_workspace_path.as_deref()
+    }
+
+    pub fn set_portable_workspace_path(&mut self, path: PathBuf) {
+        self.portable_workspace_path = Some(path);
+    }
+
+    pub fn bound_collab_account_id(&self) -> Option<&str> {
+        self.bound_collab_account_id.as_deref()
+    }
+
+    pub fn set_bound_collab_account_id(
+        &mut self,
+        account_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.bound_collab_account_id == account_id {
+            return;
+        }
+        self.bound_collab_account_id = account_id.clone();
+        cx.notify();
+        let Some(database_id) = self.database_id else {
+            return;
+        };
+        let db = WorkspaceDb::global(cx);
+        cx.background_spawn(async move { db.set_collab_account_id(database_id, account_id).await })
+            .detach_and_log_err(cx);
+    }
+
+    pub(super) fn apply_bound_collab_account(
+        &self,
+        database_id: WorkspaceId,
+        cx: &mut Context<Self>,
+    ) {
+        let db = WorkspaceDb::global(cx);
+        let client = self.client().clone();
+        cx.spawn(async move |this, cx| {
+            let bound_id = db.collab_account_id(database_id).await.ok().flatten();
+            this.update(cx, |this, cx| {
+                if this.bound_collab_account_id != bound_id {
+                    this.bound_collab_account_id = bound_id.clone();
+                    cx.notify();
+                }
+            })
+            .ok();
+            let Some(bound_id) = bound_id else {
+                return;
+            };
+            if client.active_account_id().as_deref() == Some(bound_id.as_str()) {
+                return;
+            }
+            if !client
+                .list_accounts()
+                .iter()
+                .any(|account| account.id == bound_id)
+            {
+                return;
+            }
+            client.switch_account(bound_id, cx).await.log_err();
+        })
+        .detach();
+    }
+
     pub fn any_item_awaiting_input(&self, cx: &App) -> bool {
         let dock_panes = self
             .all_docks()
