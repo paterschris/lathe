@@ -1,5 +1,6 @@
 pub mod project_panel_settings;
 mod project_panel_file_history;
+mod project_panel_git_style;
 mod undo;
 mod utils;
 
@@ -5496,23 +5497,7 @@ impl ProjectPanel {
         let depth = details.depth;
         let worktree_id = details.worktree_id;
 
-        let git_bg = (|| {
-            let summary = &details.git_status;
-            let tracked = summary.index + summary.worktree;
-            let colors = cx.theme().colors();
-            let bg = if summary.conflict > 0 {
-                colors.lathe.panel_conflict_background
-            } else if tracked.deleted > 0 {
-                colors.lathe.panel_deleted_background
-            } else if tracked.modified > 0 {
-                colors.lathe.panel_modified_background
-            } else if tracked.added > 0 || summary.untracked > 0 {
-                colors.lathe.panel_created_background
-            } else {
-                return None;
-            };
-            (bg != gpui::transparent_black()).then_some(bg)
-        })();
+        let git_bg = project_panel_git_style::row_background(&details.git_status, cx);
 
         let bg_color = if is_marked {
             item_colors.marked
