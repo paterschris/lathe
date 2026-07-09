@@ -1,4 +1,5 @@
 pub mod project_panel_settings;
+mod project_panel_file_history;
 mod undo;
 mod utils;
 
@@ -543,72 +544,7 @@ pub fn init(cx: &mut App) {
         });
 
         workspace.register_action(|workspace, _: &git::FileHistory, window, cx| {
-            // First try to get from project panel if it's focused
-            if let Some(panel) = workspace.panel::<ProjectPanel>(cx) {
-                let maybe_project_path = panel.read(cx).selection.and_then(|selection| {
-                    let project = workspace.project().read(cx);
-                    let worktree = project.worktree_for_id(selection.worktree_id, cx)?;
-                    let entry = worktree.read(cx).entry_for_id(selection.entry_id)?;
-                    if entry.is_file() {
-                        Some(ProjectPath {
-                            worktree_id: selection.worktree_id,
-                            path: entry.path.clone(),
-                        })
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(project_path) = maybe_project_path {
-                    let project = workspace.project();
-                    let git_store = project.read(cx).git_store();
-                    if let Some((repo, repo_path)) = git_store
-                        .read(cx)
-                        .repository_and_path_for_project_path(&project_path, cx)
-                    {
-                        git_ui::file_history_view::FileHistoryView::open(
-                            repo_path,
-                            git_store.downgrade(),
-                            repo.downgrade(),
-                            workspace.weak_handle(),
-                            window,
-                            cx,
-                        );
-                    }
-                    // When the project panel owns a focused file selection it
-                    // consumes `git::FileHistory`: do not fall back to the active
-                    // editor even when the selected file is not in a git repo.
-                    return;
-                }
-            }
-
-            // Fallback: try to get from active editor
-            if let Some(active_item) = workspace.active_item(cx)
-                && let Some(editor) = active_item.downcast::<Editor>()
-                && let Some(buffer) = editor.read(cx).buffer().read(cx).as_singleton()
-                && let Some(file) = buffer.read(cx).file()
-            {
-                let worktree_id = file.worktree_id(cx);
-                let project_path = ProjectPath {
-                    worktree_id,
-                    path: file.path().clone(),
-                };
-                let project = workspace.project();
-                let git_store = project.read(cx).git_store();
-                if let Some((repo, repo_path)) = git_store
-                    .read(cx)
-                    .repository_and_path_for_project_path(&project_path, cx)
-                {
-                    git_ui::file_history_view::FileHistoryView::open(
-                        repo_path,
-                        git_store.downgrade(),
-                        repo.downgrade(),
-                        workspace.weak_handle(),
-                        window,
-                        cx,
-                    );
-                }
-            }
+            project_panel_file_history::open(workspace, window, cx);
         });
     })
     .detach();
