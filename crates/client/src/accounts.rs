@@ -1,6 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use gpui::AsyncApp;
+use util::ResultExt as _;
+
+use crate::Client;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CollabAccount {
@@ -127,4 +133,107 @@ pub fn account_id_for(server_url: &str, user_id: u64) -> String {
 
 pub fn keychain_url(server_url: &str, user_id: u64) -> String {
     format!("{server_url}#user_id={user_id}")
+}
+
+/// Multi-account collab session management. Lathe lets a user keep several
+/// signed-in collab accounts and switch between them; these methods drive the
+/// disconnect/reauth handshake and keep the account index in sync with the
+/// active session. Kept here, alongside the account persistence layer, so the
+/// multi-account feature stays out of the upstream-owned `client.rs`.
+impl Client {
+    /// Returns all saved collab accounts.
+    pub fn list_accounts(&self) -> Vec<CollabAccount> {
+        load_index().accounts
+    }
+
+    /// Returns the id of the currently active saved account, if any.
+    pub fn active_account_id(&self) -> Option<String> {
+        load_index().active_id
+    }
+
+    /// Disconnects the current session, marks the given account as active,
+    /// and signs back in using that account's stored credentials.
+    pub async fn switch_account(
+        self: &Arc<Self>,
+        account_id: String,
+        cx: &AsyncApp,
+    ) -> Result<()> {
+        let mut index = load_index();
+        if index.find(&account_id).is_none() {
+            anyhow::bail!("unknown collab account: {account_id}");
+        }
+        if index.active_id.as_deref() == Some(&account_id)
+            && !self.status().borrow().is_signed_out()
+        {
+            return Ok(());
+        }
+
+        self.state.write().credentials = None;
+        self.cloud_client.clear_credentials();
+        self.disconnect(cx);
+
+        index.active_id = Some(account_id);
+        save_index(&index).log_err();
+
+        self.sign_in_with_optional_connect(true, cx).await
+    }
+
+    /// Starts a new browser sign-in flow to add a second account, disconnecting
+    /// the current session first. The new account is stored under its own
+    /// keychain entry and becomes the active account on success.
+    pub async fn add_account(self: &Arc<Self>, cx: &AsyncApp) -> Result<()> {
+        self.state.write().credentials = None;
+        self.cloud_client.clear_credentials();
+        self.disconnect(cx);
+
+        // Clearing active_id causes read_credentials to return None, which
+        // forces a fresh browser auth flow. write_credentials will insert the
+        // new account into the index and mark it active.
+        let mut index = load_index();
+        index.active_id = None;
+        save_index(&index).log_err();
+
+        self.sign_in_with_optional_connect(true, cx).await
+    }
+
+    /// Deletes the given account's keychain entry and removes it from the
+    /// index. If it was the active account, the session is torn down; if other
+    /// accounts remain, the first is promoted and signed in.
+    pub async fn remove_account(
+        self: &Arc<Self>,
+        account_id: String,
+        cx: &AsyncApp,
+    ) -> Result<()> {
+        let mut index = load_index();
+        let Some(account) = index.find(&account_id).cloned() else {
+            return Ok(());
+        };
+
+        let was_active = index.active_id.as_deref() == Some(&account_id);
+        let server_url = self
+            .credentials_provider
+            .server_url(cx)
+            .unwrap_or_else(|_| account.server_url.clone());
+        let keychain_url = keychain_url(&server_url, account.user_id);
+
+        if was_active {
+            self.state.write().credentials = None;
+            self.cloud_client.clear_credentials();
+            self.disconnect(cx);
+        }
+
+        self.credentials_provider
+            .provider
+            .delete_credentials(&keychain_url, cx)
+            .await
+            .log_err();
+
+        index.remove(&account_id);
+        save_index(&index).log_err();
+
+        if was_active && !index.accounts.is_empty() {
+            self.sign_in_with_optional_connect(true, cx).await?;
+        }
+        Ok(())
+    }
 }
