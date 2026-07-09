@@ -5565,13 +5565,13 @@ impl ProjectPanel {
             let tracked = summary.index + summary.worktree;
             let colors = cx.theme().colors();
             let bg = if summary.conflict > 0 {
-                colors.panel_conflict_background
+                colors.lathe.panel_conflict_background
             } else if tracked.deleted > 0 {
-                colors.panel_deleted_background
+                colors.lathe.panel_deleted_background
             } else if tracked.modified > 0 {
-                colors.panel_modified_background
+                colors.lathe.panel_modified_background
             } else if tracked.added > 0 || summary.untracked > 0 {
-                colors.panel_created_background
+                colors.lathe.panel_created_background
             } else {
                 return None;
             };

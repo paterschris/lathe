@@ -1,13 +1,11 @@
 use crate::{
-    BUFFER_HEADER_PADDING, BlockId, ChunkRendererContext, ChunkReplacement,
-    CodeActionSource, ConflictsOurs, ConflictsOursMarker, ConflictsOuter,
-    ConflictsTheirs, ConflictsTheirsMarker, ContextMenuPlacement, CursorShape, CustomBlockId,
-    DisplayDiffHunk, DisplayPoint, DisplayRow, EditDisplayMode, EditPrediction, Editor, EditorMode,
-    EditorSettings, EditorSnapshot, EditorStyle, FILE_HEADER_HEIGHT, FocusedBlock,
-    GutterDimensions, HalfPageDown, HalfPageUp, HandleInput, HoveredCursor,
-    InlayHintRefreshReason, JumpData, LineDown, LineHighlight, LineUp, MAX_LINE_LEN,
-    MINIMAP_FONT_SIZE, PageDown, PageUp,
-    Point, RowExt, RowRangeExt, Selection,
+    BUFFER_HEADER_PADDING, BlockId, ChunkRendererContext, ChunkReplacement, CodeActionSource,
+    ConflictsOurs, ConflictsOursMarker, ConflictsOuter, ConflictsTheirs, ConflictsTheirsMarker,
+    ContextMenuPlacement, CursorShape, CustomBlockId, DisplayDiffHunk, DisplayPoint, DisplayRow,
+    EditDisplayMode, EditPrediction, Editor, EditorMode, EditorSettings, EditorSnapshot,
+    EditorStyle, FILE_HEADER_HEIGHT, FocusedBlock, GutterDimensions, HalfPageDown, HalfPageUp,
+    HandleInput, HoveredCursor, InlayHintRefreshReason, JumpData, LineDown, LineHighlight, LineUp,
+    MAX_LINE_LEN, MINIMAP_FONT_SIZE, PageDown, PageUp, Point, RowExt, RowRangeExt, Selection,
     SelectionDragState, SizingBehavior, SoftWrap, ToPoint,
     code_context_menus::{CodeActionsMenu, MENU_ASIDE_MAX_WIDTH, MENU_ASIDE_MIN_WIDTH, MENU_GAP},
     column_pixels,
@@ -16,9 +14,8 @@ use crate::{
         HighlightKey, HighlightedChunk, ToDisplayPoint,
     },
     editor_settings::{
-        CurrentLineHighlight, DocumentColorsRenderMode, Minimap,
-        MinimapThumb, MinimapThumbBorder, ScrollBeyondLastLine, ScrollbarAxes,
-        ScrollbarDiagnostics, ShowMinimap,
+        CurrentLineHighlight, DocumentColorsRenderMode, Minimap, MinimapThumb, MinimapThumbBorder,
+        ScrollBeyondLastLine, ScrollbarAxes, ScrollbarDiagnostics, ShowMinimap,
     },
     git::blame::{BlameRenderer, GitBlame, GlobalBlameRenderer},
     hover_popover::{
@@ -42,15 +39,14 @@ use feature_flags::{DiffReviewFeatureFlag, FeatureFlagAppExt as _};
 use git::{Oid, blame::BlameEntry, commit::ParsedCommitMessage};
 use gpui::{
     Action, Along, AnyElement, App, AppContext, AvailableSpace, Axis as ScrollbarAxis, BorderStyle,
-    Bounds, ClipboardItem, ContentMask, Context, Corners, CursorStyle, DispatchPhase,
-    Edges, Element, ElementInputHandler, Entity, Focusable as _, Font, FontId, FontWeight,
+    Bounds, ClipboardItem, ContentMask, Context, Corners, CursorStyle, DispatchPhase, Edges,
+    Element, ElementInputHandler, Entity, Focusable as _, Font, FontId, FontWeight,
     GlobalElementId, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, IsZero,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, ParentElement, Pixels,
-    ScrollHandle, ShapedLine, SharedString, Size, StatefulInteractiveElement,
-    Style, Styled, StyledText, TaskExt, TextAlign, TextRun, TextStyleRefinement, WeakEntity,
-    Window, div, fill, outline,
-    pattern_slash, point, px, quad, relative, size, solid_background, transparent_black,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    ParentElement, Pixels, ScrollHandle, ShapedLine, SharedString, Size,
+    StatefulInteractiveElement, Style, Styled, StyledText, TaskExt, TextAlign, TextRun,
+    TextStyleRefinement, WeakEntity, Window, div, fill, outline, pattern_slash, point, px, quad,
+    relative, size, solid_background, transparent_black,
 };
 use itertools::Itertools;
 use language::{
@@ -89,14 +85,11 @@ use text::BufferId;
 use theme::{ActiveTheme, Appearance, PlayerColor};
 use theme_settings::BufferLineHeight;
 use ui::utils::ensure_minimum_contrast;
-use ui::{
-    ButtonLike, POPOVER_Y_PADDING, Tooltip, prelude::*, scrollbars::ShowScrollbar,
-};
+use ui::{ButtonLike, POPOVER_Y_PADDING, Tooltip, prelude::*, scrollbars::ShowScrollbar};
 use unicode_segmentation::UnicodeSegmentation;
 use util::{ResultExt, debug_panic};
 use workspace::{
-    CollaboratorId, ItemHandle,
-    Workspace,
+    CollaboratorId, ItemHandle, Workspace,
     item::{Item, ItemBufferKind},
 };
 
@@ -5361,25 +5354,24 @@ impl EditorElement {
                     } if !display_row_range.is_empty() => {
                         let color = match split_side {
                             Some(SplitSide::Left) => {
-                                cx.theme().colors().gutter_deleted_background
+                                cx.theme().colors().lathe.gutter_deleted_background
                             }
                             Some(SplitSide::Right) => {
-                                cx.theme().colors().gutter_added_background
+                                cx.theme().colors().lathe.gutter_added_background
                             }
                             None => match status.kind {
                                 DiffHunkStatusKind::Added => {
-                                    cx.theme().colors().gutter_added_background
+                                    cx.theme().colors().lathe.gutter_added_background
                                 }
                                 DiffHunkStatusKind::Modified => {
-                                    cx.theme().colors().gutter_modified_background
+                                    cx.theme().colors().lathe.gutter_modified_background
                                 }
                                 DiffHunkStatusKind::Deleted => {
-                                    cx.theme().colors().gutter_deleted_background
+                                    cx.theme().colors().lathe.gutter_deleted_background
                                 }
                             },
                         };
-                        (color != transparent_black())
-                            .then(|| (color, display_row_range.clone()))
+                        (color != transparent_black()).then(|| (color, display_row_range.clone()))
                     }
                     _ => None,
                 };

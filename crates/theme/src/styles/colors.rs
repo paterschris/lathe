@@ -6,8 +6,8 @@ use std::sync::Arc;
 use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 
 use crate::{
-    AccentColors, ActiveTheme, PlayerColors, StatusColors, StatusColorsRefinement, SyntaxTheme,
-    SystemColors,
+    AccentColors, ActiveTheme, LatheThemeColors, LatheThemeColorsRefinement, PlayerColors,
+    StatusColors, StatusColorsRefinement, SyntaxTheme, SystemColors,
 };
 
 #[derive(Refineable, Clone, Debug, PartialEq)]
@@ -127,27 +127,12 @@ pub struct ThemeColors {
     pub tab_bar_background: Hsla,
     pub tab_inactive_background: Hsla,
     pub tab_active_background: Hsla,
-    pub tab_modified_foreground: Hsla,
-    pub tab_modified_background: Hsla,
-    pub tab_created_foreground: Hsla,
-    pub tab_created_background: Hsla,
-    pub tab_deleted_foreground: Hsla,
-    pub tab_deleted_background: Hsla,
-    pub tab_conflict_foreground: Hsla,
-    pub tab_conflict_background: Hsla,
-    pub tab_error_foreground: Hsla,
-    pub tab_error_background: Hsla,
-    pub tab_warning_foreground: Hsla,
-    pub tab_warning_background: Hsla,
-    pub tab_dirty_background: Hsla,
+    #[refineable]
+    pub lathe: LatheThemeColors,
     pub search_match_background: Hsla,
     pub search_active_match_background: Hsla,
     pub panel_background: Hsla,
     pub panel_focused_border: Hsla,
-    pub panel_modified_background: Hsla,
-    pub panel_created_background: Hsla,
-    pub panel_deleted_background: Hsla,
-    pub panel_conflict_background: Hsla,
     pub panel_indent_guide: Hsla,
     pub panel_indent_guide_hover: Hsla,
     pub panel_indent_guide_active: Hsla,
@@ -356,10 +341,6 @@ pub struct ThemeColors {
     pub version_control_conflict_marker_ours: Hsla,
     /// Represents the "theirs" region of a merge conflict.
     pub version_control_conflict_marker_theirs: Hsla,
-
-    pub gutter_added_background: Hsla,
-    pub gutter_modified_background: Hsla,
-    pub gutter_deleted_background: Hsla,
 }
 
 #[derive(EnumIter, Debug, Clone, Copy, PartialEq, Eq, Hash, AsRefStr)]
@@ -646,27 +627,27 @@ impl ThemeColors {
             ThemeColorField::TabBarBackground => self.tab_bar_background,
             ThemeColorField::TabInactiveBackground => self.tab_inactive_background,
             ThemeColorField::TabActiveBackground => self.tab_active_background,
-            ThemeColorField::TabModifiedForeground => self.tab_modified_foreground,
-            ThemeColorField::TabModifiedBackground => self.tab_modified_background,
-            ThemeColorField::TabCreatedForeground => self.tab_created_foreground,
-            ThemeColorField::TabCreatedBackground => self.tab_created_background,
-            ThemeColorField::TabDeletedForeground => self.tab_deleted_foreground,
-            ThemeColorField::TabDeletedBackground => self.tab_deleted_background,
-            ThemeColorField::TabConflictForeground => self.tab_conflict_foreground,
-            ThemeColorField::TabConflictBackground => self.tab_conflict_background,
-            ThemeColorField::TabErrorForeground => self.tab_error_foreground,
-            ThemeColorField::TabErrorBackground => self.tab_error_background,
-            ThemeColorField::TabWarningForeground => self.tab_warning_foreground,
-            ThemeColorField::TabWarningBackground => self.tab_warning_background,
-            ThemeColorField::TabDirtyBackground => self.tab_dirty_background,
+            ThemeColorField::TabModifiedForeground => self.lathe.tab_modified_foreground,
+            ThemeColorField::TabModifiedBackground => self.lathe.tab_modified_background,
+            ThemeColorField::TabCreatedForeground => self.lathe.tab_created_foreground,
+            ThemeColorField::TabCreatedBackground => self.lathe.tab_created_background,
+            ThemeColorField::TabDeletedForeground => self.lathe.tab_deleted_foreground,
+            ThemeColorField::TabDeletedBackground => self.lathe.tab_deleted_background,
+            ThemeColorField::TabConflictForeground => self.lathe.tab_conflict_foreground,
+            ThemeColorField::TabConflictBackground => self.lathe.tab_conflict_background,
+            ThemeColorField::TabErrorForeground => self.lathe.tab_error_foreground,
+            ThemeColorField::TabErrorBackground => self.lathe.tab_error_background,
+            ThemeColorField::TabWarningForeground => self.lathe.tab_warning_foreground,
+            ThemeColorField::TabWarningBackground => self.lathe.tab_warning_background,
+            ThemeColorField::TabDirtyBackground => self.lathe.tab_dirty_background,
             ThemeColorField::SearchMatchBackground => self.search_match_background,
             ThemeColorField::SearchActiveMatchBackground => self.search_active_match_background,
             ThemeColorField::PanelBackground => self.panel_background,
             ThemeColorField::PanelFocusedBorder => self.panel_focused_border,
-            ThemeColorField::PanelModifiedBackground => self.panel_modified_background,
-            ThemeColorField::PanelCreatedBackground => self.panel_created_background,
-            ThemeColorField::PanelDeletedBackground => self.panel_deleted_background,
-            ThemeColorField::PanelConflictBackground => self.panel_conflict_background,
+            ThemeColorField::PanelModifiedBackground => self.lathe.panel_modified_background,
+            ThemeColorField::PanelCreatedBackground => self.lathe.panel_created_background,
+            ThemeColorField::PanelDeletedBackground => self.lathe.panel_deleted_background,
+            ThemeColorField::PanelConflictBackground => self.lathe.panel_conflict_background,
             ThemeColorField::PanelIndentGuide => self.panel_indent_guide,
             ThemeColorField::PanelIndentGuideHover => self.panel_indent_guide_hover,
             ThemeColorField::PanelIndentGuideActive => self.panel_indent_guide_active,
@@ -746,9 +727,9 @@ impl ThemeColors {
             ThemeColorField::VersionControlRenamed => self.version_control_renamed,
             ThemeColorField::VersionControlConflict => self.version_control_conflict,
             ThemeColorField::VersionControlIgnored => self.version_control_ignored,
-            ThemeColorField::GutterAddedBackground => self.gutter_added_background,
-            ThemeColorField::GutterModifiedBackground => self.gutter_modified_background,
-            ThemeColorField::GutterDeletedBackground => self.gutter_deleted_background,
+            ThemeColorField::GutterAddedBackground => self.lathe.gutter_added_background,
+            ThemeColorField::GutterModifiedBackground => self.lathe.gutter_modified_background,
+            ThemeColorField::GutterDeletedBackground => self.lathe.gutter_deleted_background,
         }
     }
 
@@ -794,29 +775,33 @@ impl ThemeColors {
             ThemeColorField::TabBarBackground => self.tab_bar_background = value,
             ThemeColorField::TabInactiveBackground => self.tab_inactive_background = value,
             ThemeColorField::TabActiveBackground => self.tab_active_background = value,
-            ThemeColorField::TabModifiedForeground => self.tab_modified_foreground = value,
-            ThemeColorField::TabModifiedBackground => self.tab_modified_background = value,
-            ThemeColorField::TabCreatedForeground => self.tab_created_foreground = value,
-            ThemeColorField::TabCreatedBackground => self.tab_created_background = value,
-            ThemeColorField::TabDeletedForeground => self.tab_deleted_foreground = value,
-            ThemeColorField::TabDeletedBackground => self.tab_deleted_background = value,
-            ThemeColorField::TabConflictForeground => self.tab_conflict_foreground = value,
-            ThemeColorField::TabConflictBackground => self.tab_conflict_background = value,
-            ThemeColorField::TabErrorForeground => self.tab_error_foreground = value,
-            ThemeColorField::TabErrorBackground => self.tab_error_background = value,
-            ThemeColorField::TabWarningForeground => self.tab_warning_foreground = value,
-            ThemeColorField::TabWarningBackground => self.tab_warning_background = value,
-            ThemeColorField::TabDirtyBackground => self.tab_dirty_background = value,
+            ThemeColorField::TabModifiedForeground => self.lathe.tab_modified_foreground = value,
+            ThemeColorField::TabModifiedBackground => self.lathe.tab_modified_background = value,
+            ThemeColorField::TabCreatedForeground => self.lathe.tab_created_foreground = value,
+            ThemeColorField::TabCreatedBackground => self.lathe.tab_created_background = value,
+            ThemeColorField::TabDeletedForeground => self.lathe.tab_deleted_foreground = value,
+            ThemeColorField::TabDeletedBackground => self.lathe.tab_deleted_background = value,
+            ThemeColorField::TabConflictForeground => self.lathe.tab_conflict_foreground = value,
+            ThemeColorField::TabConflictBackground => self.lathe.tab_conflict_background = value,
+            ThemeColorField::TabErrorForeground => self.lathe.tab_error_foreground = value,
+            ThemeColorField::TabErrorBackground => self.lathe.tab_error_background = value,
+            ThemeColorField::TabWarningForeground => self.lathe.tab_warning_foreground = value,
+            ThemeColorField::TabWarningBackground => self.lathe.tab_warning_background = value,
+            ThemeColorField::TabDirtyBackground => self.lathe.tab_dirty_background = value,
             ThemeColorField::SearchMatchBackground => self.search_match_background = value,
             ThemeColorField::SearchActiveMatchBackground => {
                 self.search_active_match_background = value
             }
             ThemeColorField::PanelBackground => self.panel_background = value,
             ThemeColorField::PanelFocusedBorder => self.panel_focused_border = value,
-            ThemeColorField::PanelModifiedBackground => self.panel_modified_background = value,
-            ThemeColorField::PanelCreatedBackground => self.panel_created_background = value,
-            ThemeColorField::PanelDeletedBackground => self.panel_deleted_background = value,
-            ThemeColorField::PanelConflictBackground => self.panel_conflict_background = value,
+            ThemeColorField::PanelModifiedBackground => {
+                self.lathe.panel_modified_background = value
+            }
+            ThemeColorField::PanelCreatedBackground => self.lathe.panel_created_background = value,
+            ThemeColorField::PanelDeletedBackground => self.lathe.panel_deleted_background = value,
+            ThemeColorField::PanelConflictBackground => {
+                self.lathe.panel_conflict_background = value
+            }
             ThemeColorField::PanelIndentGuide => self.panel_indent_guide = value,
             ThemeColorField::PanelIndentGuideHover => self.panel_indent_guide_hover = value,
             ThemeColorField::PanelIndentGuideActive => self.panel_indent_guide_active = value,
@@ -904,9 +889,13 @@ impl ThemeColors {
             ThemeColorField::VersionControlRenamed => self.version_control_renamed = value,
             ThemeColorField::VersionControlConflict => self.version_control_conflict = value,
             ThemeColorField::VersionControlIgnored => self.version_control_ignored = value,
-            ThemeColorField::GutterAddedBackground => self.gutter_added_background = value,
-            ThemeColorField::GutterModifiedBackground => self.gutter_modified_background = value,
-            ThemeColorField::GutterDeletedBackground => self.gutter_deleted_background = value,
+            ThemeColorField::GutterAddedBackground => self.lathe.gutter_added_background = value,
+            ThemeColorField::GutterModifiedBackground => {
+                self.lathe.gutter_modified_background = value
+            }
+            ThemeColorField::GutterDeletedBackground => {
+                self.lathe.gutter_deleted_background = value
+            }
         }
     }
 
@@ -1001,7 +990,8 @@ mod tests {
     fn deserialize_theme_colors_refinement_from_json() {
         let colors: ThemeColorsRefinement = serde_json::from_value(json!({
             "background": "#ff00ff",
-            "text": "#ff0000"
+            "text": "#ff0000",
+            "lathe": {}
         }))
         .unwrap();
 
