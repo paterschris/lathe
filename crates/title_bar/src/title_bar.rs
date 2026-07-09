@@ -1,6 +1,5 @@
 mod application_menu;
 pub mod collab;
-mod lathe_connection_status;
 mod lathe_git_integrations;
 mod onboarding_banner;
 mod plan_chip;
@@ -23,6 +22,7 @@ use crate::application_menu::{
     ActivateDirection, ActivateMenuLeft, ActivateMenuRight, OpenApplicationMenu,
 };
 
+use auto_update::AutoUpdateStatus;
 use call::ActiveCall;
 use client::{Client, UserStore, zed_urls};
 use cloud_api_types::Plan;
@@ -366,7 +366,7 @@ impl Render for TitleBar {
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(self.render_call_controls(window, cx))
-                .children(lathe_connection_status::render(status, cx))
+                .children(self.render_connection_status(status, cx))
                 .child(self.update_version.clone())
                 .when(
                     user.is_none()
@@ -1194,6 +1194,54 @@ impl TitleBar {
         active_call
             .update(cx, |call, cx| call.unshare_project(project, cx))
             .log_err();
+    }
+
+    fn render_connection_status(
+        &self,
+        status: &client::Status,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        match status {
+            client::Status::ConnectionError
+            | client::Status::ConnectionLost
+            | client::Status::Reauthenticating
+            | client::Status::Reconnecting
+            | client::Status::ReconnectionError { .. } => Some(
+                div()
+                    .id("disconnected")
+                    .child(Icon::new(IconName::Disconnected).size(IconSize::Small))
+                    .tooltip(Tooltip::text("Disconnected"))
+                    .into_any_element(),
+            ),
+            client::Status::UpgradeRequired => {
+                let auto_updater = auto_update::AutoUpdater::get(cx);
+                let label = match auto_updater.map(|auto_update| auto_update.read(cx).status()) {
+                    Some(AutoUpdateStatus::Updated { .. }) => "Please restart Lathe to Collaborate",
+                    Some(AutoUpdateStatus::Installing { .. })
+                    | Some(AutoUpdateStatus::Downloading { .. })
+                    | Some(AutoUpdateStatus::Checking) => "Updating...",
+                    Some(AutoUpdateStatus::Idle)
+                    | Some(AutoUpdateStatus::Errored { .. })
+                    | None => "Please update Lathe to Collaborate",
+                };
+
+                Some(
+                    Button::new("connection-status", label)
+                        .label_size(LabelSize::Small)
+                        .on_click(|_, window, cx| {
+                            if let Some(auto_updater) = auto_update::AutoUpdater::get(cx)
+                                && auto_updater.read(cx).status().is_updated()
+                            {
+                                workspace::reload(cx);
+                                return;
+                            }
+                            auto_update::check(&Default::default(), window, cx);
+                        })
+                        .into_any_element(),
+                )
+            }
+            _ => None,
+        }
     }
 
     pub fn render_sign_in_button(&mut self, _: &mut Context<Self>) -> Button {
