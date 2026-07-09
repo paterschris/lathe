@@ -1,4 +1,5 @@
 mod persistence;
+mod terminal_awaiting_input;
 pub mod terminal_element;
 pub mod terminal_panel;
 mod terminal_path_like_target;
@@ -510,61 +511,6 @@ impl TerminalView {
     pub fn clear_bell(&mut self, cx: &mut Context<TerminalView>) {
         self.has_bell = false;
         cx.emit(Event::Wakeup);
-    }
-
-    fn start_idle_timer(&mut self, cx: &mut Context<Self>) {
-        let threshold_secs =
-            TerminalSettings::get_global(cx).awaiting_input_idle_threshold_secs;
-        if threshold_secs == 0 {
-            return;
-        }
-        let threshold = Duration::from_secs(threshold_secs);
-        let awaiting_sound = awaiting_input_sound(
-            TerminalSettings::get_global(cx).sound_on_awaiting_input,
-        );
-        self.idle_timer = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(threshold).await;
-            this.update(cx, |this, cx| {
-                if !this.has_had_input {
-                    return;
-                }
-                let terminal = this.terminal.read(cx);
-                // The Terminal accessors `is_alternate_screen`, `is_at_prompt`, and
-                // `child_exited` were dropped from the terminal crate during the upstream
-                // merge, so reconstruct them here from the still-public terminal API. The
-                // child-exited check uses the absence of a foreground process id as a proxy
-                // because the underlying `child_exited` field has no public accessor.
-                let is_alternate_screen = terminal.last_content.mode.contains(Modes::ALT_SCREEN);
-                let child_exited = terminal.pid().is_none();
-                let at_prompt = match (terminal.pid(), terminal.pid_getter()) {
-                    (Some(foreground_pid), Some(pid_getter)) => {
-                        foreground_pid == pid_getter.fallback_pid()
-                    }
-                    _ => false,
-                };
-                let prompt_kind = terminal.interactive_prompt_kind();
-
-                if prompt_kind.is_some() && !at_prompt && !is_alternate_screen && !child_exited {
-                    this.awaiting_input = prompt_kind;
-                    cx.emit(ItemEvent::UpdateTab);
-                    cx.notify();
-
-                    if let Some(sound) = awaiting_sound {
-                        audio::Audio::play_sound(sound, cx);
-                    }
-                }
-            })
-            .ok();
-        });
-    }
-
-    fn clear_awaiting_input(&mut self, cx: &mut Context<Self>) {
-        if self.awaiting_input.is_some() {
-            self.awaiting_input = None;
-            self.has_had_input = false;
-            cx.emit(ItemEvent::UpdateTab);
-            cx.notify();
-        }
     }
 
     pub fn deploy_context_menu(
@@ -1106,21 +1052,6 @@ fn terminal_rerun_override(task: &TaskId) -> zed_actions::Rerun {
     }
 }
 
-fn awaiting_input_sound(setting: settings::AwaitingInputSound) -> Option<audio::Sound> {
-    use settings::AwaitingInputSound;
-    match setting {
-        AwaitingInputSound::Off => None,
-        AwaitingInputSound::AgentDone => Some(audio::Sound::AgentDone),
-        AwaitingInputSound::Mute => Some(audio::Sound::Mute),
-        AwaitingInputSound::Unmute => Some(audio::Sound::Unmute),
-        AwaitingInputSound::JoinedCall => Some(audio::Sound::Joined),
-        AwaitingInputSound::GuestJoinedCall => Some(audio::Sound::GuestJoined),
-        AwaitingInputSound::LeaveCall => Some(audio::Sound::Leave),
-        AwaitingInputSound::StartScreenshare => Some(audio::Sound::StartScreenshare),
-        AwaitingInputSound::StopScreenshare => Some(audio::Sound::StopScreenshare),
-    }
-}
-
 fn subscribe_for_terminal_events(
     terminal: &Entity<Terminal>,
     workspace: WeakEntity<Workspace>,
@@ -1144,10 +1075,10 @@ fn subscribe_for_terminal_events(
                     if terminal_view.awaiting_input.is_some() {
                         let prompt_kind = terminal.read(cx).interactive_prompt_kind();
                         if prompt_kind.is_none() {
-                            terminal_view.clear_awaiting_input(cx);
+                            terminal_awaiting_input::clear(terminal_view, cx);
                         }
                     } else {
-                        terminal_view.start_idle_timer(cx);
+                        terminal_awaiting_input::start_idle_timer(terminal_view, cx);
                     }
                     cx.notify();
                     cx.emit(Event::Wakeup);
@@ -1308,7 +1239,7 @@ impl TerminalView {
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_bell(cx);
-        self.clear_awaiting_input(cx);
+        terminal_awaiting_input::clear(self, cx);
         self.has_had_input = true;
         self.pause_cursor_blinking(window, cx);
 
@@ -1318,7 +1249,7 @@ impl TerminalView {
     }
 
     fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.clear_awaiting_input(cx);
+        terminal_awaiting_input::clear(self, cx);
         self.terminal.update(cx, |terminal, _| {
             terminal.set_cursor_shape(self.cursor_shape);
             terminal.focus_in();
