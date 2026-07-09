@@ -76,17 +76,7 @@ impl ModalView for FileFinder {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> workspace::DismissDecision {
-        let submenu_focused = self.picker.update(cx, |picker, cx| {
-            picker
-                .delegate
-                .filter_popover_menu_handle
-                .is_focused(window, cx)
-                || picker
-                    .delegate
-                    .split_popover_menu_handle
-                    .is_focused(window, cx)
-        });
-        workspace::DismissDecision::Dismiss(!submenu_focused)
+        file_finder_footer::on_before_dismiss(self, window, cx)
     }
 }
 
@@ -244,14 +234,7 @@ impl FileFinder {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.picker.update(cx, |picker, cx| {
-            let menu_handle = &picker.delegate.filter_popover_menu_handle;
-            if menu_handle.is_deployed() {
-                menu_handle.hide(cx);
-            } else {
-                menu_handle.show(window, cx);
-            }
-        });
+        file_finder_footer::toggle_filter_menu(self, window, cx);
     }
 
     fn handle_split_toggle_menu(
@@ -260,14 +243,7 @@ impl FileFinder {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.picker.update(cx, |picker, cx| {
-            let menu_handle = &picker.delegate.split_popover_menu_handle;
-            if menu_handle.is_deployed() {
-                menu_handle.hide(cx);
-            } else {
-                menu_handle.show(window, cx);
-            }
-        });
+        file_finder_footer::toggle_split_menu(self, window, cx);
     }
 
     fn handle_toggle_ignored(

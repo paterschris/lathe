@@ -1,13 +1,67 @@
 use crate::{
-    FileFinderDelegate, OpenWithoutDismiss, ToggleFilterMenu, ToggleSplitMenu,
+    FileFinder, FileFinderDelegate, OpenWithoutDismiss, ToggleFilterMenu, ToggleSplitMenu,
 };
-use gpui::{Action, AnyElement, Context, ParentElement, px};
+use gpui::{Action, AnyElement, Context, ParentElement, Window, px};
 use picker::Picker;
 use ui::{
     ButtonLike, ContextMenu, Indicator, KeyBinding, PopoverMenu, TintColor, Tooltip, prelude::*,
 };
-use workspace::pane;
+use workspace::{DismissDecision, pane};
 use zed_actions::search::ToggleIncludeIgnored;
+
+pub(super) fn on_before_dismiss(
+    file_finder: &mut FileFinder,
+    window: &mut Window,
+    cx: &mut Context<FileFinder>,
+) -> DismissDecision {
+    let submenu_focused = file_finder.picker.update(cx, |picker, cx| {
+        picker
+            .delegate
+            .filter_popover_menu_handle
+            .is_focused(window, cx)
+            || picker
+                .delegate
+                .split_popover_menu_handle
+                .is_focused(window, cx)
+    });
+    DismissDecision::Dismiss(!submenu_focused)
+}
+
+pub(super) fn toggle_filter_menu(
+    file_finder: &mut FileFinder,
+    window: &mut Window,
+    cx: &mut Context<FileFinder>,
+) {
+    toggle_menu(file_finder, window, cx, |delegate| {
+        &delegate.filter_popover_menu_handle
+    });
+}
+
+pub(super) fn toggle_split_menu(
+    file_finder: &mut FileFinder,
+    window: &mut Window,
+    cx: &mut Context<FileFinder>,
+) {
+    toggle_menu(file_finder, window, cx, |delegate| {
+        &delegate.split_popover_menu_handle
+    });
+}
+
+fn toggle_menu(
+    file_finder: &mut FileFinder,
+    window: &mut Window,
+    cx: &mut Context<FileFinder>,
+    menu_handle: impl FnOnce(&FileFinderDelegate) -> &ui::PopoverMenuHandle<ContextMenu>,
+) {
+    file_finder.picker.update(cx, |picker, cx| {
+        let menu_handle = menu_handle(&picker.delegate);
+        if menu_handle.is_deployed() {
+            menu_handle.hide(cx);
+        } else {
+            menu_handle.show(window, cx);
+        }
+    });
+}
 
 pub(super) fn render(
     delegate: &FileFinderDelegate,
