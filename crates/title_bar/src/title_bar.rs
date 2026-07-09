@@ -1,5 +1,6 @@
 mod application_menu;
 pub mod collab;
+mod lathe_git_integrations;
 mod onboarding_banner;
 mod plan_chip;
 mod title_bar_settings;
@@ -1615,42 +1616,11 @@ impl TitleBar {
                     )
                     .separator()
                     .header("Git Integrations")
-                    .when(github_connected.is_some(), |this| {
-                        let login = github_connected.clone().unwrap_or_default();
-                        this.action(
-                            format!("Disconnect GitHub ({login})"),
-                            zed_actions::DisconnectGitHost {
-                                host: "github.com".to_string(),
-                            }
-                            .boxed_clone(),
-                        )
-                    })
-                    .when(github_connected.is_none(), |this| {
-                        this.action(
-                            "Connect GitHub…",
-                            zed_actions::ConnectGitHost {
-                                host: "github.com".to_string(),
-                            }
-                            .boxed_clone(),
-                        )
-                    })
-                    .when(bitbucket_connected.is_some(), |this| {
-                        let login = bitbucket_connected.clone().unwrap_or_default();
-                        this.action(
-                            format!("Disconnect Bitbucket ({login})"),
-                            zed_actions::DisconnectGitHost {
-                                host: "bitbucket.org".to_string(),
-                            }
-                            .boxed_clone(),
-                        )
-                    })
-                    .when(bitbucket_connected.is_none(), |this| {
-                        this.action(
-                            "Connect Bitbucket Cloud…",
-                            zed_actions::ConnectGitHost {
-                                host: "bitbucket.org".to_string(),
-                            }
-                            .boxed_clone(),
+                    .map(|this| {
+                        lathe_git_integrations::append_git_integrations(
+                            this,
+                            github_connected,
+                            bitbucket_connected,
                         )
                     })
                 })
@@ -1659,4 +1629,3 @@ impl TitleBar {
             .anchor(Anchor::TopRight)
     }
 }
-
