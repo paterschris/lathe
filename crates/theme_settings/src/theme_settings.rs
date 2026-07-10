@@ -26,11 +26,6 @@ pub use crate::schema::{
     ThemeColorsContent, ThemeContent, ThemeFamilyContent, ThemeStyleContent,
     WindowBackgroundContent, status_colors_refinement, syntax_overrides, theme_colors_refinement,
 };
-use crate::settings::{
-    reset_agent_buffer_font_size_for_all_windows, reset_agent_ui_font_size_for_all_windows,
-    reset_buffer_font_size_for_all_windows, reset_git_commit_buffer_font_size_for_all_windows,
-    reset_ui_font_size_for_all_windows,
-};
 pub use crate::settings::{
     AgentBufferFontSize, AgentUiFontSize, BufferLineHeight, FontFamilyName,
     GitCommitBufferFontSize, IconThemeName, IconThemeSelection, MarkdownPreviewFontSize,
@@ -42,6 +37,11 @@ pub use crate::settings::{
     reset_agent_ui_font_size, reset_buffer_font_size, reset_git_commit_buffer_font_size,
     reset_markdown_preview_font_size, reset_ui_font_size, set_icon_theme, set_mode, set_theme,
     setup_ui_font,
+};
+use crate::settings::{
+    reset_agent_buffer_font_size_for_all_windows, reset_agent_ui_font_size_for_all_windows,
+    reset_buffer_font_size_for_all_windows, reset_git_commit_buffer_font_size_for_all_windows,
+    reset_ui_font_size_for_all_windows,
 };
 pub use theme::UiDensity;
 
@@ -443,4 +443,3 @@ pub fn merge_accent_colors(
         accent_colors.0 = Arc::from(colors);
     }
 }
-
