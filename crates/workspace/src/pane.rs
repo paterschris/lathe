@@ -10,8 +10,7 @@ use crate::{
         TabContentParams, TabTooltipContent, WeakItemHandle,
     },
     move_item,
-    notifications::NotifyResultExt,
-    toolbar::Toolbar,
+    notifications::NotifyResultExt, toolbar::Toolbar,
     workspace_settings::{AutosaveSetting, FocusFollowsMouse, TabBarSettings, WorkspaceSettings},
 };
 use anyhow::Result;
@@ -52,6 +51,8 @@ use ui::{
 use util::{
     ResultExt, debug_panic, maybe, paths::PathStyle, serde::default_true, truncate_and_remove_front,
 };
+
+mod pane_tab_status;
 
 /// A selected entry in e.g. project panel.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -2783,37 +2784,8 @@ impl Pane {
 
         let project_path = item.project_path(cx);
 
-        // lathe: git-status-aware tab coloring. When the `git_status` item setting
-        // is on, editor tabs are tinted by their file's git status (conflict /
-        // modified / created) via the matching `tab_*_foreground`/`_background`
-        // theme colors. This block and the `tab_bg_override` block below are the
-        // Lathe additions in this file; keep them across upstream merges.
-        let tab_text_color_override = if ItemSettings::get_global(cx).git_status {
-            project_path.as_ref().and_then(|project_path| {
-                let project = self.project.upgrade()?;
-                let project = project.read(cx);
-                let (repo, repo_path) = project
-                    .git_store()
-                    .read(cx)
-                    .repository_and_path_for_project_path(project_path, cx)?;
-                let summary = repo.read(cx).status_for_path(&repo_path)?.status.summary();
-                let tracked = summary.index + summary.worktree;
-                let colors = cx.theme().colors();
-                if summary.conflict > 0 {
-                    Some(Color::Custom(colors.lathe.tab_conflict_foreground))
-                } else if tracked.deleted > 0 {
-                    Some(Color::Custom(colors.lathe.tab_deleted_foreground))
-                } else if tracked.modified > 0 {
-                    Some(Color::Custom(colors.lathe.tab_modified_foreground))
-                } else if tracked.added > 0 || summary.untracked > 0 {
-                    Some(Color::Custom(colors.lathe.tab_created_foreground))
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
+        let tab_text_color_override =
+            pane_tab_status::text_color_override(&self.project, project_path.as_ref(), cx);
 
         let label = item.tab_content(
             TabContentParams {
@@ -2832,47 +2804,13 @@ impl Pane {
             .as_ref()
             .and_then(|project_path| self.diagnostics.get(project_path));
 
-        let non_transparent = |color| (color != gpui::transparent_black()).then_some(color);
-
-        let tab_bg_override = if ItemSettings::get_global(cx).git_status {
-            project_path.as_ref().and_then(|project_path| {
-                let project = self.project.upgrade()?;
-                let project = project.read(cx);
-                let (repo, repo_path) = project
-                    .git_store()
-                    .read(cx)
-                    .repository_and_path_for_project_path(project_path, cx)?;
-                let summary = repo.read(cx).status_for_path(&repo_path)?.status.summary();
-                let tracked = summary.index + summary.worktree;
-                let colors = cx.theme().colors();
-                let bg = if let Some(&DiagnosticSeverity::ERROR) = item_diagnostic {
-                    colors.lathe.tab_error_background
-                } else if let Some(&DiagnosticSeverity::WARNING) = item_diagnostic {
-                    colors.lathe.tab_warning_background
-                } else if summary.conflict > 0 {
-                    colors.lathe.tab_conflict_background
-                } else if tracked.deleted > 0 {
-                    colors.lathe.tab_deleted_background
-                } else if tracked.modified > 0 {
-                    colors.lathe.tab_modified_background
-                } else if tracked.added > 0 || summary.untracked > 0 {
-                    colors.lathe.tab_created_background
-                } else {
-                    return None;
-                };
-                non_transparent(bg)
-            })
-        } else {
-            None
-        };
-
-        let tab_bg_override = tab_bg_override.or_else(|| {
-            if item.is_dirty(cx) {
-                non_transparent(cx.theme().colors().lathe.tab_dirty_background)
-            } else {
-                None
-            }
-        });
+        let tab_bg_override = pane_tab_status::background_override(
+            &self.project,
+            project_path.as_ref(),
+            item_diagnostic,
+            item.is_dirty(cx),
+            cx,
+        );
 
         let tab_bg_override = tab_bg_override.or_else(|| item.tab_bg_override(is_active, cx));
 
