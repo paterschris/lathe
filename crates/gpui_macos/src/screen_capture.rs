@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow};
 use block::ConcreteBlock;
 use cocoa::{
     base::{YES, id, nil},
-    foundation::{NSArray, NSBundle},
+    foundation::NSArray,
 };
 use collections::HashMap;
 use core_foundation::base::TCFType;
@@ -11,7 +11,6 @@ use core_graphics::display::{
     CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayModeGetPixelHeight,
     CGDisplayModeGetPixelWidth, CGDisplayModeRelease,
 };
-use core_graphics::geometry::CGRect;
 use ctor::ctor;
 use futures::channel::oneshot;
 use gpui::{
@@ -30,6 +29,7 @@ use objc::{
 use std::{cell::RefCell, ffi::c_void, mem, ptr, rc::Rc};
 
 use crate::NSStringExt;
+mod screen_capture_window;
 
 #[derive(Clone)]
 enum MacCaptureTarget {
@@ -81,10 +81,7 @@ impl ScreenCaptureSource for MacScreenCaptureSource {
                         size(DevicePixels(width as i32), DevicePixels(height as i32)),
                     )
                 };
-                let (label, is_main) = meta
-                    .clone()
-                    .map(|meta| (meta.label, meta.is_main))
-                    .unzip();
+                let (label, is_main) = meta.clone().map(|meta| (meta.label, meta.is_main)).unzip();
 
                 Ok(SourceMetadata {
                     id: display_id as u64,
@@ -297,56 +294,12 @@ unsafe fn screen_id_to_human_label() -> HashMap<CGDirectDisplayID, ScreenMeta> {
     map
 }
 
-unsafe fn ns_string_to_shared(string: id) -> Option<SharedString> {
-    if string == nil {
-        return None;
-    }
-    let cstr: *const std::os::raw::c_char = unsafe { msg_send![string, UTF8String] };
-    if cstr.is_null() {
-        return None;
-    }
-    let rust_str = unsafe { std::ffi::CStr::from_ptr(cstr) }
-        .to_string_lossy()
-        .into_owned();
-    if rust_str.is_empty() {
-        None
-    } else {
-        Some(rust_str.into())
-    }
-}
-
-unsafe fn own_bundle_identifier() -> Option<String> {
-    let bundle: id = unsafe { NSBundle::mainBundle() };
-    if bundle == nil {
-        return None;
-    }
-    let bundle_id: id = unsafe { msg_send![bundle, bundleIdentifier] };
-    unsafe { ns_string_to_shared(bundle_id) }.map(|s| s.to_string())
-}
-
-unsafe fn window_resolution(sc_window: id) -> gpui::Size<DevicePixels> {
-    let frame: CGRect = msg_send![sc_window, frame];
-    // SCShareableContent exposes frames in points. Multiply by the main
-    // screen's backing scale factor to produce a reasonable pixel resolution
-    // for the capture configuration. On non-retina displays this resolves
-    // to the point dimensions; on retina it doubles them.
-    let main_screen: id = msg_send![class!(NSScreen), mainScreen];
-    let scale: f64 = if main_screen == nil {
-        1.0
-    } else {
-        msg_send![main_screen, backingScaleFactor]
-    };
-    let width = (frame.size.width * scale).round().max(1.0) as i32;
-    let height = (frame.size.height * scale).round().max(1.0) as i32;
-    size(DevicePixels(width), DevicePixels(height))
-}
-
 pub(crate) fn get_sources() -> oneshot::Receiver<Result<Vec<Rc<dyn ScreenCaptureSource>>>> {
     unsafe {
         let (tx, rx) = oneshot::channel();
         let tx = Rc::new(RefCell::new(Some(tx)));
         let screen_id_to_label = screen_id_to_human_label();
-        let own_bundle = own_bundle_identifier();
+        let own_bundle = screen_capture_window::own_bundle_identifier();
         let block = ConcreteBlock::new(move |shareable_content: id, error: id| {
             let Some(tx) = tx.borrow_mut().take() else {
                 return;
@@ -374,16 +327,17 @@ pub(crate) fn get_sources() -> oneshot::Receiver<Result<Vec<Rc<dyn ScreenCapture
                     let window = windows.objectAtIndex(i);
                     let window_id: u32 = msg_send![window, windowID];
                     let title_ns: id = msg_send![window, title];
-                    let title = ns_string_to_shared(title_ns);
+                    let title = screen_capture_window::ns_string_to_shared(title_ns);
 
                     let owning_app: id = msg_send![window, owningApplication];
                     let (app_name, is_own_app) = if owning_app == nil {
                         (None, false)
                     } else {
                         let app_name_ns: id = msg_send![owning_app, applicationName];
-                        let app_name = ns_string_to_shared(app_name_ns);
+                        let app_name = screen_capture_window::ns_string_to_shared(app_name_ns);
                         let bundle_id_ns: id = msg_send![owning_app, bundleIdentifier];
-                        let bundle_id = ns_string_to_shared(bundle_id_ns).map(|s| s.to_string());
+                        let bundle_id = screen_capture_window::ns_string_to_shared(bundle_id_ns)
+                            .map(|s| s.to_string());
                         let is_own = match (&own_bundle, &bundle_id) {
                             (Some(own), Some(other)) => own == other,
                             _ => false,
@@ -398,7 +352,7 @@ pub(crate) fn get_sources() -> oneshot::Receiver<Result<Vec<Rc<dyn ScreenCapture
                         continue;
                     }
 
-                    let resolution = window_resolution(window);
+                    let resolution = screen_capture_window::window_resolution(window);
                     let source = MacScreenCaptureSource {
                         target: MacCaptureTarget::Window {
                             sc_window: msg_send![window, retain],
