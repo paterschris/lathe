@@ -1,5 +1,6 @@
 mod application_menu;
 pub mod collab;
+mod lathe_accounts_menu;
 mod lathe_git_integrations;
 mod onboarding_banner;
 mod plan_chip;
@@ -47,7 +48,8 @@ use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
 use ui::{
     Avatar, ButtonLike, ContextMenu, ContextMenuEntry, CountBadge, IconWithIndicator, Indicator,
-    PopoverMenu, PopoverMenuHandle, TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
+    PopoverMenu, PopoverMenuHandle, TintColor, Tooltip, prelude::*,
+    utils::platform_title_bar_height,
 };
 use update_version::UpdateVersion;
 use util::ResultExt;
@@ -1099,10 +1101,7 @@ impl TitleBar {
         )
     }
 
-    fn render_awaiting_input_indicator(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_awaiting_input_indicator(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let workspace = self.workspace.upgrade()?;
         let count = workspace.read(cx).awaiting_input_count(cx);
         if count == 0 {
@@ -1327,21 +1326,19 @@ impl TitleBar {
 
         let show_business_organization = display_account_id == active_account_id;
         let trigger = if is_signed_in && show_user_picture {
-            let avatar = display_avatar
-                .map(Avatar::new)
-                .map(|avatar| {
-                    if show_update_button {
-                        avatar.indicator(
-                            div()
-                                .absolute()
-                                .bottom_0()
-                                .right_0()
-                                .child(Indicator::dot().color(Color::Accent)),
-                        )
-                    } else {
-                        avatar
-                    }
-                });
+            let avatar = display_avatar.map(Avatar::new).map(|avatar| {
+                if show_update_button {
+                    avatar.indicator(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .right_0()
+                            .child(Indicator::dot().color(Color::Accent)),
+                    )
+                } else {
+                    avatar
+                }
+            });
 
             ButtonLike::new("user-menu").aria_label("User menu").child(
                 h_flex()
@@ -1386,8 +1383,10 @@ impl TitleBar {
                         let display_login = display_login.clone();
                         this.custom_entry(
                             move |_window, _cx| {
-                                let display_login =
-                                    display_login.clone().map(|s| s.to_string()).unwrap_or_default();
+                                let display_login = display_login
+                                    .clone()
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_default();
 
                                 h_flex()
                                     .w_full()
@@ -1411,7 +1410,9 @@ impl TitleBar {
                                     .w_full()
                                     .gap_1()
                                     .justify_between()
-                                    .child(Label::new("Restart to update Lathe").color(Color::Accent))
+                                    .child(
+                                        Label::new("Restart to update Lathe").color(Color::Accent),
+                                    )
                                     .child(
                                         Icon::new(IconName::Download)
                                             .size(IconSize::Small)
@@ -1522,98 +1523,17 @@ impl TitleBar {
                                 })
                             })
                     })
-                    .when(
-                        is_signed_in || !saved_accounts.is_empty(),
-                        |this| {
-                            let mut this = this.separator().header("Accounts");
-                            for account in &saved_accounts {
-                                let account_id = account.id.clone();
-                                let is_active =
-                                    display_account_id.as_deref() == Some(&account.id);
-                                let is_globally_active =
-                                    active_account_id.as_deref() == Some(&account.id);
-                                let label = if is_globally_active {
-                                    user_login
-                                        .as_ref()
-                                        .map(|login| login.to_string())
-                                        .unwrap_or_else(|| {
-                                            account
-                                                .login
-                                                .clone()
-                                                .unwrap_or_else(|| account.label.clone())
-                                        })
-                                } else {
-                                    account
-                                        .login
-                                        .clone()
-                                        .unwrap_or_else(|| account.label.clone())
-                                };
-                                if is_globally_active && user_login.is_some() {
-                                    client::accounts::set_active_label(&label).log_err();
-                                }
-                                this = this.custom_entry(
-                                    move |_window, _cx| {
-                                        let mut row = h_flex()
-                                            .w_full()
-                                            .justify_between()
-                                            .child(Label::new(label.clone()));
-                                        if is_active {
-                                            row = row.child(
-                                                Icon::new(IconName::Check)
-                                                    .color(Color::Accent),
-                                            );
-                                        }
-                                        row.into_any_element()
-                                    },
-                                    {
-                                        let account_id = account_id.clone();
-                                        let workspace = workspace.clone();
-                                        move |window, cx| {
-                                            if let Some(workspace) = workspace.upgrade() {
-                                                workspace.update(cx, |workspace, cx| {
-                                                    workspace.set_bound_collab_account_id(
-                                                        Some(account_id.clone()),
-                                                        cx,
-                                                    );
-                                                });
-                                            }
-                                            window.dispatch_action(
-                                                client::SwitchAccount {
-                                                    account_id: account_id.clone(),
-                                                }
-                                                .boxed_clone(),
-                                                cx,
-                                            );
-                                        }
-                                    },
-                                );
-                            }
-                            this.action("Add Account…", client::AddAccount.boxed_clone())
-                                .when(is_signed_in, |this| {
-                                    // Only the currently active account is
-                                    // signed out; other saved accounts stay
-                                    // in the switcher. Name it explicitly so
-                                    // users with multiple accounts aren't
-                                    // guessing.
-                                    let active_label = active_account_id
-                                        .as_ref()
-                                        .and_then(|id| {
-                                            saved_accounts
-                                                .iter()
-                                                .find(|a| &a.id == id)
-                                                .map(|a| a.label.clone())
-                                        });
-                                    let sign_out_label = match active_label {
-                                        Some(label) => format!("Sign Out of {label}"),
-                                        None => "Sign Out".to_string(),
-                                    };
-                                    this.action(
-                                        sign_out_label,
-                                        client::SignOut.boxed_clone(),
-                                    )
-                                })
-                        },
-                    )
+                    .map(|this| {
+                        lathe_accounts_menu::append_accounts_menu(
+                            this,
+                            is_signed_in,
+                            saved_accounts,
+                            active_account_id,
+                            display_account_id,
+                            user_login,
+                            workspace,
+                        )
+                    })
                     .separator()
                     .header("Git Integrations")
                     .map(|this| {
