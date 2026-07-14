@@ -143,6 +143,34 @@ impl AgentServer for CustomAgentServer {
         });
     }
 
+    fn default_approval(&self, cx: &App) -> Option<String> {
+        cx.read_global(|settings: &SettingsStore, _| {
+            settings
+                .get::<AllAgentServersSettings>(None)
+                .get(self.agent_id().0.as_ref())
+                .and_then(|s| s.approval())
+                .map(|level| level.to_string())
+        })
+    }
+
+    fn set_default_approval(&self, level: Option<String>, fs: Arc<dyn Fs>, cx: &mut App) {
+        let agent_id = self.agent_id();
+        update_settings_file(fs, cx, move |settings, _cx| {
+            let settings = settings
+                .agent_servers
+                .get_or_insert_default()
+                .entry(agent_id.0.to_string())
+                .or_insert_with(default_settings_for_agent);
+
+            match settings {
+                settings::CustomAgentServerSettings::Custom { approval, .. }
+                | settings::CustomAgentServerSettings::Registry { approval, .. } => {
+                    *approval = level;
+                }
+            }
+        });
+    }
+
     fn default_config_option(&self, config_id: &str, cx: &App) -> Option<String> {
         let settings = cx.read_global(|settings: &SettingsStore, _| {
             settings
@@ -200,6 +228,7 @@ impl AgentServer for CustomAgentServer {
     ) -> Task<Result<Rc<dyn AgentConnection>>> {
         let agent_id = self.agent_id();
         let default_mode = self.default_mode(cx);
+        let default_approval = self.default_approval(cx);
         let is_registry_agent = is_registry_agent(agent_id.clone(), cx);
         let default_config_options = cx.read_global(|settings: &SettingsStore, _| {
             settings
@@ -247,6 +276,14 @@ impl AgentServer for CustomAgentServer {
                 _ => {}
             }
         }
+        let extra_args = if is_registry_agent {
+            default_approval
+                .as_deref()
+                .map(|level| approval_args(agent_id.as_ref(), level))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let store = delegate.store.downgrade();
         cx.spawn(async move |cx| {
             if is_registry_agent && agent_id.as_ref() == GEMINI_ID {
@@ -280,7 +317,7 @@ impl AgentServer for CustomAgentServer {
                     if let Some(loading_status_tx) = delegate.loading_status {
                         agent.set_loading_status_tx(loading_status_tx);
                     }
-                    anyhow::Ok(agent.get_command(vec![], extra_env, &mut cx.to_async()))
+                    anyhow::Ok(agent.get_command(extra_args, extra_env, &mut cx.to_async()))
                 })??
                 .await?;
             let connection = crate::acp::connect(
@@ -374,10 +411,45 @@ fn is_registry_agent(agent_id: impl Into<AgentId>, cx: &App) -> bool {
 fn default_settings_for_agent() -> settings::CustomAgentServerSettings {
     settings::CustomAgentServerSettings::Registry {
         default_mode: None,
+        approval: None,
         env: Default::default(),
         default_config_options: Default::default(),
         favorite_config_option_values: Default::default(),
     }
+}
+
+/// Translate a stored approval level into the CLI flags to launch the agent with.
+///
+/// The valid levels differ per agent and are the ones offered by the approval
+/// selector in the agent panel. An unknown agent or level yields no flags, so the
+/// agent falls back to its own default behaviour.
+fn approval_args(agent_id: &str, level: &str) -> Vec<String> {
+    match agent_id {
+        CODEX_ID => match level {
+            "read_only" => codex_config_args("on-request", "read-only"),
+            "auto" => codex_config_args("on-failure", "workspace-write"),
+            "full_access" => codex_config_args("never", "danger-full-access"),
+            _ => Vec::new(),
+        },
+        GEMINI_ID => match level {
+            "default" | "auto_edit" | "yolo" => {
+                vec!["--approval-mode".to_string(), level.to_string()]
+            }
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// Codex reads approval and sandbox policy from `config.toml`; `-c key=value`
+/// overrides those at launch. Values are quoted so codex parses them as TOML strings.
+fn codex_config_args(approval_policy: &str, sandbox_mode: &str) -> Vec<String> {
+    vec![
+        "-c".to_string(),
+        format!("approval_policy=\"{approval_policy}\""),
+        "-c".to_string(),
+        format!("sandbox_mode=\"{sandbox_mode}\""),
+    ]
 }
 
 #[cfg(test)]
@@ -396,6 +468,36 @@ mod tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
         });
+    }
+
+    #[test]
+    fn approval_args_maps_levels_to_flags() {
+        assert_eq!(
+            approval_args(CODEX_ID, "full_access"),
+            vec![
+                "-c",
+                "approval_policy=\"never\"",
+                "-c",
+                "sandbox_mode=\"danger-full-access\"",
+            ]
+        );
+        assert_eq!(
+            approval_args(CODEX_ID, "read_only"),
+            vec![
+                "-c",
+                "approval_policy=\"on-request\"",
+                "-c",
+                "sandbox_mode=\"read-only\"",
+            ]
+        );
+        assert_eq!(
+            approval_args(GEMINI_ID, "yolo"),
+            vec!["--approval-mode", "yolo"]
+        );
+
+        // Unknown agent or level yields no flags (agent uses its own default).
+        assert!(approval_args(CODEX_ID, "bogus").is_empty());
+        assert!(approval_args("other-agent", "full_access").is_empty());
     }
 
     fn init_registry_with_agents(cx: &mut TestAppContext, agent_ids: &[&str]) {
@@ -469,6 +571,7 @@ mod tests {
                 settings::CustomAgentServerSettings::Registry {
                     env: HashMap::default(),
                     default_mode: None,
+                    approval: None,
                     default_config_options: HashMap::default(),
                     favorite_config_option_values: HashMap::default(),
                 },

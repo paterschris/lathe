@@ -28,9 +28,9 @@ use futures::FutureExt as _;
 use gpui::{
     Action, Animation, AnimationExt, AnyView, App, ClickEvent, ClipboardItem, CursorStyle,
     ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset, ListState,
-    ObjectFit, PlatformDisplay, ScrollHandle, SharedString, Subscription, Task,
-    TextStyle, WeakEntity, Window, WindowHandle, div, ease_in_out, img,
-    linear_color_stop, linear_gradient, list, pulsating_between,
+    ObjectFit, PlatformDisplay, ScrollHandle, SharedString, Subscription, Task, TextStyle,
+    WeakEntity, Window, WindowHandle, div, ease_in_out, img, linear_color_stop, linear_gradient,
+    list, pulsating_between,
 };
 use language::Buffer;
 use language_model::{LanguageModelCompletionError, LanguageModelRegistry};
@@ -75,6 +75,7 @@ use crate::completion_provider::{AgentContextSelection, AvailableSkill};
 use crate::entry_view_state::{EntryViewEvent, ViewEvent};
 use crate::message_editor::{InputAttempt, MessageEditor, MessageEditorEvent};
 use crate::profile_selector::{ProfileProvider, ProfileSelector};
+use crate::{ApprovalSelector, agent_supports_approval};
 
 use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore};
 use crate::ui::{AgentNotification, AgentNotificationEvent};
@@ -1263,6 +1264,12 @@ impl ConversationView {
                 });
         }
 
+        let approval_selector =
+            agent_supports_approval(self.agent.agent_id().0.as_ref()).then(|| {
+                let fs = self.project.read(cx).fs().clone();
+                cx.new(|_cx| ApprovalSelector::new(self.agent.clone(), fs))
+            });
+
         let subscriptions = vec![
             cx.subscribe_in(&thread, window, Self::handle_thread_event),
             cx.observe(&action_log, |_, _, cx| cx.notify()),
@@ -1348,6 +1355,7 @@ impl ConversationView {
                 entry_view_state,
                 config_options_view,
                 mode_selector,
+                approval_selector,
                 model_selector,
                 profile_selector,
                 list_state,
@@ -3002,13 +3010,16 @@ impl Render for ConversationView {
                             .gap_2()
                             .child(loading_contents_spinner(IconSize::XSmall))
                             .child(
-                                Label::new("Starting agent…").color(Color::Muted).size(LabelSize::Small).with_animation(
-                                    "loading-agent-label",
-                                    Animation::new(Duration::from_secs(2))
-                                        .repeat()
-                                        .with_easing(pulsating_between(0.3, 0.7)),
-                                    |label, delta| label.alpha(delta),
-                                ),
+                                Label::new("Starting agent…")
+                                    .color(Color::Muted)
+                                    .size(LabelSize::Small)
+                                    .with_animation(
+                                        "loading-agent-label",
+                                        Animation::new(Duration::from_secs(2))
+                                            .repeat()
+                                            .with_easing(pulsating_between(0.3, 0.7)),
+                                        |label, delta| label.alpha(delta),
+                                    ),
                             ),
                     )
                     .child(

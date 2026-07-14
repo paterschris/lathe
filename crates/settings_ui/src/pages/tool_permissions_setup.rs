@@ -1420,6 +1420,8 @@ mod tests {
             "streaming_edit_file",
             // Subagent permission checks happen at the level of individual
             // tool calls within the subagent, not at the spawning level.
+            "create_thread",
+            "list_agents_and_models",
             "spawn_agent",
             // update_plan updates UI-visible planning state but does not use
             // tool permission rules.

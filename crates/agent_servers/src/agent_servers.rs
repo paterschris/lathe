@@ -71,6 +71,16 @@ pub trait AgentServer: Send {
     ) {
     }
 
+    /// The approval / sandbox level this agent is launched with, if any.
+    ///
+    /// Unlike modes and config options, this is applied at process spawn via
+    /// agent-specific CLI flags, so a change only takes effect on the next thread.
+    fn default_approval(&self, _cx: &App) -> Option<String> {
+        None
+    }
+
+    fn set_default_approval(&self, _level: Option<String>, _fs: Arc<dyn Fs>, _cx: &mut App) {}
+
     fn default_config_option(&self, _config_id: &str, _cx: &App) -> Option<String> {
         None
     }

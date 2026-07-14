@@ -298,6 +298,7 @@ pub struct ThreadView {
     pub title_editor: Entity<Editor>,
     pub config_options_view: Option<Entity<ConfigOptionsView>>,
     pub mode_selector: Option<Entity<ModeSelector>>,
+    pub approval_selector: Option<Entity<ApprovalSelector>>,
     pub model_selector: Option<Entity<ModelSelectorPopover>>,
     pub profile_selector: Option<Entity<ProfileSelector>>,
     pub permission_dropdown_handle: PopoverMenuHandle<ContextMenu>,
@@ -501,6 +502,7 @@ impl ThreadView {
         entry_view_state: Entity<EntryViewState>,
         config_options_view: Option<Entity<ConfigOptionsView>>,
         mode_selector: Option<Entity<ModeSelector>>,
+        approval_selector: Option<Entity<ApprovalSelector>>,
         model_selector: Option<Entity<ModelSelectorPopover>>,
         profile_selector: Option<Entity<ProfileSelector>>,
         list_state: ListState,
@@ -679,6 +681,7 @@ impl ThreadView {
             title_editor,
             config_options_view,
             mode_selector,
+            approval_selector,
             model_selector,
             profile_selector,
             list_state,
@@ -3900,6 +3903,7 @@ impl ThreadView {
                                             .children(self.mode_selector.clone())
                                             .children(self.model_selector.clone()),
                                     })
+                                    .children(self.approval_selector.clone())
                                     .child(self.render_send_button(cx)),
                             ),
                     ),
@@ -5140,26 +5144,23 @@ impl Render for TokenUsageTooltip {
                                         .color(Color::Muted)
                                         .size(LabelSize::Small),
                                 )
-                                .child(
-                                    v_flex()
-                                        .mx_neg_1()
-                                        .when(project_rules_count > 0, move |this| {
-                                            let workspace = workspace.clone();
-                                            let project_entry_ids = project_entry_ids.clone();
-                                            this.child(
-                                                Button::new(
-                                                    "open-project-rules",
-                                                    format!(
-                                                        "{} project rules",
-                                                        project_rules_count
-                                                    ),
-                                                )
-                                                .end_icon(
-                                                    Icon::new(IconName::ArrowUpRight)
-                                                        .color(Color::Muted)
-                                                        .size(IconSize::XSmall),
-                                                )
-                                                .on_click(move |_, window, cx| {
+                                .child(v_flex().mx_neg_1().when(
+                                    project_rules_count > 0,
+                                    move |this| {
+                                        let workspace = workspace.clone();
+                                        let project_entry_ids = project_entry_ids.clone();
+                                        this.child(
+                                            Button::new(
+                                                "open-project-rules",
+                                                format!("{} project rules", project_rules_count),
+                                            )
+                                            .end_icon(
+                                                Icon::new(IconName::ArrowUpRight)
+                                                    .color(Color::Muted)
+                                                    .size(IconSize::XSmall),
+                                            )
+                                            .on_click(
+                                                move |_, window, cx| {
                                                     let _ =
                                                         workspace.update(cx, |workspace, cx| {
                                                             let project =
@@ -5179,10 +5180,11 @@ impl Render for TokenUsageTooltip {
                                                                     .detach_and_log_err(cx);
                                                             }
                                                         });
-                                                }),
-                                            )
-                                        }),
-                                ),
+                                                },
+                                            ),
+                                        )
+                                    },
+                                )),
                         )
                     },
                 )
@@ -10421,32 +10423,36 @@ impl ThreadView {
                 let thread = thread.clone();
                 let entries = menu_entries.clone();
                 let active = active_for_menu.clone();
-                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                    menu = menu.header("Switch active folder");
-                    for (name, path) in &entries {
-                        let name = name.clone();
-                        let path = path.clone();
-                        let is_selected = active.as_deref() == Some(path.as_path());
-                        let entry = ContextMenuEntry::new(name.clone())
-                            .toggleable(IconPosition::End, is_selected);
-                        let workspace = workspace.clone();
-                        let thread = thread.clone();
-                        menu.push_item(entry.handler(move |window, cx| {
-                            if is_selected {
-                                return;
-                            }
-                            switch_external_agent_worktree(
-                                workspace.clone(),
-                                thread.clone(),
-                                path.clone(),
-                                name.clone(),
-                                window,
-                                cx,
-                            );
-                        }));
-                    }
-                    menu
-                }))
+                Some(ContextMenu::build(
+                    window,
+                    cx,
+                    move |mut menu, _window, _cx| {
+                        menu = menu.header("Switch active folder");
+                        for (name, path) in &entries {
+                            let name = name.clone();
+                            let path = path.clone();
+                            let is_selected = active.as_deref() == Some(path.as_path());
+                            let entry = ContextMenuEntry::new(name.clone())
+                                .toggleable(IconPosition::End, is_selected);
+                            let workspace = workspace.clone();
+                            let thread = thread.clone();
+                            menu.push_item(entry.handler(move |window, cx| {
+                                if is_selected {
+                                    return;
+                                }
+                                switch_external_agent_worktree(
+                                    workspace.clone(),
+                                    thread.clone(),
+                                    path.clone(),
+                                    name.clone(),
+                                    window,
+                                    cx,
+                                );
+                            }));
+                        }
+                        menu
+                    },
+                ))
             });
 
         Some(

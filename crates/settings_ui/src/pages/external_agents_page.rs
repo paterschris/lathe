@@ -366,6 +366,7 @@ pub(crate) struct CustomAgentForm {
     /// Advanced fields not surfaced by the form. They're preserved verbatim so
     /// editing the basic settings doesn't drop a user's hand-written config.
     default_mode: Option<String>,
+    approval: Option<String>,
     default_config_options: HashMap<String, String>,
     favorite_config_option_values: HashMap<String, Vec<String>>,
     /// Stable handles for the Cancel/Save buttons so they can render a focus
@@ -389,6 +390,7 @@ impl CustomAgentForm {
         let mut args_initial = None;
         let mut env = Vec::new();
         let mut default_mode = None;
+        let mut approval = None;
         let mut default_config_options = HashMap::default();
         let mut favorite_config_option_values = HashMap::default();
 
@@ -401,6 +403,7 @@ impl CustomAgentForm {
                     args,
                     env: env_map,
                     default_mode: mode,
+                    approval: settings_approval,
                     default_config_options: config_options,
                     favorite_config_option_values: favorites,
                 } => {
@@ -412,12 +415,14 @@ impl CustomAgentForm {
                         env.push(new_kv_row(Some(&key), Some(&value), window, cx));
                     }
                     default_mode = mode.clone();
+                    approval = settings_approval.clone();
                     default_config_options = config_options.clone();
                     favorite_config_option_values = favorites.clone();
                 }
                 CustomAgentServerSettings::Registry {
                     env: env_map,
                     default_mode: mode,
+                    approval: settings_approval,
                     default_config_options: config_options,
                     favorite_config_option_values: favorites,
                 } => {
@@ -425,6 +430,7 @@ impl CustomAgentForm {
                         env.push(new_kv_row(Some(&key), Some(&value), window, cx));
                     }
                     default_mode = mode.clone();
+                    approval = settings_approval.clone();
                     default_config_options = config_options.clone();
                     favorite_config_option_values = favorites.clone();
                 }
@@ -438,6 +444,7 @@ impl CustomAgentForm {
             args: new_input("--flag value", args_initial.as_deref(), window, cx),
             env,
             default_mode,
+            approval,
             default_config_options,
             favorite_config_option_values,
             cancel_focus_handle: cx.focus_handle(),
@@ -812,6 +819,7 @@ struct CustomAgentFormValues {
     args: String,
     env: Vec<(String, String)>,
     default_mode: Option<String>,
+    approval: Option<String>,
     default_config_options: HashMap<String, String>,
     favorite_config_option_values: HashMap<String, Vec<String>>,
 }
@@ -827,6 +835,7 @@ fn build_settings_from_form(
         args: form.args.read(cx).text(cx),
         env: read_kv(&form.env, cx),
         default_mode: form.default_mode.clone(),
+        approval: form.approval.clone(),
         default_config_options: form.default_config_options.clone(),
         favorite_config_option_values: form.favorite_config_option_values.clone(),
     };
@@ -864,6 +873,7 @@ fn build_settings_from_values(
         args,
         env,
         default_mode: values.default_mode,
+        approval: values.approval,
         default_config_options: values.default_config_options,
         favorite_config_option_values: values.favorite_config_option_values,
     };
@@ -982,6 +992,7 @@ async fn add_custom_agent_settings_entry(
                                 args: vec![],
                                 env: HashMap::default(),
                                 default_mode: None,
+                                approval: None,
                                 default_config_options: Default::default(),
                                 favorite_config_option_values: Default::default(),
                             },
@@ -1079,6 +1090,7 @@ mod tests {
             args: String::new(),
             env: Vec::new(),
             default_mode: None,
+            approval: None,
             default_config_options: HashMap::default(),
             favorite_config_option_values: HashMap::default(),
         }
@@ -1146,6 +1158,7 @@ mod tests {
                 args: vec!["--flag".into(), "value".into()],
                 env: expected_env,
                 default_mode: None,
+                approval: None,
                 default_config_options: HashMap::default(),
                 favorite_config_option_values: HashMap::default(),
             }
@@ -1156,6 +1169,7 @@ mod tests {
     fn preserves_advanced_fields() {
         let mut values = values();
         values.default_mode = Some("ask".into());
+        values.approval = Some("auto".into());
         values.default_config_options =
             HashMap::from_iter([("opt".to_string(), "val".to_string())]);
 
@@ -1163,10 +1177,12 @@ mod tests {
         match content {
             CustomAgentServerSettings::Custom {
                 default_mode,
+                approval,
                 default_config_options,
                 ..
             } => {
                 assert_eq!(default_mode.as_deref(), Some("ask"));
+                assert_eq!(approval.as_deref(), Some("auto"));
                 assert_eq!(
                     default_config_options.get("opt").map(String::as_str),
                     Some("val")

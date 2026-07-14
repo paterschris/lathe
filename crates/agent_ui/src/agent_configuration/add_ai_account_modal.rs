@@ -6,11 +6,11 @@ use ai_accounts::{
 };
 use collections::HashMap;
 use fs::Fs;
-use notifications::status_toast::StatusToast;
 use gpui::{
     ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla, KeyDownEvent,
     Rgba, ScrollHandle, WeakEntity, WindowAppearance, prelude::*,
 };
+use notifications::status_toast::StatusToast;
 // FocusHandle is used through the Focusable trait impl below.
 use project::AgentId;
 use settings::update_settings_file;
@@ -111,8 +111,7 @@ impl AddAiAccountModal {
         let descriptor = match descriptor_for(&agent_id) {
             Some(d) => d,
             None => {
-                self.last_error =
-                    Some(SharedString::from(format!("Unknown agent: {agent_id}")));
+                self.last_error = Some(SharedString::from(format!("Unknown agent: {agent_id}")));
                 cx.notify();
                 return;
             }
@@ -139,9 +138,8 @@ impl AddAiAccountModal {
                         // Save the key, bind the account, confirm via toast. No
                         // OAuth, no terminal, no restart. connect_api_key_account
                         // owns the toast and dismiss for this path.
-                        let key = api_key.expect(
-                            "api_key is Some for the ApiKey login flow (validated above)",
-                        );
+                        let key = api_key
+                            .expect("api_key is Some for the ApiKey login flow (validated above)");
                         self.connect_api_key_account(descriptor, account, key, cx);
                         return;
                     }

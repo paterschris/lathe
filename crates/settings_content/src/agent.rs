@@ -71,7 +71,9 @@ pub enum ThinkingBlockDisplay {
     AlwaysCollapsed,
 }
 
-#[derive(Copy, Clone, Default, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema, MergeFrom)]
+#[derive(
+    Copy, Clone, Default, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NewThreadLocation {
     #[default]
@@ -695,6 +697,16 @@ pub enum CustomAgentServerSettings {
         ///
         /// Default: None
         default_mode: Option<String>,
+        /// The approval / sandbox level to launch this agent with.
+        ///
+        /// Applied at process launch via agent-specific CLI flags, so it affects
+        /// newly started threads rather than the one already running.
+        ///
+        /// Codex: "read_only" | "auto" | "full_access".
+        /// Gemini: "default" | "auto_edit" | "yolo".
+        ///
+        /// Default: None (use the agent's own default)
+        approval: Option<String>,
         /// Default values for session config options.
         ///
         /// This is a map from config option ID to value ID.
@@ -724,6 +736,16 @@ pub enum CustomAgentServerSettings {
         ///
         /// Default: None
         default_mode: Option<String>,
+        /// The approval / sandbox level to launch this agent with.
+        ///
+        /// Applied at process launch via agent-specific CLI flags, so it affects
+        /// newly started threads rather than the one already running.
+        ///
+        /// Codex: "read_only" | "auto" | "full_access".
+        /// Gemini: "default" | "auto_edit" | "yolo".
+        ///
+        /// Default: None (use the agent's own default)
+        approval: Option<String>,
         /// Default values for session config options.
         ///
         /// This is a map from config option ID to value ID.

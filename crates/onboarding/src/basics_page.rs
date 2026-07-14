@@ -574,6 +574,7 @@ fn render_registry_agent_button(
                     CustomAgentServerSettings::Registry {
                         env: Default::default(),
                         default_mode: None,
+                        approval: None,
                         default_config_options: HashMap::default(),
                         favorite_config_option_values: HashMap::default(),
                     }

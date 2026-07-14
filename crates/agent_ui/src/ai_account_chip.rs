@@ -1,8 +1,7 @@
 use std::rc::Rc;
 
 use ai_accounts::{
-    AgentDescriptor, AiAccountsSettings, BrandAccent, descriptor_for, load_index,
-    mark_account_used,
+    AgentDescriptor, AiAccountsSettings, BrandAccent, descriptor_for, load_index, mark_account_used,
 };
 use gpui::{Hsla, Rgba, WindowAppearance, prelude::*};
 use project::AgentId;
@@ -63,9 +62,7 @@ impl AgentPanel {
         // closure doesn't borrow `self` or the index.
         let other_accounts: Vec<(String, String)> = index
             .for_agent(agent_id_static)
-            .filter(|account| {
-                active_account.map_or(true, |active| active.id != account.id)
-            })
+            .filter(|account| active_account.map_or(true, |active| active.id != account.id))
             .map(|account| (account.id.clone(), account.display_name.clone()))
             .collect();
         let active_id = active_account.map(|account| account.id.clone());
@@ -97,64 +94,72 @@ impl AgentPanel {
                     let fs = fs.clone();
                     let active_id = active_id.clone();
                     let panel = panel.clone();
-                    Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                        let has_alternatives = !other_accounts.is_empty();
-                        for (account_id, display_name) in other_accounts {
-                            let panel = panel.clone();
-                            menu = menu.entry(
-                                SharedString::from(format!("Switch to {display_name}")),
-                                None,
-                                move |_window, cx| {
-                                    let agent_id = agent_id_static.to_string();
-                                    let account_id = account_id.clone();
-                                    // Bind, wait for the binding to land, then
-                                    // restart the agent's subprocess so the new
-                                    // account's config dir is actually applied
-                                    // (the env is only read at spawn time).
-                                    panel
-                                        .update(cx, |panel, cx| {
-                                            panel.switch_ai_account(agent_id, account_id, cx);
-                                        })
-                                        .ok();
-                                },
-                            );
-                        }
-                        if active_id.is_some() {
-                            let fs = fs.clone();
-                            menu = menu.entry(
-                                SharedString::from("Clear binding for this workspace"),
-                                None,
-                                move |_window, cx| {
-                                    let agent_id = agent_id_static.to_string();
-                                    update_settings_file(fs.clone(), cx, move |settings, _cx| {
-                                        bind_account(settings, &agent_id, None);
-                                    });
-                                },
-                            );
-                        }
-                        if has_alternatives || active_id.is_some() {
-                            menu = menu.separator();
-                        }
-                        menu = menu.entry(
-                            SharedString::from("Add account…"),
-                            None,
-                            move |window, cx| {
-                                window.dispatch_action(
-                                    Box::new(AddAiAccount {
-                                        agent_id: Some(agent_id_static.to_string()),
-                                    }),
-                                    cx,
+                    Some(ContextMenu::build(
+                        window,
+                        cx,
+                        move |mut menu, _window, _cx| {
+                            let has_alternatives = !other_accounts.is_empty();
+                            for (account_id, display_name) in other_accounts {
+                                let panel = panel.clone();
+                                menu = menu.entry(
+                                    SharedString::from(format!("Switch to {display_name}")),
+                                    None,
+                                    move |_window, cx| {
+                                        let agent_id = agent_id_static.to_string();
+                                        let account_id = account_id.clone();
+                                        // Bind, wait for the binding to land, then
+                                        // restart the agent's subprocess so the new
+                                        // account's config dir is actually applied
+                                        // (the env is only read at spawn time).
+                                        panel
+                                            .update(cx, |panel, cx| {
+                                                panel.switch_ai_account(agent_id, account_id, cx);
+                                            })
+                                            .ok();
+                                    },
                                 );
-                            },
-                        );
-                        menu.entry(
-                            SharedString::from("Manage accounts…"),
-                            None,
-                            |window, cx| {
-                                window.dispatch_action(Box::new(ManageAiAccounts), cx);
-                            },
-                        )
-                    }))
+                            }
+                            if active_id.is_some() {
+                                let fs = fs.clone();
+                                menu = menu.entry(
+                                    SharedString::from("Clear binding for this workspace"),
+                                    None,
+                                    move |_window, cx| {
+                                        let agent_id = agent_id_static.to_string();
+                                        update_settings_file(
+                                            fs.clone(),
+                                            cx,
+                                            move |settings, _cx| {
+                                                bind_account(settings, &agent_id, None);
+                                            },
+                                        );
+                                    },
+                                );
+                            }
+                            if has_alternatives || active_id.is_some() {
+                                menu = menu.separator();
+                            }
+                            menu = menu.entry(
+                                SharedString::from("Add account…"),
+                                None,
+                                move |window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(AddAiAccount {
+                                            agent_id: Some(agent_id_static.to_string()),
+                                        }),
+                                        cx,
+                                    );
+                                },
+                            );
+                            menu.entry(
+                                SharedString::from("Manage accounts…"),
+                                None,
+                                |window, cx| {
+                                    window.dispatch_action(Box::new(ManageAiAccounts), cx);
+                                },
+                            )
+                        },
+                    ))
                 }),
         )
     }

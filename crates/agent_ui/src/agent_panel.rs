@@ -1301,15 +1301,14 @@ impl AgentPanel {
         // Upstream migrates ACP extension agents to registry settings when an
         // extension is uninstalled, so the user keeps the agent available even
         // after the extension that brought it in is gone.
-        let extension_store_subscription = extension_host::ExtensionStore::try_global(cx).map(
-            |store| {
+        let extension_store_subscription =
+            extension_host::ExtensionStore::try_global(cx).map(|store| {
                 cx.subscribe(&store, |this, _source, event, cx| {
                     if let extension_host::Event::ExtensionUninstalled(id) = event {
                         this.migrate_agent_server_from_extensions(id.clone(), cx);
                     }
                 })
-            },
-        );
+            });
 
         let connection_store = cx.new(|cx| AgentConnectionStore::new(project.clone(), cx));
         let _project_subscription =
@@ -2000,7 +1999,14 @@ impl AgentPanel {
             workspace.and_then(|workspace| terminal_view::default_working_directory(workspace, cx))
         });
 
-        self.spawn_terminal(metadata.terminal_id, working_directory, focus, source, window, cx);
+        self.spawn_terminal(
+            metadata.terminal_id,
+            working_directory,
+            focus,
+            source,
+            window,
+            cx,
+        );
     }
 
     /// Close a terminal without activating the draft afterward. Used by the
@@ -5779,14 +5785,12 @@ impl Render for AgentPanel {
             .children(self.render_trial_end_upsell(window, cx));
 
         match self.visible_font_size() {
-            WhichFontSize::AgentFont => {
-                WithRemSize::new(
-                    ThemeSettings::get_global(cx).agent_ui_font_size_in_window(window, cx),
-                )
-                .size_full()
-                .child(content)
-                    .into_any()
-            }
+            WhichFontSize::AgentFont => WithRemSize::new(
+                ThemeSettings::get_global(cx).agent_ui_font_size_in_window(window, cx),
+            )
+            .size_full()
+            .child(content)
+            .into_any(),
             _ => content.into_any(),
         }
     }

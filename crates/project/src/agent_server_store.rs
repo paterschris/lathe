@@ -232,6 +232,7 @@ impl AgentServerStore {
                 registry_id.to_string(),
                 settings.unwrap_or_else(|| settings::CustomAgentServerSettings::Registry {
                     default_mode: None,
+                    approval: None,
                     env: Default::default(),
                     default_config_options: HashMap::default(),
                     favorite_config_option_values: HashMap::default(),
@@ -1522,6 +1523,8 @@ pub enum CustomAgentServerSettings {
         ///
         /// Default: None
         default_mode: Option<String>,
+        /// The approval / sandbox level to launch this agent with (Codex, Gemini).
+        approval: Option<String>,
         /// Default values for session config options.
         ///
         /// This is a map from config option ID to value ID.
@@ -1546,6 +1549,8 @@ pub enum CustomAgentServerSettings {
         ///
         /// Default: None
         default_mode: Option<String>,
+        /// The approval / sandbox level to launch this agent with (Codex, Gemini).
+        approval: Option<String>,
         /// Default values for session config options.
         ///
         /// This is a map from config option ID to value ID.
@@ -1573,6 +1578,13 @@ impl CustomAgentServerSettings {
         match self {
             CustomAgentServerSettings::Custom { default_mode, .. }
             | CustomAgentServerSettings::Registry { default_mode, .. } => default_mode.as_deref(),
+        }
+    }
+
+    pub fn approval(&self) -> Option<&str> {
+        match self {
+            CustomAgentServerSettings::Custom { approval, .. }
+            | CustomAgentServerSettings::Registry { approval, .. } => approval.as_deref(),
         }
     }
 
@@ -1613,6 +1625,7 @@ impl From<settings::CustomAgentServerSettings> for CustomAgentServerSettings {
                 args,
                 env,
                 default_mode,
+                approval,
                 default_config_options,
                 favorite_config_option_values,
             } => CustomAgentServerSettings::Custom {
@@ -1622,17 +1635,20 @@ impl From<settings::CustomAgentServerSettings> for CustomAgentServerSettings {
                     env: Some(env),
                 },
                 default_mode,
+                approval,
                 default_config_options,
                 favorite_config_option_values,
             },
             settings::CustomAgentServerSettings::Registry {
                 env,
                 default_mode,
+                approval,
                 default_config_options,
                 favorite_config_option_values,
             } => CustomAgentServerSettings::Registry {
                 env,
                 default_mode,
+                approval,
                 default_config_options,
                 favorite_config_option_values,
             },
@@ -1716,6 +1732,7 @@ mod tests {
                                 settings::CustomAgentServerSettings::Registry {
                                     env: HashMap::default(),
                                     default_mode: None,
+                                    approval: None,
                                     default_config_options: HashMap::default(),
                                     favorite_config_option_values: HashMap::default(),
                                 }

@@ -2204,9 +2204,7 @@ impl NativeAgentConnection {
                                     if let acp_thread::RequestPermissionOutcome::Selected(outcome) =
                                         outcome_task.await
                                     {
-                                        response
-                                            .send(outcome)
-                                            .ok();
+                                        response.send(outcome).ok();
                                     }
                                 })
                                 .detach();

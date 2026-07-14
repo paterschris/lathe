@@ -32,9 +32,7 @@ impl ManageAiAccountsModal {
     ) {
         workspace.register_action(|workspace, _: &ManageAiAccounts, window, cx| {
             let workspace_handle = cx.weak_entity();
-            workspace.toggle_modal(window, cx, |_window, cx| {
-                Self::new(workspace_handle, cx)
-            });
+            workspace.toggle_modal(window, cx, |_window, cx| Self::new(workspace_handle, cx));
         });
     }
 
@@ -54,10 +52,7 @@ impl ManageAiAccountsModal {
             return;
         };
         workspace.update(cx, |workspace, cx| {
-            workspace.toggle_status_toast(
-                StatusToast::new(message, cx, |this, _cx| this),
-                cx,
-            );
+            workspace.toggle_status_toast(StatusToast::new(message, cx, |this, _cx| this), cx);
         });
     }
 
@@ -248,9 +243,7 @@ impl ManageAiAccountsModal {
                 } else if skipped == 0 {
                     format!("Imported {imported} profile(s) from claude-account-switcher.")
                 } else {
-                    format!(
-                        "Imported {imported}, skipped {skipped} (already registered)."
-                    )
+                    format!("Imported {imported}, skipped {skipped} (already registered).")
                 }
             }
             Err(error) => {
@@ -355,8 +348,7 @@ fn render_conversations(
                     this.on_click(move |_, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(cmd.clone()));
                         if let Some(workspace) = workspace.upgrade() {
-                            let toast_message =
-                                SharedString::from(format!("Copied: {cmd}"));
+                            let toast_message = SharedString::from(format!("Copied: {cmd}"));
                             workspace.update(cx, |workspace, cx| {
                                 workspace.toggle_status_toast(
                                     StatusToast::new(toast_message, cx, |this, _cx| this),
@@ -371,11 +363,7 @@ fn render_conversations(
                         .gap_0p5()
                         .child(Label::new(title).size(LabelSize::Small))
                         .when_some(project_hint, |this, hint| {
-                            this.child(
-                                Label::new(hint)
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
+                            this.child(Label::new(hint).size(LabelSize::XSmall).color(Color::Muted))
                         }),
                 )
         }))
@@ -400,11 +388,8 @@ impl ManageAiAccountsModal {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let agent_id = descriptor.agent_id;
-        let mut accounts: Vec<AiAccount> = self
-            .index
-            .for_agent(agent_id)
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut accounts: Vec<AiAccount> =
+            self.index.for_agent(agent_id).cloned().collect::<Vec<_>>();
         // Most-used first (last_used_at desc), ties broken by created_at desc,
         // then case-insensitive display_name asc. None values for both
         // timestamps sort to the bottom — newly created/never-used accounts
@@ -413,7 +398,11 @@ impl ManageAiAccountsModal {
             b.last_used_at
                 .cmp(&a.last_used_at)
                 .then_with(|| b.created_at.cmp(&a.created_at))
-                .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
+                .then_with(|| {
+                    a.display_name
+                        .to_lowercase()
+                        .cmp(&b.display_name.to_lowercase())
+                })
         });
         let default_id = self
             .index
@@ -439,10 +428,7 @@ impl ManageAiAccountsModal {
                     .rounded_full()
                     .when_some(accent, |this, color| this.bg(color)),
             )
-            .child(
-                Label::new(SharedString::from(descriptor.display_name))
-                    .size(LabelSize::Default),
-            )
+            .child(Label::new(SharedString::from(descriptor.display_name)).size(LabelSize::Default))
             .child(div().flex_1())
             .when(claude_profiles_present, |this| {
                 this.child(
@@ -538,7 +524,11 @@ impl ManageAiAccountsModal {
         ListItem::new(row_id)
             .inset(true)
             .spacing(ListItemSpacing::Sparse)
-            .start_slot(Icon::new(chevron_icon).size(IconSize::XSmall).color(Color::Muted))
+            .start_slot(
+                Icon::new(chevron_icon)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.toggle_expand(account_id_for_toggle.clone(), cx);
             }))
@@ -571,15 +561,14 @@ impl ManageAiAccountsModal {
                         .icon_size(IconSize::Small)
                         .icon_color(Color::Muted)
                         .tooltip(Tooltip::text("Copy account ID"))
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                account_id_for_copy.clone(),
-                            ));
-                            this.toast(
-                                format!("Copied account ID: {account_id_for_copy}"),
-                                cx,
-                            );
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    account_id_for_copy.clone(),
+                                ));
+                                this.toast(format!("Copied account ID: {account_id_for_copy}"), cx);
+                            },
+                        )),
                     )
                     .child(
                         IconButton::new(
@@ -594,9 +583,11 @@ impl ManageAiAccountsModal {
                         } else {
                             "Test connection"
                         }))
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.verify(account_id_for_verify.clone(), cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                this.verify(account_id_for_verify.clone(), cx);
+                            },
+                        )),
                     )
                     .when(!is_default && !only_one_account, |this| {
                         this.child(
@@ -605,14 +596,16 @@ impl ManageAiAccountsModal {
                                 "Set default",
                             )
                             .label_size(LabelSize::XSmall)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.set_default(
-                                    agent_id_for_default.clone(),
-                                    account_id_for_default.clone(),
-                                    window,
-                                    cx,
-                                );
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.set_default(
+                                        agent_id_for_default.clone(),
+                                        account_id_for_default.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
                         )
                     })
                     .child(
@@ -623,9 +616,11 @@ impl ManageAiAccountsModal {
                         .icon_size(IconSize::Small)
                         .icon_color(Color::Error)
                         .tooltip(Tooltip::text("Delete account"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.delete(account_id_for_delete.clone(), window, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.delete(account_id_for_delete.clone(), window, cx);
+                            },
+                        )),
                     ),
             )
     }
@@ -633,9 +628,10 @@ impl ManageAiAccountsModal {
 
 impl Render for ManageAiAccountsModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = h_flex().px_3().py_2().child(
-            Label::new(SharedString::from("Manage AI Accounts")).size(LabelSize::Large),
-        );
+        let header = h_flex()
+            .px_3()
+            .py_2()
+            .child(Label::new(SharedString::from("Manage AI Accounts")).size(LabelSize::Large));
 
         let any_accounts_anywhere = !self.index.accounts.is_empty();
         let claude_profiles_present = claude_profiles_dir()

@@ -521,6 +521,7 @@ impl AgentRegistryPage {
                             agent_servers.entry(agent_id).or_insert_with(|| {
                                 settings::CustomAgentServerSettings::Registry {
                                     default_mode: None,
+                                    approval: None,
                                     env: Default::default(),
                                     default_config_options: HashMap::default(),
                                     favorite_config_option_values: HashMap::default(),

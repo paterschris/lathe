@@ -31,7 +31,11 @@ pub struct AiAccount {
 }
 
 impl AiAccount {
-    pub fn new(agent_id: impl Into<String>, display_name: impl Into<String>, config_dir: PathBuf) -> Self {
+    pub fn new(
+        agent_id: impl Into<String>,
+        display_name: impl Into<String>,
+        config_dir: PathBuf,
+    ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             agent_id: agent_id.into(),
@@ -96,7 +100,8 @@ impl AiAccountsIndex {
     pub fn remove(&mut self, id: &str) -> Option<AiAccount> {
         let position = self.accounts.iter().position(|a| a.id == id)?;
         let removed = self.accounts.remove(position);
-        self.global_defaults.retain(|_, account_id| account_id != id);
+        self.global_defaults
+            .retain(|_, account_id| account_id != id);
         Some(removed)
     }
 
@@ -310,11 +315,8 @@ pub const CODEX_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     scrub_env: &[],
 };
 
-pub const TIER_A_DESCRIPTORS: &[AgentDescriptor] = &[
-    CLAUDE_CODE_DESCRIPTOR,
-    GEMINI_DESCRIPTOR,
-    CODEX_DESCRIPTOR,
-];
+pub const TIER_A_DESCRIPTORS: &[AgentDescriptor] =
+    &[CLAUDE_CODE_DESCRIPTOR, GEMINI_DESCRIPTOR, CODEX_DESCRIPTOR];
 
 pub fn descriptor_for(agent_id: &str) -> Option<&'static AgentDescriptor> {
     TIER_A_DESCRIPTORS.iter().find(|d| d.agent_id == agent_id)
@@ -402,8 +404,7 @@ pub fn validate_new_account_name(
 fn set_dir_permissions_700(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let perms = std::fs::Permissions::from_mode(0o700);
-    std::fs::set_permissions(path, perms)
-        .with_context(|| format!("chmod 700 {}", path.display()))
+    std::fs::set_permissions(path, perms).with_context(|| format!("chmod 700 {}", path.display()))
 }
 
 #[cfg(not(unix))]
@@ -419,10 +420,9 @@ fn apply_create_quirks(agent_id: &str, config_dir: &Path) -> Result<()> {
     if agent_id == CODEX_DESCRIPTOR.agent_id {
         let config_path = config_dir.join("config.toml");
         if !config_path.exists() {
-            std::fs::write(&config_path, "cli_auth_credentials_store = \"file\"\n")
-                .with_context(|| {
-                    format!("writing Codex config.toml at {}", config_path.display())
-                })?;
+            std::fs::write(&config_path, "cli_auth_credentials_store = \"file\"\n").with_context(
+                || format!("writing Codex config.toml at {}", config_path.display()),
+            )?;
         }
     } else if agent_id == GEMINI_DESCRIPTOR.agent_id {
         // The Gemini CLI chooses its auth method from
@@ -605,7 +605,11 @@ pub fn import_from_claude_profiles() -> Result<ClaudeProfilesImport> {
         if !profile_path.is_dir() {
             continue;
         }
-        let Some(name) = profile_path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+        let Some(name) = profile_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
             report.failed.push(profile_path.display().to_string());
             continue;
         };
@@ -728,8 +732,7 @@ fn list_claude_conversations(config_dir: &Path) -> Vec<ConversationSummary> {
                 .ok()
                 .and_then(|meta| meta.modified().ok())
                 .map(DateTime::<Utc>::from);
-            let title = claude_first_user_message(&session_path)
-                .unwrap_or_else(|| id.clone());
+            let title = claude_first_user_message(&session_path).unwrap_or_else(|| id.clone());
             summaries.push(ConversationSummary {
                 id,
                 title,
@@ -874,7 +877,12 @@ where
         let text = payload
             .get("content")
             .and_then(extract_text_from_content)
-            .or_else(|| payload.get("text").and_then(|t| t.as_str()).map(str::to_string));
+            .or_else(|| {
+                payload
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string)
+            });
         if let Some(text) = text {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
@@ -1101,7 +1109,10 @@ mod tests {
         index
             .set_default("claude-acp", Some(b_id.clone()))
             .expect("set default");
-        assert_eq!(index.default_for_agent("claude-acp").map(|a| &a.id), Some(&b_id));
+        assert_eq!(
+            index.default_for_agent("claude-acp").map(|a| &a.id),
+            Some(&b_id)
+        );
         let _ = a_id;
     }
 
@@ -1152,9 +1163,18 @@ mod tests {
 
     #[test]
     fn descriptor_lookup() {
-        assert_eq!(descriptor_for("claude-acp").map(|d| d.display_name), Some("Claude Agent"));
-        assert_eq!(descriptor_for("gemini").map(|d| d.display_name), Some("Gemini CLI"));
-        assert_eq!(descriptor_for("codex-acp").map(|d| d.display_name), Some("Codex CLI"));
+        assert_eq!(
+            descriptor_for("claude-acp").map(|d| d.display_name),
+            Some("Claude Agent")
+        );
+        assert_eq!(
+            descriptor_for("gemini").map(|d| d.display_name),
+            Some("Gemini CLI")
+        );
+        assert_eq!(
+            descriptor_for("codex-acp").map(|d| d.display_name),
+            Some("Codex CLI")
+        );
         assert!(descriptor_for("nope").is_none());
     }
 
@@ -1265,7 +1285,10 @@ mod tests {
     #[test]
     fn unique_display_name_returns_input_when_unique() {
         let index = AiAccountsIndex::default();
-        assert_eq!(unique_display_name(&index, "claude-acp", "personal"), "personal");
+        assert_eq!(
+            unique_display_name(&index, "claude-acp", "personal"),
+            "personal"
+        );
     }
 
     #[test]

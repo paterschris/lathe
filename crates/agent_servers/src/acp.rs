@@ -7,12 +7,11 @@ use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{self as acp, ErrorCode},
 };
-use ai_accounts::{AiAccountsSettings, descriptor_for, load_index, mark_account_used};
 use agent_client_protocol::{Agent, Client, ConnectionTo, JsonRpcResponse, Lines, Responder};
+use ai_accounts::{AiAccountsSettings, descriptor_for, load_index, mark_account_used};
 use anyhow::anyhow;
 use async_channel;
 use collections::{HashMap, HashSet};
-use settings::SettingsStore;
 use feature_flags::{AcpBetaFeatureFlag, FeatureFlagAppExt as _};
 use futures::channel::mpsc;
 use futures::future::Shared;
@@ -24,6 +23,7 @@ use project::agent_server_store::{
 use project::{AgentId, Project};
 use remote::remote_client::Interactive;
 use serde::Deserialize;
+use settings::SettingsStore;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::rc::Rc;
@@ -1380,11 +1380,7 @@ impl AcpConnection {
                             }
                             _ => None,
                         };
-                        Some((
-                            config_option.id.clone(),
-                            default_value,
-                            initial_value,
-                        ))
+                        Some((config_option.id.clone(), default_value, initial_value))
                     } else {
                         log::warn!(
                             "`{}` is not a valid value for config option `{}` in {}",
@@ -3049,6 +3045,7 @@ mod tests {
                         args: Vec::new(),
                         env: HashMap::default(),
                         default_mode: Some("manual".to_string()),
+                        approval: None,
                         default_config_options: HashMap::from_iter([(
                             "mode".to_string(),
                             "manual".to_string(),
