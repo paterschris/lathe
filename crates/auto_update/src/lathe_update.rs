@@ -19,6 +19,10 @@ use std::{env, sync::Arc};
 const LATHE_DEFAULT_UPDATE_URL: &str =
     "https://api.github.com/repos/paterschris/lathe/releases?per_page=30";
 
+pub const PACKAGE_MANAGER_INSTALL_TITLE: &str = "Lathe was installed via a package manager.";
+pub const UP_TO_DATE_TITLE: &str = "Lathe is up to date";
+pub const UP_TO_DATE_MESSAGE: &str = "You're already running the latest version.";
+
 pub fn update_base_url(channel: ReleaseChannel) -> Option<String> {
     let beta = option_env!("LATHE_BETA_UPDATE_URL")
         .map(str::to_owned)

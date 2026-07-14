@@ -281,7 +281,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Lathe was installed via a package manager.",
+            lathe_update::PACKAGE_MANAGER_INSTALL_TITLE,
             Some(&message),
             &["OK"],
             cx,
@@ -338,8 +338,8 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
                         let _ = window_handle.update(cx, |_, window, app| {
                             drop(window.prompt(
                                 gpui::PromptLevel::Info,
-                                "Lathe is up to date",
-                                Some("You're already running the latest version."),
+                                lathe_update::UP_TO_DATE_TITLE,
+                                Some(lathe_update::UP_TO_DATE_MESSAGE),
                                 &["OK"],
                                 app,
                             ));
@@ -1401,7 +1401,9 @@ mod tests {
 
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
-            cx.background_executor.timer(Duration::from_millis(10)).await;
+            cx.background_executor
+                .timer(Duration::from_millis(10))
+                .await;
             cx.run_until_parked();
             let status = auto_updater.read_with(cx, |updater, _| updater.status());
             if !matches!(status, AutoUpdateStatus::Idle) {
@@ -1435,7 +1437,9 @@ mod tests {
 
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
-            cx.background_executor.timer(Duration::from_millis(10)).await;
+            cx.background_executor
+                .timer(Duration::from_millis(10))
+                .await;
             cx.run_until_parked();
             let status = auto_updater.read_with(cx, |updater, _| updater.status());
             if !matches!(status, AutoUpdateStatus::Downloading { .. }) {
