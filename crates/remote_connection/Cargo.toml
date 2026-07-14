@@ -13,7 +13,7 @@ path = "src/remote_connection.rs"
 
 [features]
 default = []
-test-support = ["remote/test-support"]
+test-support = ["remote/test-support", "workspace/test-support"]
 
 [dependencies]
 anyhow.workspace = true

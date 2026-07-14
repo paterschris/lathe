@@ -23,6 +23,7 @@ test-support = [
 
     "project/test-support",
     "remote/test-support",
+    "remote_connection/test-support",
     "util/test-support",
     "workspace/test-support",
     "recent_projects/test-support",
@@ -76,7 +77,9 @@ gpui = { workspace = true, features = ["test-support"] }
 notifications = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 release_channel.workspace = true
+recent_projects = { workspace = true, features = ["test-support"] }
 remote = { workspace = true, features = ["test-support"] }
+remote_connection = { workspace = true, features = ["test-support"] }
 rpc = { workspace = true, features = ["test-support"] }
 semver.workspace = true
 settings = { workspace = true, features = ["test-support"] }
