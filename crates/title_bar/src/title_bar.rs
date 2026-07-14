@@ -1,6 +1,8 @@
 mod application_menu;
 pub mod collab;
 mod lathe_accounts_menu;
+mod lathe_awaiting_input;
+mod lathe_branding;
 mod lathe_git_integrations;
 mod onboarding_banner;
 mod plan_chip;
@@ -47,9 +49,8 @@ use std::time::Duration;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
 use ui::{
-    Avatar, ButtonLike, ContextMenu, ContextMenuEntry, CountBadge, IconWithIndicator, Indicator,
-    PopoverMenu, PopoverMenuHandle, TintColor, Tooltip, prelude::*,
-    utils::platform_title_bar_height,
+    Avatar, ButtonLike, ContextMenu, ContextMenuEntry, IconWithIndicator, Indicator, PopoverMenu,
+    PopoverMenuHandle, TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
 };
 use update_version::UpdateVersion;
 use util::ResultExt;
@@ -1101,49 +1102,6 @@ impl TitleBar {
         )
     }
 
-    fn render_awaiting_input_indicator(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let workspace = self.workspace.upgrade()?;
-        let count = workspace.read(cx).awaiting_input_count(cx);
-        if count == 0 {
-            return None;
-        }
-        let workspace_handle = self.workspace.clone();
-        let tooltip = workspace.read(cx).first_awaiting_input_tooltip(cx);
-        let tooltip_text = if count > 1 {
-            format!("{count} terminals awaiting input — click to focus")
-        } else {
-            format!("{tooltip} — click to focus")
-        };
-        Some(
-            div()
-                .id("terminal-awaiting-input")
-                .cursor_pointer()
-                .relative()
-                .on_click(move |_, window, cx| {
-                    if let Some(workspace) = workspace_handle.upgrade() {
-                        workspace.update(cx, |workspace, cx| {
-                            workspace.focus_first_awaiting_input(window, cx);
-                        });
-                    }
-                })
-                .tooltip(Tooltip::text(tooltip_text))
-                .child(
-                    Icon::new(IconName::Return)
-                        .size(IconSize::Small)
-                        .color(Color::Accent),
-                )
-                .when(count > 1, |this| this.child(CountBadge::new(count)))
-                .with_animation(
-                    "titlebar-awaiting-pulse",
-                    Animation::new(Duration::from_secs(2))
-                        .repeat()
-                        .with_easing(pulsating_between(0.4, 1.0)),
-                    |element, delta| element.opacity(delta),
-                )
-                .into_any_element(),
-        )
-    }
-
     fn window_activation_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window.is_window_active() {
             ActiveCall::global(cx)
@@ -1215,13 +1173,15 @@ impl TitleBar {
             client::Status::UpgradeRequired => {
                 let auto_updater = auto_update::AutoUpdater::get(cx);
                 let label = match auto_updater.map(|auto_update| auto_update.read(cx).status()) {
-                    Some(AutoUpdateStatus::Updated { .. }) => "Please restart Lathe to Collaborate",
+                    Some(AutoUpdateStatus::Updated { .. }) => {
+                        lathe_branding::RESTART_TO_COLLABORATE
+                    }
                     Some(AutoUpdateStatus::Installing { .. })
                     | Some(AutoUpdateStatus::Downloading { .. })
                     | Some(AutoUpdateStatus::Checking) => "Updating...",
                     Some(AutoUpdateStatus::Idle)
                     | Some(AutoUpdateStatus::Errored { .. })
-                    | None => "Please update Lathe to Collaborate",
+                    | None => lathe_branding::UPDATE_TO_COLLABORATE,
                 };
 
                 Some(
@@ -1411,7 +1371,8 @@ impl TitleBar {
                                     .gap_1()
                                     .justify_between()
                                     .child(
-                                        Label::new("Restart to update Lathe").color(Color::Accent),
+                                        Label::new(lathe_branding::RESTART_TO_UPDATE)
+                                            .color(Color::Accent),
                                     )
                                     .child(
                                         Icon::new(IconName::Download)
