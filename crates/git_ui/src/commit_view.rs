@@ -2,8 +2,8 @@ use anyhow::{Context as _, Result};
 use buffer_diff::BufferDiff;
 use collections::HashMap;
 use editor::{
-    Addon, Editor, EditorEvent, EditorSettings, MultiBuffer, SplittableEditor,
-    hover_markdown_style, multibuffer_context_lines,
+    Addon, Editor, EditorEvent, EditorSettings, MultiBuffer, RestoreOnlyDiffHunkDelegate,
+    SplittableEditor, hover_markdown_style, multibuffer_context_lines,
 };
 use git::repository::{CommitDetails, CommitDiff, RepoPath, is_binary_content};
 use git::status::{FileStatus, StatusCode, TrackedStatus};
@@ -275,13 +275,7 @@ impl CommitView {
                 window,
                 cx,
             );
-            // SplittableEditor::disable_diff_hunk_controls is an upstream
-            // convenience not present in this build; render empty controls
-            // directly to achieve the same effect.
-            editor.set_render_diff_hunk_controls(
-                Arc::new(|_, _, _, _, _, _, _, _| gpui::Empty.into_any_element()),
-                cx,
-            );
+            editor.set_diff_hunk_delegate(Some(Arc::new(RestoreOnlyDiffHunkDelegate)), cx);
 
             editor.rhs_editor().update(cx, |editor, cx| {
                 editor.set_show_bookmarks(false, cx);
@@ -1199,13 +1193,7 @@ impl Item for CommitView {
                         window,
                         cx,
                     );
-                    // SplittableEditor::disable_diff_hunk_controls is an
-                    // upstream convenience not present in this build; render
-                    // empty controls directly to achieve the same effect.
-                    editor.set_render_diff_hunk_controls(
-                        Arc::new(|_, _, _, _, _, _, _, _| gpui::Empty.into_any_element()),
-                        cx,
-                    );
+                    editor.set_diff_hunk_delegate(Some(Arc::new(RestoreOnlyDiffHunkDelegate)), cx);
                     editor.rhs_editor().update(cx, |editor, cx| {
                         editor.set_show_bookmarks(false, cx);
                         editor.set_show_breakpoints(false, cx);

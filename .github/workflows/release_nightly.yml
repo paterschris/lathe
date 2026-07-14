@@ -10,6 +10,8 @@ on:
     - nightly
   schedule:
   - cron: 0 7 * * *
+permissions:
+  contents: read
 jobs:
   check_style:
     if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')

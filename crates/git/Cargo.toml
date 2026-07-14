@@ -25,6 +25,7 @@ gpui.workspace = true
 http_client.workspace = true
 itertools.workspace = true
 log.workspace = true
+async-channel.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
 rand = { workspace = true, optional = true }

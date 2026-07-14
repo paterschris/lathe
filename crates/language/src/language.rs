@@ -162,6 +162,7 @@ pub static PLAIN_TEXT: LazyLock<Arc<Language>> = LazyLock::new(|| {
         LanguageConfig {
             name: "Plain Text".into(),
             soft_wrap: Some(SoftWrap::EditorWidth),
+            autoclose_before: ")]}".into(),
             matcher: LanguageMatcher {
                 path_suffixes: vec!["txt".to_owned()],
                 first_line_pattern: None,
@@ -1236,9 +1237,9 @@ impl LanguageScope {
     pub fn language_allowed(&self, name: &LanguageServerName) -> bool {
         let config = &self.language.config;
         let opt_in_servers = &config.scope_opt_in_language_servers;
-        if opt_in_servers.contains(name) {
+        if opt_in_servers.contains(&name.0) {
             if let Some(over) = self.config_override() {
-                over.opt_into_language_servers.contains(name)
+                over.opt_into_language_servers.contains(&name.0)
             } else {
                 false
             }

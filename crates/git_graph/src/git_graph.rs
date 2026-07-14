@@ -4662,10 +4662,12 @@ impl Render for GitGraph {
                                     )
                                     .child(render_redistributable_columns_resize_handles(
                                         &self.column_widths,
+                                        None,
                                         window,
                                         cx,
                                     )),
                                 self.column_widths.clone(),
+                                None,
                             )
                         }),
                 )

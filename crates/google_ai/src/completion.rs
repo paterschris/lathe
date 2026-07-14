@@ -2,8 +2,9 @@ use anyhow::Result;
 use futures::{Stream, StreamExt};
 use language_model_core::{
     LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelRequest,
-    LanguageModelToolChoice, LanguageModelToolUse, LanguageModelToolUseId, MessageContent, Role,
-    StopReason, TokenUsage,
+    LanguageModelRequestToolInput, LanguageModelToolChoice, LanguageModelToolUse,
+    LanguageModelToolUseId, LanguageModelToolUseInput, MessageContent, Role, StopReason,
+    TokenUsage,
 };
 use std::pin::Pin;
 use std::sync::Arc;
@@ -20,20 +21,18 @@ pub fn into_google(
     mut request: LanguageModelRequest,
     model_id: String,
     mode: GoogleModelMode,
-) -> crate::GenerateContentRequest {
-    fn map_content(content: Vec<MessageContent>) -> Vec<Part> {
-        content
-            .into_iter()
-            .flat_map(|content| match content {
+) -> Result<crate::GenerateContentRequest> {
+    fn map_content(content: Vec<MessageContent>) -> Result<Vec<Part>> {
+        let mut mapped_parts = Vec::new();
+        for content in content {
+            match content {
                 MessageContent::Text(text) => {
                     if !text.is_empty() {
-                        vec![Part::TextPart(TextPart {
+                        mapped_parts.push(Part::TextPart(TextPart {
                             text,
                             thought: false,
                             thought_signature: None,
-                        })]
-                    } else {
-                        vec![]
+                        }));
                     }
                 }
                 MessageContent::Thinking {
@@ -41,38 +40,36 @@ pub fn into_google(
                     signature: Some(signature),
                 } => {
                     if !signature.is_empty() {
-                        vec![Part::TextPart(TextPart {
+                        mapped_parts.push(Part::TextPart(TextPart {
                             text,
                             thought: true,
                             thought_signature: Some(signature),
-                        })]
-                    } else {
-                        vec![]
+                        }));
                     }
                 }
-                MessageContent::Thinking { .. } => {
-                    vec![]
-                }
-                MessageContent::RedactedThinking(_) | MessageContent::Compaction(_) => vec![],
+                MessageContent::Thinking { .. } => {}
+                MessageContent::RedactedThinking(_) | MessageContent::Compaction(_) => {}
                 MessageContent::Image(image) => {
-                    vec![Part::InlineDataPart(InlineDataPart {
+                    mapped_parts.push(Part::InlineDataPart(InlineDataPart {
                         inline_data: GenerativeContentBlob {
                             mime_type: "image/png".to_string(),
                             data: image.source.to_string(),
                         },
-                    })]
+                    }));
                 }
                 MessageContent::ToolUse(tool_use) => {
-                    // Normalize empty string signatures to None
                     let thought_signature = tool_use.thought_signature.filter(|s| !s.is_empty());
+                    let LanguageModelToolUseInput::Json(input) = tool_use.input else {
+                        anyhow::bail!("Google AI does not support custom tool calls");
+                    };
 
-                    vec![Part::FunctionCallPart(crate::FunctionCallPart {
+                    mapped_parts.push(Part::FunctionCallPart(crate::FunctionCallPart {
                         function_call: crate::FunctionCall {
                             name: tool_use.name.to_string(),
-                            args: tool_use.input,
+                            args: input,
                         },
                         thought_signature,
-                    })]
+                    }));
                 }
                 MessageContent::ToolResult(tool_result) => {
                     let mut text_output = String::new();
@@ -97,7 +94,7 @@ pub fn into_google(
                     } else {
                         text_output
                     };
-                    let mut parts = vec![Part::FunctionResponsePart(crate::FunctionResponsePart {
+                    mapped_parts.push(Part::FunctionResponsePart(crate::FunctionResponsePart {
                         function_response: crate::FunctionResponse {
                             name: tool_result.tool_name.to_string(),
                             // The API expects a valid JSON object
@@ -105,12 +102,12 @@ pub fn into_google(
                                 "output": output
                             }),
                         },
-                    })];
-                    parts.extend(images.into_iter().map(Part::InlineDataPart));
-                    parts
+                    }));
+                    mapped_parts.extend(images.into_iter().map(Part::InlineDataPart));
                 }
-            })
-            .collect()
+            }
+        }
+        Ok(mapped_parts)
     }
 
     let system_instructions = if request
@@ -120,7 +117,7 @@ pub fn into_google(
     {
         let message = request.messages.remove(0);
         Some(SystemInstruction {
-            parts: map_content(message.content),
+            parts: map_content(message.content)?,
         })
     } else {
         None
@@ -128,27 +125,53 @@ pub fn into_google(
 
     let thinking_config = thinking_config_for_request(&request, &model_id, mode);
 
-    crate::GenerateContentRequest {
+    let tools = if request.tools.is_empty() {
+        None
+    } else {
+        Some(vec![crate::Tool {
+            function_declarations: request
+                .tools
+                .into_iter()
+                .map(|tool| match tool.input {
+                    LanguageModelRequestToolInput::Function { input_schema, .. } => {
+                        Ok(FunctionDeclaration {
+                            name: tool.name,
+                            description: tool.description,
+                            parameters: input_schema,
+                        })
+                    }
+                    LanguageModelRequestToolInput::Custom { .. } => {
+                        Err(anyhow::anyhow!("Google AI does not support custom tools"))
+                    }
+                })
+                .collect::<Result<_>>()?,
+        }])
+    };
+
+    Ok(crate::GenerateContentRequest {
         model: ModelName { model_id },
         system_instruction: system_instructions,
         contents: request
             .messages
             .into_iter()
-            .filter_map(|message| {
-                let parts = map_content(message.content);
+            .map(|message| {
+                let parts = map_content(message.content)?;
                 if parts.is_empty() {
-                    None
+                    Ok(None)
                 } else {
-                    Some(Content {
+                    Ok(Some(Content {
                         parts,
                         role: match message.role {
                             Role::User => crate::Role::User,
                             Role::Assistant => crate::Role::Model,
                             Role::System => crate::Role::User, // Google AI doesn't have a system role
                         },
-                    })
+                    }))
                 }
             })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
             .collect(),
         generation_config: Some(GenerationConfig {
             candidate_count: Some(1),
@@ -160,19 +183,7 @@ pub fn into_google(
             top_k: None,
         }),
         safety_settings: None,
-        tools: (!request.tools.is_empty()).then(|| {
-            vec![crate::Tool {
-                function_declarations: request
-                    .tools
-                    .into_iter()
-                    .map(|tool| FunctionDeclaration {
-                        name: tool.name,
-                        description: tool.description,
-                        parameters: tool.input_schema,
-                    })
-                    .collect(),
-            }]
-        }),
+        tools,
         tool_config: request.tool_choice.map(|choice| ToolConfig {
             function_calling_config: FunctionCallingConfig {
                 mode: match choice {
@@ -183,7 +194,7 @@ pub fn into_google(
                 allowed_function_names: None,
             },
         }),
-    }
+    })
 }
 
 fn thinking_config_for_request(
@@ -381,7 +392,9 @@ impl GoogleEventMapper {
                                     name,
                                     is_input_complete: true,
                                     raw_input: function_call_part.function_call.args.to_string(),
-                                    input: function_call_part.function_call.args,
+                                    input: LanguageModelToolUseInput::Json(
+                                        function_call_part.function_call.args,
+                                    ),
                                     thought_signature,
                                 },
                             )));

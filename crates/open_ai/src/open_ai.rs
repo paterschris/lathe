@@ -67,7 +67,6 @@ pub enum Model {
     #[serde(rename = "gpt-5")]
     Five,
     #[serde(rename = "gpt-5-mini")]
-    #[default]
     FiveMini,
     #[serde(rename = "gpt-5-nano")]
     FiveNano,
@@ -89,6 +88,13 @@ pub enum Model {
     FivePointFive,
     #[serde(rename = "gpt-5.5-pro")]
     FivePointFivePro,
+    #[serde(rename = "gpt-5.6-sol")]
+    #[default]
+    FivePointSixSol,
+    #[serde(rename = "gpt-5.6-terra")]
+    FivePointSixTerra,
+    #[serde(rename = "gpt-5.6-luna")]
+    FivePointSixLuna,
     #[serde(rename = "custom")]
     Custom {
         name: String,
@@ -115,7 +121,7 @@ const fn default_supports_images() -> bool {
 
 impl Model {
     pub fn default_fast() -> Self {
-        Self::FiveMini
+        Self::FivePointSixLuna
     }
 
     pub fn from_id(id: &str) -> Result<Self> {
@@ -135,6 +141,9 @@ impl Model {
             "gpt-5.4-pro" => Ok(Self::FivePointFourPro),
             "gpt-5.5" => Ok(Self::FivePointFive),
             "gpt-5.5-pro" => Ok(Self::FivePointFivePro),
+            "gpt-5.6-sol" => Ok(Self::FivePointSixSol),
+            "gpt-5.6-terra" => Ok(Self::FivePointSixTerra),
+            "gpt-5.6-luna" => Ok(Self::FivePointSixLuna),
             invalid_id => anyhow::bail!("invalid model id '{invalid_id}'"),
         }
     }
@@ -156,6 +165,9 @@ impl Model {
             Self::FivePointFourPro => "gpt-5.4-pro",
             Self::FivePointFive => "gpt-5.5",
             Self::FivePointFivePro => "gpt-5.5-pro",
+            Self::FivePointSixSol => "gpt-5.6-sol",
+            Self::FivePointSixTerra => "gpt-5.6-terra",
+            Self::FivePointSixLuna => "gpt-5.6-luna",
             Self::Custom { name, .. } => name,
         }
     }
@@ -177,6 +189,9 @@ impl Model {
             Self::FivePointFourPro => "gpt-5.4-pro",
             Self::FivePointFive => "gpt-5.5",
             Self::FivePointFivePro => "gpt-5.5-pro",
+            Self::FivePointSixSol => "gpt-5.6-sol",
+            Self::FivePointSixTerra => "gpt-5.6-terra",
+            Self::FivePointSixLuna => "gpt-5.6-luna",
             Self::Custom { display_name, .. } => display_name.as_deref().unwrap_or(&self.id()),
         }
     }
@@ -198,6 +213,9 @@ impl Model {
             Self::FivePointFourPro => 1_050_000,
             Self::FivePointFive => 1_050_000,
             Self::FivePointFivePro => 1_050_000,
+            Self::FivePointSixSol => 1_050_000,
+            Self::FivePointSixTerra => 1_050_000,
+            Self::FivePointSixLuna => 1_050_000,
             Self::Custom { max_tokens, .. } => *max_tokens,
         }
     }
@@ -222,6 +240,9 @@ impl Model {
             Self::FivePointFourPro => Some(128_000),
             Self::FivePointFive => Some(128_000),
             Self::FivePointFivePro => Some(128_000),
+            Self::FivePointSixSol => Some(128_000),
+            Self::FivePointSixTerra => Some(128_000),
+            Self::FivePointSixLuna => Some(128_000),
         }
     }
 
@@ -235,6 +256,7 @@ impl Model {
             | Self::FivePointFour
             | Self::FivePointFourMini
             | Self::FivePointFourNano => Some(ReasoningEffort::None),
+            Self::FivePointSixSol => Some(ReasoningEffort::Low),
             Self::O3
             | Self::Five
             | Self::FiveMini
@@ -242,7 +264,9 @@ impl Model {
             | Self::FivePointThreeCodex
             | Self::FivePointFourPro
             | Self::FivePointFive
-            | Self::FivePointFivePro => Some(ReasoningEffort::Medium),
+            | Self::FivePointFivePro
+            | Self::FivePointSixTerra
+            | Self::FivePointSixLuna => Some(ReasoningEffort::Medium),
             _ => None,
         }
     }
@@ -289,6 +313,14 @@ impl Model {
                 ReasoningEffort::High,
                 ReasoningEffort::XHigh,
             ],
+            Self::FivePointSixSol | Self::FivePointSixTerra | Self::FivePointSixLuna => &[
+                ReasoningEffort::None,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+            ],
             Self::FivePointTwo
             | Self::FivePointFour
             | Self::FivePointFive
@@ -332,6 +364,9 @@ impl Model {
             | Self::FivePointFourPro
             | Self::FivePointFive
             | Self::FivePointFivePro
+            | Self::FivePointSixSol
+            | Self::FivePointSixTerra
+            | Self::FivePointSixLuna
             | Self::FiveNano => true,
             Self::O3 | Model::Custom { .. } => false,
         }
@@ -359,7 +394,10 @@ impl Model {
             | Self::FivePointFour
             | Self::FivePointFourPro
             | Self::FivePointFive
-            | Self::FivePointFivePro => true,
+            | Self::FivePointFivePro
+            | Self::FivePointSixSol
+            | Self::FivePointSixTerra
+            | Self::FivePointSixLuna => true,
             Self::Four
             | Self::FourOmniMini
             | Self::O3
@@ -386,7 +424,10 @@ impl Model {
             | Self::FivePointThreeCodex
             | Self::FivePointFourMini
             | Self::FivePointFour
-            | Self::FivePointFive => true,
+            | Self::FivePointFive
+            | Self::FivePointSixSol
+            | Self::FivePointSixTerra
+            | Self::FivePointSixLuna => true,
             Self::Four
             | Self::FiveNano
             | Self::FivePointFourNano

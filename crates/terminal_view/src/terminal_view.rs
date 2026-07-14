@@ -16,7 +16,6 @@ use gpui::{
     MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollWheelEvent, Styled, Subscription,
     Task, TaskExt, WeakEntity, actions, anchored, deferred, div, hsla,
 };
-use itertools::Itertools;
 use menu;
 use persistence::TerminalDb;
 use project::{Project, ProjectEntryId, search::SearchQuery};
@@ -898,8 +897,11 @@ impl TerminalView {
         });
     }
 
-    fn add_paths_to_terminal(&self, paths: &[PathBuf], window: &mut Window, cx: &mut App) {
-        let mut text = paths.iter().map(|path| format!(" {path:?}")).join("");
+    pub fn add_paths_to_terminal(&self, paths: &[PathBuf], window: &mut Window, cx: &mut App) {
+        let mut text = paths
+            .iter()
+            .filter_map(|path| Some(format!(" {}", shlex::try_quote(path.to_str()?).ok()?)))
+            .collect::<String>();
         text.push(' ');
         window.focus(&self.focus_handle(cx), cx);
         self.terminal.update(cx, |terminal, _| {
@@ -1079,6 +1081,7 @@ fn subscribe_for_terminal_events(
                         terminal_awaiting_input::start_idle_timer(terminal_view, cx);
                     }
                     cx.notify();
+                    window.invalidate_character_coordinates();
                     cx.emit(Event::Wakeup);
                     cx.emit(ItemEvent::UpdateTab);
                     cx.emit(SearchEvent::MatchesInvalidated);
@@ -2127,7 +2130,7 @@ mod tests {
         let mut text = String::new();
         for path in paths {
             text.push(' ');
-            text.push_str(&format!("{path:?}"));
+            text.push_str(&shlex::try_quote(path.to_str().unwrap()).unwrap());
         }
         text.push(' ');
         text
@@ -2840,6 +2843,72 @@ mod tests {
             let text = view.tab_content_text(0, cx);
             assert_ne!(text.as_ref(), "my-server");
         });
+    }
+
+    async fn draw_standalone_terminal(
+        output: &[u8],
+        cx: &mut TestAppContext,
+    ) -> (gpui::Bounds<Pixels>, gpui::Size<Pixels>) {
+        let (project, workspace) = init_test(cx).await;
+        let terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_display_only(
+                CursorShape::default(),
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(output, cx);
+        });
+
+        let (terminal_view, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::new(
+                terminal.clone(),
+                workspace.downgrade(),
+                None,
+                project.downgrade(),
+                window,
+                cx,
+            )
+        });
+
+        let draw_size = gpui::size(px(400.), px(201.));
+        cx.simulate_resize(draw_size);
+        cx.draw(gpui::Point::default(), draw_size, |_, _| {
+            terminal_view.clone().into_any_element()
+        });
+        cx.run_until_parked();
+        cx.draw(gpui::Point::default(), draw_size, |_, _| {
+            terminal_view.clone().into_any_element()
+        });
+
+        let bounds = terminal.read_with(cx, |terminal, _| {
+            terminal.last_content().terminal_bounds.bounds
+        });
+        (bounds, draw_size)
+    }
+
+    #[gpui::test]
+    async fn test_short_standalone_terminal_stays_top_anchored_on_resize(cx: &mut TestAppContext) {
+        let (bounds, _) = draw_standalone_terminal(b"$ ", cx).await;
+        assert_eq!(bounds.origin.y, px(0.));
+    }
+
+    #[gpui::test]
+    async fn test_full_standalone_terminal_stays_bottom_anchored_on_resize(
+        cx: &mut TestAppContext,
+    ) {
+        let (bounds, draw_size) = draw_standalone_terminal(
+            b"one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n",
+            cx,
+        )
+        .await;
+        assert!(bounds.origin.y > px(0.));
+        assert_eq!(bounds.bottom(), draw_size.height);
     }
 
     #[gpui::test]

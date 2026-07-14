@@ -4,6 +4,8 @@ use gpui::{
 use project::git_store::{GitStore, GitStoreEvent, Repository};
 use workspace::{HideStatusItem, StatusItemView, Workspace, item::ItemHandle};
 
+use ui::{ContextMenu, PopoverMenuHandle};
+
 use crate::render_remote_button;
 
 pub struct BranchStatusIndicator {
@@ -65,7 +67,14 @@ impl Render for BranchStatusIndicator {
             .upgrade()
             .map(|workspace| workspace.focus_handle(cx));
 
-        match render_remote_button("branch-status-indicator", &branch, focus_handle, true, None) {
+        match render_remote_button(
+            "branch-status-indicator",
+            &branch,
+            focus_handle,
+            true,
+            None,
+            PopoverMenuHandle::<ContextMenu>::default(),
+        ) {
             Some(button) => button.into_any_element(),
             None => Empty.into_any_element(),
         }

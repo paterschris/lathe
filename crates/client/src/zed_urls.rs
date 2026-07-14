@@ -69,6 +69,23 @@ pub fn skills_docs(cx: &App) -> String {
     format!("{docs_url}/ai/skills", docs_url = docs_url(cx))
 }
 
+/// Returns the URL to Zed's Agent sandboxing documentation.
+///
+/// Pass `section` to deep-link to a specific section anchor on the page (for
+/// example, `Some("installing-bubblewrap")`); pass `None` to link to the top of
+/// the page.
+///
+pub fn sandboxing_docs(section: Option<&str>, cx: &App) -> String {
+    let base = format!("{docs_url}/ai/sandboxing", docs_url = docs_url(cx));
+    match section {
+        Some(section) => format!("{base}#{section}"),
+        None => base,
+    }
+}
+pub fn llm_provider_docs(cx: &App) -> String {
+    format!("{docs_url}/ai/llm-providers", docs_url = docs_url(cx))
+}
+
 /// Returns the URL to Zed's ACP registry blog post.
 pub fn acp_registry_blog(cx: &App) -> String {
     format!(

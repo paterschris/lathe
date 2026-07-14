@@ -64,6 +64,8 @@ pub enum ResponseInputItem {
     Message(ResponseMessageItem),
     FunctionCall(ResponseFunctionCallItem),
     FunctionCallOutput(ResponseFunctionCallOutputItem),
+    CustomToolCall(ResponseCustomToolCallItem),
+    CustomToolCallOutput(ResponseCustomToolCallOutputItem),
     Reasoning(ResponseReasoningInputItem),
     Compaction(ResponseCompactionItem),
 }
@@ -92,6 +94,21 @@ pub struct ResponseFunctionCallItem {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResponseFunctionCallOutputItem {
+    pub call_id: String,
+    pub output: ResponseFunctionCallOutputContent,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResponseCustomToolCallItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub call_id: String,
+    pub name: String,
+    pub input: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResponseCustomToolCallOutputItem {
     pub call_id: String,
     pub output: ResponseFunctionCallOutputContent,
 }
@@ -155,7 +172,7 @@ pub enum ReasoningSummaryMode {
     Detailed,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolDefinition {
     Function {
@@ -167,9 +184,33 @@ pub enum ToolDefinition {
         #[serde(skip_serializing_if = "Option::is_none")]
         strict: Option<bool>,
     },
+    Custom {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        format: Option<CustomToolFormat>,
+    },
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CustomToolFormat {
+    Text,
+    Grammar {
+        syntax: CustomToolGrammarSyntax,
+        definition: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CustomToolGrammarSyntax {
+    Lark,
+    Regex,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ResponseError {
     #[serde(default)]
     pub code: Option<String>,
@@ -271,6 +312,23 @@ pub enum StreamEvent {
         output_index: usize,
         summary_index: usize,
     },
+    #[serde(rename = "response.reasoning.delta")]
+    ReasoningDelta {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<usize>,
+        delta: String,
+    },
+    #[serde(rename = "response.reasoning.done")]
+    ReasoningDone {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<usize>,
+        #[serde(default)]
+        text: Option<String>,
+    },
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta {
         item_id: String,
@@ -284,6 +342,22 @@ pub enum StreamEvent {
         item_id: String,
         output_index: usize,
         arguments: String,
+        #[serde(default)]
+        sequence_number: Option<u64>,
+    },
+    #[serde(rename = "response.custom_tool_call_input.delta")]
+    CustomToolCallInputDelta {
+        item_id: String,
+        output_index: usize,
+        delta: String,
+        #[serde(default)]
+        sequence_number: Option<u64>,
+    },
+    #[serde(rename = "response.custom_tool_call_input.done")]
+    CustomToolCallInputDone {
+        item_id: String,
+        output_index: usize,
+        input: String,
         #[serde(default)]
         sequence_number: Option<u64>,
     },
@@ -304,7 +378,7 @@ pub enum StreamEvent {
     Unknown,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct ResponseSummary {
     #[serde(default)]
     pub id: Option<String>,
@@ -320,13 +394,13 @@ pub struct ResponseSummary {
     pub output: Vec<ResponseOutputItem>,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct ResponseIncompleteDetails {
     #[serde(default)]
     pub reason: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct ResponseUsage {
     #[serde(default)]
     pub input_tokens: Option<u64>,
@@ -340,30 +414,32 @@ pub struct ResponseUsage {
     pub total_tokens: Option<u64>,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct ResponseInputTokensDetails {
     #[serde(default)]
     pub cached_tokens: u64,
 }
 
-#[derive(Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct ResponseOutputTokensDetails {
     #[serde(default)]
     pub reasoning_tokens: u64,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseOutputItem {
     Message(ResponseOutputMessage),
     FunctionCall(ResponseFunctionToolCall),
+    CustomToolCall(ResponseCustomToolCall),
     Reasoning(ResponseReasoningItem),
     Compaction(ResponseCompactionItem),
+    /// Deserialization-only catch-all; must never be serialized back to the API.
     #[serde(other)]
     Unknown,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ResponseReasoningItem {
     #[serde(default)]
     pub id: Option<String>,
@@ -377,7 +453,7 @@ pub struct ResponseReasoningItem {
     pub status: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReasoningSummaryPart {
     SummaryText {
@@ -387,7 +463,7 @@ pub enum ReasoningSummaryPart {
     Unknown,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ResponseOutputMessage {
     #[serde(default)]
     pub id: Option<String>,
@@ -401,7 +477,7 @@ pub struct ResponseOutputMessage {
     pub phase: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ResponseFunctionToolCall {
     #[serde(default)]
     pub id: Option<String>,
@@ -413,6 +489,20 @@ pub struct ResponseFunctionToolCall {
     pub name: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ResponseCustomToolCall {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub call_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub input: String,
 }
 
 pub async fn stream_response(
@@ -522,6 +612,16 @@ pub async fn stream_response(
                                         item_id: item_id.clone(),
                                         output_index,
                                         arguments: function_call.arguments.clone(),
+                                        sequence_number: None,
+                                    });
+                                }
+                            }
+                            ResponseOutputItem::CustomToolCall(custom_tool_call) => {
+                                if let Some(ref item_id) = custom_tool_call.id {
+                                    all_events.push(StreamEvent::CustomToolCallInputDone {
+                                        item_id: item_id.clone(),
+                                        output_index,
+                                        input: custom_tool_call.input.clone(),
                                         sequence_number: None,
                                     });
                                 }
