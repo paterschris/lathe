@@ -13,8 +13,7 @@ use futures::channel::mpsc;
 use gpui::{
     Action, AnyElement, AnyEntity, AnyView, App, AppContext, Context, Entity, EntityId,
     EventEmitter, FocusHandle, Focusable, Font, Hsla, Pixels, Point, Render, SharedString, Task,
-    TaskExt,
-    WeakEntity, Window,
+    TaskExt, WeakEntity, Window,
 };
 use language::Capability;
 pub use language::HighlightedText;

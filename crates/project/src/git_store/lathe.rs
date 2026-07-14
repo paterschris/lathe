@@ -58,11 +58,7 @@ impl super::GitStore {
     }
 
     /// Pop a specific undo entry from the log and run its undo action.
-    pub fn undo(
-        &mut self,
-        undo_id: undo_log::UndoId,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<()>> {
+    pub fn undo(&mut self, undo_id: undo_log::UndoId, cx: &mut Context<Self>) -> Task<Result<()>> {
         let Some(entry) = self.undo_log.take(undo_id) else {
             return Task::ready(Err(anyhow!("undo entry not found")));
         };
@@ -214,22 +210,26 @@ impl super::Repository {
     ) -> Task<anyhow::Result<()>> {
         cx.spawn(async move |this, cx| {
             this.update(cx, |this, _| {
-                this.send_job("stash_paths_with_message", None, move |git_repo, _cx| async move {
-                    match git_repo {
-                        RepositoryState::Local(LocalRepositoryState {
-                            backend,
-                            environment,
-                            ..
-                        }) => {
-                            backend
-                                .stash_paths_with_message(entries, message, environment)
-                                .await
+                this.send_job(
+                    "stash_paths_with_message",
+                    None,
+                    move |git_repo, _cx| async move {
+                        match git_repo {
+                            RepositoryState::Local(LocalRepositoryState {
+                                backend,
+                                environment,
+                                ..
+                            }) => {
+                                backend
+                                    .stash_paths_with_message(entries, message, environment)
+                                    .await
+                            }
+                            RepositoryState::Remote(_) => Err(anyhow!(
+                                "stash with message is not supported on remote repositories"
+                            )),
                         }
-                        RepositoryState::Remote(_) => Err(anyhow!(
-                            "stash with message is not supported on remote repositories"
-                        )),
-                    }
-                })
+                    },
+                )
             })?
             .await??;
             Ok(())
@@ -245,18 +245,22 @@ impl super::Repository {
     ) -> Task<anyhow::Result<()>> {
         cx.spawn(async move |this, cx| {
             this.update(cx, |this, _| {
-                this.send_job("stash_pop_by_message", None, move |git_repo, _cx| async move {
-                    match git_repo {
-                        RepositoryState::Local(LocalRepositoryState {
-                            backend,
-                            environment,
-                            ..
-                        }) => backend.stash_pop_by_message(message, environment).await,
-                        RepositoryState::Remote(_) => Err(anyhow!(
-                            "stash pop by message is not supported on remote repositories"
-                        )),
-                    }
-                })
+                this.send_job(
+                    "stash_pop_by_message",
+                    None,
+                    move |git_repo, _cx| async move {
+                        match git_repo {
+                            RepositoryState::Local(LocalRepositoryState {
+                                backend,
+                                environment,
+                                ..
+                            }) => backend.stash_pop_by_message(message, environment).await,
+                            RepositoryState::Remote(_) => Err(anyhow!(
+                                "stash pop by message is not supported on remote repositories"
+                            )),
+                        }
+                    },
+                )
             })?
             .await??;
             Ok(())
@@ -322,16 +326,20 @@ impl super::Repository {
 
     pub fn change_to_commit(&mut self, revision: String) -> oneshot::Receiver<Result<()>> {
         let label: SharedString = format!("git checkout {revision}").into();
-        self.send_job("change_to_commit", Some(label), move |repo, _cx| async move {
-            match repo {
-                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                    backend.change_to_commit(revision).await
+        self.send_job(
+            "change_to_commit",
+            Some(label),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.change_to_commit(revision).await
+                    }
+                    RepositoryState::Remote(_) => {
+                        bail!("detached checkout is not yet supported on remote projects")
+                    }
                 }
-                RepositoryState::Remote(_) => {
-                    bail!("detached checkout is not yet supported on remote projects")
-                }
-            }
-        })
+            },
+        )
     }
 
     pub fn cherry_pick(
@@ -340,18 +348,22 @@ impl super::Repository {
         no_commit: bool,
     ) -> oneshot::Receiver<Result<()>> {
         let label = format!("git cherry-pick {}", commits.join(" "));
-        self.send_job("cherry_pick", Some(label.into()), move |repo, _cx| async move {
-            match repo {
-                RepositoryState::Local(LocalRepositoryState {
-                    backend,
-                    environment,
-                    ..
-                }) => backend.cherry_pick(commits, no_commit, environment).await,
-                RepositoryState::Remote(_) => {
-                    bail!("cherry-pick is not yet supported on remote projects")
+        self.send_job(
+            "cherry_pick",
+            Some(label.into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => backend.cherry_pick(commits, no_commit, environment).await,
+                    RepositoryState::Remote(_) => {
+                        bail!("cherry-pick is not yet supported on remote projects")
+                    }
                 }
-            }
-        })
+            },
+        )
     }
 
     pub fn revert(
@@ -446,22 +458,26 @@ impl super::Repository {
         todo: Vec<RebaseTodoEntry>,
     ) -> oneshot::Receiver<Result<()>> {
         let label: SharedString = format!("git rebase -i {upstream}").into();
-        self.send_job("rebase_interactive", Some(label), move |repo, _cx| async move {
-            match repo {
-                RepositoryState::Local(LocalRepositoryState {
-                    backend,
-                    environment,
-                    ..
-                }) => {
-                    backend
-                        .rebase_interactive(upstream, todo, environment)
-                        .await
+        self.send_job(
+            "rebase_interactive",
+            Some(label),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => {
+                        backend
+                            .rebase_interactive(upstream, todo, environment)
+                            .await
+                    }
+                    RepositoryState::Remote(_) => {
+                        bail!("interactive rebase is not yet supported on remote projects")
+                    }
                 }
-                RepositoryState::Remote(_) => {
-                    bail!("interactive rebase is not yet supported on remote projects")
-                }
-            }
-        })
+            },
+        )
     }
 
     pub fn rebase_action(

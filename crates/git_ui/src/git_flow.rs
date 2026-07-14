@@ -1,8 +1,6 @@
 use editor::Editor;
 use git::repository::MergeOptions;
-use gpui::{
-    AppContext as _, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, actions,
-};
+use gpui::{AppContext as _, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, actions};
 use project::git_store::Repository;
 use ui::{Headline, HeadlineSize, prelude::*};
 use workspace::{ModalView, Workspace};
@@ -247,8 +245,7 @@ fn finish_current_branch(
     cx.spawn_in(window, async move |_, cx| {
         for (idx, target) in targets.iter().enumerate() {
             let target = (*target).to_string();
-            let receiver = repo_for_task
-                .update(cx, |repo, _| repo.change_branch(target.clone()));
+            let receiver = repo_for_task.update(cx, |repo, _| repo.change_branch(target.clone()));
             let res: anyhow::Result<()> = receiver.await.unwrap_or_else(|_| Ok(()));
             if let Err(err) = res {
                 anyhow::bail!("checkout {target}: {err}");
@@ -258,10 +255,9 @@ fn finish_current_branch(
                 no_ff: true,
                 ..Default::default()
             };
-            let receiver = repo_for_task
-                .update(cx, |repo, _| {
-                    repo.merge(current_branch.clone(), merge_options)
-                });
+            let receiver = repo_for_task.update(cx, |repo, _| {
+                repo.merge(current_branch.clone(), merge_options)
+            });
             let res: anyhow::Result<()> = receiver.await.unwrap_or_else(|_| Ok(()));
             if let Err(err) = res {
                 anyhow::bail!("merge {current_branch} into {target}: {err}");
@@ -271,7 +267,8 @@ fn finish_current_branch(
             // expects a version tag (releases / hotfixes). We use the bare
             // version string from the branch name and leave a default
             // message that mirrors the canonical GitFlow workflow.
-            if idx == 0 && tag_on_finish
+            if idx == 0
+                && tag_on_finish
                 && let Some(name) = &tag_name
             {
                 let receiver = repo_for_task.update(cx, |repo, _| {

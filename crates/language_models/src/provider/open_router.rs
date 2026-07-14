@@ -453,10 +453,7 @@ pub fn into_open_router(
         let reasoning_details_for_message = if is_anthropic_model {
             None
         } else {
-            message
-                .reasoning_details
-                .as_deref()
-                .cloned()
+            message.reasoning_details.as_deref().cloned()
         };
 
         let message_wants_cache = message.cache;

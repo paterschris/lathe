@@ -13,8 +13,8 @@ use project::git_store::{
 use ui::{
     ActiveTheme, App, Button, ButtonCommon, ButtonStyle, Clickable, Color, Context, ContextMenu,
     Divider, FluentBuilder, Icon, IconName, IconSize, InteractiveElement, IntoElement, Label,
-    LabelCommon, LabelSize, ParentElement, PopoverMenu, Render, SharedString, StyledExt,
-    WithScrollbar, Window, div, h_flex, prelude::*, v_flex,
+    LabelCommon, LabelSize, ParentElement, PopoverMenu, Render, SharedString, StyledExt, Window,
+    WithScrollbar, div, h_flex, prelude::*, v_flex,
 };
 use workspace::{ModalView, Workspace};
 
@@ -128,9 +128,9 @@ impl InteractiveRebaseModal {
         let Ok(oid) = sha.parse::<Oid>() else {
             return short_sha.clone();
         };
-        let state = self
-            .repository
-            .update(cx, |repo, cx| repo.fetch_commit_data(oid, false, cx).clone());
+        let state = self.repository.update(cx, |repo, cx| {
+            repo.fetch_commit_data(oid, false, cx).clone()
+        });
         match state {
             CommitDataState::Loaded(data) => data.subject.clone(),
             CommitDataState::Loading(_) => "Loading…".into(),
@@ -217,54 +217,50 @@ impl InteractiveRebaseModal {
         let Some(repo) = git_store.read(cx).repositories().get(&repo_id).cloned() else {
             return;
         };
-        let receiver = repo.update(cx, |repo, _cx| {
-            repo.rebase_interactive(upstream, todo)
-        });
+        let receiver = repo.update(cx, |repo, _cx| repo.rebase_interactive(upstream, todo));
 
         self.in_progress = true;
         self.last_error = None;
         cx.notify();
 
-        cx.spawn_in(window, async move |this, cx| {
-            match receiver.await {
-                Ok(Ok(())) => {
-                    if let Some((branch, sha)) = pre_state.clone() {
-                        cx.update(|_, cx| {
-                            git_store.update(cx, |store, cx| {
-                                store.record_undo(
-                                    repo_id,
-                                    "Interactive rebase".to_string(),
-                                    UndoAction::RestoreBranchTip {
-                                        branch,
-                                        sha,
-                                        is_current: true,
-                                    },
-                                    cx,
-                                );
-                            });
-                            let _ = workspace;
-                        })
-                        .ok();
-                    }
-                    this.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
-                }
-                Ok(Err(error)) => {
-                    let message: SharedString = format!("{error}").into();
-                    this.update(cx, |this, cx| {
-                        this.in_progress = false;
-                        this.last_error = Some(message);
-                        cx.notify();
+        cx.spawn_in(window, async move |this, cx| match receiver.await {
+            Ok(Ok(())) => {
+                if let Some((branch, sha)) = pre_state.clone() {
+                    cx.update(|_, cx| {
+                        git_store.update(cx, |store, cx| {
+                            store.record_undo(
+                                repo_id,
+                                "Interactive rebase".to_string(),
+                                UndoAction::RestoreBranchTip {
+                                    branch,
+                                    sha,
+                                    is_current: true,
+                                },
+                                cx,
+                            );
+                        });
+                        let _ = workspace;
                     })
                     .ok();
                 }
-                Err(_) => {
-                    this.update(cx, |this, cx| {
-                        this.in_progress = false;
-                        this.last_error = Some("Rebase cancelled".into());
-                        cx.notify();
-                    })
-                    .ok();
-                }
+                this.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
+            }
+            Ok(Err(error)) => {
+                let message: SharedString = format!("{error}").into();
+                this.update(cx, |this, cx| {
+                    this.in_progress = false;
+                    this.last_error = Some(message);
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(_) => {
+                this.update(cx, |this, cx| {
+                    this.in_progress = false;
+                    this.last_error = Some("Rebase cancelled".into());
+                    cx.notify();
+                })
+                .ok();
             }
         })
         .detach();
@@ -301,7 +297,12 @@ impl Render for InteractiveRebaseModal {
         // Pre-compute everything that needs `cx` so the row-builder closure
         // below doesn't have to capture the context mutably (which would clash
         // with the `cx.listener` and `cx.theme()` calls that follow).
-        let row_data: Vec<(SharedString, SharedString, RebaseAction, Option<Entity<Editor>>)> = self
+        let row_data: Vec<(
+            SharedString,
+            SharedString,
+            RebaseAction,
+            Option<Entity<Editor>>,
+        )> = self
             .entries
             .iter()
             .enumerate()
@@ -341,17 +342,14 @@ impl Render for InteractiveRebaseModal {
                         Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
                             for &candidate in SELECTABLE_ACTIONS {
                                 let menu_owner = menu_owner.clone();
-                                menu = menu.entry(
-                                    action_label(candidate),
-                                    None,
-                                    move |window, cx| {
+                                menu =
+                                    menu.entry(action_label(candidate), None, move |window, cx| {
                                         menu_owner
                                             .update(cx, |this, cx| {
                                                 this.set_action(idx, candidate, window, cx);
                                             })
                                             .ok();
-                                    },
-                                );
+                                    });
                             }
                             menu
                         }))
@@ -432,17 +430,15 @@ impl Render for InteractiveRebaseModal {
                     .gap_2()
                     .justify_between()
                     .when_some(self.last_error.clone(), |this, error| {
-                        this.child(
-                            Label::new(error)
-                                .color(Color::Error)
-                                .size(LabelSize::Small),
-                        )
+                        this.child(Label::new(error).color(Color::Error).size(LabelSize::Small))
                     })
                     .when(self.last_error.is_none(), |this| {
                         this.child(
-                            Label::new("Pick an action per commit; for reword, edit the message inline.")
-                                .color(Color::Muted)
-                                .size(LabelSize::Small),
+                            Label::new(
+                                "Pick an action per commit; for reword, edit the message inline.",
+                            )
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
                         )
                     })
                     .child(
@@ -467,9 +463,11 @@ impl Render for InteractiveRebaseModal {
                                 )
                                 .style(ButtonStyle::Filled)
                                 .disabled(in_progress)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.start_rebase(window, cx);
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.start_rebase(window, cx);
+                                    },
+                                )),
                             ),
                     ),
             )

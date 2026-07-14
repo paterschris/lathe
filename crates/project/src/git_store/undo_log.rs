@@ -108,7 +108,8 @@ impl GitUndoLog {
     }
 
     pub fn clear_for(&mut self, repository_id: RepositoryId) {
-        self.entries.retain(|entry| entry.repository_id != repository_id);
+        self.entries
+            .retain(|entry| entry.repository_id != repository_id);
     }
 
     pub fn is_empty(&self) -> bool {

@@ -5,7 +5,6 @@ use editor::{
     Addon, Editor, EditorEvent, EditorSettings, MultiBuffer, SplittableEditor,
     hover_markdown_style, multibuffer_context_lines,
 };
-use smol::future::yield_now;
 use git::repository::{CommitDetails, CommitDiff, RepoPath, is_binary_content};
 use git::status::{FileStatus, StatusCode, TrackedStatus};
 use git::{
@@ -26,6 +25,7 @@ use markdown::{Markdown, MarkdownElement};
 use multi_buffer::PathKey;
 use project::{Project, ProjectPath, WorktreeId, git_store::Repository};
 use settings::{DiffViewStyle, Settings};
+use smol::future::yield_now;
 use std::{
     any::{Any, TypeId},
     collections::HashSet,

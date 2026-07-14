@@ -450,12 +450,7 @@ impl ClientCredentialsProvider {
 
             let keychain_url = accounts::keychain_url(&server_url, user_id);
             self.provider
-                .write_credentials(
-                    &keychain_url,
-                    &user_id_str,
-                    access_token.as_bytes(),
-                    cx,
-                )
+                .write_credentials(&keychain_url, &user_id_str, access_token.as_bytes(), cx)
                 .await
                 .log_err();
 

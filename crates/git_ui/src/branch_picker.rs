@@ -1053,7 +1053,9 @@ impl PickerDelegate for BranchListDelegate {
         match self.state {
             PickerState::List | PickerState::NewRemote | PickerState::NewBranch => {
                 match self.branch_filter {
-                    BranchFilter::All | BranchFilter::Remote => "Switch or type to create a branch…",
+                    BranchFilter::All | BranchFilter::Remote => {
+                        "Switch or type to create a branch…"
+                    }
                 }
             }
             PickerState::CreateRemote(_) => "Enter a name for this remote…",

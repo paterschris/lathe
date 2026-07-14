@@ -1,8 +1,6 @@
 use git::Oid;
 use git::repository::{CommitSummary, RebaseAction, RebaseOptions};
-use gpui::{
-    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task, WeakEntity,
-};
+use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task, WeakEntity};
 use project::git_store::{GitStore, Repository, RepositoryId, undo_log::UndoAction};
 use ui::{
     ActiveTheme, App, Button, ButtonCommon, ButtonStyle, Clickable, Color, Context, Disableable,
@@ -359,9 +357,8 @@ impl Render for RebaseConfirmModal {
                     self.source,
                     self.target_label
                 );
-                body.child(Label::new(summary).size(LabelSize::Small)).when(
-                    count > 1,
-                    |this| {
+                body.child(Label::new(summary).size(LabelSize::Small))
+                    .when(count > 1, |this| {
                         this.child(
                             Label::new(
                                 "An interactive rebase lets you reorder, squash, edit, \
@@ -370,8 +367,7 @@ impl Render for RebaseConfirmModal {
                             .color(Color::Muted)
                             .size(LabelSize::Small),
                         )
-                    },
-                )
+                    })
             }
         };
 

@@ -153,11 +153,7 @@ impl Client {
 
     /// Disconnects the current session, marks the given account as active,
     /// and signs back in using that account's stored credentials.
-    pub async fn switch_account(
-        self: &Arc<Self>,
-        account_id: String,
-        cx: &AsyncApp,
-    ) -> Result<()> {
+    pub async fn switch_account(self: &Arc<Self>, account_id: String, cx: &AsyncApp) -> Result<()> {
         let mut index = load_index();
         if index.find(&account_id).is_none() {
             anyhow::bail!("unknown collab account: {account_id}");
@@ -199,11 +195,7 @@ impl Client {
     /// Deletes the given account's keychain entry and removes it from the
     /// index. If it was the active account, the session is torn down; if other
     /// accounts remain, the first is promoted and signed in.
-    pub async fn remove_account(
-        self: &Arc<Self>,
-        account_id: String,
-        cx: &AsyncApp,
-    ) -> Result<()> {
+    pub async fn remove_account(self: &Arc<Self>, account_id: String, cx: &AsyncApp) -> Result<()> {
         let mut index = load_index();
         let Some(account) = index.find(&account_id).cloned() else {
             return Ok(());

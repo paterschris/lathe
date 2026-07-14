@@ -1,6 +1,6 @@
+mod file_finder_footer;
 #[cfg(test)]
 mod file_finder_tests;
-mod file_finder_footer;
 
 use futures::future::join_all;
 pub use open_path_prompt::OpenPathDelegate;
@@ -40,8 +40,8 @@ use std::{
     time::Duration,
 };
 use ui::{
-    ContextMenu, HighlightedLabel, Indicator, ListItem, ListItemSpacing, PopoverMenuHandle, Tooltip,
-    prelude::*,
+    ContextMenu, HighlightedLabel, Indicator, ListItem, ListItemSpacing, PopoverMenuHandle,
+    Tooltip, prelude::*,
 };
 use util::{
     ResultExt, maybe,

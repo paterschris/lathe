@@ -130,30 +130,25 @@ impl State {
                     async move {
                         let name = model.name.as_str();
 
-                        show_model(
-                            http_client.as_ref(),
-                            &api_url,
-                            api_key.as_deref(),
-                            name,
-                        )
-                        .await
-                        .map_or_else(
-                            |error| {
-                                ollama::Model::new_disabled(
-                                    name,
-                                    format!("Failed to fetch model from API: {error}",),
-                                )
-                            },
-                            |model| {
-                                ollama::Model::new(
-                                    name,
-                                    model.context_length,
-                                    Some(model.supports_tools()),
-                                    Some(model.supports_vision()),
-                                    Some(model.supports_thinking()),
-                                )
-                            },
-                        )
+                        show_model(http_client.as_ref(), &api_url, api_key.as_deref(), name)
+                            .await
+                            .map_or_else(
+                                |error| {
+                                    ollama::Model::new_disabled(
+                                        name,
+                                        format!("Failed to fetch model from API: {error}",),
+                                    )
+                                },
+                                |model| {
+                                    ollama::Model::new(
+                                        name,
+                                        model.context_length,
+                                        Some(model.supports_tools()),
+                                        Some(model.supports_vision()),
+                                        Some(model.supports_thinking()),
+                                    )
+                                },
+                            )
                     }
                 });
 

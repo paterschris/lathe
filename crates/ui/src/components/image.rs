@@ -115,56 +115,56 @@ impl Component for Vector {
         let size = rems_from_px(60.);
 
         v_flex()
-                .gap_6()
-                .children(vec![
-                    example_group_with_title(
-                        "Basic Usage",
-                        vec![
-                            single_example(
-                                "Default",
-                                Vector::square(VectorName::LatheLogo, size).into_any_element(),
-                            ),
-                            single_example(
-                                "Custom Size",
-                                h_flex()
-                                    .h(rems_from_px(120.))
-                                    .justify_center()
-                                    .child(Vector::new(
-                                        VectorName::LatheLogo,
-                                        rems_from_px(120.),
-                                        rems_from_px(200.),
-                                    ))
-                                    .into_any_element(),
-                            ),
-                        ],
-                    ),
-                    example_group_with_title(
-                        "Colored",
-                        vec![
-                            single_example(
-                                "Accent Color",
-                                Vector::square(VectorName::LatheLogo, size)
-                                    .color(Color::Accent)
-                                    .into_any_element(),
-                            ),
-                            single_example(
-                                "Error Color",
-                                Vector::square(VectorName::LatheLogo, size)
-                                    .color(Color::Error)
-                                    .into_any_element(),
-                            ),
-                        ],
-                    ),
-                    example_group_with_title(
-                        "Different Vectors",
-                        vec![single_example(
-                            "Zed X Copilot",
-                            Vector::square(VectorName::ZedXCopilot, rems_from_px(100.))
+            .gap_6()
+            .children(vec![
+                example_group_with_title(
+                    "Basic Usage",
+                    vec![
+                        single_example(
+                            "Default",
+                            Vector::square(VectorName::LatheLogo, size).into_any_element(),
+                        ),
+                        single_example(
+                            "Custom Size",
+                            h_flex()
+                                .h(rems_from_px(120.))
+                                .justify_center()
+                                .child(Vector::new(
+                                    VectorName::LatheLogo,
+                                    rems_from_px(120.),
+                                    rems_from_px(200.),
+                                ))
                                 .into_any_element(),
-                        )],
-                    ),
-                ])
-                .into_any_element()
+                        ),
+                    ],
+                ),
+                example_group_with_title(
+                    "Colored",
+                    vec![
+                        single_example(
+                            "Accent Color",
+                            Vector::square(VectorName::LatheLogo, size)
+                                .color(Color::Accent)
+                                .into_any_element(),
+                        ),
+                        single_example(
+                            "Error Color",
+                            Vector::square(VectorName::LatheLogo, size)
+                                .color(Color::Error)
+                                .into_any_element(),
+                        ),
+                    ],
+                ),
+                example_group_with_title(
+                    "Different Vectors",
+                    vec![single_example(
+                        "Zed X Copilot",
+                        Vector::square(VectorName::ZedXCopilot, rems_from_px(100.))
+                            .into_any_element(),
+                    )],
+                ),
+            ])
+            .into_any_element()
     }
 }
 
@@ -174,6 +174,9 @@ mod tests {
 
     #[test]
     fn vector_path() {
-        assert_eq!(VectorName::LatheLogo.path().as_ref(), "images/lathe_logo.svg");
+        assert_eq!(
+            VectorName::LatheLogo.path().as_ref(),
+            "images/lathe_logo.svg"
+        );
     }
 }

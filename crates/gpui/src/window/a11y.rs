@@ -126,7 +126,10 @@ pub(crate) type A11yActionListener =
 ///
 /// Manages the AccessKit tree that is built each frame and the mappings
 /// needed to dispatch incoming action requests back to the right elements.
-#[allow(dead_code, reason = "fork has not yet ported the platform-side AccessKit adapter, so the active flag stays false and most fields are unread until that lands")]
+#[allow(
+    dead_code,
+    reason = "fork has not yet ported the platform-side AccessKit adapter, so the active flag stays false and most fields are unread until that lands"
+)]
 pub(crate) struct A11y {
     /// Whether accessibility has been [forcibly disabled] for this window.
     ///

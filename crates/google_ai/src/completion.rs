@@ -13,8 +13,7 @@ use crate::{
     Content, FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration,
     GenerateContentResponse, GenerationConfig, GenerativeContentBlob, GoogleModelMode,
     InlineDataPart, ModelName, Part, SystemInstruction, TextPart, ThinkingConfig, ThinkingLevel,
-    ToolConfig,
-    UsageMetadata,
+    ToolConfig, UsageMetadata,
 };
 
 pub fn into_google(

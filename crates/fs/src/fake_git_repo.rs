@@ -11,11 +11,10 @@ use git::{
     repository::{
         AskPassDelegate, Branch, BranchesScanResult, CommitData, CommitDataReader, CommitDetails,
         CommitOptions, CommitSummary, CreateWorktreeTarget, FetchOptions,
-        FileHistoryChangedFileSets, GRAPH_CHUNK_SIZE,
-        GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource,
-        MergeOptions, PushOptions, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, RefEdit,
-        ReflogEntry, Remote, RepoPath, ResetMode, SearchCommitArgs, Tag, Worktree,
-        commit_hash_search_query,
+        FileHistoryChangedFileSets, GRAPH_CHUNK_SIZE, GitRepository, GitRepositoryCheckpoint,
+        InitialGraphCommitData, LogOrder, LogSource, MergeOptions, PushOptions,
+        RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, RefEdit, ReflogEntry, Remote,
+        RepoPath, ResetMode, SearchCommitArgs, Tag, Worktree, commit_hash_search_query,
     },
     stash::GitStash,
     status::{
@@ -1096,24 +1095,15 @@ impl GitRepository for FakeGitRepository {
         unimplemented!()
     }
 
-    fn submodule_update(
-        &self,
-        _env: Arc<HashMap<String, String>>,
-    ) -> BoxFuture<'_, Result<()>> {
+    fn submodule_update(&self, _env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>> {
         unimplemented!()
     }
 
-    fn lfs_fetch(
-        &self,
-        _env: Arc<HashMap<String, String>>,
-    ) -> BoxFuture<'_, Result<()>> {
+    fn lfs_fetch(&self, _env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>> {
         unimplemented!()
     }
 
-    fn lfs_pull(
-        &self,
-        _env: Arc<HashMap<String, String>>,
-    ) -> BoxFuture<'_, Result<()>> {
+    fn lfs_pull(&self, _env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>> {
         unimplemented!()
     }
 

@@ -472,7 +472,7 @@ mod macos {
              buttons {{\"OK\"}} default button \"OK\" giving up after 30"
         );
 
-        if let Err(error) = std::process::Command::new("/usr/bin/osascript")
+        if let Err(error) = smol::process::Command::new("/usr/bin/osascript")
             .arg("-e")
             .arg(&script)
             .spawn()

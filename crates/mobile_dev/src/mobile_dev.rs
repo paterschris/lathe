@@ -15,9 +15,9 @@ use anyhow::Result;
 use futures::StreamExt as _;
 use futures::pin_mut;
 use gpui::{
-    App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    InteractiveElement, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement,
-    Styled, Subscription, Task, WeakEntity, Window, actions, div, px,
+    App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, actions, div, px,
 };
 use project::Project;
 use serde::{Deserialize, Serialize};
@@ -269,9 +269,7 @@ impl MobileDevPanel {
             return;
         };
         let Some(package) = project.android_package else {
-            log::warn!(
-                "mobile_dev: cannot start logcat; app.json has no expo.android.package"
-            );
+            log::warn!("mobile_dev: cannot start logcat; app.json has no expo.android.package");
             return;
         };
         let Some(device) = self
@@ -512,9 +510,11 @@ impl MobileDevPanel {
                             .color(Color::Muted),
                     )
                     .child(
-                        Label::new("Plug a phone in over USB, or run the 'adb: pair wireless' task.")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
+                        Label::new(
+                            "Plug a phone in over USB, or run the 'adb: pair wireless' task.",
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
                     ),
             );
             return section;
@@ -577,13 +577,17 @@ impl MobileDevPanel {
                     .size(ui::IconSize::XSmall)
                     .color(Color::Muted),
             )
-            .child(
-                Label::new(label)
-                    .size(LabelSize::Small)
-                    .color(if selected { Color::Default } else { Color::Default }),
-            )
+            .child(Label::new(label).size(LabelSize::Small).color(if selected {
+                Color::Default
+            } else {
+                Color::Default
+            }))
             .child(div().flex_1())
-            .child(Label::new(state_label).size(LabelSize::XSmall).color(state_color))
+            .child(
+                Label::new(state_label)
+                    .size(LabelSize::XSmall)
+                    .color(state_color),
+            )
             .on_click(cx.listener(move |panel, _, _, cx| {
                 panel.select_device(serial_for_click.clone(), cx);
             }))
@@ -603,14 +607,8 @@ impl MobileDevPanel {
         let state = self.logcat_state.as_ref()?;
         let border_color = cx.theme().colors().border;
 
-        let visible_lines: Vec<SharedString> = state
-            .lines
-            .iter()
-            .rev()
-            .take(80)
-            .rev()
-            .cloned()
-            .collect();
+        let visible_lines: Vec<SharedString> =
+            state.lines.iter().rev().take(80).rev().cloned().collect();
 
         let pid_label = match state.pid {
             Some(pid) => SharedString::from(format!("pid {pid}")),
@@ -636,20 +634,21 @@ impl MobileDevPanel {
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
             )
-            .child(Label::new(pid_label).size(LabelSize::XSmall).color(Color::Muted));
-
-        let error_line = state
-            .error
-            .as_ref()
-            .map(|err| Label::new(err.clone()).size(LabelSize::XSmall).color(Color::Error));
-
-        let mut log = v_flex().w_full().gap_0p5();
-        for line in visible_lines {
-            log = log.child(
-                Label::new(line)
+            .child(
+                Label::new(pid_label)
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
             );
+
+        let error_line = state.error.as_ref().map(|err| {
+            Label::new(err.clone())
+                .size(LabelSize::XSmall)
+                .color(Color::Error)
+        });
+
+        let mut log = v_flex().w_full().gap_0p5();
+        for line in visible_lines {
+            log = log.child(Label::new(line).size(LabelSize::XSmall).color(Color::Muted));
         }
 
         Some(
@@ -682,21 +681,12 @@ impl MobileDevPanel {
             BuildStatus::Failure(_) => ("failed", Color::Error),
         };
 
-        let visible_lines: Vec<SharedString> = state
-            .lines
-            .iter()
-            .rev()
-            .take(50)
-            .rev()
-            .cloned()
-            .collect();
+        let visible_lines: Vec<SharedString> =
+            state.lines.iter().rev().take(50).rev().cloned().collect();
 
         let header = h_flex()
             .gap_2()
-            .child(
-                Label::new(state.kind.label())
-                    .size(LabelSize::Small),
-            )
+            .child(Label::new(state.kind.label()).size(LabelSize::Small))
             .child(div().flex_1())
             .child(
                 Label::new(status_label)
@@ -716,11 +706,7 @@ impl MobileDevPanel {
 
         let mut log = v_flex().w_full().gap_0p5();
         for line in visible_lines {
-            log = log.child(
-                Label::new(line)
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            );
+            log = log.child(Label::new(line).size(LabelSize::XSmall).color(Color::Muted));
         }
 
         Some(

@@ -89,22 +89,20 @@ impl BranchFromCommitModal {
 
         cx.spawn_in(window, async move |this, cx| {
             let result = receiver.await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(Ok(())) => {
-                        let _ = workspace;
-                        cx.emit(DismissEvent);
-                    }
-                    Ok(Err(error)) => {
-                        this.in_progress = false;
-                        this.last_error = Some(format!("{error}").into());
-                        cx.notify();
-                    }
-                    Err(_) => {
-                        this.in_progress = false;
-                        this.last_error = Some("Branch creation cancelled".into());
-                        cx.notify();
-                    }
+            this.update(cx, |this, cx| match result {
+                Ok(Ok(())) => {
+                    let _ = workspace;
+                    cx.emit(DismissEvent);
+                }
+                Ok(Err(error)) => {
+                    this.in_progress = false;
+                    this.last_error = Some(format!("{error}").into());
+                    cx.notify();
+                }
+                Err(_) => {
+                    this.in_progress = false;
+                    this.last_error = Some("Branch creation cancelled".into());
+                    cx.notify();
                 }
             })
             .ok();
@@ -117,8 +115,7 @@ impl Render for BranchFromCommitModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let in_progress = self.in_progress;
         let theme = cx.theme();
-        let target_label: SharedString =
-            format!("Create at commit {}", self.short_sha).into();
+        let target_label: SharedString = format!("Create at commit {}", self.short_sha).into();
 
         v_flex()
             .key_context("BranchFromCommitModal")
@@ -159,11 +156,7 @@ impl Render for BranchFromCommitModal {
                     .gap_2()
                     .justify_between()
                     .when_some(self.last_error.clone(), |this, error| {
-                        this.child(
-                            Label::new(error)
-                                .color(Color::Error)
-                                .size(LabelSize::Small),
-                        )
+                        this.child(Label::new(error).color(Color::Error).size(LabelSize::Small))
                     })
                     .when(self.last_error.is_none(), |this| {
                         this.child(
@@ -186,13 +179,19 @@ impl Render for BranchFromCommitModal {
                             .child(
                                 Button::new(
                                     "branch-from-create",
-                                    if in_progress { "Creating…" } else { "Create branch" },
+                                    if in_progress {
+                                        "Creating…"
+                                    } else {
+                                        "Create branch"
+                                    },
                                 )
                                 .style(ButtonStyle::Filled)
                                 .disabled(in_progress)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.create(window, cx);
-                                })),
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.create(window, cx);
+                                    },
+                                )),
                             ),
                     ),
             )

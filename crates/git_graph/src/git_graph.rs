@@ -21,13 +21,14 @@ use git_ui::{
 use gpui::{
     Action, Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardItem, DefiniteLength,
     DismissEvent, DragMoveEvent, ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable,
-    Hsla, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, ScrollStrategy, ScrollWheelEvent,
-    SharedString, Subscription, Task, TextStyleRefinement, UniformListScrollHandle, WeakEntity,
-    Window, actions, anchored, deferred, point, prelude::*, px, uniform_list,
+    Hsla, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, ScrollStrategy,
+    ScrollWheelEvent, SharedString, Subscription, Task, TextStyleRefinement,
+    UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, point, prelude::*,
+    px, uniform_list,
 };
 use language::line_diff;
-use notifications::status_toast::StatusToast;
 use menu::{Cancel, SelectFirst, SelectLast, SelectNext, SelectPrevious};
+use notifications::status_toast::StatusToast;
 use picker::{Picker, PickerDelegate};
 use project::{
     GIT_COMMAND_TASK_TAG, TaskSourceKind,
@@ -1113,7 +1114,6 @@ fn take_value(input: &str) -> (String, String) {
     (value.to_string(), remainder.to_string())
 }
 
-
 /// Detach an in-flight git op and log any error from the receiver.
 fn detach_op(cx: &mut App, receiver: oneshot::Receiver<Result<(), anyhow::Error>>) {
     cx.spawn(async move |_| match receiver.await {
@@ -1137,40 +1137,38 @@ fn detach_op_with_undo(
     label: String,
     action: UndoAction,
 ) {
-    cx.spawn(async move |cx| {
-        match receiver.await {
-            Ok(Ok(())) => {
-                let store_for_toast = git_store.clone();
-                let toast_label = label.clone();
-                cx.update(|cx| {
-                    let undo_id = git_store.update(cx, |store, cx| {
-                        store.record_undo(repo_id, label.clone(), action, cx)
-                    });
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            let store = store_for_toast.clone();
-                            let toast = StatusToast::new(toast_label.clone(), cx, move |this, _cx| {
-                                let store = store.clone();
-                                this.icon(
-                                    Icon::new(IconName::Undo)
-                                        .size(IconSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .action("Undo", move |_window, cx| {
-                                    store
-                                        .update(cx, |store, cx| store.undo(undo_id, cx))
-                                        .detach();
-                                })
-                                .dismiss_button(true)
-                            });
-                            workspace.toggle_status_toast(toast, cx);
-                        })
-                        .ok();
+    cx.spawn(async move |cx| match receiver.await {
+        Ok(Ok(())) => {
+            let store_for_toast = git_store.clone();
+            let toast_label = label.clone();
+            cx.update(|cx| {
+                let undo_id = git_store.update(cx, |store, cx| {
+                    store.record_undo(repo_id, label.clone(), action, cx)
                 });
-            }
-            Ok(Err(error)) => log::error!("git op failed: {error:?}"),
-            Err(_) => log::error!("git op cancelled before completion"),
+                workspace
+                    .update(cx, |workspace, cx| {
+                        let store = store_for_toast.clone();
+                        let toast = StatusToast::new(toast_label.clone(), cx, move |this, _cx| {
+                            let store = store.clone();
+                            this.icon(
+                                Icon::new(IconName::Undo)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .action("Undo", move |_window, cx| {
+                                store
+                                    .update(cx, |store, cx| store.undo(undo_id, cx))
+                                    .detach();
+                            })
+                            .dismiss_button(true)
+                        });
+                        workspace.toggle_status_toast(toast, cx);
+                    })
+                    .ok();
+            });
         }
+        Ok(Err(error)) => log::error!("git op failed: {error:?}"),
+        Err(_) => log::error!("git op cancelled before completion"),
     })
     .detach();
 }
@@ -1782,7 +1780,8 @@ impl GitGraph {
                                         |name| {
                                             let is_head =
                                                 Self::is_head_ref(name.as_ref(), &head_branch_name);
-                                            let chip = self.render_chip(name, accent_color, is_head);
+                                            let chip =
+                                                self.render_chip(name, accent_color, is_head);
                                             let stripped = name
                                                 .as_ref()
                                                 .strip_prefix("HEAD -> ")
@@ -1804,10 +1803,8 @@ impl GitGraph {
                                             .into();
                                             let target_branch = stripped.to_string();
                                             let weak_for_drop = weak_self_for_chip.clone();
-                                            let target_branch_for_ref =
-                                                target_branch.clone();
-                                            let weak_for_ref_drop =
-                                                weak_for_drop.clone();
+                                            let target_branch_for_ref = target_branch.clone();
+                                            let weak_for_ref_drop = weak_for_drop.clone();
                                             div()
                                                 .id(ElementId::Name(chip_id))
                                                 .on_drag(payload, |_payload, _, _, cx| {
@@ -3796,8 +3793,7 @@ impl GitGraph {
                 move |window, cx| {
                     let sha = sha.clone();
                     let short_sha = short_sha.clone();
-                    let Some(repository) =
-                        git_store.read(cx).repositories().get(&repo_id).cloned()
+                    let Some(repository) = git_store.read(cx).repositories().get(&repo_id).cloned()
                     else {
                         return;
                     };
@@ -3830,8 +3826,9 @@ impl GitGraph {
                     let sha = sha.to_string();
                     let repo = git_store.read(cx).repositories().get(&repo_id).cloned();
                     if let Some(repo) = repo {
-                        let receiver =
-                            repo.update(cx, |repo, _cx| repo.tag_create(name.clone(), sha, None, false));
+                        let receiver = repo.update(cx, |repo, _cx| {
+                            repo.tag_create(name.clone(), sha, None, false)
+                        });
                         let store = git_store.clone();
                         detach_op_with_undo(
                             cx,
@@ -3934,8 +3931,7 @@ impl GitGraph {
                     let label = format!("Revert {}", &sha[..7]);
                     let repo = git_store.read(cx).repositories().get(&repo_id).cloned();
                     let Some(repo) = repo else { return };
-                    let receiver =
-                        repo.update(cx, |repo, _cx| repo.revert(vec![sha], false, None));
+                    let receiver = repo.update(cx, |repo, _cx| repo.revert(vec![sha], false, None));
                     match pre.clone() {
                         Some((branch, original_sha)) => detach_op_with_undo(
                             cx,
@@ -4018,9 +4014,8 @@ impl GitGraph {
                         let label = format!("Rebase onto {}", &sha[..7]);
                         let repo = git_store.read(cx).repositories().get(&repo_id).cloned();
                         let Some(repo) = repo else { return };
-                        let receiver = repo.update(cx, |repo, _cx| {
-                            repo.rebase(sha, RebaseOptions::default())
-                        });
+                        let receiver =
+                            repo.update(cx, |repo, _cx| repo.rebase(sha, RebaseOptions::default()));
                         match pre.clone() {
                             Some((branch, original_sha)) => detach_op_with_undo(
                                 cx,

@@ -4492,8 +4492,14 @@ impl BackgroundScanner {
 
         // Certain directories may have FS changes, but do not lead to git data changes that Zed cares about.
         // Ignore these, to avoid Zed unnecessarily rescanning git metadata.
-        let skipped_file_names_in_dot_git =
-            [COMMIT_MESSAGE, INDEX_LOCK, FETCH_HEAD, ORIG_HEAD, BISECT_LOG, GC_PID];
+        let skipped_file_names_in_dot_git = [
+            COMMIT_MESSAGE,
+            INDEX_LOCK,
+            FETCH_HEAD,
+            ORIG_HEAD,
+            BISECT_LOG,
+            GC_PID,
+        ];
         let skipped_dirs_in_dot_git = [
             FSMONITOR_DAEMON,
             LFS_DIR,
@@ -5358,10 +5364,9 @@ impl BackgroundScanner {
                         if state.should_scan_directory(
                             &fs_entry,
                             self.settings.scan_symlinks == settings::ScanSymlinksSetting::Always,
-                        )
-                            || (self.track_git_repositories
-                                && fs_entry.path.is_empty()
-                                && abs_path.file_name() == Some(OsStr::new(DOT_GIT)))
+                        ) || (self.track_git_repositories
+                            && fs_entry.path.is_empty()
+                            && abs_path.file_name() == Some(OsStr::new(DOT_GIT)))
                         {
                             state
                                 .enqueue_scan_dir(

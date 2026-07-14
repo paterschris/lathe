@@ -548,7 +548,9 @@ impl LanguageModel for OpenCodeLanguageModel {
                     request,
                     self.model.id().to_string(),
                     1.0,
-                    self.model.max_output_tokens(self.subscription).unwrap_or(8192),
+                    self.model
+                        .max_output_tokens(self.subscription)
+                        .unwrap_or(8192),
                     mode,
                     anthropic::completion::AnthropicPromptCacheMode::Automatic,
                 );

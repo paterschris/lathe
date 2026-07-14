@@ -117,10 +117,8 @@ impl JsDebugAdapter {
             // `outputCapture: "std"` and the IDE's debug console work as users
             // expect. Callers who want a real TTY can opt into
             // `integratedTerminal` or `externalTerminal` explicitly.
-            let is_attach_request = configuration
-                .get("request")
-                .and_then(Value::as_str)
-                == Some("attach");
+            let is_attach_request =
+                configuration.get("request").and_then(Value::as_str) == Some("attach");
             if !is_attach_request {
                 configuration
                     .entry("console")

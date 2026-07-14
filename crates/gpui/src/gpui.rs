@@ -136,10 +136,10 @@ use key_dispatch::*;
 pub use keymap::*;
 pub use path_builder::*;
 pub use platform::*;
+pub use pollster::block_on;
 pub use profiler::*;
 #[cfg(any(target_os = "windows", target_os = "linux", target_family = "wasm"))]
 pub use queue::{PriorityQueueReceiver, PriorityQueueSender};
-pub use pollster::block_on;
 pub use refineable::*;
 pub use scene::*;
 pub use shared_uri::*;

@@ -1,6 +1,6 @@
-pub mod project_panel_settings;
 mod project_panel_file_history;
 mod project_panel_git_style;
+pub mod project_panel_settings;
 mod undo;
 mod utils;
 

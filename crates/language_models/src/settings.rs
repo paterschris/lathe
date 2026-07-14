@@ -9,8 +9,8 @@ use crate::provider::{
     google::GoogleSettings, llama_cpp::LlamaCppSettings, lmstudio::LmStudioSettings,
     mistral::MistralSettings, ollama::OllamaSettings, open_ai::OpenAiSettings,
     open_ai_compatible::OpenAiCompatibleSettings, open_router::OpenRouterSettings,
-    opencode::OpenCodeSettings, resolve_custom_headers,
-    vercel_ai_gateway::VercelAiGatewaySettings, x_ai::XAiSettings,
+    opencode::OpenCodeSettings, resolve_custom_headers, vercel_ai_gateway::VercelAiGatewaySettings,
+    x_ai::XAiSettings,
 };
 
 #[derive(Debug, RegisterSetting)]

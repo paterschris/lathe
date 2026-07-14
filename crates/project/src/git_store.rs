@@ -39,10 +39,10 @@ use git::{
         Branch, BranchesScanResult, CommitData, CommitDetails, CommitDiff, CommitFile,
         CommitOptions, CommitSummary, CreateWorktreeTarget, DiffType, FetchOptions,
         GitCommitTemplate, GitProgressEvent, GitRepository, GitRepositoryCheckpoint,
-        InitialGraphCommitData, LogOrder, LogSource,
-        MergeOptions, PushOptions, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry,
-        ReflogEntry, Remote, RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, Tag,
-        UpstreamTrackingStatus, Worktree as GitWorktree, delete_branch_flag,
+        InitialGraphCommitData, LogOrder, LogSource, MergeOptions, PushOptions,
+        RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, ReflogEntry, Remote,
+        RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, Tag, UpstreamTrackingStatus,
+        Worktree as GitWorktree, delete_branch_flag,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -4584,11 +4584,7 @@ impl RepositorySnapshot {
                 .iter()
                 .map(worktree_to_proto)
                 .collect(),
-            branch_list: self
-                .branch_list
-                .iter()
-                .map(branch_to_proto)
-                .collect(),
+            branch_list: self.branch_list.iter().map(branch_to_proto).collect(),
         }
     }
 
@@ -4675,11 +4671,7 @@ impl RepositorySnapshot {
                 .iter()
                 .map(worktree_to_proto)
                 .collect(),
-            branch_list: self
-                .branch_list
-                .iter()
-                .map(branch_to_proto)
-                .collect(),
+            branch_list: self.branch_list.iter().map(branch_to_proto).collect(),
         }
     }
 
@@ -6928,29 +6920,37 @@ impl Repository {
         let id = self.id;
         let this_weak = self.this.clone();
 
-        self.send_job("fetch", Some("git fetch".into()), move |git_repo, cx| async move {
-            // Channel for live `--progress` updates from the spawned git process.
-            // When the operation completes the sender is dropped, which closes the
-            // channel and lets the receiver task exit cleanly.
-            let (progress_tx, progress_rx) = smol::channel::unbounded();
-            lathe::spawn_progress_relay("git fetch", this_weak.clone(), progress_rx, cx.clone());
+        self.send_job(
+            "fetch",
+            Some("git fetch".into()),
+            move |git_repo, cx| async move {
+                // Channel for live `--progress` updates from the spawned git process.
+                // When the operation completes the sender is dropped, which closes the
+                // channel and lets the receiver task exit cleanly.
+                let (progress_tx, progress_rx) = smol::channel::unbounded();
+                lathe::spawn_progress_relay(
+                    "git fetch",
+                    this_weak.clone(),
+                    progress_rx,
+                    cx.clone(),
+                );
 
-            match git_repo {
-                RepositoryState::Local(LocalRepositoryState {
-                    backend,
-                    environment,
-                    ..
-                }) => {
-                    backend
-                        .fetch(fetch_options, askpass, environment, cx, Some(progress_tx))
-                        .await
-                }
-                RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
-                    askpass_delegates.lock().insert(askpass_id, askpass);
-                    let _defer = util::defer(|| {
-                        let askpass_delegate = askpass_delegates.lock().remove(&askpass_id);
-                        debug_assert!(askpass_delegate.is_some());
-                    });
+                match git_repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => {
+                        backend
+                            .fetch(fetch_options, askpass, environment, cx, Some(progress_tx))
+                            .await
+                    }
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                        askpass_delegates.lock().insert(askpass_id, askpass);
+                        let _defer = util::defer(|| {
+                            let askpass_delegate = askpass_delegates.lock().remove(&askpass_id);
+                            debug_assert!(askpass_delegate.is_some());
+                        });
 
                         let response = client
                             .request(proto::Fetch {
@@ -7033,7 +7033,8 @@ impl Repository {
                         // TODO would be nice to not have to do this manually
                         if result.is_ok() {
                             let branches = backend.branches().await?;
-                            let branch = branches.branches.into_iter().find(|branch| branch.is_head);
+                            let branch =
+                                branches.branches.into_iter().find(|branch| branch.is_head);
                             log::info!("head branch after scan is {branch:?}");
                             let snapshot = this.update(&mut cx, |this, cx| {
                                 this.snapshot.branch = branch;
@@ -7104,43 +7105,51 @@ impl Repository {
             status.push_str(&format!(" {}", b));
         }
 
-        self.send_job("pull", Some(status.into()), move |git_repo, cx| async move {
-            match git_repo {
-                RepositoryState::Local(LocalRepositoryState {
-                    backend,
-                    environment,
-                    ..
-                }) => {
-                    let (progress_tx, progress_rx) = smol::channel::unbounded();
-                    lathe::spawn_progress_relay("git pull", this_weak.clone(), progress_rx, cx.clone());
-                    backend
-                        .pull(
-                            branch.as_ref().map(|b| b.to_string()),
-                            remote.to_string(),
-                            rebase,
-                            askpass,
-                            environment.clone(),
-                            cx,
-                            Some(progress_tx),
-                        )
-                        .await
-                }
-                RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
-                    askpass_delegates.lock().insert(askpass_id, askpass);
-                    let _defer = util::defer(|| {
-                        let askpass_delegate = askpass_delegates.lock().remove(&askpass_id);
-                        debug_assert!(askpass_delegate.is_some());
-                    });
-                    let response = client
-                        .request(proto::Pull {
-                            project_id: project_id.0,
-                            repository_id: id.to_proto(),
-                            askpass_id,
-                            rebase,
-                            branch_name: branch.as_ref().map(|b| b.to_string()),
-                            remote_name: remote.to_string(),
-                        })
-                        .await?;
+        self.send_job(
+            "pull",
+            Some(status.into()),
+            move |git_repo, cx| async move {
+                match git_repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => {
+                        let (progress_tx, progress_rx) = smol::channel::unbounded();
+                        lathe::spawn_progress_relay(
+                            "git pull",
+                            this_weak.clone(),
+                            progress_rx,
+                            cx.clone(),
+                        );
+                        backend
+                            .pull(
+                                branch.as_ref().map(|b| b.to_string()),
+                                remote.to_string(),
+                                rebase,
+                                askpass,
+                                environment.clone(),
+                                cx,
+                                Some(progress_tx),
+                            )
+                            .await
+                    }
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                        askpass_delegates.lock().insert(askpass_id, askpass);
+                        let _defer = util::defer(|| {
+                            let askpass_delegate = askpass_delegates.lock().remove(&askpass_id);
+                            debug_assert!(askpass_delegate.is_some());
+                        });
+                        let response = client
+                            .request(proto::Pull {
+                                project_id: project_id.0,
+                                repository_id: id.to_proto(),
+                                askpass_id,
+                                rebase,
+                                branch_name: branch.as_ref().map(|b| b.to_string()),
+                                remote_name: remote.to_string(),
+                            })
+                            .await?;
 
                         Ok(RemoteCommandOutput {
                             stdout: response.stdout,

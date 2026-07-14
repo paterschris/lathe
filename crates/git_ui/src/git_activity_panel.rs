@@ -1,3 +1,4 @@
+use crate::new_panel_settings::GitActivityPanelSettings;
 use gpui::{
     Action, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, SharedString,
     Subscription, WeakEntity, actions,
@@ -6,9 +7,8 @@ use project::{
     Project,
     git_store::{GitStore, GitStoreEvent, JobInfo},
 };
-use std::time::Duration;
-use crate::new_panel_settings::GitActivityPanelSettings;
 use settings::Settings;
+use std::time::Duration;
 use ui::{CommonAnimationExt, prelude::*};
 use workspace::{
     Workspace,
@@ -53,7 +53,9 @@ impl GitActivityPanel {
         workspace: WeakEntity<Workspace>,
         mut cx: AsyncWindowContext,
     ) -> anyhow::Result<Entity<Self>> {
-        workspace.update_in(&mut cx, |workspace, window, cx| Self::new(workspace, window, cx))
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            Self::new(workspace, window, cx)
+        })
     }
 
     pub fn new(
@@ -285,4 +287,3 @@ impl Panel for GitActivityPanel {
         9
     }
 }
-

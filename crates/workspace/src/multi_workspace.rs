@@ -776,12 +776,7 @@ impl MultiWorkspace {
         let active_workspace_id = self.active_workspace_id.clone();
         let shared_group_name = self.shared_group_name.clone();
         workspace.update(cx, |workspace, cx| {
-            workspace.set_multi_workspace(
-                weak_self,
-                active_workspace_id,
-                shared_group_name,
-                cx,
-            );
+            workspace.set_multi_workspace(weak_self, active_workspace_id, shared_group_name, cx);
         });
 
         let entity = cx.entity();

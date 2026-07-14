@@ -91,8 +91,14 @@ impl BuildSession {
             .spawn()
             .map_err(|e| anyhow!("spawning {program_str}: {e}"))?;
 
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("missing stdout pipe"))?;
-        let stderr = child.stderr.take().ok_or_else(|| anyhow!("missing stderr pipe"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("missing stdout pipe"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("missing stderr pipe"))?;
 
         let stdout_tx = tx.clone();
         let stderr_tx = tx.clone();
@@ -130,7 +136,9 @@ impl BuildSession {
         smol::spawn(async move {
             let outcome = match child.status().await {
                 Ok(status) => outcome_from_status(status),
-                Err(err) => BuildOutcome::Failure(SharedString::from(format!("wait failed: {err}"))),
+                Err(err) => {
+                    BuildOutcome::Failure(SharedString::from(format!("wait failed: {err}")))
+                }
             };
             let _ = tx.send(BuildEvent::Finished(outcome)).await;
         })

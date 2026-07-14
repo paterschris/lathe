@@ -180,36 +180,36 @@ impl Component for UpdateButton {
         let version = "1.3.0+stable.2025051";
 
         v_flex()
-                .gap_6()
-                .children(vec![
-                    example_group_with_title(
-                        "Progress States",
-                        vec![
-                            single_example("Checking", UpdateButton::checking().into_any_element()),
-                            single_example(
-                                "Downloading",
-                                UpdateButton::downloading(version).into_any_element(),
-                            ),
-                            single_example(
-                                "Installing",
-                                UpdateButton::installing(version).into_any_element(),
-                            ),
-                        ],
-                    ),
-                    example_group_with_title(
-                        "Actionable States",
-                        vec![
-                            single_example(
-                                "Ready to Update",
-                                UpdateButton::updated(version).into_any_element(),
-                            ),
-                            single_example(
-                                "Error",
-                                UpdateButton::errored("Network timeout").into_any_element(),
-                            ),
-                        ],
-                    ),
-                ])
-                .into_any_element()
+            .gap_6()
+            .children(vec![
+                example_group_with_title(
+                    "Progress States",
+                    vec![
+                        single_example("Checking", UpdateButton::checking().into_any_element()),
+                        single_example(
+                            "Downloading",
+                            UpdateButton::downloading(version).into_any_element(),
+                        ),
+                        single_example(
+                            "Installing",
+                            UpdateButton::installing(version).into_any_element(),
+                        ),
+                    ],
+                ),
+                example_group_with_title(
+                    "Actionable States",
+                    vec![
+                        single_example(
+                            "Ready to Update",
+                            UpdateButton::updated(version).into_any_element(),
+                        ),
+                        single_example(
+                            "Error",
+                            UpdateButton::errored("Network timeout").into_any_element(),
+                        ),
+                    ],
+                ),
+            ])
+            .into_any_element()
     }
 }

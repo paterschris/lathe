@@ -286,10 +286,7 @@ mod tests {
         PortableWorkspace::save(
             fs.clone(),
             file_path,
-            &[
-                PathBuf::from("/work/proj-a"),
-                PathBuf::from("/work/proj-b"),
-            ],
+            &[PathBuf::from("/work/proj-a"), PathBuf::from("/work/proj-b")],
         )
         .await
         .unwrap();
@@ -309,13 +306,12 @@ mod tests {
             ]
         );
 
-        let resolved = PortableWorkspace::load(fs.clone(), file_path).await.unwrap();
+        let resolved = PortableWorkspace::load(fs.clone(), file_path)
+            .await
+            .unwrap();
         assert_eq!(
             resolved,
-            vec![
-                PathBuf::from("/work/proj-a"),
-                PathBuf::from("/work/proj-b"),
-            ]
+            vec![PathBuf::from("/work/proj-a"), PathBuf::from("/work/proj-b"),]
         );
     }
 
@@ -336,7 +332,9 @@ mod tests {
         .to_string();
         fs.atomic_write(file_path.to_path_buf(), raw).await.unwrap();
 
-        let resolved = PortableWorkspace::load(fs.clone(), file_path).await.unwrap();
+        let resolved = PortableWorkspace::load(fs.clone(), file_path)
+            .await
+            .unwrap();
         assert_eq!(
             resolved,
             vec![
@@ -361,6 +359,9 @@ mod tests {
         let err = PortableWorkspace::load(fs.clone(), file_path)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("unsupported portable workspace version"));
+        assert!(
+            err.to_string()
+                .contains("unsupported portable workspace version")
+        );
     }
 }

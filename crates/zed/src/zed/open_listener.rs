@@ -30,9 +30,7 @@ use util::debug_panic;
 use util::paths::PathWithPosition;
 use workspace::PathList;
 use workspace::item::ItemHandle;
-use workspace::portable_workspace::{
-    PortableWorkspace, has_portable_workspace_extension,
-};
+use workspace::portable_workspace::{PortableWorkspace, has_portable_workspace_extension};
 use workspace::{AppState, MultiWorkspace, OpenOptions, OpenResult, SerializedWorkspaceLocation};
 
 #[derive(Default, Debug)]
@@ -514,11 +512,8 @@ pub async fn open_paths_with_positions(
     WindowHandle<MultiWorkspace>,
     Vec<Option<Result<Box<dyn ItemHandle>>>>,
 )> {
-    let path_positions = expand_portable_workspace_paths(
-        path_positions,
-        app_state.fs.clone(),
-    )
-    .await;
+    let path_positions =
+        expand_portable_workspace_paths(path_positions, app_state.fs.clone()).await;
     let path_positions = path_positions.as_slice();
     let paths = path_positions
         .iter()

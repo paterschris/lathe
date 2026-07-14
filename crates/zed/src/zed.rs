@@ -32,9 +32,9 @@ use fs::Fs;
 use futures::FutureExt as _;
 use futures::{StreamExt, channel::mpsc, select_biased};
 use git_ui::commit_view::CommitViewToolbar;
+use git_ui::git_activity_panel::GitActivityPanel;
 use git_ui::git_panel::GitPanel;
 use git_ui::project_diff::{BranchDiffToolbar, ProjectDiffToolbar};
-use git_ui::git_activity_panel::GitActivityPanel;
 // PR panel hidden for the beta — see `initialize_panels`.
 use gpui::{
     Action, App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, DismissEvent,
@@ -1426,9 +1426,7 @@ fn open_about_window(cx: &mut App) {
             ReleaseChannel::Preview => {
                 include_bytes!("../resources/app-icon-preview.png").as_slice()
             }
-            ReleaseChannel::Beta => {
-                include_bytes!("../resources/app-icon-preview.png").as_slice()
-            }
+            ReleaseChannel::Beta => include_bytes!("../resources/app-icon-preview.png").as_slice(),
             ReleaseChannel::Stable => include_bytes!("../resources/app-icon.png").as_slice(),
         };
 

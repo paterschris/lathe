@@ -111,13 +111,20 @@ impl ThemeCustomizer {
 
         // "All" tab
         let is_active = self.active_category.is_none() && !self.show_lathe_only;
-        row = row.child(Self::category_pill("cat-all", "All", is_active, false, cx, {
-            move |this: &mut Self, _: &ClickEvent, _window, cx: &mut Context<Self>| {
-                this.active_category = None;
-                this.show_lathe_only = false;
-                cx.notify();
-            }
-        }));
+        row = row.child(Self::category_pill(
+            "cat-all",
+            "All",
+            is_active,
+            false,
+            cx,
+            {
+                move |this: &mut Self, _: &ClickEvent, _window, cx: &mut Context<Self>| {
+                    this.active_category = None;
+                    this.show_lathe_only = false;
+                    cx.notify();
+                }
+            },
+        ));
 
         // "Lathe" tab
         row = row.child(Self::category_pill(
@@ -346,13 +353,41 @@ impl ThemeCustomizer {
                     .color(Color::Muted),
             )
             // Hue slider
-            .child(self.render_slider("Hue", format!("{:.0}", color.h * 360.0), color.h, field, SliderChannel::Hue, cx))
+            .child(self.render_slider(
+                "Hue",
+                format!("{:.0}", color.h * 360.0),
+                color.h,
+                field,
+                SliderChannel::Hue,
+                cx,
+            ))
             // Saturation slider
-            .child(self.render_slider("Saturation", format!("{:.0}%", color.s * 100.0), color.s, field, SliderChannel::Saturation, cx))
+            .child(self.render_slider(
+                "Saturation",
+                format!("{:.0}%", color.s * 100.0),
+                color.s,
+                field,
+                SliderChannel::Saturation,
+                cx,
+            ))
             // Lightness slider
-            .child(self.render_slider("Lightness", format!("{:.0}%", color.l * 100.0), color.l, field, SliderChannel::Lightness, cx))
+            .child(self.render_slider(
+                "Lightness",
+                format!("{:.0}%", color.l * 100.0),
+                color.l,
+                field,
+                SliderChannel::Lightness,
+                cx,
+            ))
             // Alpha slider
-            .child(self.render_slider("Alpha", format!("{:.0}%", color.a * 100.0), color.a, field, SliderChannel::Alpha, cx))
+            .child(self.render_slider(
+                "Alpha",
+                format!("{:.0}%", color.a * 100.0),
+                color.a,
+                field,
+                SliderChannel::Alpha,
+                cx,
+            ))
             // Actions
             .child(
                 h_flex()
@@ -443,12 +478,14 @@ impl ThemeCustomizer {
                             IconName::ChevronLeft,
                         )
                         .size(ButtonSize::Compact)
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            let mut current = this.current_color(field);
-                            let val = channel.get_value(current);
-                            channel.set_value(&mut current, (val - step_small).clamp(0.0, 1.0));
-                            this.set_color(field, current, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                let mut current = this.current_color(field);
+                                let val = channel.get_value(current);
+                                channel.set_value(&mut current, (val - step_small).clamp(0.0, 1.0));
+                                this.set_color(field, current, cx);
+                            },
+                        )),
                     )
                     // Clickable gradient segments
                     .child(
@@ -460,60 +497,44 @@ impl ThemeCustomizer {
                             .border_1()
                             .border_color(cx.theme().colors().border)
                             .overflow_hidden()
-                            .child(
-                                h_flex()
-                                    .size_full()
-                                    .children((0..segment_count).map(|i| {
-                                        let t = (i as f32 + 0.5) / segment_count as f32;
-                                        // Interpolate color for this segment from gradient stops
-                                        let stop_index_f = i as f32
-                                            / segment_count as f32
-                                            * (gradient_stops.len() - 1) as f32;
-                                        let stop_low = stop_index_f.floor() as usize;
-                                        let stop_high = (stop_low + 1)
-                                            .min(gradient_stops.len() - 1);
-                                        let frac = stop_index_f - stop_low as f32;
-                                        let bg_color = lerp_hsla(
-                                            gradient_stops[stop_low],
-                                            gradient_stops[stop_high],
-                                            frac,
-                                        );
+                            .child(h_flex().size_full().children((0..segment_count).map(|i| {
+                                let t = (i as f32 + 0.5) / segment_count as f32;
+                                // Interpolate color for this segment from gradient stops
+                                let stop_index_f = i as f32 / segment_count as f32
+                                    * (gradient_stops.len() - 1) as f32;
+                                let stop_low = stop_index_f.floor() as usize;
+                                let stop_high = (stop_low + 1).min(gradient_stops.len() - 1);
+                                let frac = stop_index_f - stop_low as f32;
+                                let bg_color = lerp_hsla(
+                                    gradient_stops[stop_low],
+                                    gradient_stops[stop_high],
+                                    frac,
+                                );
 
-                                        let is_thumb_here = (value - t).abs()
-                                            < (0.5 / segment_count as f32);
+                                let is_thumb_here =
+                                    (value - t).abs() < (0.5 / segment_count as f32);
 
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "seg-{label}-{i}"
-                                            )))
-                                            .h_full()
-                                            .flex_grow(1.0)
-                                            .cursor_pointer()
-                                            .bg(bg_color)
-                                            .when(is_thumb_here, |this| {
-                                                this.child(
-                                                    div()
-                                                        .size_full()
-                                                        .border_l_2()
-                                                        .border_r_2()
-                                                        .border_color(
-                                                            gpui::rgb(0xffffff),
-                                                        ),
-                                                )
-                                            })
-                                            .on_click(cx.listener(
-                                                move |this, _, _window, cx| {
-                                                    let mut current =
-                                                        this.current_color(field);
-                                                    channel
-                                                        .set_value(&mut current, t);
-                                                    this.set_color(
-                                                        field, current, cx,
-                                                    );
-                                                },
-                                            ))
-                                    })),
-                            ),
+                                div()
+                                    .id(SharedString::from(format!("seg-{label}-{i}")))
+                                    .h_full()
+                                    .flex_grow(1.0)
+                                    .cursor_pointer()
+                                    .bg(bg_color)
+                                    .when(is_thumb_here, |this| {
+                                        this.child(
+                                            div()
+                                                .size_full()
+                                                .border_l_2()
+                                                .border_r_2()
+                                                .border_color(gpui::rgb(0xffffff)),
+                                        )
+                                    })
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        let mut current = this.current_color(field);
+                                        channel.set_value(&mut current, t);
+                                        this.set_color(field, current, cx);
+                                    }))
+                            }))),
                     )
                     // Increment button
                     .child(
@@ -522,12 +543,14 @@ impl ThemeCustomizer {
                             IconName::ChevronRight,
                         )
                         .size(ButtonSize::Compact)
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            let mut current = this.current_color(field);
-                            let val = channel.get_value(current);
-                            channel.set_value(&mut current, (val + step_small).clamp(0.0, 1.0));
-                            this.set_color(field, current, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                let mut current = this.current_color(field);
+                                let val = channel.get_value(current);
+                                channel.set_value(&mut current, (val + step_small).clamp(0.0, 1.0));
+                                this.set_color(field, current, cx);
+                            },
+                        )),
                     ),
             )
     }
@@ -585,7 +608,11 @@ fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
     )
 }
 
-fn color_swatch(color: Hsla, size: gpui::Pixels, cx: &Context<ThemeCustomizer>) -> impl IntoElement {
+fn color_swatch(
+    color: Hsla,
+    size: gpui::Pixels,
+    cx: &Context<ThemeCustomizer>,
+) -> impl IntoElement {
     div()
         .size(size)
         .rounded_sm()
@@ -701,11 +728,13 @@ impl Render for ThemeCustomizer {
                                         .unwrap_or_else(|| "No selection".to_string()),
                                 )
                                 .size(LabelSize::Default)
-                                .color(if self.selected_field.is_some() {
-                                    Color::Default
-                                } else {
-                                    Color::Muted
-                                }),
+                                .color(
+                                    if self.selected_field.is_some() {
+                                        Color::Default
+                                    } else {
+                                        Color::Muted
+                                    },
+                                ),
                             ),
                     )
                     .child(self.render_color_editor(cx)),

@@ -35,7 +35,9 @@ impl GitHostKind {
     }
 
     pub fn from_host(host: &str) -> Option<GitHostKind> {
-        GitHostKind::ALL.into_iter().find(|kind| kind.host() == host)
+        GitHostKind::ALL
+            .into_iter()
+            .find(|kind| kind.host() == host)
     }
 
     /// Builds the API auth value for a stored `(username, secret)` credential.

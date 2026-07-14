@@ -1056,22 +1056,13 @@ pub trait GitRepository: Send + Sync {
 
     /// Initialize and fetch all submodules recursively.
     /// (`git submodule update --init --recursive`).
-    fn submodule_update(
-        &self,
-        env: Arc<HashMap<String, String>>,
-    ) -> BoxFuture<'_, Result<()>>;
+    fn submodule_update(&self, env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>>;
 
     /// Fetch LFS-tracked content for the current checkout (`git lfs fetch`).
-    fn lfs_fetch(
-        &self,
-        env: Arc<HashMap<String, String>>,
-    ) -> BoxFuture<'_, Result<()>>;
+    fn lfs_fetch(&self, env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>>;
 
     /// Replace placeholder pointers with actual LFS content (`git lfs pull`).
-    fn lfs_pull(
-        &self,
-        env: Arc<HashMap<String, String>>,
-    ) -> BoxFuture<'_, Result<()>>;
+    fn lfs_pull(&self, env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>>;
 
     fn push(
         &self,
@@ -2785,10 +2776,7 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
-    fn submodule_update(
-        &self,
-        env: Arc<HashMap<String, String>>,
-    ) -> BoxFuture<'_, Result<()>> {
+    fn submodule_update(&self, env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>> {
         let git_binary = self.git_binary();
         self.executor
             .spawn(async move {
@@ -2808,10 +2796,7 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
-    fn lfs_fetch(
-        &self,
-        env: Arc<HashMap<String, String>>,
-    ) -> BoxFuture<'_, Result<()>> {
+    fn lfs_fetch(&self, env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>> {
         let git_binary = self.git_binary();
         self.executor
             .spawn(async move {
@@ -2831,10 +2816,7 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
-    fn lfs_pull(
-        &self,
-        env: Arc<HashMap<String, String>>,
-    ) -> BoxFuture<'_, Result<()>> {
+    fn lfs_pull(&self, env: Arc<HashMap<String, String>>) -> BoxFuture<'_, Result<()>> {
         let git_binary = self.git_binary();
         self.executor
             .spawn(async move {
@@ -3721,7 +3703,10 @@ impl GitRepository for RealGitRepository {
     ) -> BoxFuture<'_, Result<()>> {
         let git_binary = self.git_binary();
         async move {
-            anyhow::ensure!(!commits.is_empty(), "cherry-pick requires at least one commit");
+            anyhow::ensure!(
+                !commits.is_empty(),
+                "cherry-pick requires at least one commit"
+            );
             let git = git_binary;
             let mut args: Vec<OsString> = vec!["cherry-pick".into()];
             if no_commit {
@@ -3730,11 +3715,7 @@ impl GitRepository for RealGitRepository {
             for commit in &commits {
                 args.push(commit.into());
             }
-            let output = git
-                .build_command(&args)
-                .envs(env.iter())
-                .output()
-                .await?;
+            let output = git.build_command(&args).envs(env.iter()).output().await?;
             anyhow::ensure!(
                 output.status.success(),
                 "Failed to cherry-pick:\n{}",
@@ -3767,11 +3748,7 @@ impl GitRepository for RealGitRepository {
             for commit in &commits {
                 args.push(commit.into());
             }
-            let output = git
-                .build_command(&args)
-                .envs(env.iter())
-                .output()
-                .await?;
+            let output = git.build_command(&args).envs(env.iter()).output().await?;
             anyhow::ensure!(
                 output.status.success(),
                 "Failed to revert:\n{}",
@@ -3814,11 +3791,7 @@ impl GitRepository for RealGitRepository {
                 args.push(message.into());
             }
             args.push(commit.into());
-            let output = git
-                .build_command(&args)
-                .envs(env.iter())
-                .output()
-                .await?;
+            let output = git.build_command(&args).envs(env.iter()).output().await?;
             anyhow::ensure!(
                 output.status.success(),
                 "Failed to merge:\n{}",
@@ -3847,11 +3820,7 @@ impl GitRepository for RealGitRepository {
                 args.push(onto.into());
             }
             args.push(upstream.into());
-            let output = git
-                .build_command(&args)
-                .envs(env.iter())
-                .output()
-                .await?;
+            let output = git.build_command(&args).envs(env.iter()).output().await?;
             anyhow::ensure!(
                 output.status.success(),
                 "Failed to rebase:\n{}",
@@ -3942,7 +3911,8 @@ impl GitRepository for RealGitRepository {
                     todo_text.push_str("pick ");
                     todo_text.push_str(&entry.commit);
                     todo_text.push('\n');
-                    todo_text.push_str("exec git commit --amend --cleanup=verbatim --allow-empty -F \"");
+                    todo_text
+                        .push_str("exec git commit --amend --cleanup=verbatim --allow-empty -F \"");
                     todo_text.push_str(&msg_path.replace('"', "\\\""));
                     todo_text.push_str("\"\n");
                     reword_message_files.push(msg_file);
@@ -3971,10 +3941,13 @@ impl GitRepository for RealGitRepository {
                 .context("rebase todo path is not utf-8")?
                 .to_owned();
             #[cfg(windows)]
-            let sequence_editor = format!("cmd /C copy /Y \"{}\"", todo_path_str.replace('/', "\\"));
-            #[cfg(not(windows))]
             let sequence_editor =
-                format!("sh -c 'cat \"{}\" > \"$1\"' _", todo_path_str.replace('\'', "'\\''"));
+                format!("cmd /C copy /Y \"{}\"", todo_path_str.replace('/', "\\"));
+            #[cfg(not(windows))]
+            let sequence_editor = format!(
+                "sh -c 'cat \"{}\" > \"$1\"' _",
+                todo_path_str.replace('\'', "'\\''")
+            );
 
             let output = git
                 .build_command(&[
@@ -4051,11 +4024,7 @@ impl GitRepository for RealGitRepository {
             }
             args.push(name.into());
             args.push(commit.into());
-            let output = git
-                .build_command(&args)
-                .envs(env.iter())
-                .output()
-                .await?;
+            let output = git.build_command(&args).envs(env.iter()).output().await?;
             anyhow::ensure!(
                 output.status.success(),
                 "Failed to create tag:\n{}",
@@ -4141,7 +4110,9 @@ impl GitRepository for RealGitRepository {
             let is_current = {
                 let repo = repo.lock();
                 match repo.head() {
-                    Ok(reference) => reference.shorthand().map(|s| s.to_string()) == Some(name.clone()),
+                    Ok(reference) => {
+                        reference.shorthand().map(|s| s.to_string()) == Some(name.clone())
+                    }
                     Err(_) => false,
                 }
             };
@@ -5023,7 +4994,10 @@ mod tests {
         .unwrap();
 
         assert_same_path(repository.path(), repo_dir.path().join(".git"));
-        assert_same_path(repository.main_repository_path(), repo_dir.path().join(".git"));
+        assert_same_path(
+            repository.main_repository_path(),
+            repo_dir.path().join(".git"),
+        );
         assert_same_path(repository.working_directory().unwrap(), repo_dir.path());
         assert_same_path(
             original_repo_path_from_common_dir(&repository.main_repository_path()).unwrap(),

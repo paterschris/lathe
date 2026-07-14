@@ -843,38 +843,38 @@ impl MarkdownPreviewView {
         };
 
         let mut markdown_element = MarkdownElement::new(self.markdown.clone(), markdown_style)
-        .code_block_renderer(CodeBlockRenderer::Default {
-            copy_button_visibility: CopyButtonVisibility::VisibleOnHover,
-            wrap_button_visibility: markdown::WrapButtonVisibility::Hidden,
-            border: false,
-        })
-        .scroll_handle(self.scroll_handle.clone())
-        .show_root_block_markers()
-        .image_resolver({
-            let base_directory = self.base_directory.clone();
-            move |dest_url| {
-                resolve_preview_image(
-                    dest_url,
-                    base_directory.as_deref(),
-                    workspace_directory.as_deref(),
-                )
-            }
-        })
-        .on_url_click({
-            let view_handle = cx.entity().downgrade();
-            let workspace = self.workspace.clone();
-            let base_directory = self.base_directory.clone();
-            move |url, window, cx| {
-                handle_url_click(
-                    url,
-                    &view_handle,
-                    base_directory.clone(),
-                    &workspace,
-                    window,
-                    cx,
-                );
-            }
-        });
+            .code_block_renderer(CodeBlockRenderer::Default {
+                copy_button_visibility: CopyButtonVisibility::VisibleOnHover,
+                wrap_button_visibility: markdown::WrapButtonVisibility::Hidden,
+                border: false,
+            })
+            .scroll_handle(self.scroll_handle.clone())
+            .show_root_block_markers()
+            .image_resolver({
+                let base_directory = self.base_directory.clone();
+                move |dest_url| {
+                    resolve_preview_image(
+                        dest_url,
+                        base_directory.as_deref(),
+                        workspace_directory.as_deref(),
+                    )
+                }
+            })
+            .on_url_click({
+                let view_handle = cx.entity().downgrade();
+                let workspace = self.workspace.clone();
+                let base_directory = self.base_directory.clone();
+                move |url, window, cx| {
+                    handle_url_click(
+                        url,
+                        &view_handle,
+                        base_directory.clone(),
+                        &workspace,
+                        window,
+                        cx,
+                    );
+                }
+            });
 
         if let Some(active_editor) = active_editor {
             let editor_for_checkbox = active_editor.clone();

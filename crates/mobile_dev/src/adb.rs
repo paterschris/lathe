@@ -120,8 +120,12 @@ pub(crate) fn parse_devices(output: &str) -> Vec<AdbDevice> {
             continue;
         }
         let mut parts = line.split_whitespace();
-        let Some(serial_raw) = parts.next() else { continue };
-        let Some(state_token) = parts.next() else { continue };
+        let Some(serial_raw) = parts.next() else {
+            continue;
+        };
+        let Some(state_token) = parts.next() else {
+            continue;
+        };
 
         let serial = SharedString::from(serial_raw.to_string());
         let state = AdbDeviceState::from_token(state_token);
@@ -261,10 +265,7 @@ pub async fn pid_of(serial: &str, package: &str) -> Result<Option<u32>> {
 /// exits, which happens when ADB drops the device. Dropping the receiver
 /// closes the channel, which causes the background task to exit and the
 /// child process to be killed (via `kill_on_drop`).
-pub fn logcat(
-    serial: &str,
-    pid_filter: Option<u32>,
-) -> impl Stream<Item = Result<String>> {
+pub fn logcat(serial: &str, pid_filter: Option<u32>) -> impl Stream<Item = Result<String>> {
     let serial = serial.to_owned();
     let (tx, rx) = channel::unbounded::<Result<String>>();
     smol::spawn(async move {

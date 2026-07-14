@@ -168,7 +168,8 @@ pub fn init(cx: &mut App) {
 }
 
 fn active_multi_workspace(cx: &App) -> Option<gpui::WindowHandle<MultiWorkspace>> {
-    cx.active_window().and_then(|w| w.downcast::<MultiWorkspace>())
+    cx.active_window()
+        .and_then(|w| w.downcast::<MultiWorkspace>())
 }
 
 fn handle_update_current(cx: &mut App) {
@@ -231,7 +232,9 @@ fn handle_bind_account(cx: &mut App) {
         return;
     };
     cx.defer(move |cx| {
-        let Ok(group_name) = handle.update(cx, |mw, _, _| mw.workspace_group_name().map(str::to_owned)) else {
+        let Ok(group_name) =
+            handle.update(cx, |mw, _, _| mw.workspace_group_name().map(str::to_owned))
+        else {
             return;
         };
         let Some(group_name) = group_name else {
@@ -240,7 +243,9 @@ fn handle_bind_account(cx: &mut App) {
         };
         let kvp = KeyValueStore::global(cx);
         cx.background_spawn(async move {
-            set_binding_async(kvp, group_name, account_id).await.log_err();
+            set_binding_async(kvp, group_name, account_id)
+                .await
+                .log_err();
         })
         .detach();
     });
@@ -251,7 +256,9 @@ fn handle_unbind_account(cx: &mut App) {
         return;
     };
     cx.defer(move |cx| {
-        let Ok(group_name) = handle.update(cx, |mw, _, _| mw.workspace_group_name().map(str::to_owned)) else {
+        let Ok(group_name) =
+            handle.update(cx, |mw, _, _| mw.workspace_group_name().map(str::to_owned))
+        else {
             return;
         };
         let Some(group_name) = group_name else {
@@ -734,7 +741,9 @@ impl PickerDelegate for OpenWorkspaceGroupDelegate {
                 if choice != 0 {
                     return;
                 }
-                delete_group_async(kvp.clone(), name.clone()).await.log_err();
+                delete_group_async(kvp.clone(), name.clone())
+                    .await
+                    .log_err();
                 picker
                     .update_in(cx, |picker, window, cx| {
                         picker.delegate.all_groups.retain(|g| g.name != name);
@@ -933,7 +942,12 @@ impl PickerDelegate for RenameWorkspaceGroupDelegate {
 
     fn set_selected_index(&mut self, _: usize, _: &mut Window, _: &mut Context<Picker<Self>>) {}
 
-    fn update_matches(&mut self, query: String, _: &mut Window, _: &mut Context<Picker<Self>>) -> Task<()> {
+    fn update_matches(
+        &mut self,
+        query: String,
+        _: &mut Window,
+        _: &mut Context<Picker<Self>>,
+    ) -> Task<()> {
         self.query = query;
         Task::ready(())
     }

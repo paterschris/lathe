@@ -7,11 +7,11 @@ use crate::{
     language_settings::{AutoIndentMode, LanguageSettings},
     outline::OutlineItem,
     row_chunk::RowChunks,
+    runnable::RunnableRange,
     syntax_map::{
         MAX_BYTES_TO_QUERY, SyntaxLayer, SyntaxMap, SyntaxMapCapture, SyntaxMapCaptures,
         SyntaxMapMatch, SyntaxMapMatches, SyntaxSnapshot, ToTreeSitterPoint,
     },
-    runnable::RunnableRange,
     text_diff::text_diff,
     unified_diff_with_offsets,
 };
@@ -2914,7 +2914,9 @@ impl Buffer {
 
         self.reparse(cx, true);
         let source = if is_local {
-            self.pending_edit_source.take().unwrap_or(BufferEditSource::User)
+            self.pending_edit_source
+                .take()
+                .unwrap_or(BufferEditSource::User)
         } else {
             BufferEditSource::Remote
         };

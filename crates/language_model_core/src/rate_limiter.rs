@@ -1,5 +1,5 @@
-use smol::lock::{Semaphore, SemaphoreGuardArc};
 use futures::Stream;
+use smol::lock::{Semaphore, SemaphoreGuardArc};
 use std::{
     future::Future,
     pin::Pin,

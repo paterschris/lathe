@@ -125,9 +125,7 @@ impl MergeEditorView {
         let buffer = self.buffer.clone();
         let project = self.project.clone();
         project
-            .update(cx, |project, cx| {
-                project.save_buffer(buffer, cx)
-            })
+            .update(cx, |project, cx| project.save_buffer(buffer, cx))
             .detach_and_log_err(cx);
     }
 
@@ -141,11 +139,7 @@ impl MergeEditorView {
             .min_w_0()
             .flex_1()
             .gap_1()
-            .child(
-                Label::new(label)
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
+            .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
             .child(
                 div()
                     .px_2()
@@ -157,9 +151,7 @@ impl MergeEditorView {
                         // small snippets, not full files; the conflict bodies
                         // come in with whitespace intact and we want the user
                         // to see them exactly.
-                        Label::new(text)
-                            .size(LabelSize::Small)
-                            .buffer_font(cx),
+                        Label::new(text).size(LabelSize::Small).buffer_font(cx),
                     ),
             )
     }
@@ -226,11 +218,7 @@ impl MergeEditorView {
             .child({
                 let mut row = h_flex().gap_2().items_start();
                 if let Some(base) = base_text {
-                    row = row.child(self.render_conflict_pane(
-                        "Base".into(),
-                        base,
-                        cx,
-                    ));
+                    row = row.child(self.render_conflict_pane("Base".into(), base, cx));
                 }
                 row.child(self.render_conflict_pane(
                     format!("Ours ({ours_branch})").into(),
@@ -251,11 +239,7 @@ impl MergeEditorView {
                             .style(ButtonStyle::Filled)
                             .label_size(LabelSize::Small)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.resolve_with(
-                                    &conflict_for_ours,
-                                    vec![ours_range.clone()],
-                                    cx,
-                                );
+                                this.resolve_with(&conflict_for_ours, vec![ours_range.clone()], cx);
                             })),
                     )
                     .child(
@@ -321,10 +305,7 @@ impl Render for MergeEditorView {
             .gap_3()
             .border_b_1()
             .border_color(cx.theme().colors().border)
-            .child(
-                Label::new("Merge editor")
-                    .size(LabelSize::Large),
-            )
+            .child(Label::new("Merge editor").size(LabelSize::Large))
             .child(
                 Label::new(file_label)
                     .size(LabelSize::Small)
@@ -394,11 +375,7 @@ impl Render for MergeEditorView {
                 let conflict = conflicts[ix].clone();
                 self.render_conflict(ix, total, ix == selected_index, &conflict, cx)
             });
-            v_flex()
-                .p_3()
-                .gap_3()
-                .children(rows)
-                .into_any_element()
+            v_flex().p_3().gap_3().children(rows).into_any_element()
         };
 
         v_flex()
@@ -448,9 +425,8 @@ pub fn open_merge_editor(
         .update(cx, |workspace, cx| {
             let project = workspace.project().clone();
             let workspace_weak = workspace.weak_handle();
-            let view = cx.new(|cx| {
-                MergeEditorView::new(buffer, conflict_set, project, workspace_weak, cx)
-            });
+            let view = cx
+                .new(|cx| MergeEditorView::new(buffer, conflict_set, project, workspace_weak, cx));
             workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
         })
         .ok();
