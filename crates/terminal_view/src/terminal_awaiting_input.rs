@@ -1,20 +1,22 @@
 use crate::TerminalView;
-use gpui::Context;
+use gpui::{
+    Animation, AnimationExt, AnyElement, Context, InteractiveElement, IntoElement, ParentElement,
+    Styled, div, pulsating_between,
+};
 use settings::{AwaitingInputSound, Settings};
 use std::time::Duration;
-use terminal::{Modes, terminal_settings::TerminalSettings};
+use terminal::{Modes, TaskState, TaskStatus, terminal_settings::TerminalSettings};
+use ui::{Color, FluentBuilder, Icon, IconButton, IconName};
 use workspace::item::ItemEvent;
 
-pub(super) fn start_idle_timer(
-    terminal_view: &mut TerminalView,
-    cx: &mut Context<TerminalView>,
-) {
+pub(super) fn start_idle_timer(terminal_view: &mut TerminalView, cx: &mut Context<TerminalView>) {
     let threshold_secs = TerminalSettings::get_global(cx).awaiting_input_idle_threshold_secs;
     if threshold_secs == 0 {
         return;
     }
     let threshold = Duration::from_secs(threshold_secs);
-    let awaiting_sound = awaiting_input_sound(TerminalSettings::get_global(cx).sound_on_awaiting_input);
+    let awaiting_sound =
+        awaiting_input_sound(TerminalSettings::get_global(cx).sound_on_awaiting_input);
     terminal_view.idle_timer = cx.spawn(async move |this, cx| {
         cx.background_executor().timer(threshold).await;
         this.update(cx, |this, cx| {
@@ -57,6 +59,71 @@ pub(super) fn clear(terminal_view: &mut TerminalView, cx: &mut Context<TerminalV
         terminal_view.has_had_input = false;
         cx.emit(ItemEvent::UpdateTab);
         cx.notify();
+    }
+}
+
+pub(super) fn tab_icon(
+    icon: IconName,
+    color: Color,
+    is_awaiting_input: bool,
+    has_rerun_button: bool,
+) -> AnyElement {
+    let icon = div()
+        .when(has_rerun_button, |this| {
+            this.hover(|style| style.invisible().w_0())
+        })
+        .child(Icon::new(icon).color(color));
+
+    if is_awaiting_input {
+        icon.with_animation(
+            "tab-awaiting-pulse",
+            Animation::new(Duration::from_secs(2))
+                .repeat()
+                .with_easing(pulsating_between(0.4, 1.0)),
+            |element, delta| element.opacity(delta),
+        )
+        .into_any_element()
+    } else {
+        icon.into_any_element()
+    }
+}
+
+pub(super) fn tab_icon_state(
+    task: Option<&TaskState>,
+    is_awaiting_input: bool,
+) -> (IconName, Color, Option<IconButton>) {
+    match task {
+        Some(task) => match &task.status {
+            TaskStatus::Running => {
+                let (icon, color) = if is_awaiting_input {
+                    (IconName::Return, Color::Accent)
+                } else {
+                    (IconName::PlayFilled, Color::Disabled)
+                };
+                (icon, color, TerminalView::rerun_button(task))
+            }
+            TaskStatus::Unknown => (
+                IconName::Warning,
+                Color::Warning,
+                TerminalView::rerun_button(task),
+            ),
+            TaskStatus::Completed { success } => {
+                let rerun_button = TerminalView::rerun_button(task);
+
+                if *success {
+                    (IconName::Check, Color::Success, rerun_button)
+                } else {
+                    (IconName::XCircle, Color::Error, rerun_button)
+                }
+            }
+        },
+        None => {
+            if is_awaiting_input {
+                (IconName::Return, Color::Accent, None)
+            } else {
+                (IconName::Terminal, Color::Muted, None)
+            }
+        }
     }
 }
 

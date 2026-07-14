@@ -1,5 +1,6 @@
 mod persistence;
 mod terminal_awaiting_input;
+mod terminal_bell;
 pub mod terminal_element;
 pub mod terminal_panel;
 mod terminal_path_like_target;
@@ -10,11 +11,10 @@ use editor::{
     ui_scrollbar_settings_from_raw,
 };
 use gpui::{
-    Action, Animation, AnimationExt, AnyElement, App, ClipboardEntry, DismissEvent, Entity,
-    EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, Hsla, KeyContext, KeyDownEvent,
-    Keystroke, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollWheelEvent,
-    Styled, Subscription, Task, TaskExt, WeakEntity, actions, anchored, deferred, div, hsla,
-    pulsating_between,
+    Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, Font, Hsla, KeyContext, KeyDownEvent, Keystroke, MouseButton,
+    MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollWheelEvent, Styled, Subscription,
+    Task, TaskExt, WeakEntity, actions, anchored, deferred, div, hsla,
 };
 use itertools::Itertools;
 use menu;
@@ -22,9 +22,7 @@ use persistence::TerminalDb;
 use project::{Project, ProjectEntryId, search::SearchQuery};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use settings::{
-    SeedQuerySetting, Settings, SettingsStore, TerminalBlink, WorkingDirectory,
-};
+use settings::{SeedQuerySetting, Settings, SettingsStore, TerminalBlink, WorkingDirectory};
 use std::{
     any::Any,
     cmp,
@@ -1087,7 +1085,7 @@ fn subscribe_for_terminal_events(
                 }
 
                 Event::Bell => {
-                    terminal_view.has_bell = true;
+                    terminal_bell::handle(terminal_view, window, cx);
                     cx.emit(Event::Wakeup);
                 }
 
@@ -1419,41 +1417,9 @@ impl Item for TerminalView {
             .cloned()
             .unwrap_or_else(|| terminal.title(true));
 
-        let awaiting_input = self.awaiting_input;
-        let is_awaiting = awaiting_input.is_some();
-        let (icon, icon_color, rerun_button) = match terminal.task() {
-            Some(terminal_task) => match &terminal_task.status {
-                TaskStatus::Running => {
-                    let (icon, color) = if is_awaiting {
-                        (IconName::Return, Color::Accent)
-                    } else {
-                        (IconName::PlayFilled, Color::Disabled)
-                    };
-                    (icon, color, TerminalView::rerun_button(terminal_task))
-                }
-                TaskStatus::Unknown => (
-                    IconName::Warning,
-                    Color::Warning,
-                    TerminalView::rerun_button(terminal_task),
-                ),
-                TaskStatus::Completed { success } => {
-                    let rerun_button = TerminalView::rerun_button(terminal_task);
-
-                    if *success {
-                        (IconName::Check, Color::Success, rerun_button)
-                    } else {
-                        (IconName::XCircle, Color::Error, rerun_button)
-                    }
-                }
-            },
-            None => {
-                if is_awaiting {
-                    (IconName::Return, Color::Accent, None)
-                } else {
-                    (IconName::Terminal, Color::Muted, None)
-                }
-            }
-        };
+        let is_awaiting = self.awaiting_input.is_some();
+        let (icon, icon_color, rerun_button) =
+            terminal_awaiting_input::tab_icon_state(terminal.task(), is_awaiting);
 
         let self_handle = self.self_handle.clone();
         h_flex()
@@ -1470,28 +1436,12 @@ impl Item for TerminalView {
             .child(
                 h_flex()
                     .group("term-tab-icon")
-                    .child(
-                        {
-                            let icon_div = div()
-                                .when(rerun_button.is_some(), |this| {
-                                    this.hover(|style| style.invisible().w_0())
-                                })
-                                .child(Icon::new(icon).color(icon_color));
-                            if is_awaiting {
-                                icon_div
-                                    .with_animation(
-                                        "tab-awaiting-pulse",
-                                        Animation::new(Duration::from_secs(2))
-                                            .repeat()
-                                            .with_easing(pulsating_between(0.4, 1.0)),
-                                        |element, delta| element.opacity(delta),
-                                    )
-                                    .into_any_element()
-                            } else {
-                                icon_div.into_any_element()
-                            }
-                        },
-                    )
+                    .child(terminal_awaiting_input::tab_icon(
+                        icon,
+                        icon_color,
+                        is_awaiting,
+                        rerun_button.is_some(),
+                    ))
                     .when_some(rerun_button, |this, rerun_button| {
                         this.child(
                             div()
