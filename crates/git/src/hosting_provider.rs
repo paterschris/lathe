@@ -244,6 +244,21 @@ pub trait GitHostingProvider {
         anyhow::bail!("submitting reviews is not supported by this hosting provider")
     }
 
+    /// Retract the authenticated user's own review of `verdict` on a PR: remove an
+    /// approval or a changes-requested review so it no longer counts. Called when
+    /// the user clicks the button for a verdict they've already submitted, to make
+    /// those buttons toggle. Hosts that don't model this report "not supported".
+    async fn remove_review(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _verdict: PullRequestReviewVerdict,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        anyhow::bail!("removing reviews is not supported by this hosting provider")
+    }
+
     /// Post a reply to an existing inline review comment. `in_reply_to` is the
     /// id of the parent `PullRequestReviewComment`. Hosts that don't model
     /// threaded review replies report "not supported".

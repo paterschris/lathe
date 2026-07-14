@@ -1,10 +1,19 @@
 use anyhow::{Context as _, Result};
 use buffer_diff::BufferDiff;
 use collections::{HashMap, HashSet};
-use std::ops::Range;
 use editor::{
-    Anchor, Editor, EditorEvent, MultiBuffer, multibuffer_context_lines,
+    Anchor, Editor, EditorEvent, MultiBuffer,
     display_map::{BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
+    multibuffer_context_lines,
+};
+use git::{
+    DiffCommentSide, GitHostAuth, GitHostingProvider, ParsedGitRemote, PullRequestDetail,
+    PullRequestMergeMethod, PullRequestReviewComment, PullRequestReviewVerdict,
+    PullRequestReviewer, PullRequestState,
+};
+use gpui::{
+    AsyncApp, ClickEvent, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable,
+    Pixels, SharedString, Subscription, Task, WeakEntity, http_client::HttpClient,
 };
 use language::{
     Buffer, Capability, DiskState, File, LanguageRegistry, LineEnding, Point, ReplicaId, Rope,
@@ -12,21 +21,15 @@ use language::{
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use multi_buffer::{PathKey, ToPoint as _};
-use project::{Project, WorktreeId};
-use std::path::PathBuf;
-use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
-use git::{
-    DiffCommentSide, GitHostAuth, GitHostingProvider, ParsedGitRemote, PullRequestDetail,
-    PullRequestMergeMethod, PullRequestReviewComment, PullRequestReviewVerdict, PullRequestReviewer,
-    PullRequestState,
-};
-use gpui::{
-    AsyncApp, ClickEvent, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable,
-    Pixels, SharedString, Subscription, Task, WeakEntity, http_client::HttpClient,
-};
 use notifications::status_toast::StatusToast;
+use project::{Project, WorktreeId};
+use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
-use ui::{Button, ButtonCommon, ButtonStyle, Clickable, Disclosure, Divider, TintColor, prelude::*};
+use ui::{
+    Button, ButtonCommon, ButtonStyle, Clickable, Disclosure, Divider, TintColor, prelude::*,
+};
+use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
     Workspace,
     item::{Item, ItemEvent},
@@ -176,9 +179,7 @@ impl PullRequestView {
         }
         let label: SharedString = match verdict {
             PullRequestReviewVerdict::Approve => "Approved pull request".into(),
-            PullRequestReviewVerdict::RequestChanges => {
-                "Requested changes on pull request".into()
-            }
+            PullRequestReviewVerdict::RequestChanges => "Requested changes on pull request".into(),
             PullRequestReviewVerdict::Comment => "Posted review comment".into(),
         };
         let provider = self.provider.clone();
@@ -205,11 +206,54 @@ impl PullRequestView {
                 match result {
                     Ok(()) => surface_toast(&workspace, label, cx),
                     Err(error) => {
-                        surface_toast(
-                            &workspace,
-                            action_error_message("Review", &error),
-                            cx,
-                        );
+                        surface_toast(&workspace, action_error_message("Review", &error), cx);
+                    }
+                }
+                this.refresh(cx);
+                cx.notify();
+            })
+            .ok();
+        });
+        self._action_task = Some(task);
+    }
+
+    /// Retract the viewer's own approval / requested-changes. Called when they
+    /// click a review button they've already submitted, making those buttons act
+    /// as toggles rather than re-submitting the same verdict.
+    fn retract_review(&mut self, verdict: PullRequestReviewVerdict, cx: &mut Context<Self>) {
+        if self.in_flight_action {
+            return;
+        }
+        let label: SharedString = match verdict {
+            PullRequestReviewVerdict::Approve => "Removed approval".into(),
+            PullRequestReviewVerdict::RequestChanges => "Removed requested changes".into(),
+            PullRequestReviewVerdict::Comment => "Removed review".into(),
+        };
+        let provider = self.provider.clone();
+        let host = provider.base_url().host_str().map(|host| host.to_string());
+        let remote = clone_remote(&self.remote);
+        let number = self.number;
+        let http_client = cx.http_client();
+        let workspace = self.workspace.clone();
+        self.in_flight_action = true;
+        cx.notify();
+        let task = cx.spawn(async move |this, cx| {
+            let auth = match host.as_deref() {
+                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            let result = provider
+                .remove_review(&remote, number, verdict, auth, http_client)
+                .await;
+            this.update(cx, |this, cx| {
+                this.in_flight_action = false;
+                match result {
+                    Ok(()) => surface_toast(&workspace, label, cx),
+                    Err(error) => {
+                        surface_toast(&workspace, action_error_message("Review", &error), cx);
                     }
                 }
                 this.refresh(cx);
@@ -256,11 +300,9 @@ impl PullRequestView {
                         format!("Merged PR #{number} via {method_label}").into(),
                         cx,
                     ),
-                    Err(error) => surface_toast(
-                        &workspace,
-                        action_error_message("Merge", &error),
-                        cx,
-                    ),
+                    Err(error) => {
+                        surface_toast(&workspace, action_error_message("Merge", &error), cx)
+                    }
                 }
                 this.refresh(cx);
                 cx.notify();
@@ -602,8 +644,14 @@ impl PullRequestView {
             let build_context = DiffBuildContext {
                 provider: provider.clone(),
                 remote: clone_remote(&remote),
-                head_sha: detail.as_ref().ok().map(|detail| detail.head_sha.to_string()),
-                base_sha: detail.as_ref().ok().map(|detail| detail.base_sha.to_string()),
+                head_sha: detail
+                    .as_ref()
+                    .ok()
+                    .map(|detail| detail.head_sha.to_string()),
+                base_sha: detail
+                    .as_ref()
+                    .ok()
+                    .map(|detail| detail.base_sha.to_string()),
                 auth,
                 http_client,
             };
@@ -637,9 +685,7 @@ impl PullRequestView {
                         this.detail = Some(detail);
                     }
                     Err(e) => match e.downcast_ref::<git::PullRequestAuthError>() {
-                        Some(auth_error) => {
-                            this.auth_error_host = Some(auth_error.host.clone())
-                        }
+                        Some(auth_error) => this.auth_error_host = Some(auth_error.host.clone()),
                         None => this.error = Some(format!("{e}").into()),
                     },
                 }
@@ -760,9 +806,7 @@ fn parse_unified_diff(text: &str) -> Vec<ParsedDiffFile> {
 /// Extracts the new-file start line from a `@@ -a,b +c,d @@` hunk header.
 fn parse_hunk_new_start(header: &str) -> Option<u32> {
     let after_plus = header.split('+').nth(1)?;
-    let number = after_plus
-        .split(|ch: char| ch == ',' || ch == ' ')
-        .next()?;
+    let number = after_plus.split(|ch: char| ch == ',' || ch == ' ').next()?;
     number.parse::<u32>().ok()
 }
 
@@ -908,7 +952,10 @@ async fn build_diff_multibuffer(
         if files.iter().any(|file| paths_match(&file.path, path)) {
             continue;
         }
-        standalone.entry(path.to_string()).or_default().push(comment);
+        standalone
+            .entry(path.to_string())
+            .or_default()
+            .push(comment);
     }
     for (path, file_comments) in standalone {
         match add_unchanged_file(
@@ -949,7 +996,12 @@ async fn add_patch_file(
         return Ok(None);
     };
     let rel_path: Arc<RelPath> = rel_path.into();
-    let blob = pr_diff_file(rel_path.clone(), worktree_id, new_text.is_empty(), &file.path);
+    let blob = pr_diff_file(
+        rel_path.clone(),
+        worktree_id,
+        new_text.is_empty(),
+        &file.path,
+    );
     let buffer = build_buffer(new_text, blob, language_registry, cx).await?;
     let buffer_diff = build_buffer_diff(old_text, &buffer, language_registry, cx).await?;
 
@@ -1124,7 +1176,11 @@ fn pr_diff_file(
     is_deleted: bool,
     full_path: &str,
 ) -> Arc<dyn File> {
-    let display_name = full_path.rsplit('/').next().unwrap_or(full_path).to_string();
+    let display_name = full_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(full_path)
+        .to_string();
     Arc::new(PrDiffFile {
         path,
         worktree_id,
@@ -1139,7 +1195,12 @@ fn hunk_new_span(hunk: &ParsedDiffHunk) -> Option<(u32, u32)> {
     let new_len = hunk
         .lines
         .iter()
-        .filter(|line| matches!(line, ParsedDiffLine::Context(_) | ParsedDiffLine::Addition(_)))
+        .filter(|line| {
+            matches!(
+                line,
+                ParsedDiffLine::Context(_) | ParsedDiffLine::Addition(_)
+            )
+        })
         .count() as u32;
     (new_len > 0).then(|| (hunk.new_start, hunk.new_start + new_len - 1))
 }
@@ -1208,7 +1269,10 @@ fn thread_root_id(
 ) -> u64 {
     let mut current = comment;
     for _ in 0..64 {
-        match current.parent_id.and_then(|parent_id| by_id.get(&parent_id)) {
+        match current
+            .parent_id
+            .and_then(|parent_id| by_id.get(&parent_id))
+        {
             Some(parent) => current = parent,
             None => break,
         }
@@ -1225,7 +1289,10 @@ fn thread_depth(
     let mut current = comment;
     let mut depth = 0;
     for _ in 0..64 {
-        match current.parent_id.and_then(|parent_id| by_id.get(&parent_id)) {
+        match current
+            .parent_id
+            .and_then(|parent_id| by_id.get(&parent_id))
+        {
             Some(parent) => {
                 current = parent;
                 depth += 1;
@@ -1251,8 +1318,10 @@ fn resolve_comment_threads(
     };
     let snapshot = multibuffer.read(cx).snapshot(cx);
 
-    let by_id: HashMap<u64, &PullRequestReviewComment> =
-        comments.iter().map(|comment| (comment.id, comment)).collect();
+    let by_id: HashMap<u64, &PullRequestReviewComment> = comments
+        .iter()
+        .map(|comment| (comment.id, comment))
+        .collect();
 
     // Group comments by thread root, preserving first-seen order so threads
     // appear in the order the host returned them.
@@ -1633,9 +1702,7 @@ fn render_comment_thread(
                             .on_click({
                                 let weak_view = weak_view.clone();
                                 move |_, _window, cx| {
-                                    weak_view
-                                        .update(cx, |view, cx| view.submit_reply(cx))
-                                        .ok();
+                                    weak_view.update(cx, |view, cx| view.submit_reply(cx)).ok();
                                 }
                             }),
                     )
@@ -1646,18 +1713,12 @@ fn render_comment_thread(
                             .on_click({
                                 let weak_view = weak_view.clone();
                                 move |_, _window, cx| {
-                                    weak_view
-                                        .update(cx, |view, cx| view.cancel_reply(cx))
-                                        .ok();
+                                    weak_view.update(cx, |view, cx| view.cancel_reply(cx)).ok();
                                 }
                             }),
                     )
                     .when(reply_in_flight, |this| {
-                        this.child(
-                            Label::new("…")
-                                .color(Color::Muted)
-                                .size(LabelSize::Small),
-                        )
+                        this.child(Label::new("…").color(Color::Muted).size(LabelSize::Small))
                     }),
             )
             .into_any_element(),
@@ -1765,14 +1826,8 @@ async fn build_buffer_diff(
     // registry so syntax highlighting is available for the deleted side, then
     // `set_base_text` populates that base buffer from `old_text` and computes and
     // applies the diff snapshot in one step.
-    let diff = cx.new(|cx| {
-        BufferDiff::new(
-            &buffer.text,
-            language,
-            Some(language_registry.clone()),
-            cx,
-        )
-    });
+    let diff =
+        cx.new(|cx| BufferDiff::new(&buffer.text, language, Some(language_registry.clone()), cx));
 
     let base_text = old_text.map(|old_text| Arc::<str>::from(old_text.as_str()));
     diff.update(cx, |diff, cx| {
@@ -1992,14 +2047,9 @@ impl Render for PullRequestView {
                 .p_4()
                 .gap_2()
                 .child(
-                    Label::new(format!("Failed to load PR #{}", self.number))
-                        .color(Color::Error),
+                    Label::new(format!("Failed to load PR #{}", self.number)).color(Color::Error),
                 )
-                .child(
-                    Label::new(error)
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                )
+                .child(Label::new(error).color(Color::Muted).size(LabelSize::Small))
                 .into_any_element();
         }
 
@@ -2227,7 +2277,9 @@ impl PullRequestView {
                                     .h(px(6.))
                                     .w_full()
                                     .cursor_row_resize()
-                                    .on_drag(DescriptionResizeDrag, |_, _, _, cx| cx.new(|_| Empty)),
+                                    .on_drag(DescriptionResizeDrag, |_, _, _, cx| {
+                                        cx.new(|_| Empty)
+                                    }),
                             )
                         }),
                 )
@@ -2248,16 +2300,26 @@ impl PullRequestView {
                     .child(
                         Button::new(
                             "pr-approve",
-                            if viewer_approved { "Approved" } else { "Approve" },
+                            if viewer_approved {
+                                "Approved"
+                            } else {
+                                "Approve"
+                            },
                         )
                         .style(ButtonStyle::Tinted(TintColor::Success))
                         .when(viewer_approved, |button| {
                             button.start_icon(Icon::new(IconName::Check))
                         })
                         .disabled(!actions_enabled)
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            this.submit_review(PullRequestReviewVerdict::Approve, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                if viewer_approved {
+                                    this.retract_review(PullRequestReviewVerdict::Approve, cx);
+                                } else {
+                                    this.submit_review(PullRequestReviewVerdict::Approve, cx);
+                                }
+                            },
+                        )),
                     )
                     .child(
                         Button::new(
@@ -2273,9 +2335,21 @@ impl PullRequestView {
                             button.start_icon(Icon::new(IconName::Close))
                         })
                         .disabled(!actions_enabled)
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            this.submit_review(PullRequestReviewVerdict::RequestChanges, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                if viewer_requested_changes {
+                                    this.retract_review(
+                                        PullRequestReviewVerdict::RequestChanges,
+                                        cx,
+                                    );
+                                } else {
+                                    this.submit_review(
+                                        PullRequestReviewVerdict::RequestChanges,
+                                        cx,
+                                    );
+                                }
+                            },
+                        )),
                     )
                     .child(
                         Button::new("pr-merge", "Merge")
@@ -2294,11 +2368,7 @@ impl PullRequestView {
                             })),
                     )
                     .when(in_flight, |this| {
-                        this.child(
-                            Label::new("…")
-                                .color(Color::Muted)
-                                .size(LabelSize::Small),
-                        )
+                        this.child(Label::new("…").color(Color::Muted).size(LabelSize::Small))
                     }),
             )
             .into_any_element()
@@ -2335,30 +2405,29 @@ impl PullRequestView {
         let weak_view = cx.weak_entity();
         let mut markdowns: Vec<Entity<Markdown>> = Vec::new();
         let rendered_threads: Vec<(Anchor, u64, bool, Vec<(ThreadComment, Entity<Markdown>)>)> =
-            self
-            .comment_threads
-            .clone()
-            .into_iter()
-            .map(|thread| {
-                let comments = thread
-                    .comments
-                    .into_iter()
-                    .map(|comment| {
-                        let markdown = cx.new(|cx| {
-                            Markdown::new(
-                                comment.body.clone(),
-                                Some(language_registry.clone()),
-                                None,
-                                cx,
-                            )
-                        });
-                        markdowns.push(markdown.clone());
-                        (comment, markdown)
-                    })
-                    .collect::<Vec<_>>();
-                (thread.anchor, thread.root_id, thread.resolved, comments)
-            })
-            .collect();
+            self.comment_threads
+                .clone()
+                .into_iter()
+                .map(|thread| {
+                    let comments = thread
+                        .comments
+                        .into_iter()
+                        .map(|comment| {
+                            let markdown = cx.new(|cx| {
+                                Markdown::new(
+                                    comment.body.clone(),
+                                    Some(language_registry.clone()),
+                                    None,
+                                    cx,
+                                )
+                            });
+                            markdowns.push(markdown.clone());
+                            (comment, markdown)
+                        })
+                        .collect::<Vec<_>>();
+                    (thread.anchor, thread.root_id, thread.resolved, comments)
+                })
+                .collect();
 
         let editor = cx.new(|cx| {
             let mut editor = Editor::for_multibuffer(multibuffer, Some(project), window, cx);
@@ -2453,7 +2522,10 @@ mod tests {
             Some("2026-01-04")
         );
         // A bare date is accepted as-is.
-        assert_eq!(iso_calendar_date("2026-05-19").as_deref(), Some("2026-05-19"));
+        assert_eq!(
+            iso_calendar_date("2026-05-19").as_deref(),
+            Some("2026-05-19")
+        );
     }
 
     #[test]

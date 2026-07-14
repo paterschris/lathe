@@ -617,6 +617,18 @@ impl GitHostingProvider for Github {
         Ok(())
     }
 
+    async fn remove_review(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        verdict: PullRequestReviewVerdict,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        self.remove_review_with_verdict(remote, number, verdict, auth, http_client)
+            .await
+    }
+
     async fn post_review_comment(
         &self,
         remote: &ParsedGitRemote,
@@ -1057,5 +1069,4 @@ mod tests {
             "https://avatars.githubusercontent.com/u/e?email=12345%2Boctocat%40users.noreply.github.com&s=128"
         );
     }
-
 }

@@ -685,6 +685,18 @@ impl GitHostingProvider for Bitbucket {
         Ok(())
     }
 
+    async fn remove_review(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        verdict: PullRequestReviewVerdict,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        self.remove_review_with_verdict(remote, number, verdict, auth, http_client)
+            .await
+    }
+
     async fn post_review_comment(
         &self,
         remote: &ParsedGitRemote,
@@ -1073,5 +1085,4 @@ mod tests {
             "https://bitbucket.company.com/projects/zed-industries/repos/zed/pull-requests/123"
         );
     }
-
 }

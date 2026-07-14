@@ -1,23 +1,23 @@
+use crate::pull_request_panel_settings::PullRequestPanelSettings;
 use crate::pull_request_view::PullRequestView;
 use anyhow::{Context as _, Result};
 use git::{
     GitHostingProvider, GitHostingProviderRegistry, ParsedGitRemote, PullRequestListFilter,
     PullRequestReviewVerdict, PullRequestState, PullRequestSummary, parse_git_remote_url,
 };
+use gpui::http_client::HttpClient;
 use gpui::{
     Action, AppContext as _, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable,
     MouseButton, SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, actions,
     uniform_list,
 };
-use gpui::http_client::HttpClient;
 use project::{
     Project,
     git_store::{GitStore, GitStoreEvent},
 };
+use settings::Settings;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::pull_request_panel_settings::PullRequestPanelSettings;
-use settings::Settings;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use workspace::{
     Workspace,
@@ -50,7 +50,9 @@ enum LoadState {
     Failed(SharedString),
     /// A pull-request call returned HTTP 401; the stored credential for `host`
     /// is expired or invalid, so the user is offered a targeted reconnect.
-    AuthExpired { host: SharedString },
+    AuthExpired {
+        host: SharedString,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -107,7 +109,9 @@ impl PullRequestPanel {
         workspace: WeakEntity<Workspace>,
         mut cx: AsyncWindowContext,
     ) -> Result<Entity<Self>> {
-        workspace.update_in(&mut cx, |workspace, window, cx| Self::new(workspace, window, cx))
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            Self::new(workspace, window, cx)
+        })
     }
 
     pub fn new(
@@ -327,13 +331,7 @@ impl PullRequestPanel {
         workspace
             .update(cx, |workspace, cx| {
                 let view = cx.new(|cx| {
-                    PullRequestView::new(
-                        provider,
-                        remote,
-                        number,
-                        workspace.weak_handle(),
-                        cx,
-                    )
+                    PullRequestView::new(provider, remote, number, workspace.weak_handle(), cx)
                 });
                 workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
             })

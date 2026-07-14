@@ -145,9 +145,13 @@ impl ConnectGitHostModal {
                     }
                     Ok(DeviceTokenPoll::Authorized(token)) => {
                         let login = fetch_login(&http_client, &token).await.unwrap_or_default();
-                        let stored =
-                            git_host_credentials::set(cx, GitHostKind::GitHub.host(), &login, &token)
-                                .await;
+                        let stored = git_host_credentials::set(
+                            cx,
+                            GitHostKind::GitHub.host(),
+                            &login,
+                            &token,
+                        )
+                        .await;
                         this.update(cx, |this, cx| match stored {
                             Ok(()) => cx.emit(DismissEvent),
                             Err(error) => {
@@ -188,9 +192,13 @@ impl ConnectGitHostModal {
         self.error = None;
         cx.notify();
         let task = cx.spawn(async move |this, cx| {
-            let stored =
-                git_host_credentials::set(cx, GitHostKind::BitbucketCloud.host(), &username, &secret)
-                    .await;
+            let stored = git_host_credentials::set(
+                cx,
+                GitHostKind::BitbucketCloud.host(),
+                &username,
+                &secret,
+            )
+            .await;
             this.update(cx, |this, cx| match stored {
                 Ok(()) => cx.emit(DismissEvent),
                 Err(error) => {
@@ -315,7 +323,9 @@ impl Render for ConnectGitHostModal {
             .w(rems(28.))
             .p_4()
             .gap_3()
-            .child(Label::new(format!("Connect {}", self.kind.display_name())).size(LabelSize::Large))
+            .child(
+                Label::new(format!("Connect {}", self.kind.display_name())).size(LabelSize::Large),
+            )
             .child(body)
             .when_some(self.error.clone(), |this, error| {
                 this.child(Label::new(error).color(Color::Error).size(LabelSize::Small))

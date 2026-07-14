@@ -60,11 +60,42 @@ impl Bitbucket {
             serde_json::from_slice(&bytes).context("parsing authenticated Bitbucket user")?;
         Ok(user.uuid.map(SharedString::from))
     }
+
+    pub(super) async fn remove_review_with_verdict(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        verdict: PullRequestReviewVerdict,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        if self.is_self_hosted() {
+            bail!("pull request operations are only supported on Bitbucket Cloud");
+        }
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        // Bitbucket Cloud redacts a verdict with a DELETE on the same endpoint
+        // that adds it, mirroring `submit_review`'s POST.
+        let url = match verdict {
+            PullRequestReviewVerdict::Approve => {
+                format!("{api_base}/pullrequests/{number}/approve")
+            }
+            PullRequestReviewVerdict::RequestChanges => {
+                format!("{api_base}/pullrequests/{number}/request-changes")
+            }
+            PullRequestReviewVerdict::Comment => {
+                bail!("Bitbucket has no comment-only review to remove");
+            }
+        };
+        let request = bitbucket_request(BitbucketMethod::Delete, &url, &auth, None)?;
+        bitbucket_send(&http_client, request, "removing Bitbucket review").await?;
+        Ok(())
+    }
 }
 
 pub(super) enum BitbucketMethod {
     Get,
     Post,
+    Delete,
 }
 
 pub(super) fn bitbucket_cloud_api_base(base_url: &Url, remote: &ParsedGitRemote) -> Result<String> {
@@ -102,6 +133,7 @@ pub(super) fn bitbucket_request(
     let builder = match method {
         BitbucketMethod::Get => Request::get(url),
         BitbucketMethod::Post => Request::post(url),
+        BitbucketMethod::Delete => Request::delete(url),
     };
     let mut builder = builder
         .header("Accept", "application/json")

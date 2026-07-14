@@ -59,6 +59,48 @@ impl Github {
         let bytes = github_send(http_client, request, "fetching GitHub reviews").await?;
         serde_json::from_slice(&bytes).context("parsing GitHub reviews")
     }
+
+    pub(super) async fn remove_review_with_verdict(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        verdict: PullRequestReviewVerdict,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let login = self
+            .fetch_authenticated_login(&auth, &http_client)
+            .await?
+            .context("could not determine the authenticated GitHub user")?;
+        let reviews = self
+            .fetch_reviews(remote, number, &auth, &http_client)
+            .await?;
+        let review_id = viewer_review_id_to_dismiss(&reviews, login.as_ref(), verdict)
+            .context("no matching review to remove")?;
+        // GitHub has no "un-review" endpoint; retracting a verdict is done by
+        // dismissing the review, which requires a message.
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/dismissals",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let body = serde_json::to_vec(
+            &serde_json::json!({ "message": "Dismissed via Lathe", "event": "DISMISS" }),
+        )?;
+        let request = github_request(
+            GithubMethod::Put,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            Some(body),
+        )?;
+        github_send(&http_client, request, "dismissing GitHub review").await?;
+        Ok(())
+    }
 }
 
 /// The viewer's current verdict from their chronological review history: the most
@@ -85,6 +127,38 @@ pub(super) fn viewer_verdict_from_reviews(
         }
     }
     verdict
+}
+
+/// The id of the viewer's own review that currently produces `verdict`, so it can
+/// be dismissed to retract that verdict. Mirrors `viewer_verdict_from_reviews`:
+/// the latest approving/blocking review wins and a later DISMISSED clears it, so
+/// this returns an id only when the viewer's effective verdict still matches.
+pub(super) fn viewer_review_id_to_dismiss(
+    reviews: &[GithubReview],
+    login: &str,
+    verdict: PullRequestReviewVerdict,
+) -> Option<u64> {
+    let mut current: Option<(u64, PullRequestReviewVerdict)> = None;
+    for review in reviews {
+        let is_viewer = review
+            .user
+            .as_ref()
+            .is_some_and(|user| user.login.eq_ignore_ascii_case(login));
+        if !is_viewer {
+            continue;
+        }
+        match review.state.as_str() {
+            "APPROVED" => current = Some((review.id, PullRequestReviewVerdict::Approve)),
+            "CHANGES_REQUESTED" => {
+                current = Some((review.id, PullRequestReviewVerdict::RequestChanges))
+            }
+            "DISMISSED" => current = None,
+            _ => {}
+        }
+    }
+    current
+        .filter(|(_, current_verdict)| *current_verdict == verdict)
+        .map(|(id, _)| id)
 }
 
 /// The full reviewer list: everyone who submitted a review (with their latest
@@ -349,10 +423,12 @@ impl GithubPullRequest {
     }
 }
 
-/// A submitted review on a pull request. Only the author and state are needed
-/// to resolve the authenticated user's current verdict.
+/// A submitted review on a pull request. The author and state resolve the
+/// authenticated user's current verdict; the id lets us dismiss (retract) it.
 #[derive(Deserialize)]
 pub(super) struct GithubReview {
+    #[serde(default)]
+    id: u64,
     #[serde(default)]
     user: Option<GithubUserRef>,
     #[serde(default)]

@@ -116,7 +116,9 @@ enum PickerStatus {
     Loaded,
     Failed(SharedString),
     /// A pull-request call returned HTTP 401; the row offers a reconnect.
-    AuthExpired { host: SharedString },
+    AuthExpired {
+        host: SharedString,
+    },
 }
 
 pub struct PullRequestPickerDelegate {
@@ -407,4 +409,3 @@ impl PickerDelegate for PullRequestPickerDelegate {
         }
     }
 }
-
