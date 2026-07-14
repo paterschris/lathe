@@ -2056,6 +2056,10 @@
     "path_hyperlink_timeout_ms": 1,
     // Whether to show a badge on the terminal panel icon with the count of open terminals.
     "show_count_badge": false,
+    // What sound to play when the terminal emits a bell.
+    //
+    // Default: system
+    "bell": "system",
     // How many seconds of inactivity before the terminal shows
     // an awaiting-input indicator. Set to 0 to disable the indicator.
     "awaiting_input_idle_threshold_secs": 5,

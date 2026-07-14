@@ -872,8 +872,29 @@ impl VsCodeSettings {
 
     fn terminal_settings_content(&self) -> Option<TerminalSettingsContent> {
         let (font_family, font_fallbacks) = self.read_fonts("terminal.integrated.fontFamily");
+        let bell = self
+            .read_value("accessibility.signals.terminalBell")
+            .and_then(|value| value.as_object())
+            .and_then(|value| value.get("sound"))
+            .and_then(|value| value.as_str())
+            .and_then(|sound| match sound {
+                "on" => Some(TerminalBell::System),
+                "off" => Some(TerminalBell::Off),
+                _ => None,
+            })
+            .or_else(|| {
+                self.read_bool("terminal.integrated.enableBell")
+                    .map(|enabled| {
+                        if enabled {
+                            TerminalBell::System
+                        } else {
+                            TerminalBell::Off
+                        }
+                    })
+            });
         skip_default(TerminalSettingsContent {
             alternate_scroll: None,
+            bell,
             blinking: self
                 .read_bool("terminal.integrated.cursorBlinking")
                 .map(|b| {

@@ -179,6 +179,10 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: false
     pub show_count_badge: Option<bool>,
+    /// What sound to play when the terminal emits a bell.
+    ///
+    /// Default: system
+    pub bell: Option<TerminalBell>,
     /// How many seconds of inactivity before the terminal shows
     /// an awaiting-input indicator. Set to 0 to disable the indicator.
     ///
