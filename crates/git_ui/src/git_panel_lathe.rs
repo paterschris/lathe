@@ -237,12 +237,18 @@ fn flatten_folder_tree(
         // the same as a parent of another branch) gets a leaf row right after
         // its folder subtree at the same depth.
         if let Some(ix) = folder.entry_ix {
-            rows.push(ExplorerRow::Entry { entry_ix: ix, depth });
+            rows.push(ExplorerRow::Entry {
+                entry_ix: ix,
+                depth,
+            });
         }
     }
     for leaf in child_leaves {
         if let Some(ix) = leaf.entry_ix {
-            rows.push(ExplorerRow::Entry { entry_ix: ix, depth });
+            rows.push(ExplorerRow::Entry {
+                entry_ix: ix,
+                depth,
+            });
         }
     }
 }
@@ -279,6 +285,110 @@ pub(super) fn open_output(
     });
 
     workspace.add_item_to_center(Box::new(editor), window, cx);
+}
+
+pub(super) fn show_discard_undo_toast(
+    workspace: WeakEntity<Workspace>,
+    active_repository: &Entity<Repository>,
+    stash_message: String,
+    discarded_count: usize,
+    cx: &mut AsyncWindowContext,
+) -> anyhow::Result<()> {
+    let workspace_for_toast = workspace.clone();
+    let repo_id = active_repository.read_with(cx, |repository, _| repository.id);
+    let git_store = workspace.update(cx, |workspace, cx| {
+        workspace.project().read(cx).git_store().clone()
+    })?;
+    let label: SharedString = format!("Discarded {discarded_count} file(s)").into();
+    let toast_label = label.clone();
+    cx.update(|_, cx| {
+        let undo_id = git_store.update(cx, |store, cx| {
+            store.record_undo(
+                repo_id,
+                label,
+                project::git_store::undo_log::UndoAction::PopStashByMessage {
+                    message: stash_message,
+                },
+                cx,
+            )
+        });
+        workspace_for_toast
+            .update(cx, |workspace, cx| {
+                let store = git_store.clone();
+                let toast = StatusToast::new(toast_label, cx, move |this, _cx| {
+                    let store = store.clone();
+                    this.icon(
+                        ui::Icon::new(ui::IconName::Undo)
+                            .size(ui::IconSize::Small)
+                            .color(ui::Color::Muted),
+                    )
+                    .action("Undo discard", move |_window, cx| {
+                        store
+                            .update(cx, |store, cx| store.undo(undo_id, cx))
+                            .detach();
+                    })
+                    .dismiss_button(true)
+                });
+                workspace.toggle_status_toast(toast, cx);
+            })
+            .ok();
+    })?;
+    Ok(())
+}
+
+pub(super) struct DiscardSafetyNet {
+    pub stash_message: String,
+    pub discarded_count: usize,
+}
+
+pub(super) async fn create_discard_safety_net(
+    active_repository: &Entity<Repository>,
+    entries: &[GitStatusEntry],
+    cx: &mut AsyncWindowContext,
+) -> Option<DiscardSafetyNet> {
+    // Safety net: stash the about-to-be-discarded changes (including
+    // untracked) so they're recoverable via `git stash list`. Only
+    // stash when there is at least one path to operate on; an empty
+    // stash would still succeed and clutter the stash list.
+    let stash_paths: Vec<_> = entries
+        .iter()
+        .map(|entry| entry.repo_path.clone())
+        .collect();
+    let discarded_count = stash_paths.len();
+    if discarded_count == 0 {
+        return None;
+    }
+
+    // Tag the stash with a deterministic message so the Undo toast
+    // can locate it later by message, not by index — the index
+    // shifts if the user pushes additional stash entries on top.
+    let stash_message = format!(
+        "lathe-discard/{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0)
+    );
+    let stash_task = active_repository.update(cx, |repo, cx| {
+        repo.stash_entries_with_message(stash_paths.clone(), stash_message.clone(), cx)
+    });
+    match stash_task.await {
+        Ok(()) => Some(DiscardSafetyNet {
+            stash_message,
+            discarded_count,
+        }),
+        Err(error) => {
+            // Stashing failed (no tracked content here, or running
+            // against a remote/collab repo where message-tagged
+            // stashes aren't supported). Log but continue: the user
+            // explicitly asked to discard. Undo will be skipped.
+            log::warn!(
+                "lathe-discard stash failed for {} path(s): {error:?}",
+                stash_paths.len()
+            );
+            None
+        }
+    }
 }
 
 /// ANSI handler that accumulates a git command's output as plain text, honoring
@@ -448,12 +558,9 @@ impl super::GitPanel {
                 ExplorerEntry::LocalBranch(_) | ExplorerEntry::RemoteBranch(_)
             )
         });
-        let (locals, remotes): (Vec<_>, Vec<_>) = branches.into_iter().partition(|branch| {
-            branch
-                .ref_name
-                .as_ref()
-                .starts_with("refs/heads/")
-        });
+        let (locals, remotes): (Vec<_>, Vec<_>) = branches
+            .into_iter()
+            .partition(|branch| branch.ref_name.as_ref().starts_with("refs/heads/"));
         // Section order matches what the UI shows top-to-bottom.
         let locals = locals.into_iter().map(ExplorerEntry::LocalBranch);
         let remotes = remotes.into_iter().map(ExplorerEntry::RemoteBranch);
@@ -488,11 +595,7 @@ impl super::GitPanel {
                     .enumerate()
                     .filter(|(_, entry)| entry.section() == section)
                     .filter(|(_, entry)| {
-                        needle.is_empty()
-                            || entry
-                                .label()
-                                .to_lowercase()
-                                .contains(needle)
+                        needle.is_empty() || entry.label().to_lowercase().contains(needle)
                     })
                     .map(|(ix, _)| ix)
                     .collect();
@@ -525,16 +628,17 @@ impl super::GitPanel {
             if is_collapsed {
                 continue;
             }
-            let tree_eligible = matches!(
-                section,
-                ExplorerSection::Local | ExplorerSection::Remote
-            ) && !filter_active;
+            let tree_eligible = matches!(section, ExplorerSection::Local | ExplorerSection::Remote)
+                && !filter_active;
             if tree_eligible {
                 let tree = build_explorer_folder_tree(&self.explorer_entries, indices);
                 flatten_folder_tree(&tree, *section, 0, &mut rows, &collapsed_folders);
             } else {
                 for ix in indices {
-                    rows.push(ExplorerRow::Entry { entry_ix: *ix, depth: 0 });
+                    rows.push(ExplorerRow::Entry {
+                        entry_ix: *ix,
+                        depth: 0,
+                    });
                 }
             }
         }
@@ -555,15 +659,11 @@ impl super::GitPanel {
             .size_full()
             .overflow_hidden()
             .child(
-                h_flex()
-                    .px_3()
-                    .py_1()
-                    .justify_between()
-                    .child(
-                        Label::new(viewing_label)
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
+                h_flex().px_3().py_1().justify_between().child(
+                    Label::new(viewing_label)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
             )
             .child(
                 h_flex().px_3().pb_1().child(
@@ -757,10 +857,11 @@ impl super::GitPanel {
                     } else {
                         Color::Muted
                     }))
-                    .child(Label::new(label).size(LabelSize::Small).when(
-                        is_head,
-                        |label| label.color(Color::Accent),
-                    ))
+                    .child(
+                        Label::new(label)
+                            .size(LabelSize::Small)
+                            .when(is_head, |label| label.color(Color::Accent)),
+                    )
                     .child(div().flex_1())
                     .when_some(tracking_status, |this, status| {
                         this.child(render_tracking_chip(status))
@@ -813,12 +914,7 @@ impl super::GitPanel {
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             this.explorer_selected_row = Some(row_ix);
-                            this.deploy_explorer_context_menu(
-                                event.position,
-                                entry_ix,
-                                window,
-                                cx,
-                            );
+                            this.deploy_explorer_context_menu(event.position, entry_ix, window, cx);
                         }),
                     )
                     .into_any_element()
@@ -949,9 +1045,7 @@ impl super::GitPanel {
         if !self.can_push_and_pull(cx) {
             self.show_error_toast(
                 "delete remote branch",
-                anyhow::anyhow!(
-                    "deleting remote branches is not yet supported on remote projects"
-                ),
+                anyhow::anyhow!("deleting remote branches is not yet supported on remote projects"),
                 cx,
             );
             return;
@@ -959,10 +1053,8 @@ impl super::GitPanel {
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
-        let askpass =
-            self.askpass_delegate(format!("git push {remote_name} --delete"), window, cx);
-        let push_label: SharedString =
-            format!("delete {branch_name} on {remote_name}").into();
+        let askpass = self.askpass_delegate(format!("git push {remote_name} --delete"), window, cx);
+        let push_label: SharedString = format!("delete {branch_name} on {remote_name}").into();
 
         cx.spawn(async move |this, cx| {
             let push = repo.update(cx, |repo, cx| {
@@ -1027,11 +1119,7 @@ impl super::GitPanel {
         };
         let branch_name: SharedString = branch.name().to_string().into();
         let is_head = branch.is_head;
-        let current_branch_name = repo
-            .read(cx)
-            .branch
-            .as_ref()
-            .map(|b| b.name().to_string());
+        let current_branch_name = repo.read(cx).branch.as_ref().map(|b| b.name().to_string());
         let workspace = self.workspace.clone();
         let panel = cx.entity().downgrade();
         // Local branches that actually have a remote-tracking upstream get the
@@ -1061,16 +1149,14 @@ impl super::GitPanel {
                 let workspace = workspace.clone();
                 let panel = panel.clone();
                 menu = menu.entry("Checkout", None, move |_, cx| {
-                    let receiver =
-                        repo.update(cx, |repo, _| repo.change_branch(name.to_string()));
+                    let receiver = repo.update(cx, |repo, _| repo.change_branch(name.to_string()));
                     run_branch_op(cx, workspace.clone(), panel.clone(), receiver, "checkout");
                 });
             }
 
             if let Some(commit) = branch.most_recent_commit.clone() {
                 let sha: SharedString = commit.sha.to_string().into();
-                let short_sha: SharedString =
-                    sha.chars().take(7).collect::<String>().into();
+                let short_sha: SharedString = sha.chars().take(7).collect::<String>().into();
                 let repo = repo.clone();
                 let workspace = workspace.clone();
                 menu = menu.entry("Branch from here…", None, move |window, cx| {
@@ -1113,31 +1199,23 @@ impl super::GitPanel {
                 let current_label = current.clone();
                 let workspace_m = workspace.clone();
                 let panel_m = panel.clone();
-                menu = menu.entry(
-                    format!("Merge into {current_label}"),
-                    None,
-                    move |_, cx| {
-                        let receiver = repo_merge.update(cx, |repo, _| {
-                            repo.merge(name.to_string(), MergeOptions::default())
-                        });
-                        run_branch_op(cx, workspace_m.clone(), panel_m.clone(), receiver, "merge");
-                    },
-                );
+                menu = menu.entry(format!("Merge into {current_label}"), None, move |_, cx| {
+                    let receiver = repo_merge.update(cx, |repo, _| {
+                        repo.merge(name.to_string(), MergeOptions::default())
+                    });
+                    run_branch_op(cx, workspace_m.clone(), panel_m.clone(), receiver, "merge");
+                });
 
                 let name = branch_name.clone();
                 let repo_rebase = repo.clone();
                 let workspace_r = workspace.clone();
                 let panel_r = panel.clone();
-                menu = menu.entry(
-                    format!("Rebase {current} onto this"),
-                    None,
-                    move |_, cx| {
-                        let receiver = repo_rebase.update(cx, |repo, _| {
-                            repo.rebase(name.to_string(), RebaseOptions::default())
-                        });
-                        run_branch_op(cx, workspace_r.clone(), panel_r.clone(), receiver, "rebase");
-                    },
-                );
+                menu = menu.entry(format!("Rebase {current} onto this"), None, move |_, cx| {
+                    let receiver = repo_rebase.update(cx, |repo, _| {
+                        repo.rebase(name.to_string(), RebaseOptions::default())
+                    });
+                    run_branch_op(cx, workspace_r.clone(), panel_r.clone(), receiver, "rebase");
+                });
             }
 
             if !is_head {
@@ -1155,7 +1233,13 @@ impl super::GitPanel {
                     let receiver = repo_del.update(cx, |repo, _| {
                         repo.delete_branch(is_remote, name.to_string(), false)
                     });
-                    run_branch_op(cx, workspace_d.clone(), panel_d.clone(), receiver, "delete branch");
+                    run_branch_op(
+                        cx,
+                        workspace_d.clone(),
+                        panel_d.clone(),
+                        receiver,
+                        "delete branch",
+                    );
                 });
 
                 if let Some((remote_name, remote_branch_name)) = upstream_for_remote_delete {
@@ -1205,7 +1289,9 @@ impl super::GitPanel {
         let index = stash.index;
 
         let context_menu = ContextMenu::build(window, cx, |menu, _window, _cx| {
-            let mut menu = menu.context(self.focus_handle.clone()).header(header.clone());
+            let mut menu = menu
+                .context(self.focus_handle.clone())
+                .header(header.clone());
 
             {
                 let repo = repo.clone();
@@ -1310,11 +1396,7 @@ fn render_pinned_strip_row(ix: usize, path: String, cx: &Context<GitPanel>) -> A
 }
 
 impl super::GitPanel {
-    pub(crate) fn fetch_all_repositories(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn fetch_all_repositories(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_push_and_pull(cx) {
             return;
         }
@@ -1339,9 +1421,7 @@ impl super::GitPanel {
         let mut fetch_tasks = Vec::with_capacity(total);
         for repo in repo_entities {
             let askpass = self.askpass_delegate("git fetch", window, cx);
-            let receiver = repo.update(cx, |repo, cx| {
-                repo.fetch(FetchOptions::All, askpass, cx)
-            });
+            let receiver = repo.update(cx, |repo, cx| repo.fetch(FetchOptions::All, askpass, cx));
             fetch_tasks.push(receiver);
         }
 
@@ -1392,11 +1472,7 @@ impl super::GitPanel {
         .detach_and_log_err(cx);
     }
 
-    pub(crate) fn pull_all_repositories(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn pull_all_repositories(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_push_and_pull(cx) {
             return;
         }
@@ -1523,7 +1599,8 @@ impl super::GitPanel {
         let project = self.project.clone();
         let git_store = project.read(cx).git_store().clone();
         let store_ref = git_store.read(cx);
-        let mut repos: Vec<Entity<Repository>> = store_ref.repositories().values().cloned().collect();
+        let mut repos: Vec<Entity<Repository>> =
+            store_ref.repositories().values().cloned().collect();
         repos.sort_by(|a, b| {
             a.read(cx)
                 .display_name()
@@ -1582,10 +1659,7 @@ impl super::GitPanel {
                             .icon_size(IconSize::Small)
                             .tooltip(Tooltip::text("Fetch all repositories"))
                             .on_click(|_, window, cx| {
-                                window.dispatch_action(
-                                    git::FetchAllRepositories.boxed_clone(),
-                                    cx,
-                                );
+                                window.dispatch_action(git::FetchAllRepositories.boxed_clone(), cx);
                             }),
                     )
                     .child(
@@ -1593,10 +1667,7 @@ impl super::GitPanel {
                             .icon_size(IconSize::Small)
                             .tooltip(Tooltip::text("Pull all repositories"))
                             .on_click(|_, window, cx| {
-                                window.dispatch_action(
-                                    git::PullAllRepositories.boxed_clone(),
-                                    cx,
-                                );
+                                window.dispatch_action(git::PullAllRepositories.boxed_clone(), cx);
                             }),
                     )
                     .child(
@@ -1621,9 +1692,12 @@ impl super::GitPanel {
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     )
-                    .children(pinned.iter().enumerate().map(|(ix, path)| {
-                        render_pinned_strip_row(ix, path.clone(), cx)
-                    }));
+                    .children(
+                        pinned
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, path)| render_pinned_strip_row(ix, path.clone(), cx)),
+                    );
             }
             Some(
                 list.border_b_1()
@@ -1685,13 +1759,13 @@ impl super::GitPanel {
                     IconName::Folder
                 })
                 .size(IconSize::XSmall)
-                .color(if is_active { Color::Accent } else { Color::Muted }),
+                .color(if is_active {
+                    Color::Accent
+                } else {
+                    Color::Muted
+                }),
             )
-            .child(
-                Label::new(display_name)
-                    .size(LabelSize::XSmall)
-                    .truncate(),
-            )
+            .child(Label::new(display_name).size(LabelSize::XSmall).truncate())
             .child(
                 Label::new(branch_label)
                     .size(LabelSize::XSmall)
@@ -1725,18 +1799,14 @@ impl super::GitPanel {
                             menu.entry("Fetch this repository", None, {
                                 let repo = repo.clone();
                                 move |window, cx| {
-                                    repo.update(cx, |repo, cx| {
-                                        repo.set_as_active_repository(cx)
-                                    });
+                                    repo.update(cx, |repo, cx| repo.set_as_active_repository(cx));
                                     window.dispatch_action(git::Fetch.boxed_clone(), cx);
                                 }
                             })
                             .entry("Pull this repository", None, {
                                 let repo = repo.clone();
                                 move |window, cx| {
-                                    repo.update(cx, |repo, cx| {
-                                        repo.set_as_active_repository(cx)
-                                    });
+                                    repo.update(cx, |repo, cx| repo.set_as_active_repository(cx));
                                     window.dispatch_action(git::Pull.boxed_clone(), cx);
                                 }
                             })
@@ -1847,6 +1917,100 @@ impl super::GitPanel {
         });
     }
 
+    fn split_patch(patch: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut current_patch = String::new();
+
+        for line in patch.lines() {
+            if line.starts_with("---") && !current_patch.is_empty() {
+                result.push(current_patch.trim_end_matches('\n').into());
+                current_patch = String::new();
+            }
+            current_patch.push_str(line);
+            current_patch.push('\n');
+        }
+
+        if !current_patch.is_empty() {
+            result.push(current_patch.trim_end_matches('\n').into());
+        }
+
+        result
+    }
+
+    fn truncate_iteratively(patch: &str, max_bytes: usize) -> String {
+        let mut current_size = patch.len();
+        if current_size <= max_bytes {
+            return patch.to_string();
+        }
+        let file_patches = Self::split_patch(patch);
+        let mut file_infos: Vec<TruncatedPatch> = file_patches
+            .iter()
+            .filter_map(|patch| TruncatedPatch::from_unified_diff(patch))
+            .collect();
+
+        if file_infos.is_empty() {
+            return patch.to_string();
+        }
+
+        current_size = file_infos
+            .iter()
+            .map(|file| file.calculate_size())
+            .sum::<usize>();
+        while current_size > max_bytes {
+            let file_idx = file_infos
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| file.hunks_to_keep > 1)
+                .max_by_key(|(_, file)| file.hunks_to_keep)
+                .map(|(idx, _)| idx);
+            match file_idx {
+                Some(idx) => {
+                    let file = &mut file_infos[idx];
+                    let size_before = file.calculate_size();
+                    file.hunks_to_keep -= 1;
+                    let size_after = file.calculate_size();
+                    let saved = size_before.saturating_sub(size_after);
+                    current_size = current_size.saturating_sub(saved);
+                }
+                None => {
+                    break;
+                }
+            }
+        }
+
+        file_infos
+            .iter()
+            .map(|info| info.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn compress_commit_diff(diff_text: &str, max_bytes: usize) -> String {
+        if diff_text.len() <= max_bytes {
+            return diff_text.to_string();
+        }
+
+        let mut compressed = diff_text
+            .lines()
+            .map(|line| {
+                if line.len() > 256 {
+                    format!("{}...[truncated]\n", &line[..line.floor_char_boundary(256)])
+                } else {
+                    format!("{}\n", line)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+
+        if compressed.len() <= max_bytes {
+            return compressed;
+        }
+
+        compressed = Self::truncate_iteratively(&compressed, max_bytes);
+
+        compressed
+    }
+
     pub(super) async fn load_commit_message_prompt(cx: &mut AsyncApp) -> String {
         let load = async {
             let store = cx.update(|cx| PromptStore::global(cx)).await.ok()?;
@@ -1867,7 +2031,11 @@ impl super::GitPanel {
         let bound_id = workspace.bound_collab_account_id()?.to_string();
         let client = workspace.client().clone();
 
-        let remote_url = self.active_repository.as_ref()?.read(cx).default_remote_url()?;
+        let remote_url = self
+            .active_repository
+            .as_ref()?
+            .read(cx)
+            .default_remote_url()?;
         let provider_registry = GitHostingProviderRegistry::global(cx);
         let (provider, _) = git::parse_git_remote_url(provider_registry, &remote_url)?;
         if provider.name() != "GitHub" {
@@ -1894,6 +2062,73 @@ impl super::GitPanel {
         cx: &mut Context<Self>,
     ) {
         self.set_active_tab(GitPanelTab::Explorer, window, cx);
+    }
+}
+
+struct TruncatedPatch {
+    header: String,
+    hunks: Vec<String>,
+    hunks_to_keep: usize,
+}
+
+impl TruncatedPatch {
+    fn from_unified_diff(patch_str: &str) -> Option<Self> {
+        let lines: Vec<&str> = patch_str.lines().collect();
+        if lines.len() < 2 {
+            return None;
+        }
+        let header = format!("{}\n{}\n", lines[0], lines[1]);
+        let mut hunks = Vec::new();
+        let mut current_hunk = String::new();
+        for line in &lines[2..] {
+            if line.starts_with("@@") {
+                if !current_hunk.is_empty() {
+                    hunks.push(current_hunk);
+                }
+                current_hunk = format!("{}\n", line);
+            } else if !current_hunk.is_empty() {
+                current_hunk.push_str(line);
+                current_hunk.push('\n');
+            }
+        }
+        if !current_hunk.is_empty() {
+            hunks.push(current_hunk);
+        }
+        if hunks.is_empty() {
+            return None;
+        }
+        let hunks_to_keep = hunks.len();
+        Some(TruncatedPatch {
+            header,
+            hunks,
+            hunks_to_keep,
+        })
+    }
+
+    fn calculate_size(&self) -> usize {
+        let mut size = self.header.len();
+        for (i, hunk) in self.hunks.iter().enumerate() {
+            if i < self.hunks_to_keep {
+                size += hunk.len();
+            }
+        }
+        size
+    }
+}
+
+impl std::fmt::Display for TruncatedPatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.header)?;
+        for (i, hunk) in self.hunks.iter().enumerate() {
+            if i < self.hunks_to_keep {
+                formatter.write_str(hunk)?;
+            }
+        }
+        let skipped_hunks = self.hunks.len() - self.hunks_to_keep;
+        if skipped_hunks > 0 {
+            writeln!(formatter, "[...skipped {} hunks...]", skipped_hunks)?;
+        }
+        Ok(())
     }
 }
 
@@ -1949,18 +2184,8 @@ impl super::GitPanel {
                     .hunks(&buffer_snapshot.text)
                     .enumerate()
                     .map(|(idx, hunk)| {
-                        let start = hunk
-                            .buffer_range
-                            .start
-                            .to_point(&buffer_snapshot.text)
-                            .row
-                            + 1;
-                        let end = hunk
-                            .buffer_range
-                            .end
-                            .to_point(&buffer_snapshot.text)
-                            .row
-                            + 1;
+                        let start = hunk.buffer_range.start.to_point(&buffer_snapshot.text).row + 1;
+                        let end = hunk.buffer_range.end.to_point(&buffer_snapshot.text).row + 1;
                         let line_label: SharedString = if start == end {
                             format!("Line {start}").into()
                         } else {
@@ -2005,7 +2230,10 @@ impl super::GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(self.hunk_states.get(&repo_path), Some(HunkLoadState::Loaded { .. })) {
+        if matches!(
+            self.hunk_states.get(&repo_path),
+            Some(HunkLoadState::Loaded { .. })
+        ) {
             return;
         }
         self.hunk_states
@@ -2015,10 +2243,7 @@ impl super::GitPanel {
         };
         let project = self.project.clone();
         let git_store = project.read(cx).git_store().clone();
-        let Some(project_path) = repo
-            .read(cx)
-            .repo_path_to_project_path(&repo_path, cx)
-        else {
+        let Some(project_path) = repo.read(cx).repo_path_to_project_path(&repo_path, cx) else {
             self.hunk_states.insert(
                 repo_path,
                 HunkLoadState::Failed("no project path for repo path".into()),
@@ -2029,8 +2254,7 @@ impl super::GitPanel {
             // `project` and `git_store` are strong handles; `Entity::update`
             // via `AppContext` returns the closure value directly (no Result
             // wrapper), so we don't `?` after these calls.
-            let open_task = project
-                .update(cx, |project, cx| project.open_buffer(project_path, cx));
+            let open_task = project.update(cx, |project, cx| project.open_buffer(project_path, cx));
             let buffer = match open_task.await {
                 Ok(buffer) => buffer,
                 Err(err) => {
@@ -2050,10 +2274,9 @@ impl super::GitPanel {
             // `stage_or_unstage_hunks` to compute a new index text. The plain
             // `open_unstaged_diff` returns a diff with `secondary_diff = None`,
             // which makes the stage/unstage call a no-op.
-            let diff_task = git_store
-                .update(cx, |store, cx| {
-                    store.open_uncommitted_diff(buffer.clone(), cx)
-                });
+            let diff_task = git_store.update(cx, |store, cx| {
+                store.open_uncommitted_diff(buffer.clone(), cx)
+            });
             let diff = match diff_task.await {
                 Ok(diff) => diff,
                 Err(err) => {
@@ -2094,12 +2317,7 @@ impl super::GitPanel {
     /// editor's `restore_diff_hunks` flow — also unstages the hunk so the
     /// discard is reflected in both worktree and index. No-op if the file is
     /// newly created (no diff base to revert to).
-    fn discard_hunk(
-        &mut self,
-        repo_path: &RepoPath,
-        hunk_index: usize,
-        cx: &mut Context<Self>,
-    ) {
+    fn discard_hunk(&mut self, repo_path: &RepoPath, hunk_index: usize, cx: &mut Context<Self>) {
         let Some(HunkLoadState::Loaded { buffer, diff, .. }) = self.hunk_states.get(repo_path)
         else {
             return;
@@ -2119,8 +2337,7 @@ impl super::GitPanel {
         // Newly-created files have no base text to revert to; the equivalent
         // is "delete this hunk's lines from the buffer", which is what
         // `restore_diff_hunks` skips in the editor. We do the same.
-        if hunk.diff_base_byte_range.is_empty()
-            && hunk.buffer_range.start == hunk.buffer_range.end
+        if hunk.diff_base_byte_range.is_empty() && hunk.buffer_range.start == hunk.buffer_range.end
         {
             return;
         }
@@ -2186,7 +2403,11 @@ impl super::GitPanel {
         let repo_path = hunk.repo_path.clone();
         let repo_path_for_discard = hunk.repo_path.clone();
         let hunk_index = hunk.hunk_index;
-        let action_label = if is_staged { "Unstage hunk" } else { "Stage hunk" };
+        let action_label = if is_staged {
+            "Unstage hunk"
+        } else {
+            "Stage hunk"
+        };
 
         h_flex()
             .id(("git-hunk-row", ix))
@@ -2197,7 +2418,11 @@ impl super::GitPanel {
             .child(
                 Icon::new(IconName::Hash)
                     .size(IconSize::XSmall)
-                    .color(if is_staged { Color::Accent } else { Color::Muted }),
+                    .color(if is_staged {
+                        Color::Accent
+                    } else {
+                        Color::Muted
+                    }),
             )
             .child(
                 Label::new(label)
