@@ -38,7 +38,22 @@ From any commit in the Git history view, create a new branch off that revision w
 Check out any commit SHA from the history view into detached HEAD. For inspecting old state without losing your current branch position. Local repositories only for now; collab projects bail with a clear error.
 
 ### Interactive rebase with drag-and-drop
-The interactive rebase modal supports drag-and-drop reordering of commits and per-row pick / squash / edit / drop actions inline.
+The interactive rebase modal supports drag-and-drop reordering of commits and per-row pick / squash / edit / drop actions inline. Dragging a branch onto another in the history view shows a confirmation modal with a preview of what the rebase will do before anything runs.
+
+### Git panel: Explorer and History tabs
+The git panel has three tabs. **Changes** is the familiar staging view, **History** shows the commit log inline, and **Explorer** lists branches, worktrees, and stashes for the repository in one filterable tree. A multi-repo strip keeps every repository in the workspace one click away, with fetch-all and pull-all actions.
+
+### Inline hunk staging
+Expand any file row in the Changes list to see its individual hunks and stage or unstage them one at a time, without opening a diff view.
+
+### Worktrees that start up to date
+Creating a worktree from a remote branch fetches the latest origin state first, so the new worktree starts from the current remote tip instead of a stale local ref.
+
+### File history view
+Open the full commit history of a single file from the project panel and browse how it changed over time.
+
+### Pull request reviews (in progress)
+A pull request panel with browser-based auth for GitHub and Bitbucket Cloud: browse PRs, read and leave review comments, see reviewers, and approve or request changes. Verdict buttons toggle, so clicking Approve again retracts your approval. Hidden in the current beta while the credentials UI is finished.
 
 ### Terminal awaiting-input indicator
 Shows a return icon in the terminal tab and title bar when Claude Code or other interactive prompts are waiting for input.
@@ -50,6 +65,12 @@ Terminal tabs get a subtle green background when active, making them easy to spo
 
 ### Terminal focus fix
 Switching to a terminal tab via ctrl+tab properly activates the cursor without needing to click into the terminal.
+
+### Terminal bell sound
+Choose what sound plays when a terminal rings its bell via the `terminal.bell` setting. Imported automatically from VS Code's `accessibility.signals.terminalBell` when migrating settings.
+
+### AI agent accounts and approval control
+Sign in to multiple subscription accounts for the external agents in the Agent Panel (Claude Code, Codex, Gemini) and switch between them from the panel's account chip. An approval selector picks each agent's approval / sandbox level; the level is applied when the agent process spawns, so changes take effect on the next thread.
 
 ### Multi-account collab switcher
 Sign into more than one Zed Cloud account and switch between them from the avatar menu. Saved accounts are listed under **Accounts** by their GitHub username, with **Add Account…** and **Sign Out** actions.
@@ -158,7 +179,7 @@ script/install-fork-linux
 
 Lathe periodically merges from [upstream Zed](https://github.com/zed-industries/zed) to stay current with new features and fixes. Custom changes are kept in separate commits to make merges straightforward.
 
-**Last synced with upstream Zed: 2026-04-22.**
+**Last synced with upstream Zed: 2026-07-14.**
 
 > **2026-04-24:** `main` was rewritten to fix a long-standing ancestry tangle that made the fork display as ~37k commits ahead and ~37k behind upstream. The new history is 9 thematic commits on top of `upstream/main`, and the source tree is unchanged. Original SHAs are preserved on the `archive/pre-rebuild-20260424` branch. Existing clones can recover with:
 >
