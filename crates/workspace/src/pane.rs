@@ -21,9 +21,8 @@ use gpui::{
     Action, Anchor, AnyElement, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Div,
     DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
     Focusable, Hsla, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel,
-    Render,
-    ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window, actions,
-    anchored, deferred, prelude::*,
+    Render, ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window,
+    actions, anchored, deferred, prelude::*,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};
@@ -4960,10 +4959,13 @@ impl Render for DraggedTab {
             window,
             cx,
         );
-        let icon =
-            self.pane
-                .read(cx)
-                .tab_icon_element(self.item.as_ref(), self.is_active, None, window, cx);
+        let icon = self.pane.read(cx).tab_icon_element(
+            self.item.as_ref(),
+            self.is_active,
+            None,
+            window,
+            cx,
+        );
         Tab::new("")
             .toggle_state(self.is_active)
             .children(icon)

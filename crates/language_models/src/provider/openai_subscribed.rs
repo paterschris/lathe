@@ -1113,12 +1113,11 @@ impl Render for ConfigurationView {
             .when(!self.compact, |this| {
                 this.child(Label::new(SUBSCRIPTION_DESCRIPTION))
             })
-            .child(
-                Button::new("sign-in", "Sign in with ChatGPT")
-                    .on_click(move |_, _window, cx| {
-                        do_sign_in(&provider_state, &http_client, cx);
-                    }),
-            )
+            .child(Button::new("sign-in", "Sign in with ChatGPT").on_click(
+                move |_, _window, cx| {
+                    do_sign_in(&provider_state, &http_client, cx);
+                },
+            ))
             .into_any_element()
     }
 }

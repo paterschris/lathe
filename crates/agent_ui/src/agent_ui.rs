@@ -70,9 +70,7 @@ use std::any::TypeId;
 use std::path::{Path, PathBuf};
 use workspace::{OpenOptions, Workspace};
 
-use crate::agent_configuration::{
-    AddAiAccountModal, ManageAiAccountsModal, ManageProfilesModal,
-};
+use crate::agent_configuration::{AddAiAccountModal, ManageAiAccountsModal, ManageProfilesModal};
 pub use crate::agent_connection_store::{ActiveAcpConnection, AgentConnectionStore};
 pub use crate::agent_panel::{
     AgentPanel, AgentPanelEvent, AgentPanelTerminalInfo, MaxIdleRetainedThreads, TerminalId,

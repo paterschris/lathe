@@ -42,8 +42,8 @@ use std::{
     time::Duration,
 };
 use ui::{
-    Checkbox, ContextMenu, HighlightedLabel, ListItem, ListItemSpacing, PopoverMenuHandle,
-    Tooltip, prelude::*,
+    Checkbox, ContextMenu, HighlightedLabel, ListItem, ListItemSpacing, PopoverMenuHandle, Tooltip,
+    prelude::*,
 };
 use util::{
     ResultExt, maybe,
@@ -2203,7 +2203,6 @@ impl FileFinderDelegate {
                 .end_slot::<AnyElement>(end_slot),
         )
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

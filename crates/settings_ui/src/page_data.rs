@@ -8147,7 +8147,6 @@ fn ai_page(cx: &App) -> SettingsPage {
             files: USER,
         }));
 
-
         items.extend([
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Single File Review",

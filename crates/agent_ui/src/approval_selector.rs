@@ -177,7 +177,11 @@ impl Render for ApprovalSelector {
         let trigger_button = Button::new("approval-selector-trigger", current_name)
             .label_size(LabelSize::Small)
             .color(Color::Muted)
-            .start_icon(Icon::new(lock_icon).size(IconSize::XSmall).color(Color::Muted))
+            .start_icon(
+                Icon::new(lock_icon)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
             .end_icon(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted));
 
         PopoverMenu::new("approval-selector")

@@ -21,8 +21,8 @@ use editor::actions::OpenExcerpts;
 use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 
 use crate::completion_provider::PromptLocalCommand;
-use crate::open_abs_path_at_point;
 use crate::message_editor::SharedSessionCapabilities;
+use crate::open_abs_path_at_point;
 use crate::ui::{
     SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
     TerminalToolHeader,
