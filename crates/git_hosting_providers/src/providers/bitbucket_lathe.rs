@@ -393,12 +393,12 @@ impl BitbucketPullRequest {
     }
 
     /// Whether the authenticated user (matched by account uuid) is a designated
-    /// reviewer on this PR who has not yet approved or requested changes.
-    /// Comment-only participation still counts as awaiting, matching Bitbucket's
-    /// own "needs my review" view. Reviewers added via a default-reviewer group
-    /// are materialized as participants with role REVIEWER, so this catches them
-    /// even when the top-level `reviewers` array omits them.
-    pub(super) fn is_awaiting_reviewer(&self, viewer_uuid: &str) -> bool {
+    /// reviewer on this PR, whether or not they have already approved or
+    /// requested changes. Reviewers added via a default-reviewer group are
+    /// materialized as participants with role REVIEWER, so this catches them even
+    /// when the top-level `reviewers` array omits them. Callers distinguish an
+    /// outstanding review from a completed one via the per-reviewer verdict.
+    pub(super) fn is_reviewer(&self, viewer_uuid: &str) -> bool {
         self.participants
             .iter()
             .find(|participant| {
@@ -413,7 +413,6 @@ impl BitbucketPullRequest {
                     .role
                     .as_deref()
                     .is_some_and(|role| role.eq_ignore_ascii_case("REVIEWER"))
-                    && participant_verdict(participant).is_none()
             })
     }
 
@@ -536,6 +535,8 @@ impl BitbucketPullRequest {
             // Filled in by `get_pull_request` via a separate commits request; the
             // PR object itself carries no commit count.
             commits: None,
+            // Filled in by `get_pull_request` via a separate compare request.
+            behind_by: None,
             // Resolved by `get_pull_request` from the PR's participants once the
             // authenticated account's uuid is known.
             viewer_review: None,

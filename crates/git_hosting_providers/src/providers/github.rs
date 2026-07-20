@@ -321,7 +321,7 @@ impl GitHostingProvider for Github {
         // Resolving "review requested from me" needs the caller's own login, so
         // fetch it once up front and match it against each PR's requested
         // reviewers below.
-        let reviewer_login = if filter.reviewer_is_me {
+        let authenticated_login = if filter.reviewer_is_me || filter.author_is_me {
             Some(
                 self.fetch_authenticated_login(&auth, &http_client)
                     .await?
@@ -331,22 +331,46 @@ impl GitHostingProvider for Github {
             None
         };
         let state = github_list_state(&filter);
-        let per_page = filter.limit.unwrap_or(50).clamp(1, 100);
-        let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls?state={state}&per_page={per_page}&sort=updated&direction=desc",
-            owner = remote.owner,
-            repo = remote.repo,
-        );
-        let request = github_request(
-            GithubMethod::Get,
-            &url,
-            "application/vnd.github+json",
-            &auth,
-            None,
-        )?;
-        let bytes = github_send(&http_client, request, "listing GitHub pull requests").await?;
-        let raw: Vec<GithubPullRequest> =
-            serde_json::from_slice(&bytes).context("parsing GitHub pull request list")?;
+        // Resolving "me" (reviewer or author) matches client-side below, so a
+        // single page of `limit` rows would miss any match outside the most
+        // recently updated window. In that case scan several pages up to a cap,
+        // mirroring the Bitbucket provider. A plain listing stays one page.
+        let deep_scan = filter.reviewer_is_me || filter.author_is_me;
+        let per_page = if deep_scan {
+            100
+        } else {
+            filter.limit.unwrap_or(50).clamp(1, 100)
+        };
+        let scan_cap = if deep_scan {
+            (filter.limit.unwrap_or(50) as usize).max(200)
+        } else {
+            per_page as usize
+        };
+        let mut raw: Vec<GithubPullRequest> = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let url = format!(
+                "https://api.{host}/repos/{owner}/{repo}/pulls?state={state}&per_page={per_page}&page={page}&sort=updated&direction=desc",
+                owner = remote.owner,
+                repo = remote.repo,
+            );
+            let request = github_request(
+                GithubMethod::Get,
+                &url,
+                "application/vnd.github+json",
+                &auth,
+                None,
+            )?;
+            let bytes = github_send(&http_client, request, "listing GitHub pull requests").await?;
+            let batch: Vec<GithubPullRequest> =
+                serde_json::from_slice(&bytes).context("parsing GitHub pull request list")?;
+            let batch_len = batch.len();
+            raw.extend(batch);
+            if !deep_scan || batch_len < per_page as usize || raw.len() >= scan_cap {
+                break;
+            }
+            page += 1;
+        }
 
         let mut summaries = Vec::new();
         for pr in raw {
@@ -366,11 +390,21 @@ impl GitHostingProvider for Github {
                     continue;
                 }
             }
-            if let Some(login) = &reviewer_login
-                && !pr
-                    .requested_reviewers
-                    .iter()
-                    .any(|reviewer| reviewer.login.eq_ignore_ascii_case(login.as_ref()))
+            if filter.author_is_me
+                && !pr.user.as_ref().is_some_and(|user| {
+                    authenticated_login
+                        .as_ref()
+                        .is_some_and(|login| user.login.eq_ignore_ascii_case(login.as_ref()))
+                })
+            {
+                continue;
+            }
+            if filter.reviewer_is_me
+                && !pr.requested_reviewers.iter().any(|reviewer| {
+                    authenticated_login
+                        .as_ref()
+                        .is_some_and(|login| reviewer.login.eq_ignore_ascii_case(login.as_ref()))
+                })
             {
                 continue;
             }
@@ -435,7 +469,78 @@ impl GitHostingProvider for Github {
                 .and_then(|reviewer| reviewer.verdict);
             detail.reviewers = reviewers;
         }
+        // Best-effort: how many commits the PR is behind its base branch. GitHub's
+        // compare endpoint reports `behind_by` = commits on base not reachable
+        // from head. A failure just leaves the indicator unset.
+        let compare_url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/compare/{base}...{head}",
+            owner = remote.owner,
+            repo = remote.repo,
+            base = detail.target_branch,
+            head = detail.source_branch,
+        );
+        detail.behind_by = async {
+            let request = github_request(
+                GithubMethod::Get,
+                &compare_url,
+                "application/vnd.github+json",
+                &auth,
+                None,
+            )?;
+            let bytes = github_send(&http_client, request, "comparing GitHub branches").await?;
+            let comparison: GithubComparison =
+                serde_json::from_slice(&bytes).context("parsing GitHub comparison")?;
+            anyhow::Ok(comparison.behind_by)
+        }
+        .await
+        .log_err();
         Ok(detail)
+    }
+
+    async fn pull_request_reviewers(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestReviewer>> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            None,
+        )?;
+        let bytes = github_send(&http_client, request, "fetching GitHub pull request").await?;
+        let pr: GithubPullRequest =
+            serde_json::from_slice(&bytes).context("parsing GitHub pull request")?;
+        let requested: Vec<SharedString> = pr
+            .requested_reviewers
+            .iter()
+            .map(|user| SharedString::from(user.login.clone()))
+            .collect();
+        let reviews = self
+            .fetch_reviews(remote, number, &auth, &http_client)
+            .await?;
+        let viewer_login = self
+            .fetch_authenticated_login(&auth, &http_client)
+            .await
+            .log_err()
+            .flatten();
+        Ok(build_github_reviewers(
+            &reviews,
+            &requested,
+            viewer_login.as_deref(),
+        ))
     }
 
     async fn pull_request_review_state(

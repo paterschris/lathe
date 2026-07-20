@@ -308,6 +308,20 @@ pub trait GitHostingProvider {
     ) -> Result<Option<PullRequestReviewVerdict>> {
         Ok(None)
     }
+
+    /// All reviewers on a single PR and their latest verdicts. Lighter than
+    /// `get_pull_request`: used to decorate PR list rows. `verdict: None` is a
+    /// requested reviewer who has not reviewed yet. Hosts that cannot report
+    /// reviewers return an empty vec; without auth, `is_me` is false everywhere.
+    async fn pull_request_reviewers(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestReviewer>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Which side of a diff an inline review comment anchors to. `Right` is the

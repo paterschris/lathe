@@ -171,6 +171,7 @@ async fn load_pull_requests(
         states: Some(vec![PullRequestState::Open]),
         author: None,
         reviewer_is_me: false,
+        author_is_me: false,
         limit: Some(50),
     };
     // Cloning the parsed remote requires reconstruction since the struct

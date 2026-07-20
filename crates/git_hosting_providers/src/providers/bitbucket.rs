@@ -345,7 +345,7 @@ impl GitHostingProvider for Bitbucket {
         }
         let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
         let limit = filter.limit.unwrap_or(50);
-        let viewer_uuid = if filter.reviewer_is_me {
+        let viewer_uuid = if filter.reviewer_is_me || filter.author_is_me {
             Some(
                 self.fetch_authenticated_uuid(&auth, &http_client)
                     .await?
@@ -363,7 +363,7 @@ impl GitHostingProvider for Bitbucket {
         // still-awaiting default/group reviewers. So scan open PRs with their
         // participants pulled inline (`+values.participants`) and filter
         // client-side below. Scan well past `limit` since most rows get dropped.
-        let scan_cap = if viewer_uuid.is_some() {
+        let scan_cap = if filter.reviewer_is_me || filter.author_is_me {
             (limit as usize).max(200)
         } else {
             limit as usize
@@ -373,12 +373,22 @@ impl GitHostingProvider for Bitbucket {
             .map(|state| format!("state={state}"))
             .collect::<Vec<_>>()
             .join("&");
-        let first_url = if viewer_uuid.is_some() {
+        let author_query = if filter.author_is_me {
+            viewer_uuid
+                .as_ref()
+                .map(|uuid| format!("&q={}", encode(&format!("author.uuid=\"{uuid}\""))))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let first_url = if filter.reviewer_is_me {
             format!(
-                "{api_base}/pullrequests?{state_query}&pagelen=50&sort=-updated_on&fields=%2Bvalues.participants"
+                "{api_base}/pullrequests?{state_query}{author_query}&pagelen=50&sort=-updated_on&fields=%2Bvalues.participants"
             )
         } else {
-            format!("{api_base}/pullrequests?{state_query}&pagelen=50&sort=-updated_on")
+            format!(
+                "{api_base}/pullrequests?{state_query}{author_query}&pagelen=50&sort=-updated_on"
+            )
         };
         let mut raw: Vec<BitbucketPullRequest> = bitbucket_get_paginated(
             &http_client,
@@ -393,7 +403,7 @@ impl GitHostingProvider for Bitbucket {
         // list endpoint (participants only ride along on the single-PR detail). If
         // no row carried any participants, hydrate them per-PR with bounded
         // concurrency so the reviewer filter still has data to work with.
-        if viewer_uuid.is_some()
+        if filter.reviewer_is_me
             && !raw.is_empty()
             && raw.iter().all(|pr| pr.participants.is_empty())
         {
@@ -435,6 +445,15 @@ impl GitHostingProvider for Bitbucket {
         let mut summaries = Vec::new();
         for pr in raw {
             let pr_state = pr.pull_request_state();
+            // Bitbucket drops the top-level `state=` param once a `q` BBQL query
+            // is present (e.g. the `author.uuid` clause for author_is_me), so the
+            // server may return other states. Re-apply the state filter here,
+            // mirroring the GitHub provider, so the requested states are honored.
+            if let Some(states) = &filter.states
+                && !states.contains(&pr_state)
+            {
+                continue;
+            }
             if let Some(author) = &filter.author {
                 let login = pr
                     .author
@@ -445,11 +464,13 @@ impl GitHostingProvider for Bitbucket {
                     continue;
                 }
             }
-            // "Awaiting my review": keep only PRs where I'm a reviewer who hasn't
-            // approved or requested changes yet. Comment-only participation still
-            // counts as awaiting, matching the host's own "needs my review" view.
-            if let Some(uuid) = &viewer_uuid {
-                if !pr.is_awaiting_reviewer(uuid) {
+            // "My reviews": keep every PR where I'm a reviewer, whether or not I
+            // have already voted. The panel distinguishes approved /
+            // changes-requested / still-pending from each reviewer's verdict.
+            if filter.reviewer_is_me
+                && let Some(uuid) = &viewer_uuid
+            {
+                if !pr.is_reviewer(uuid) {
                     continue;
                 }
             }
@@ -508,7 +529,50 @@ impl GitHostingProvider for Bitbucket {
         .await
         .log_err()
         .map(|commits| commits.len() as u32);
+        // Best-effort "behind by N commits": commits reachable from the target
+        // branch but not from the source branch. Bitbucket exposes no divergence
+        // field, so list them (bounded) and count. A failure leaves it unset.
+        let behind_url = format!(
+            "{api_base}/commits?include={target}&exclude={source}&pagelen=100",
+            target = encode(&detail.target_branch),
+            source = encode(&detail.source_branch),
+        );
+        detail.behind_by = bitbucket_get_paginated::<BitbucketCommitId>(
+            &http_client,
+            behind_url,
+            &auth,
+            "counting Bitbucket commits behind base",
+            250,
+        )
+        .await
+        .log_err()
+        .map(|commits| commits.len() as u32);
         Ok(detail)
+    }
+
+    async fn pull_request_reviewers(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestReviewer>> {
+        if self.is_self_hosted() {
+            return Ok(Vec::new());
+        }
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let url = format!("{api_base}/pullrequests/{number}");
+        let request = bitbucket_request(BitbucketMethod::Get, &url, &auth, None)?;
+        let bytes =
+            bitbucket_send(&http_client, request, "fetching Bitbucket pull request").await?;
+        let pr: BitbucketPullRequest =
+            serde_json::from_slice(&bytes).context("parsing Bitbucket pull request")?;
+        let viewer_uuid = self
+            .fetch_authenticated_uuid(&auth, &http_client)
+            .await
+            .log_err()
+            .flatten();
+        Ok(pr.reviewers(viewer_uuid.as_deref()))
     }
 
     async fn pull_request_review_state(
@@ -1084,5 +1148,236 @@ mod tests {
             pr.url.as_str(),
             "https://bitbucket.company.com/projects/zed-industries/repos/zed/pull-requests/123"
         );
+    }
+
+    #[test]
+    fn test_bitbucket_list_filters_to_authenticated_author() {
+        let client: Arc<dyn HttpClient> =
+            http_client::FakeHttpClient::create(|request| async move {
+                let path = request.uri().path();
+                let body = if path == "/2.0/user" {
+                    r#"{"uuid":"{viewer}"}"#
+                } else if path.ends_with("/pullrequests") {
+                    let query = request.uri().query().unwrap_or_default();
+                    assert!(query.contains("q=author.uuid%3D%22%7Bviewer%7D%22"));
+                    r#"{"values":[
+                    {"id":1,"title":"Mine","state":"OPEN",
+                     "author":{"display_name":"Me","uuid":"{viewer}"},
+                     "source":{"branch":{"name":"feature"},"commit":{"hash":"a1"}},
+                     "destination":{"branch":{"name":"main"},"commit":{"hash":"b1"}},
+                     "links":{"html":{"href":"https://bitbucket.org/owner/repo/pull-requests/1"}},
+                     "updated_on":"2026-01-02T00:00:00Z"}
+                ]}"#
+                } else {
+                    r#"{"values":[]}"#
+                };
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(body.into())
+                    .unwrap())
+            });
+
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let filter = PullRequestListFilter {
+            states: Some(vec![PullRequestState::Open]),
+            author: None,
+            reviewer_is_me: false,
+            author_is_me: true,
+            limit: Some(50),
+        };
+        let summaries =
+            futures::executor::block_on(Bitbucket::public_instance().list_pull_requests(
+                &remote,
+                filter,
+                Some(GitHostAuth::Basic {
+                    username: "user".into(),
+                    secret: "secret".into(),
+                }),
+                client,
+            ))
+            .unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].number, 1);
+        assert_eq!(summaries[0].author_login.to_string(), "Me");
+    }
+
+    #[test]
+    fn test_bitbucket_reviewer_is_me_includes_already_voted() {
+        // A PR the viewer has already approved must still surface in "my open
+        // reviews" mode (distinguished later by verdict); a PR the viewer does
+        // not review is excluded.
+        let client: Arc<dyn HttpClient> =
+            http_client::FakeHttpClient::create(|request| async move {
+                let path = request.uri().path();
+                let body = if path == "/2.0/user" {
+                    r#"{"uuid":"{viewer}"}"#
+                } else if path.ends_with("/pullrequests") {
+                    r#"{"values":[
+                    {"id":1,"title":"Approved by me","state":"OPEN",
+                     "author":{"display_name":"Author","uuid":"{author}"},
+                     "source":{"branch":{"name":"feature"},"commit":{"hash":"a1"}},
+                     "destination":{"branch":{"name":"main"},"commit":{"hash":"b1"}},
+                     "links":{"html":{"href":"https://bitbucket.org/owner/repo/pull-requests/1"}},
+                     "updated_on":"2026-01-02T00:00:00Z",
+                     "participants":[
+                         {"role":"REVIEWER","approved":true,"state":"approved",
+                          "user":{"display_name":"Me","uuid":"{viewer}"}}
+                     ]},
+                    {"id":2,"title":"Not mine","state":"OPEN",
+                     "author":{"display_name":"Author","uuid":"{author}"},
+                     "source":{"branch":{"name":"feature2"},"commit":{"hash":"c1"}},
+                     "destination":{"branch":{"name":"main"},"commit":{"hash":"b2"}},
+                     "links":{"html":{"href":"https://bitbucket.org/owner/repo/pull-requests/2"}},
+                     "updated_on":"2026-01-01T00:00:00Z",
+                     "participants":[
+                         {"role":"REVIEWER","approved":false,
+                          "user":{"display_name":"Someone","uuid":"{other}"}}
+                     ]}
+                ]}"#
+                } else {
+                    r#"{"values":[]}"#
+                };
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(body.into())
+                    .unwrap())
+            });
+
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let filter = PullRequestListFilter {
+            states: Some(vec![PullRequestState::Open]),
+            author: None,
+            reviewer_is_me: true,
+            author_is_me: false,
+            limit: Some(50),
+        };
+        let summaries =
+            futures::executor::block_on(Bitbucket::public_instance().list_pull_requests(
+                &remote,
+                filter,
+                Some(GitHostAuth::Basic {
+                    username: "user".into(),
+                    secret: "secret".into(),
+                }),
+                client,
+            ))
+            .unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].number, 1);
+    }
+
+    #[test]
+    fn test_bitbucket_pull_request_reviewers_marks_viewer_and_pending() {
+        let client: Arc<dyn HttpClient> =
+            http_client::FakeHttpClient::create(|request| async move {
+                let path = request.uri().path();
+                let body = if path == "/2.0/user" {
+                    r#"{"uuid":"{viewer}"}"#
+                } else if path.ends_with("/pullrequests/7") {
+                    r#"{"id":7,"title":"Reviewers","state":"OPEN",
+                    "author":{"display_name":"Author","uuid":"{author}"},
+                    "source":{"branch":{"name":"feature"},"commit":{"hash":"a1"}},
+                    "destination":{"branch":{"name":"main"},"commit":{"hash":"b1"}},
+                    "links":{"html":{"href":"https://bitbucket.org/owner/repo/pull-requests/7"}},
+                    "participants":[
+                        {"role":"REVIEWER","approved":true,"state":"approved",
+                         "user":{"display_name":"Me","uuid":"{viewer}"}},
+                        {"role":"REVIEWER","approved":false,"state":"changes_requested",
+                         "user":{"display_name":"Blocker","uuid":"{blocker}"}},
+                        {"role":"REVIEWER","approved":false,
+                         "user":{"display_name":"Pending","uuid":"{pending}"}},
+                        {"role":"PARTICIPANT","approved":true,
+                         "user":{"display_name":"Participant","uuid":"{participant}"}}
+                    ]}"#
+                } else {
+                    r#"{"values":[]}"#
+                };
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(body.into())
+                    .unwrap())
+            });
+
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let reviewers =
+            futures::executor::block_on(Bitbucket::public_instance().pull_request_reviewers(
+                &remote,
+                7,
+                Some(GitHostAuth::Basic {
+                    username: "user".into(),
+                    secret: "secret".into(),
+                }),
+                client,
+            ))
+            .unwrap();
+
+        assert_eq!(reviewers.len(), 3);
+        assert_eq!(reviewers[0].login.to_string(), "Me");
+        assert_eq!(
+            reviewers[0].verdict,
+            Some(PullRequestReviewVerdict::Approve)
+        );
+        assert!(reviewers[0].is_me);
+        assert_eq!(
+            reviewers[1].verdict,
+            Some(PullRequestReviewVerdict::RequestChanges)
+        );
+        assert_eq!(reviewers[2].login.to_string(), "Pending");
+        assert_eq!(reviewers[2].verdict, None);
+        assert!(!reviewers[2].is_me);
+    }
+
+    #[test]
+    fn test_bitbucket_pull_request_reviewers_without_auth_does_not_mark_me() {
+        let client: Arc<dyn HttpClient> =
+            http_client::FakeHttpClient::create(|request| async move {
+                let path = request.uri().path();
+                let (status, body) = if path == "/2.0/user" {
+                    (401, r#"{"error":{"message":"bad credentials"}}"#)
+                } else if path.ends_with("/pullrequests/7") {
+                    (
+                        200,
+                        r#"{"id":7,"title":"Reviewers","state":"OPEN",
+                    "author":{"display_name":"Author","uuid":"{author}"},
+                    "source":{"branch":{"name":"feature"},"commit":{"hash":"a1"}},
+                    "destination":{"branch":{"name":"main"},"commit":{"hash":"b1"}},
+                    "links":{"html":{"href":"https://bitbucket.org/owner/repo/pull-requests/7"}},
+                    "participants":[
+                        {"role":"REVIEWER","approved":true,"state":"approved",
+                         "user":{"display_name":"Me","uuid":"{viewer}"}}
+                    ]}"#,
+                    )
+                } else {
+                    (200, r#"{"values":[]}"#)
+                };
+                Ok(http_client::Response::builder()
+                    .status(status)
+                    .body(body.into())
+                    .unwrap())
+            });
+
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let reviewers = futures::executor::block_on(
+            Bitbucket::public_instance().pull_request_reviewers(&remote, 7, None, client),
+        )
+        .unwrap();
+
+        assert_eq!(reviewers.len(), 1);
+        assert_eq!(reviewers[0].login.to_string(), "Me");
+        assert!(!reviewers[0].is_me);
     }
 }

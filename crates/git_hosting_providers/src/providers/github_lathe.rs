@@ -416,11 +416,22 @@ impl GithubPullRequest {
             deletions: self.deletions.unwrap_or(0),
             changed_files: self.changed_files.unwrap_or(0),
             commits: self.commits,
+            // Filled in by `get_pull_request` from a separate compare request.
+            behind_by: None,
             // Filled in by `get_pull_request` from a separate reviews request.
             viewer_review: None,
             reviewers: Vec::new(),
         })
     }
+}
+
+/// Subset of GitHub's compare response. `behind_by` is the number of commits on
+/// the base branch that are not reachable from the head branch, i.e. how far
+/// behind the base the pull request has fallen.
+#[derive(Deserialize)]
+pub(super) struct GithubComparison {
+    #[serde(default)]
+    pub(super) behind_by: u32,
 }
 
 /// A submitted review on a pull request. The author and state resolve the
@@ -692,6 +703,7 @@ mod tests {
             states: Some(vec![PullRequestState::Open]),
             author: None,
             reviewer_is_me: true,
+            author_is_me: false,
             limit: Some(50),
         };
         let summaries = futures::executor::block_on(Github::public_instance().list_pull_requests(
@@ -705,5 +717,192 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].number, 1);
         assert_eq!(summaries[0].title.to_string(), "Mine to review");
+    }
+
+    #[test]
+    fn test_github_list_filters_to_authenticated_author() {
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(|request| async move {
+            let path = request.uri().path();
+            let body = if path == "/user" {
+                r#"{"login":"OctoCat"}"#
+            } else if path.ends_with("/pulls") {
+                r#"[
+                    {"number":1,"title":"Mine","state":"open",
+                     "user":{"login":"octocat"},
+                     "requested_reviewers":[],
+                     "head":{"ref":"a","sha":"a1"},"base":{"ref":"main","sha":"b1"},
+                     "html_url":"https://github.com/owner/repo/pull/1","updated_at":"2026-01-02T00:00:00Z"},
+                    {"number":2,"title":"Theirs","state":"open",
+                     "user":{"login":"alice"},
+                     "requested_reviewers":[],
+                     "head":{"ref":"c","sha":"c1"},"base":{"ref":"main","sha":"b2"},
+                     "html_url":"https://github.com/owner/repo/pull/2","updated_at":"2026-01-01T00:00:00Z"}
+                ]"#
+            } else {
+                "[]"
+            };
+            Ok(http_client::Response::builder()
+                .status(200)
+                .body(body.into())
+                .unwrap())
+        });
+
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let filter = PullRequestListFilter {
+            states: Some(vec![PullRequestState::Open]),
+            author: None,
+            reviewer_is_me: false,
+            author_is_me: true,
+            limit: Some(50),
+        };
+        let summaries = futures::executor::block_on(Github::public_instance().list_pull_requests(
+            &remote,
+            filter,
+            Some(GitHostAuth::Bearer("token".into())),
+            client,
+        ))
+        .unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].number, 1);
+        assert_eq!(summaries[0].author_login.to_string(), "octocat");
+    }
+
+    #[test]
+    fn test_github_author_filter_errors_when_login_cannot_be_resolved() {
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(|request| async move {
+            let path = request.uri().path();
+            let body = if path == "/user" { r#"{}"# } else { "[]" };
+            Ok(http_client::Response::builder()
+                .status(200)
+                .body(body.into())
+                .unwrap())
+        });
+
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let filter = PullRequestListFilter {
+            states: Some(vec![PullRequestState::Open]),
+            author: None,
+            reviewer_is_me: false,
+            author_is_me: true,
+            limit: Some(50),
+        };
+        let error = futures::executor::block_on(Github::public_instance().list_pull_requests(
+            &remote,
+            filter,
+            Some(GitHostAuth::Bearer("token".into())),
+            client,
+        ))
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("parsing authenticated GitHub user")
+        );
+    }
+
+    #[test]
+    fn test_github_pull_request_reviewers_marks_viewer_and_pending() {
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(|request| async move {
+            let path = request.uri().path();
+            let body = if path == "/user" {
+                r#"{"login":"octocat"}"#
+            } else if path.ends_with("/pulls/7") {
+                r#"{"number":7,"title":"Reviewers","state":"open",
+                    "user":{"login":"alice"},
+                    "requested_reviewers":[{"login":"pending"}],
+                    "head":{"ref":"a","sha":"a1"},"base":{"ref":"main","sha":"b1"},
+                    "html_url":"https://github.com/owner/repo/pull/7","updated_at":"2026-01-02T00:00:00Z"}"#
+            } else if path.ends_with("/pulls/7/reviews") {
+                r#"[
+                    {"id":1,"user":{"login":"octocat"},"state":"APPROVED"},
+                    {"id":2,"user":{"login":"carol"},"state":"CHANGES_REQUESTED"}
+                ]"#
+            } else {
+                "[]"
+            };
+            Ok(http_client::Response::builder()
+                .status(200)
+                .body(body.into())
+                .unwrap())
+        });
+
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let reviewers =
+            futures::executor::block_on(Github::public_instance().pull_request_reviewers(
+                &remote,
+                7,
+                Some(GitHostAuth::Bearer("token".into())),
+                client,
+            ))
+            .unwrap();
+
+        assert_eq!(reviewers.len(), 3);
+        assert_eq!(reviewers[0].login.to_string(), "octocat");
+        assert_eq!(
+            reviewers[0].verdict,
+            Some(PullRequestReviewVerdict::Approve)
+        );
+        assert!(reviewers[0].is_me);
+        assert_eq!(
+            reviewers[1].verdict,
+            Some(PullRequestReviewVerdict::RequestChanges)
+        );
+        assert_eq!(reviewers[2].login.to_string(), "pending");
+        assert_eq!(reviewers[2].verdict, None);
+        assert!(!reviewers[2].is_me);
+    }
+
+    #[test]
+    fn test_github_pull_request_reviewers_without_auth_does_not_mark_me() {
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(|request| async move {
+            let path = request.uri().path();
+            let (status, body) = if path == "/user" {
+                (401, r#"{"message":"bad credentials"}"#)
+            } else if path.ends_with("/pulls/7") {
+                (
+                    200,
+                    r#"{"number":7,"title":"Reviewers","state":"open",
+                    "user":{"login":"alice"},
+                    "requested_reviewers":[],
+                    "head":{"ref":"a","sha":"a1"},"base":{"ref":"main","sha":"b1"},
+                    "html_url":"https://github.com/owner/repo/pull/7","updated_at":"2026-01-02T00:00:00Z"}"#,
+                )
+            } else if path.ends_with("/pulls/7/reviews") {
+                (
+                    200,
+                    r#"[{"id":1,"user":{"login":"octocat"},"state":"APPROVED"}]"#,
+                )
+            } else {
+                (200, "[]")
+            };
+            Ok(http_client::Response::builder()
+                .status(status)
+                .body(body.into())
+                .unwrap())
+        });
+
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let reviewers = futures::executor::block_on(
+            Github::public_instance().pull_request_reviewers(&remote, 7, None, client),
+        )
+        .unwrap();
+
+        assert_eq!(reviewers.len(), 1);
+        assert_eq!(reviewers[0].login.to_string(), "octocat");
+        assert!(!reviewers[0].is_me);
     }
 }

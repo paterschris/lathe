@@ -2,8 +2,9 @@ use crate::pull_request_panel_settings::PullRequestPanelSettings;
 use crate::pull_request_view::PullRequestView;
 use anyhow::{Context as _, Result};
 use git::{
-    GitHostingProvider, GitHostingProviderRegistry, ParsedGitRemote, PullRequestListFilter,
-    PullRequestReviewVerdict, PullRequestState, PullRequestSummary, parse_git_remote_url,
+    GitHostAuth, GitHostingProvider, GitHostingProviderRegistry, ParsedGitRemote,
+    PullRequestListFilter, PullRequestReviewVerdict, PullRequestReviewer, PullRequestState,
+    PullRequestSummary, parse_git_remote_url,
 };
 use gpui::http_client::HttpClient;
 use gpui::{
@@ -16,9 +17,10 @@ use project::{
     git_store::{GitStore, GitStoreEvent},
 };
 use settings::Settings;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
+use util::ResultExt as _;
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -45,7 +47,7 @@ pub fn register(workspace: &mut Workspace) {
 enum LoadState {
     Idle,
     Loading,
-    Loaded(Vec<PullRequestSummary>),
+    Loaded(LoadedPullRequests),
     NoHost(SharedString),
     Failed(SharedString),
     /// A pull-request call returned HTTP 401; the stored credential for `host`
@@ -53,6 +55,48 @@ enum LoadState {
     AuthExpired {
         host: SharedString,
     },
+}
+
+/// The two partitions the panel renders. `authored` holds PRs opened by the
+/// connected account (rendered in a "Created by you" section at the bottom); `others`
+/// is the rest of the list with the authored PRs removed so no PR appears
+/// twice. `authored` is only populated when an account is connected and the
+/// review-requested filter is off.
+#[derive(Clone, Default)]
+struct LoadedPullRequests {
+    authored: Vec<PullRequestSummary>,
+    others: Vec<PullRequestSummary>,
+}
+
+impl LoadedPullRequests {
+    fn total(&self) -> usize {
+        self.authored.len() + self.others.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.authored.is_empty() && self.others.is_empty()
+    }
+
+    /// Every PR number across both partitions, used to drive reviewer
+    /// enrichment without fetching the same PR twice.
+    fn numbers(&self) -> Vec<u32> {
+        let mut seen = HashSet::new();
+        self.authored
+            .iter()
+            .chain(self.others.iter())
+            .map(|summary| summary.number)
+            .filter(|number| seen.insert(*number))
+            .collect()
+    }
+}
+
+/// One rendered entry in the flattened PR list. Section headers and PR rows
+/// share the list so the whole panel scrolls as a single uniform list; headers
+/// occupy a full row so every entry keeps the uniform height the list requires.
+#[derive(Clone)]
+enum PanelRow {
+    Header(SharedString),
+    PullRequest(PullRequestSummary),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,9 +141,10 @@ pub struct PullRequestPanel {
     /// PR number most recently opened from this panel; highlighted in the list.
     selected_pr: Option<u32>,
     _load_task: Option<Task<()>>,
-    /// Cached "my review verdict" per PR number, filled in lazily in the
-    /// background after the list loads so already-reviewed rows can be tinted.
-    viewer_reviews: HashMap<u32, Option<PullRequestReviewVerdict>>,
+    /// Cached reviewer lists per PR number, filled in lazily in the background
+    /// after the list loads. Drives both the per-row reviewer roll-up and the
+    /// viewer's own tint (derived from the `is_me` reviewer's verdict).
+    reviewers: HashMap<u32, Vec<PullRequestReviewer>>,
     _enrich_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -148,7 +193,7 @@ impl PullRequestPanel {
                 reviewing: false,
                 selected_pr: None,
                 _load_task: None,
-                viewer_reviews: HashMap::new(),
+                reviewers: HashMap::new(),
                 _enrich_task: None,
                 _subscriptions: subscriptions,
             };
@@ -201,10 +246,10 @@ impl PullRequestPanel {
                     Ok(LoadOutcome::Loaded {
                         provider,
                         remote,
-                        prs,
+                        loaded,
                     }) => {
                         this.host_context = Some((provider, remote));
-                        this.state = LoadState::Loaded(prs);
+                        this.state = LoadState::Loaded(loaded);
                         this.start_review_enrichment(cx);
                     }
                     Ok(LoadOutcome::NoHost(reason)) => {
@@ -232,11 +277,11 @@ impl PullRequestPanel {
     /// (bounded concurrency) so already-reviewed rows can be tinted. One request
     /// per PR, cached; the task is replaced (cancelled) on the next load.
     fn start_review_enrichment(&mut self, cx: &mut Context<Self>) {
-        self.viewer_reviews.clear();
-        let LoadState::Loaded(prs) = &self.state else {
+        self.reviewers.clear();
+        let LoadState::Loaded(loaded) = &self.state else {
             return;
         };
-        let numbers: Vec<u32> = prs.iter().map(|summary| summary.number).collect();
+        let numbers = loaded.numbers();
         let Some((provider, remote)) = self.host_context.as_ref() else {
             return;
         };
@@ -270,19 +315,18 @@ impl PullRequestPanel {
                     let auth = auth.clone();
                     let http_client = http_client.clone();
                     async move {
-                        let verdict = provider
-                            .pull_request_review_state(&remote, number, auth, http_client)
+                        let reviewers = provider
+                            .pull_request_reviewers(&remote, number, auth, http_client)
                             .await
-                            .ok()
-                            .flatten();
-                        (number, verdict)
+                            .unwrap_or_default();
+                        (number, reviewers)
                     }
                 }))
                 .await;
                 let alive = this
                     .update(cx, |this, cx| {
-                        for (number, verdict) in results {
-                            this.viewer_reviews.insert(number, verdict);
+                        for (number, reviewers) in results {
+                            this.reviewers.insert(number, reviewers);
                         }
                         cx.notify();
                     })
@@ -294,17 +338,16 @@ impl PullRequestPanel {
         }));
     }
 
-    /// Whether the connected account has already responded to this PR's review
-    /// with a verdict. Comment-only reviews and not-yet-reviewed PRs are not a
-    /// response, so they still count as "awaiting my review". Returns false while
-    /// a PR's verdict is still being fetched (it stays visible until known).
-    fn has_responded_to_review(&self, number: u32) -> bool {
-        matches!(
-            self.viewer_reviews.get(&number),
-            Some(Some(
-                PullRequestReviewVerdict::Approve | PullRequestReviewVerdict::RequestChanges
-            ))
-        )
+    /// The connected account's own latest verdict on a PR, derived from the
+    /// cached reviewer list (the `is_me` entry). `None` while reviewers are
+    /// still loading, when the viewer has not reviewed, or when the host does
+    /// not report reviewers.
+    fn my_verdict(&self, number: u32) -> Option<PullRequestReviewVerdict> {
+        self.reviewers
+            .get(&number)?
+            .iter()
+            .find(|reviewer| reviewer.is_me)
+            .and_then(|reviewer| reviewer.verdict)
     }
 
     fn open_pull_request(
@@ -340,7 +383,7 @@ impl PullRequestPanel {
 
     fn render_header(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = match &self.state {
-            LoadState::Loaded(prs) => prs.len(),
+            LoadState::Loaded(loaded) => loaded.total(),
             _ => 0,
         };
         let loading = matches!(self.state, LoadState::Loading);
@@ -442,7 +485,7 @@ impl PullRequestPanel {
                     // state selection above, so it sits below a separator rather
                     // than in the mutually-exclusive state group.
                     menu = menu.separator().toggleable_entry(
-                        "Awaiting my review",
+                        "My open reviews",
                         reviewing,
                         ui::IconPosition::End,
                         None,
@@ -483,6 +526,7 @@ impl PullRequestPanel {
         h_flex()
             .id(("pr-row", ix))
             .h(rems(ROW_HEIGHT_REMS))
+            .w_full()
             .px_2()
             .gap_2()
             .border_l_2()
@@ -493,18 +537,15 @@ impl PullRequestPanel {
             })
             // Tint rows the connected account has already reviewed (filled in
             // lazily by `start_review_enrichment`). Selection/hover override it.
-            .when_some(
-                self.viewer_reviews.get(&number).copied().flatten(),
-                |this, verdict| match verdict {
-                    PullRequestReviewVerdict::Approve => {
-                        this.bg(Color::Success.color(cx).opacity(0.12))
-                    }
-                    PullRequestReviewVerdict::RequestChanges => {
-                        this.bg(Color::Error.color(cx).opacity(0.12))
-                    }
-                    PullRequestReviewVerdict::Comment => this,
-                },
-            )
+            .when_some(self.my_verdict(number), |this, verdict| match verdict {
+                PullRequestReviewVerdict::Approve => {
+                    this.bg(Color::Success.color(cx).opacity(0.12))
+                }
+                PullRequestReviewVerdict::RequestChanges => {
+                    this.bg(Color::Error.color(cx).opacity(0.12))
+                }
+                PullRequestReviewVerdict::Comment => this,
+            })
             .when(is_selected, |this| {
                 this.bg(cx.theme().colors().element_selected)
             })
@@ -550,17 +591,114 @@ impl PullRequestPanel {
                                         .size(LabelSize::XSmall)
                                         .color(Color::Muted),
                                 )
+                            })
+                            .when(self.reviewing, |this| {
+                                let (verdict_label, verdict_color) = match self.my_verdict(number) {
+                                    Some(PullRequestReviewVerdict::Approve) => {
+                                        ("approved", Color::Success)
+                                    }
+                                    Some(PullRequestReviewVerdict::RequestChanges) => {
+                                        ("changes requested", Color::Error)
+                                    }
+                                    Some(PullRequestReviewVerdict::Comment) => {
+                                        ("commented", Color::Info)
+                                    }
+                                    None => ("awaiting", Color::Muted),
+                                };
+                                this.child(
+                                    Label::new(verdict_label)
+                                        .size(LabelSize::XSmall)
+                                        .color(verdict_color),
+                                )
                             }),
                     ),
             )
+            .when_some(self.render_reviewer_rollup(number, cx), |this, rollup| {
+                this.child(rollup)
+            })
     }
+
+    /// A compact reviewer summary for a PR list row: up to `MAX_ROLLUP_DOTS`
+    /// verdict-colored dots (approved green, changes-requested red, pending
+    /// hollow) plus a "+N" overflow, with a tooltip listing every reviewer.
+    /// `None` when reviewers are still loading or the host reports none.
+    fn render_reviewer_rollup(&self, number: u32, cx: &Context<Self>) -> Option<AnyElement> {
+        const MAX_ROLLUP_DOTS: usize = 3;
+        let reviewers = self.reviewers.get(&number)?;
+        if reviewers.is_empty() {
+            return None;
+        }
+        let overflow = reviewers.len().saturating_sub(MAX_ROLLUP_DOTS);
+        let dots = reviewers.iter().take(MAX_ROLLUP_DOTS).map(|reviewer| {
+            let (color, filled) = match reviewer.verdict {
+                Some(PullRequestReviewVerdict::Approve) => (Color::Success, true),
+                Some(PullRequestReviewVerdict::RequestChanges) => (Color::Error, true),
+                Some(PullRequestReviewVerdict::Comment) => (Color::Info, true),
+                None => (Color::Muted, false),
+            };
+            let color = color.color(cx);
+            let mut dot = div().size(px(8.)).rounded_full();
+            dot = if filled {
+                dot.bg(color)
+            } else {
+                dot.border_1().border_color(color)
+            };
+            dot
+        });
+        let tooltip: SharedString = reviewers
+            .iter()
+            .map(|reviewer| {
+                let state = match reviewer.verdict {
+                    Some(PullRequestReviewVerdict::Approve) => "approved",
+                    Some(PullRequestReviewVerdict::RequestChanges) => "changes requested",
+                    Some(PullRequestReviewVerdict::Comment) => "commented",
+                    None => "pending",
+                };
+                let you = if reviewer.is_me { " (you)" } else { "" };
+                format!("{}{you}: {state}", reviewer.login)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into();
+        Some(
+            h_flex()
+                .id(("pr-reviewer-rollup", number as usize))
+                .flex_none()
+                .gap_1()
+                .items_center()
+                .children(dots)
+                .when(overflow > 0, |this| {
+                    this.child(
+                        Label::new(format!("+{overflow}"))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                })
+                .tooltip(Tooltip::text(tooltip))
+                .into_any_element(),
+        )
+    }
+}
+
+/// A section header row inside the flattened PR list. Occupies a full uniform
+/// row so it can sit between PR rows without breaking the list's fixed height.
+fn render_section_header(label: SharedString) -> impl IntoElement {
+    h_flex()
+        .h(rems(ROW_HEIGHT_REMS))
+        .px_2()
+        .items_center()
+        .child(
+            Label::new(label)
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
 }
 
 enum LoadOutcome {
     Loaded {
         provider: Arc<dyn GitHostingProvider + Send + Sync>,
         remote: ParsedGitRemote,
-        prs: Vec<PullRequestSummary>,
+        loaded: LoadedPullRequests,
     },
     NoHost(SharedString),
 }
@@ -581,10 +719,11 @@ async fn load_pull_requests(
     http_client: Arc<dyn HttpClient>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<LoadOutcome> {
-    // Collect candidate remotes (origin first, then upstream when set). Forks
-    // typically have `origin = your fork` (often no PRs) and `upstream = the
-    // canonical repo` (where the PRs live), so we list against each in turn
-    // and return the first non-empty result.
+    // Collect candidate remotes (origin first, then upstream when set). We query
+    // the first remote that resolves to a known host and has a credential, so a
+    // fork shows its own `origin` pull requests (often none) rather than falling
+    // through to the `upstream` project and surfacing the canonical repo's PRs.
+    // `upstream` is only used when `origin` is not a usable hosting remote.
     let resolution: CandidateResolution = cx.update(|cx| {
         let git_store = project.read(cx).git_store().clone();
         let Some(active) = git_store.read(cx).active_repository() else {
@@ -628,6 +767,9 @@ async fn load_pull_requests(
 
     let mut chosen: Option<(Arc<dyn GitHostingProvider + Send + Sync>, ParsedGitRemote)> = None;
     let mut last_summaries: Vec<PullRequestSummary> = Vec::new();
+    // Auth for the chosen candidate, reused for the second "authored by me" call
+    // so we do not re-read the keychain.
+    let mut chosen_auth: Option<GitHostAuth> = None;
     let mut connect_hint: Option<SharedString> = None;
 
     for remote_url in candidates {
@@ -656,6 +798,7 @@ async fn load_pull_requests(
             states: filter.states(),
             author: None,
             reviewer_is_me: reviewing,
+            author_is_me: false,
             limit: Some(50),
         };
         let remote_for_call = ParsedGitRemote {
@@ -663,17 +806,18 @@ async fn load_pull_requests(
             repo: parsed.repo.clone(),
         };
         let summaries = provider
-            .list_pull_requests(&remote_for_call, filter, auth, http_client.clone())
+            .list_pull_requests(&remote_for_call, filter, auth.clone(), http_client.clone())
             .await
             .with_context(|| {
                 format!("listing pull requests for {}/{}", parsed.owner, parsed.repo)
             })?;
-        let got_any = !summaries.is_empty();
         chosen = Some((provider, parsed));
         last_summaries = summaries;
-        if got_any {
-            break;
-        }
+        chosen_auth = auth;
+        // The first queryable remote wins. For a fork this is `origin` (your own
+        // repo), so its pull requests are shown even when empty, instead of
+        // falling through to `upstream` and listing the canonical repo's PRs.
+        break;
     }
 
     let Some((provider, remote)) = chosen else {
@@ -685,10 +829,55 @@ async fn load_pull_requests(
         ));
     };
 
+    // With an account connected, also fetch the viewer's own PRs so the panel
+    // can surface them in a "Created by you" section. Skipped in review mode,
+    // where the list is already scoped to review requests (which exclude your
+    // own PRs). A failure here (for example a host that cannot resolve the
+    // authenticated user) leaves the section empty rather than failing the load.
+    let authored = if reviewing {
+        Vec::new()
+    } else if let Some(auth) = chosen_auth {
+        let authored_filter = PullRequestListFilter {
+            states: filter.states(),
+            author: None,
+            reviewer_is_me: false,
+            author_is_me: true,
+            limit: Some(50),
+        };
+        let remote_for_authored = ParsedGitRemote {
+            owner: remote.owner.clone(),
+            repo: remote.repo.clone(),
+        };
+        provider
+            .list_pull_requests(
+                &remote_for_authored,
+                authored_filter,
+                Some(auth),
+                http_client,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "listing authored pull requests for {}/{}",
+                    remote.owner, remote.repo
+                )
+            })
+            .log_err()
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let authored_numbers: HashSet<u32> = authored.iter().map(|summary| summary.number).collect();
+    let others: Vec<PullRequestSummary> = last_summaries
+        .into_iter()
+        .filter(|summary| !authored_numbers.contains(&summary.number))
+        .collect();
+
     Ok(LoadOutcome::Loaded {
         provider,
         remote,
-        prs: last_summaries,
+        loaded: LoadedPullRequests { authored, others },
     })
 }
 
@@ -716,26 +905,15 @@ impl Render for PullRequestPanel {
                         .color(Color::Muted),
                 )
                 .into_any_element(),
-            LoadState::Loaded(rows) => {
-                // In "awaiting my review" mode, hide PRs the connected account has
-                // already responded to (approved or requested changes). Comment-only
-                // reviews and not-yet-reviewed PRs stay visible. GitHub already
-                // excludes responded PRs via its `requested_reviewers` query; this
-                // makes Bitbucket (which keeps you as a reviewer regardless) match.
-                let rows: Vec<PullRequestSummary> = if self.reviewing {
-                    rows.into_iter()
-                        .filter(|summary| !self.has_responded_to_review(summary.number))
-                        .collect()
-                } else {
-                    rows
-                };
-                if rows.is_empty() {
+            LoadState::Loaded(loaded) => {
+                let LoadedPullRequests { authored, others } = loaded;
+                if authored.is_empty() && others.is_empty() {
                     let queried = self
                         .host_context
                         .as_ref()
                         .map(|(_, remote)| format!("{}/{}", remote.owner, remote.repo));
                     let empty_message = if self.reviewing {
-                        "No pull requests awaiting your review"
+                        "You have no open pull requests to review"
                     } else {
                         "No open pull requests"
                     };
@@ -758,15 +936,32 @@ impl Render for PullRequestPanel {
                         })
                         .into_any_element()
                 } else {
-                    let count = rows.len();
+                    // Flatten into a single list so headers and rows scroll
+                    // together. The "Created by you" section only appears when
+                    // the viewer has authored PRs; otherwise the list is
+                    // unsectioned, matching the pre-section behavior.
+                    let mut panel_rows: Vec<PanelRow> = Vec::new();
+                    if !authored.is_empty() && !others.is_empty() {
+                        panel_rows.push(PanelRow::Header("Other pull requests".into()));
+                    }
+                    panel_rows.extend(others.into_iter().map(PanelRow::PullRequest));
+                    if !authored.is_empty() {
+                        panel_rows.push(PanelRow::Header("Created by you".into()));
+                        panel_rows.extend(authored.into_iter().map(PanelRow::PullRequest));
+                    }
+                    let count = panel_rows.len();
                     uniform_list(
                         "pull-request-panel-rows",
                         count,
                         cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                             range
-                                .filter_map(|ix| {
-                                    let summary = rows.get(ix)?.clone();
-                                    Some(this.render_row(ix, summary, cx).into_any_element())
+                                .filter_map(|ix| match panel_rows.get(ix)? {
+                                    PanelRow::Header(label) => Some(
+                                        render_section_header(label.clone()).into_any_element(),
+                                    ),
+                                    PanelRow::PullRequest(summary) => Some(
+                                        this.render_row(ix, summary.clone(), cx).into_any_element(),
+                                    ),
                                 })
                                 .collect()
                         }),
@@ -891,7 +1086,7 @@ impl Panel for PullRequestPanel {
 
     fn icon_label(&self, _: &Window, _cx: &App) -> Option<String> {
         match &self.state {
-            LoadState::Loaded(prs) if !prs.is_empty() => Some(prs.len().to_string()),
+            LoadState::Loaded(loaded) if !loaded.is_empty() => Some(loaded.total().to_string()),
             _ => None,
         }
     }

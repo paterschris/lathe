@@ -48,6 +48,12 @@ pub struct PullRequestListFilter {
     /// still awaiting your review, whereas Bitbucket keeps you in `reviewers`
     /// regardless of whether you have already reviewed.
     pub reviewer_is_me: bool,
+    /// When `true`, restrict to PRs authored by the authenticated user. The
+    /// provider resolves "me" itself (GitHub matches `user.login`; Bitbucket
+    /// matches `author.uuid`). Errors when the authenticated user cannot be
+    /// determined, mirroring `reviewer_is_me`. Combines with `reviewer_is_me`
+    /// as an intersection when both are set.
+    pub author_is_me: bool,
     /// Cap on returned PRs. `None` = whatever the provider's default is.
     pub limit: Option<u32>,
 }
@@ -81,6 +87,11 @@ pub struct PullRequestDetail {
     /// Number of commits on the PR when the host reports it. `None` when the
     /// host doesn't expose a count; the header omits the commit chip in that case.
     pub commits: Option<u32>,
+    /// How many commits the PR's target branch is ahead of its source branch,
+    /// i.e. how far behind the base the PR has fallen. `Some(0)` means up to
+    /// date; `None` when the host hasn't reported it. Providers resolve it with
+    /// an extra compare request and leave it `None` on any failure.
+    pub behind_by: Option<u32>,
     /// The authenticated user's own current review on this PR, when known.
     /// `Some(Approve)` if they have approved, `Some(RequestChanges)` if they
     /// have a blocking review, `Some(Comment)` for a comment-only review, and

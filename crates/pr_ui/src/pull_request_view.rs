@@ -2208,6 +2208,22 @@ impl PullRequestView {
                         )
                     }),
             )
+            .when_some(
+                detail
+                    .behind_by
+                    .filter(|behind| *behind > 0 && matches!(detail.state, PullRequestState::Open)),
+                |this, behind| {
+                    this.child(
+                        Label::new(format!(
+                            "This pull request is {behind} commit{} behind \"{}\".",
+                            if behind == 1 { "" } else { "s" },
+                            detail.target_branch,
+                        ))
+                        .color(Color::Info)
+                        .size(LabelSize::Small),
+                    )
+                },
+            )
             .when_some(description, |this, description| {
                 // Collapsible + drag-resizable description. Collapsing hides the
                 // body but leaves the action buttons below in place; the buttons
@@ -2271,12 +2287,19 @@ impl PullRequestView {
                                 Some(height) => body.h(height),
                                 None => body.max_h(rems(13.)),
                             };
+                            let resize_line = cx.theme().colors().border;
+                            let resize_line_hover = cx.theme().colors().border_focused;
                             this.child(body).child(
                                 div()
                                     .id("pr-view-description-resize")
                                     .h(px(6.))
                                     .w_full()
                                     .cursor_row_resize()
+                                    // A divider marking where the description ends;
+                                    // it doubles as the drag target for resizing.
+                                    .border_t_1()
+                                    .border_color(resize_line)
+                                    .hover(move |style| style.border_color(resize_line_hover))
                                     .on_drag(DescriptionResizeDrag, |_, _, _, cx| {
                                         cx.new(|_| Empty)
                                     }),
