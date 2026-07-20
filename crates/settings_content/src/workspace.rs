@@ -521,6 +521,11 @@ pub struct StatusBarSettingsContent {
     ///
     /// Default: non_utf8
     pub active_encoding_button: Option<EncodingDisplayOptions>,
+    /// Whether to show the Android device selector in the status bar when a
+    /// mobile (Expo) project is open.
+    ///
+    /// Default: true
+    pub mobile_device_selector_button: Option<bool>,
 }
 
 #[derive(

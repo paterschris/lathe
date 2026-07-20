@@ -20,6 +20,12 @@ use smol::channel;
 use smol::stream::StreamExt as _;
 use util::command::{Stdio, new_command};
 
+/// Prefer the Lathe-managed platform-tools adb (consistent with the env the
+/// panel injects into builds); fall back to whatever `adb` is on PATH.
+fn adb_program() -> std::path::PathBuf {
+    crate::toolchain::managed_adb_path().unwrap_or_else(|| std::path::PathBuf::from("adb"))
+}
+
 /// A device returned by `adb devices -l`.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct AdbDevice {
@@ -92,7 +98,7 @@ impl AdbTransport {
 /// One-shot device listing. Returns whatever `adb devices -l` knows about
 /// right now. For continuous tracking use [`track_devices`].
 pub async fn list_devices() -> Result<Vec<AdbDevice>> {
-    let output = new_command("adb")
+    let output = new_command(adb_program())
         .arg("devices")
         .arg("-l")
         .output()
@@ -193,7 +199,7 @@ pub fn track_devices(
 /// Install (or reinstall) an APK on the given device. Equivalent to
 /// `adb -s <serial> install -r <apk_path>`.
 pub async fn install(serial: &str, apk_path: &Path) -> Result<()> {
-    let output = new_command("adb")
+    let output = new_command(adb_program())
         .arg("-s")
         .arg(serial)
         .arg("install")
@@ -219,7 +225,7 @@ pub async fn install(serial: &str, apk_path: &Path) -> Result<()> {
 /// fully-qualified activity class, typically `<package>.MainActivity`.
 pub async fn launch(serial: &str, package: &str, activity: &str) -> Result<()> {
     let component = format!("{package}/{activity}");
-    let output = new_command("adb")
+    let output = new_command(adb_program())
         .arg("-s")
         .arg(serial)
         .arg("shell")
@@ -241,7 +247,7 @@ pub async fn launch(serial: &str, package: &str, activity: &str) -> Result<()> {
 
 /// Look up the PID of `package` on the device, or `None` if it isn't running.
 pub async fn pid_of(serial: &str, package: &str) -> Result<Option<u32>> {
-    let output = new_command("adb")
+    let output = new_command(adb_program())
         .arg("-s")
         .arg(serial)
         .arg("shell")
@@ -269,7 +275,7 @@ pub fn logcat(serial: &str, pid_filter: Option<u32>) -> impl Stream<Item = Resul
     let serial = serial.to_owned();
     let (tx, rx) = channel::unbounded::<Result<String>>();
     smol::spawn(async move {
-        let mut cmd = new_command("adb");
+        let mut cmd = new_command(adb_program());
         cmd.arg("-s")
             .arg(&serial)
             .arg("logcat")
@@ -313,7 +319,7 @@ pub fn logcat(serial: &str, pid_filter: Option<u32>) -> impl Stream<Item = Resul
 /// Pair a wireless device (Android 11+). `addr` is the IP:port shown on the
 /// phone's pairing screen, `code` is the six-digit code.
 pub async fn pair(addr: &str, code: &str) -> Result<()> {
-    let output = new_command("adb")
+    let output = new_command(adb_program())
         .arg("pair")
         .arg(addr)
         .arg(code)
@@ -332,7 +338,7 @@ pub async fn pair(addr: &str, code: &str) -> Result<()> {
 /// Connect to an already-paired wireless device. After a phone reboot or
 /// network blip you have to reconnect with the *non-pair* port.
 pub async fn connect(addr: &str) -> Result<()> {
-    let output = new_command("adb")
+    let output = new_command(adb_program())
         .arg("connect")
         .arg(addr)
         .output()

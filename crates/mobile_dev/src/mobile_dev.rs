@@ -7,7 +7,11 @@
 
 pub mod adb;
 pub mod build;
+mod device_picker;
 pub mod expo_project;
+pub mod toolchain;
+
+pub use device_picker::MobileDeviceSelector;
 
 use std::time::Duration;
 
@@ -21,11 +25,13 @@ use gpui::{
 };
 use project::Project;
 use serde::{Deserialize, Serialize};
+use settings::{RegisterSetting, Settings};
 use ui::prelude::*;
 use ui::{Color, Headline, HeadlineSize, IconName, Label, LabelSize, h_flex, v_flex};
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
+    notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
 use crate::adb::{AdbDevice, AdbDeviceState, AdbTransport};
@@ -36,6 +42,24 @@ const PANEL_KEY: &str = "MobileDevPanel";
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BUILD_OUTPUT_LINE_CAP: usize = 500;
 const LOGCAT_LINE_CAP: usize = 1000;
+
+#[derive(Debug, RegisterSetting)]
+pub struct MobileDevPanelSettings {
+    pub button: bool,
+    pub dock: DockPosition,
+    pub default_width: Pixels,
+}
+
+impl Settings for MobileDevPanelSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        let panel = content.mobile_dev_panel.as_ref().unwrap();
+        Self {
+            button: panel.button.unwrap(),
+            dock: panel.dock.unwrap().into(),
+            default_width: panel.default_width.map(px).unwrap(),
+        }
+    }
+}
 
 actions!(
     mobile_dev,
@@ -52,6 +76,8 @@ actions!(
         PickDevice,
         /// Pair a wireless ADB device.
         PairWirelessDevice,
+        /// Download JDK 17 and the Android SDK into a Lathe-managed directory.
+        InstallAndroidToolchain,
         /// Toggle the Mobile panel's focus.
         ToggleFocus,
     ]
@@ -107,6 +133,14 @@ fn register_workspace_actions(
         })
         .register_action(|_, _: &PairWirelessDevice, _, _| {
             log::warn!("mobile_dev: PairWirelessDevice is not yet implemented");
+        })
+        .register_action(|workspace, _: &InstallAndroidToolchain, window, cx| {
+            if let Some(panel) = workspace.panel::<MobileDevPanel>(cx) {
+                workspace.focus_panel::<MobileDevPanel>(window, cx);
+                panel.update(cx, |panel, cx| {
+                    panel.start_toolchain_install(cx);
+                });
+            }
         });
 }
 
@@ -142,6 +176,13 @@ struct LogcatUiState {
     _forwarder: Task<()>,
 }
 
+/// Live state for a running (or most-recent) managed toolchain install.
+struct ToolchainInstallUiState {
+    status: BuildStatus,
+    lines: Vec<SharedString>,
+    _forwarder: Task<()>,
+}
+
 /// Live state for the currently-running (or most-recent) build.
 #[allow(dead_code)] // `kind` used by status-label rendering in a follow-up commit.
 struct BuildUiState {
@@ -158,7 +199,6 @@ struct BuildUiState {
 
 /// Bottom-dock panel for mobile development.
 pub struct MobileDevPanel {
-    #[allow(dead_code)] // used by upcoming build orchestration.
     workspace: WeakEntity<Workspace>,
     #[allow(dead_code)] // used by upcoming worktree-change subscription that re-runs detection.
     project: Entity<Project>,
@@ -177,8 +217,15 @@ pub struct MobileDevPanel {
     project_scanned: bool,
     build_state: Option<BuildUiState>,
     logcat_state: Option<LogcatUiState>,
+    toolchain_status: Option<toolchain::ToolchainStatus>,
+    toolchain_install: Option<ToolchainInstallUiState>,
+    /// Whether this panel already offered the toolchain install via a
+    /// workspace notification (once per workspace session, so a dismissal
+    /// isn't nagged).
+    toolchain_offer_made: bool,
     _device_tracker: Task<()>,
     _project_detector: Task<()>,
+    _toolchain_detector: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -237,6 +284,7 @@ impl MobileDevPanel {
                 this.update(cx, |panel, cx| {
                     panel.expo_project = detected;
                     panel.project_scanned = true;
+                    panel.maybe_offer_toolchain_install(cx);
                     cx.notify();
                 })
                 .ok();
@@ -254,10 +302,131 @@ impl MobileDevPanel {
             project_scanned: false,
             build_state: None,
             logcat_state: None,
+            toolchain_status: None,
+            toolchain_install: None,
+            toolchain_offer_made: false,
             _device_tracker: device_tracker,
             _project_detector: project_detector,
+            _toolchain_detector: Self::spawn_toolchain_detection(cx),
             _subscriptions: Vec::new(),
         }
+    }
+
+    fn spawn_toolchain_detection(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let status = cx.background_spawn(async { toolchain::detect() }).await;
+            this.update(cx, |panel, cx| {
+                panel.toolchain_status = Some(status);
+                panel.maybe_offer_toolchain_install(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+    }
+
+    /// Once both detections have finished and this turns out to be an Expo
+    /// project with toolchain components missing, offer the managed install
+    /// via a workspace notification. Fires at most once per panel instance.
+    fn maybe_offer_toolchain_install(&mut self, cx: &mut Context<Self>) {
+        struct ToolchainInstallOffer;
+
+        if self.toolchain_offer_made
+            || self.expo_project.is_none()
+            || self.toolchain_install.is_some()
+        {
+            return;
+        }
+        let Some(status) = self.toolchain_status.as_ref() else {
+            return;
+        };
+        if status.all_present() {
+            return;
+        }
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+
+        self.toolchain_offer_made = true;
+        workspace.update(cx, |workspace, cx| {
+            workspace.show_notification(
+                NotificationId::unique::<ToolchainInstallOffer>(),
+                cx,
+                |cx| {
+                    cx.new(|cx| {
+                        MessageNotification::new(
+                            "This is an Expo project, but some of the Android build tools it \
+                             needs are missing. Lathe can download JDK 17 and the Android SDK \
+                             into a managed directory and accept the SDK licenses for you.",
+                            cx,
+                        )
+                        .with_title("Install Android toolchain?")
+                        .primary_message("Install")
+                        .primary_icon(IconName::Download)
+                        .primary_on_click(|window, cx| {
+                            window.dispatch_action(Box::new(InstallAndroidToolchain), cx);
+                        })
+                    })
+                },
+            );
+        });
+    }
+
+    fn refresh_toolchain(&mut self, cx: &mut Context<Self>) {
+        self._toolchain_detector = Self::spawn_toolchain_detection(cx);
+    }
+
+    /// Kick off (or ignore, if one is already running) a managed toolchain
+    /// install, streaming its progress into the panel's toolchain section.
+    pub fn start_toolchain_install(&mut self, cx: &mut Context<Self>) {
+        if self
+            .toolchain_install
+            .as_ref()
+            .is_some_and(|state| state.status == BuildStatus::Running)
+        {
+            return;
+        }
+
+        let session = toolchain::InstallSession::spawn(cx.http_client());
+        let forwarder = cx.spawn(async move |this, cx| {
+            let events = session.events();
+            pin_mut!(events);
+            while let Some(event) = events.next().await {
+                let Ok(_) = this.update(cx, |panel, cx| {
+                    match event {
+                        toolchain::InstallEvent::Line(line) => {
+                            if let Some(state) = panel.toolchain_install.as_mut() {
+                                state.lines.push(line);
+                                if state.lines.len() > BUILD_OUTPUT_LINE_CAP {
+                                    let overflow = state.lines.len() - BUILD_OUTPUT_LINE_CAP;
+                                    state.lines.drain(..overflow);
+                                }
+                            }
+                        }
+                        toolchain::InstallEvent::Finished(outcome) => {
+                            if let Some(state) = panel.toolchain_install.as_mut() {
+                                state.status = match outcome {
+                                    toolchain::InstallOutcome::Success => BuildStatus::Success,
+                                    toolchain::InstallOutcome::Failure(reason) => {
+                                        BuildStatus::Failure(reason)
+                                    }
+                                };
+                            }
+                            panel.refresh_toolchain(cx);
+                        }
+                    }
+                    cx.notify();
+                }) else {
+                    break;
+                };
+            }
+        });
+
+        self.toolchain_install = Some(ToolchainInstallUiState {
+            status: BuildStatus::Running,
+            lines: Vec::new(),
+            _forwarder: forwarder,
+        });
+        cx.notify();
     }
 
     /// Start streaming logcat for the active project's package on the
@@ -354,7 +523,8 @@ impl MobileDevPanel {
             BuildKind::EasPreview | BuildKind::EasProduction => None,
         };
 
-        let session = match BuildSession::spawn(kind, project.root, device_serial) {
+        let toolchain_env = toolchain::build_env(self.toolchain_status.as_ref());
+        let session = match BuildSession::spawn(kind, project.root, device_serial, toolchain_env) {
             Ok(session) => session,
             Err(err) => {
                 log::error!("mobile_dev: failed to spawn build: {err:#}");
@@ -730,6 +900,108 @@ impl MobileDevPanel {
         )
     }
 
+    fn render_toolchain_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let border_color = cx.theme().colors().border;
+        let mut section = v_flex()
+            .w_full()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(border_color);
+
+        let header = h_flex()
+            .gap_2()
+            .child(
+                Label::new("Android toolchain")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(div().flex_1());
+
+        let Some(status) = self.toolchain_status.as_ref() else {
+            return section.child(header).child(
+                Label::new("Checking toolchain...")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            );
+        };
+
+        let installing = self
+            .toolchain_install
+            .as_ref()
+            .is_some_and(|state| state.status == BuildStatus::Running);
+
+        let header = if installing {
+            header.child(
+                Label::new("installing...")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Info),
+            )
+        } else if status.all_present() {
+            header.child(
+                Label::new("ready")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Success),
+            )
+        } else {
+            header.child(
+                Button::new("mobile-toolchain-install", "Install missing")
+                    .label_size(LabelSize::Small)
+                    .on_click(cx.listener(|this, _, _, cx| this.start_toolchain_install(cx))),
+            )
+        };
+        section = section.child(header);
+
+        for (name, component) in [
+            ("JDK 17", &status.jdk),
+            ("SDK command-line tools", &status.sdk),
+            ("Platform tools (adb)", &status.platform_tools),
+            ("SDK licenses", &status.licenses),
+        ] {
+            let (state_label, color) = match component {
+                toolchain::ComponentStatus::Managed(_) => ("managed", Color::Success),
+                toolchain::ComponentStatus::System(_) => ("system", Color::Default),
+                toolchain::ComponentStatus::Missing => ("missing", Color::Warning),
+            };
+            section = section.child(
+                h_flex()
+                    .gap_2()
+                    .child(Label::new(name).size(LabelSize::XSmall))
+                    .child(div().flex_1())
+                    .child(Label::new(state_label).size(LabelSize::XSmall).color(color)),
+            );
+        }
+
+        if let Some(install) = self.toolchain_install.as_ref() {
+            if let BuildStatus::Failure(reason) = &install.status {
+                section = section.child(
+                    Label::new(reason.clone())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Error),
+                );
+            }
+            let mut log = v_flex().w_full();
+            for line in install.lines.iter().rev().take(30).rev() {
+                log = log.child(
+                    Label::new(line.clone())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                );
+            }
+            section = section.child(
+                div()
+                    .id("mobile-toolchain-output")
+                    .h(px(120.))
+                    .w_full()
+                    .overflow_y_scroll()
+                    .child(log),
+            );
+        }
+
+        section
+    }
+
     fn render_project_section(&self) -> impl IntoElement {
         let v = v_flex().w_full().gap_1().px_3().py_2();
         if !self.project_scanned {
@@ -825,6 +1097,7 @@ impl Render for MobileDevPanel {
                     ),
             )
             .child(self.render_project_section())
+            .child(self.render_toolchain_section(cx))
             .child(self.render_devices_section(cx))
             .when_some(self.render_build_section(cx), |this, section| {
                 this.child(section)
@@ -844,24 +1117,27 @@ impl Panel for MobileDevPanel {
         PANEL_KEY
     }
 
-    fn position(&self, _: &Window, _: &App) -> DockPosition {
-        DockPosition::Bottom
+    fn position(&self, _: &Window, cx: &App) -> DockPosition {
+        MobileDevPanelSettings::get_global(cx).dock
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
         matches!(position, DockPosition::Bottom | DockPosition::Right)
     }
 
-    fn set_position(&mut self, _position: DockPosition, _: &mut Window, _: &mut Context<Self>) {
-        // Position is fixed until a settings struct lands in a later commit.
+    fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+            settings.mobile_dev_panel.get_or_insert_default().dock = Some(position.into())
+        });
     }
 
-    fn default_size(&self, _: &Window, _: &App) -> Pixels {
-        self.width.unwrap_or(px(320.))
+    fn default_size(&self, _: &Window, cx: &App) -> Pixels {
+        self.width
+            .unwrap_or_else(|| MobileDevPanelSettings::get_global(cx).default_width)
     }
 
-    fn icon(&self, _: &Window, _: &App) -> Option<IconName> {
-        Some(IconName::ToolHammer)
+    fn icon(&self, _: &Window, cx: &App) -> Option<IconName> {
+        Some(IconName::ToolHammer).filter(|_| MobileDevPanelSettings::get_global(cx).button)
     }
 
     fn icon_tooltip(&self, _: &Window, _: &App) -> Option<&'static str> {

@@ -1,6 +1,6 @@
 # Mobile development with Lathe
 
-Lathe ships a workflow for building React Native / Expo apps and installing them on an Android device, with no Android Studio install required. Phase 1 (this doc) covers the manual setup and the cheapest path for common workflows. A future first-run wizard (Phase 3, planned) will automate the toolchain install.
+Lathe ships a workflow for building React Native / Expo apps and installing them on an Android device, with no Android Studio install required. Phase 1 (this doc) covers the manual setup and the cheapest path for common workflows. The Mobile panel can now install the whole toolchain for you (see "Toolchain" below), so the manual route is optional.
 
 ## Pick your workflow
 
@@ -59,7 +59,9 @@ See "Toolchain" below for the install. Once set up, generate a release keystore 
 
 ## Toolchain (only needed for local builds)
 
-Required components for an Expo 54 build targeting Android 35.
+**The easy way**: when Lathe detects an Expo project whose toolchain is incomplete, it offers the install in a workspace notification; click **Install**. The same flow is always available from the Mobile panel's "Android toolchain" section (**Install missing**) or the `install android toolchain` action. Lathe downloads JDK 17 (Azul Zulu) and the Android SDK into a Lathe-managed directory, accepts the licenses, and injects `JAVA_HOME` / `ANDROID_HOME` / `PATH` into panel-started builds automatically; the shell exports below are then only needed for terminal workflows. The managed toolchain skips the NDK: gradle downloads the project's pinned revision on first build.
+
+The manual route, for reference. Required components for an Expo 54 build targeting Android 35.
 
 | Component                                                   | Recommended install                                                                                                                                                                       |
 | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -154,9 +156,9 @@ Your `android/app/build.gradle` should reference those properties in the `signin
 | Build hangs on first gradle invocation                                   | Downloading NDK (~1 GB) silently                            | Pre-install NDK with `sdkmanager "ndk;27.1.12297006"` so progress is visible.                  |
 | `JAVA_HOME points to … which is not Java 17`                             | Multiple JDKs installed                                     | Set `JAVA_HOME` explicitly in `~/.zshrc` per the recipe above.                                 |
 
-## Next phases (planned)
+## Next phases
 
-- **Phase 2**: `mobile_dev` crate inside Lathe. Status-bar device picker, dedicated logcat panel, single "Build & Run" command palette action, EAS-build wrapper.
-- **Phase 3**: first-run wizard that downloads JDK 17 (Azul Zulu), the Android SDK, and the NDK into a Lathe-managed directory, accepts licenses, and stores release keystore passwords in the macOS Keychain.
+- **Phase 2 (shipped)**: the `mobile_dev` panel inside Lathe. Device list with selection, per-app logcat tail, "Build & Run" and EAS build actions in the command palette, and a status-bar device selector that appears whenever an Expo project is open. The panel docks bottom or right via the `mobile_dev_panel` settings; the selector can be hidden with `status_bar.mobile_device_selector_button`.
+- **Phase 3 (shipped)**: the panel's "Android toolchain" section detects JDK 17, SDK command-line tools, platform-tools, and license state, and installs anything missing into a Lathe-managed directory with licenses accepted. Panel-started builds automatically use the managed toolchain via injected `JAVA_HOME` / `ANDROID_HOME` / `PATH`; adb calls prefer the managed platform-tools. The NDK is left to gradle (it fetches the project's pinned revision on first build). Still open from the original Phase 3 scope: storing release keystore passwords in the macOS Keychain, which lands together with panel-driven local release builds.
 
-Both phases are tracked in the Lathe repo. Phase 1 (this doc) is enough for daily Expo Android dev today.
+Phase 1 (this doc) remains the reference for the manual, terminal-based workflow.

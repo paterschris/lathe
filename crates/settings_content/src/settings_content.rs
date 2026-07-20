@@ -175,6 +175,9 @@ pub struct SettingsContent {
     /// Settings for the git activity feed panel (live in-flight git commands).
     pub git_activity_panel: Option<PanelSettingsContent>,
 
+    /// Settings for the mobile development panel.
+    pub mobile_dev_panel: Option<PanelSettingsContent>,
+
     pub tabs: Option<ItemSettingsContent>,
     pub tab_bar: Option<TabBarSettingsContent>,
     pub status_bar: Option<StatusBarSettingsContent>,

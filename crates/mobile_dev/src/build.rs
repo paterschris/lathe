@@ -67,11 +67,13 @@ impl BuildSession {
     /// Spawn a new build. `project_root` is the directory containing
     /// `app.json`; `device_serial` is forwarded to expo via `-s <serial>`
     /// for [`BuildKind::LocalDebugRun`] when present (EAS builds are device
-    /// agnostic).
+    /// agnostic). `env` carries the managed-toolchain variables
+    /// (JAVA_HOME/ANDROID_HOME/PATH) so gradle works without shell setup.
     pub fn spawn(
         kind: BuildKind,
         project_root: PathBuf,
         device_serial: Option<SharedString>,
+        env: Vec<(String, String)>,
     ) -> Result<Self> {
         let (tx, rx) = channel::unbounded::<BuildEvent>();
         let started_at = std::time::Instant::now();
@@ -83,6 +85,10 @@ impl BuildSession {
         let mut cmd = new_command(&program);
         cmd.args(args.iter().map(String::as_str))
             .current_dir(&project_root)
+            .envs(
+                env.iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            )
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);

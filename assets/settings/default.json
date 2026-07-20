@@ -1057,6 +1057,14 @@
     // Default: project_diff
     "entry_primary_click_action": "project_diff",
   },
+  "mobile_dev_panel": {
+    // Whether to show the mobile panel button in the dock.
+    "button": true,
+    // Where to dock the mobile panel. Can be 'bottom' or 'right'.
+    "dock": "bottom",
+    // Default width of the mobile panel (when docked right).
+    "default_width": 320,
+  },
   "agent": {
     // Whether the inline assistant should use streaming tools, when available
     "inline_assistant_use_streaming_tools": true,
@@ -1833,6 +1841,9 @@
     "line_endings_button": false,
     // Control when to show the active encoding in the status bar.
     "active_encoding_button": "non_utf8",
+    // Whether to show the Android device selector in the status bar
+    // when a mobile (Expo) project is open.
+    "mobile_device_selector_button": true,
   },
   // Settings specific to the terminal
   "terminal": {

@@ -11359,12 +11359,16 @@ name = "mobile_dev"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
+ "async-tar",
  "collections",
  "db",
  "fs",
  "futures 0.3.32",
  "gpui",
+ "http_client",
  "log",
+ "paths",
  "project",
  "serde",
  "serde_json",

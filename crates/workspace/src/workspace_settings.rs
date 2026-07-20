@@ -199,6 +199,7 @@ pub struct StatusBarSettings {
     pub cursor_position_button: bool,
     pub line_endings_button: bool,
     pub active_encoding_button: EncodingDisplayOptions,
+    pub mobile_device_selector_button: bool,
 }
 
 impl Settings for StatusBarSettings {
@@ -211,6 +212,7 @@ impl Settings for StatusBarSettings {
             cursor_position_button: status_bar.cursor_position_button.unwrap(),
             line_endings_button: status_bar.line_endings_button.unwrap(),
             active_encoding_button: status_bar.active_encoding_button.unwrap(),
+            mobile_device_selector_button: status_bar.mobile_device_selector_button.unwrap(),
         }
     }
 }

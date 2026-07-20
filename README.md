@@ -94,7 +94,7 @@ Commands (via the command palette):
 `Cmd +`, `Cmd -`, and `Cmd 0` adjust the buffer and UI font size of only the active Lathe window, so two windows side-by-side can be zoomed independently. The "Reset Zoom" menu action and `Cmd +scroll-wheel` (when mouse-wheel zoom is enabled) also stay scoped to the focused window. The persisted variants (the menu's `… (persisted)` items) still write to `settings.json` and apply globally.
 
 ### Mobile (Expo / React Native) workflow
-A drop-in `.zed/tasks.json` template and a setup walkthrough for building and installing Expo apps on Android devices without Android Studio. See [docs/mobile-development.md](docs/mobile-development.md). A first-class `mobile_dev` panel (device picker, logcat, one-click build & run) is in progress.
+A drop-in `.zed/tasks.json` template and a setup walkthrough for building and installing Expo apps on Android devices without Android Studio. See [docs/mobile-development.md](docs/mobile-development.md). Lathe also ships a first-class Mobile panel (device list, per-app logcat, one-click debug build & run, EAS cloud builds), a status-bar device selector that appears when an Expo project is open, and a one-click Android toolchain installer that downloads JDK 17 and the Android SDK into a Lathe-managed directory with licenses accepted.
 
 ## Install
 

@@ -190,6 +190,7 @@ impl VsCodeSettings {
             repository_dashboard_pinned_repos: None,
             pull_request_panel: None,
             git_activity_panel: None,
+            mobile_dev_panel: None,
             global_lsp_settings: skip_default(GlobalLspSettingsContent {
                 semantic_token_rules: self.semantic_token_rules(),
                 ..GlobalLspSettingsContent::default()
@@ -803,6 +804,7 @@ impl VsCodeSettings {
             cursor_position_button: None,
             line_endings_button: None,
             active_encoding_button: None,
+            mobile_device_selector_button: None,
         })
     }
 
