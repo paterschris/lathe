@@ -32,8 +32,14 @@ case "$target_triple" in
 esac
 
 zip_path="target/release/Lathe-${version}-${arch}-macos.zip"
+dmg_path="target/release/Lathe-${version}-${arch}-macos.dmg"
 tag="v${version}"
 repo="paterschris/lathe"
+
+assets=("$zip_path")
+if [ -f "$dmg_path" ]; then
+    assets+=("$dmg_path")
+fi
 
 # Mark beta/preview tags as GitHub prereleases
 prerelease_args=()
@@ -48,16 +54,19 @@ echo "=== Step 3: Release ==="
 
 # Check if release already exists
 if gh release view "$tag" --repo "$repo" &>/dev/null; then
-    echo "Release ${tag} already exists. Uploading asset to it..."
-    gh release upload "$tag" "$zip_path" --clobber --repo "$repo"
+    echo "Release ${tag} already exists. Uploading assets to it..."
+    gh release upload "$tag" "${assets[@]}" --clobber --repo "$repo"
 else
     echo "Creating release ${tag}..."
-    gh release create "$tag" "$zip_path" \
+    # ${array[@]+...} guards the expansion: macOS bash 3.2 treats an empty
+    # array as unbound under `set -u`, which aborted the first stable
+    # (no --prerelease) release.
+    gh release create "$tag" "${assets[@]}" \
         --title "Lathe ${tag}" \
         --notes "Lathe ${tag} for macOS (${arch})" \
         --target main \
         --repo "$repo" \
-        "${prerelease_args[@]}"
+        ${prerelease_args[@]+"${prerelease_args[@]}"}
 fi
 
 echo ""
