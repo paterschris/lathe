@@ -5,9 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use gpui::HighlightStyle;
-#[cfg(any(test, feature = "test-support"))]
-use gpui::Hsla;
+use gpui::{HighlightStyle, Hsla};
 
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
 pub struct SyntaxTheme {
@@ -73,6 +71,23 @@ impl SyntaxTheme {
             .iter()
             .find(|(_, value)| **value == idx)
             .map(|(key, _)| key.as_ref())
+    }
+
+    /// Iterates all capture names with their highlight indices, ordered by name.
+    pub fn capture_names_with_indices(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.capture_name_map
+            .iter()
+            .map(|(name, index)| (name.as_str(), *index))
+    }
+
+    pub fn highlight_color(&self, index: usize) -> Option<Hsla> {
+        self.highlights.get(index).and_then(|style| style.color)
+    }
+
+    pub fn set_highlight_color(&mut self, index: usize, color: Hsla) {
+        if let Some(style) = self.highlights.get_mut(index) {
+            style.color = Some(color);
+        }
     }
 
     pub fn highlight_id(&self, capture_name: &str) -> Option<u32> {

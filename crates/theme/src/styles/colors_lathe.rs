@@ -1,9 +1,11 @@
 #![allow(missing_docs)]
 
-use gpui::Hsla;
-use strum::EnumIter;
+use std::sync::Arc;
 
-use crate::{ThemeColorField, ThemeColors};
+use gpui::Hsla;
+use strum::{AsRefStr, EnumIter, IntoEnumIterator};
+
+use crate::{StatusColors, ThemeColorField, ThemeColors, ThemeStyles};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
 pub enum ColorCategory {
@@ -17,9 +19,16 @@ pub enum ColorCategory {
     Scrollbar,
     Minimap,
     Editor,
+    Search,
+    Vim,
+    Debugger,
     Terminal,
     VersionControl,
     Gutter,
+    Status,
+    Player,
+    Accent,
+    Syntax,
     Other,
 }
 
@@ -36,9 +45,16 @@ impl ColorCategory {
             Self::Scrollbar => "Scrollbar",
             Self::Minimap => "Minimap",
             Self::Editor => "Editor",
+            Self::Search => "Search",
+            Self::Vim => "Vim",
+            Self::Debugger => "Debugger",
             Self::Terminal => "Terminal",
             Self::VersionControl => "Version Control",
             Self::Gutter => "Gutter",
+            Self::Status => "Status",
+            Self::Player => "Player",
+            Self::Accent => "Accent",
+            Self::Syntax => "Syntax",
             Self::Other => "Other",
         }
     }
@@ -47,14 +63,16 @@ impl ColorCategory {
 impl ThemeColorField {
     pub fn category(&self) -> ColorCategory {
         let name = self.as_ref();
-        if name.starts_with("border") {
+        if name.contains("debugger") {
+            ColorCategory::Debugger
+        } else if name.starts_with("border") {
             ColorCategory::Border
         } else if name.starts_with("element")
             || name.starts_with("ghost_element")
             || name.starts_with("drop_target")
         {
             ColorCategory::Element
-        } else if name.starts_with("text") {
+        } else if name.starts_with("text") || name.starts_with("link_text") {
             ColorCategory::Text
         } else if name.starts_with("icon") {
             ColorCategory::Icon
@@ -66,6 +84,10 @@ impl ThemeColorField {
             ColorCategory::Scrollbar
         } else if name.starts_with("minimap") {
             ColorCategory::Minimap
+        } else if name.starts_with("search") {
+            ColorCategory::Search
+        } else if name.starts_with("vim") {
+            ColorCategory::Vim
         } else if name.starts_with("editor") {
             ColorCategory::Editor
         } else if name.starts_with("terminal") {
@@ -128,6 +150,9 @@ impl ThemeColors {
             ThemeColorField::ElementHover => self.element_hover = value,
             ThemeColorField::ElementActive => self.element_active = value,
             ThemeColorField::ElementSelected => self.element_selected = value,
+            ThemeColorField::ElementSelectionBackground => {
+                self.element_selection_background = value
+            }
             ThemeColorField::ElementDisabled => self.element_disabled = value,
             ThemeColorField::DropTargetBackground => self.drop_target_background = value,
             ThemeColorField::DropTargetBorder => self.drop_target_border = value,
@@ -146,6 +171,7 @@ impl ThemeColors {
             ThemeColorField::IconDisabled => self.icon_disabled = value,
             ThemeColorField::IconPlaceholder => self.icon_placeholder = value,
             ThemeColorField::IconAccent => self.icon_accent = value,
+            ThemeColorField::DebuggerAccent => self.debugger_accent = value,
             ThemeColorField::StatusBarBackground => self.status_bar_background = value,
             ThemeColorField::TitleBarBackground => self.title_bar_background = value,
             ThemeColorField::TitleBarInactiveBackground => {
@@ -207,6 +233,26 @@ impl ThemeColors {
                 self.minimap_thumb_active_background = value
             }
             ThemeColorField::MinimapThumbBorder => self.minimap_thumb_border = value,
+            ThemeColorField::VimHelixJumpLabelForeground => {
+                self.vim_helix_jump_label_foreground = value
+            }
+            ThemeColorField::VimNormalBackground => self.vim_normal_background = value,
+            ThemeColorField::VimInsertBackground => self.vim_insert_background = value,
+            ThemeColorField::VimReplaceBackground => self.vim_replace_background = value,
+            ThemeColorField::VimVisualBackground => self.vim_visual_background = value,
+            ThemeColorField::VimVisualLineBackground => self.vim_visual_line_background = value,
+            ThemeColorField::VimVisualBlockBackground => self.vim_visual_block_background = value,
+            ThemeColorField::VimYankBackground => self.vim_yank_background = value,
+            ThemeColorField::VimHelixNormalBackground => self.vim_helix_normal_background = value,
+            ThemeColorField::VimHelixSelectBackground => self.vim_helix_select_background = value,
+            ThemeColorField::VimNormalForeground => self.vim_normal_foreground = value,
+            ThemeColorField::VimInsertForeground => self.vim_insert_foreground = value,
+            ThemeColorField::VimReplaceForeground => self.vim_replace_foreground = value,
+            ThemeColorField::VimVisualForeground => self.vim_visual_foreground = value,
+            ThemeColorField::VimVisualLineForeground => self.vim_visual_line_foreground = value,
+            ThemeColorField::VimVisualBlockForeground => self.vim_visual_block_foreground = value,
+            ThemeColorField::VimHelixNormalForeground => self.vim_helix_normal_foreground = value,
+            ThemeColorField::VimHelixSelectForeground => self.vim_helix_select_foreground = value,
             ThemeColorField::EditorForeground => self.editor_foreground = value,
             ThemeColorField::EditorBackground => self.editor_background = value,
             ThemeColorField::EditorGutterBackground => self.editor_gutter_background = value,
@@ -217,8 +263,12 @@ impl ThemeColors {
             ThemeColorField::EditorHighlightedLineBackground => {
                 self.editor_highlighted_line_background = value
             }
+            ThemeColorField::EditorDebuggerActiveLineBackground => {
+                self.editor_debugger_active_line_background = value
+            }
             ThemeColorField::EditorLineNumber => self.editor_line_number = value,
             ThemeColorField::EditorActiveLineNumber => self.editor_active_line_number = value,
+            ThemeColorField::EditorHoverLineNumber => self.editor_hover_line_number = value,
             ThemeColorField::EditorInvisible => self.editor_invisible = value,
             ThemeColorField::EditorWrapGuide => self.editor_wrap_guide = value,
             ThemeColorField::EditorActiveWrapGuide => self.editor_active_wrap_guide = value,
@@ -232,6 +282,24 @@ impl ThemeColors {
             }
             ThemeColorField::EditorDocumentHighlightBracketBackground => {
                 self.editor_document_highlight_bracket_background = value
+            }
+            ThemeColorField::EditorDiffHunkAddedBackground => {
+                self.editor_diff_hunk_added_background = value
+            }
+            ThemeColorField::EditorDiffHunkAddedHollowBackground => {
+                self.editor_diff_hunk_added_hollow_background = value
+            }
+            ThemeColorField::EditorDiffHunkAddedHollowBorder => {
+                self.editor_diff_hunk_added_hollow_border = value
+            }
+            ThemeColorField::EditorDiffHunkDeletedBackground => {
+                self.editor_diff_hunk_deleted_background = value
+            }
+            ThemeColorField::EditorDiffHunkDeletedHollowBackground => {
+                self.editor_diff_hunk_deleted_hollow_background = value
+            }
+            ThemeColorField::EditorDiffHunkDeletedHollowBorder => {
+                self.editor_diff_hunk_deleted_hollow_border = value
             }
             ThemeColorField::TerminalBackground => self.terminal_background = value,
             ThemeColorField::TerminalForeground => self.terminal_foreground = value,
@@ -269,6 +337,14 @@ impl ThemeColors {
             ThemeColorField::VersionControlRenamed => self.version_control_renamed = value,
             ThemeColorField::VersionControlConflict => self.version_control_conflict = value,
             ThemeColorField::VersionControlIgnored => self.version_control_ignored = value,
+            ThemeColorField::VersionControlWordAdded => self.version_control_word_added = value,
+            ThemeColorField::VersionControlWordDeleted => self.version_control_word_deleted = value,
+            ThemeColorField::VersionControlConflictMarkerOurs => {
+                self.version_control_conflict_marker_ours = value
+            }
+            ThemeColorField::VersionControlConflictMarkerTheirs => {
+                self.version_control_conflict_marker_theirs = value
+            }
             ThemeColorField::GutterAddedBackground => self.lathe.gutter_added_background = value,
             ThemeColorField::GutterModifiedBackground => {
                 self.lathe.gutter_modified_background = value
@@ -276,6 +352,346 @@ impl ThemeColors {
             ThemeColorField::GutterDeletedBackground => {
                 self.lathe.gutter_deleted_background = value
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum StatusColorField {
+    Conflict,
+    ConflictBackground,
+    ConflictBorder,
+    Created,
+    CreatedBackground,
+    CreatedBorder,
+    Deleted,
+    DeletedBackground,
+    DeletedBorder,
+    Error,
+    ErrorBackground,
+    ErrorBorder,
+    Hidden,
+    HiddenBackground,
+    HiddenBorder,
+    Hint,
+    HintBackground,
+    HintBorder,
+    Ignored,
+    IgnoredBackground,
+    IgnoredBorder,
+    Info,
+    InfoBackground,
+    InfoBorder,
+    Modified,
+    ModifiedBackground,
+    ModifiedBorder,
+    Predictive,
+    PredictiveBackground,
+    PredictiveBorder,
+    Renamed,
+    RenamedBackground,
+    RenamedBorder,
+    Success,
+    SuccessBackground,
+    SuccessBorder,
+    Unreachable,
+    UnreachableBackground,
+    UnreachableBorder,
+    Warning,
+    WarningBackground,
+    WarningBorder,
+}
+
+impl StatusColorField {
+    pub fn display_name(&self) -> String {
+        format!("status {}", self.as_ref().replace('_', " "))
+    }
+}
+
+impl StatusColors {
+    pub fn color(&self, field: StatusColorField) -> Hsla {
+        match field {
+            StatusColorField::Conflict => self.conflict,
+            StatusColorField::ConflictBackground => self.conflict_background,
+            StatusColorField::ConflictBorder => self.conflict_border,
+            StatusColorField::Created => self.created,
+            StatusColorField::CreatedBackground => self.created_background,
+            StatusColorField::CreatedBorder => self.created_border,
+            StatusColorField::Deleted => self.deleted,
+            StatusColorField::DeletedBackground => self.deleted_background,
+            StatusColorField::DeletedBorder => self.deleted_border,
+            StatusColorField::Error => self.error,
+            StatusColorField::ErrorBackground => self.error_background,
+            StatusColorField::ErrorBorder => self.error_border,
+            StatusColorField::Hidden => self.hidden,
+            StatusColorField::HiddenBackground => self.hidden_background,
+            StatusColorField::HiddenBorder => self.hidden_border,
+            StatusColorField::Hint => self.hint,
+            StatusColorField::HintBackground => self.hint_background,
+            StatusColorField::HintBorder => self.hint_border,
+            StatusColorField::Ignored => self.ignored,
+            StatusColorField::IgnoredBackground => self.ignored_background,
+            StatusColorField::IgnoredBorder => self.ignored_border,
+            StatusColorField::Info => self.info,
+            StatusColorField::InfoBackground => self.info_background,
+            StatusColorField::InfoBorder => self.info_border,
+            StatusColorField::Modified => self.modified,
+            StatusColorField::ModifiedBackground => self.modified_background,
+            StatusColorField::ModifiedBorder => self.modified_border,
+            StatusColorField::Predictive => self.predictive,
+            StatusColorField::PredictiveBackground => self.predictive_background,
+            StatusColorField::PredictiveBorder => self.predictive_border,
+            StatusColorField::Renamed => self.renamed,
+            StatusColorField::RenamedBackground => self.renamed_background,
+            StatusColorField::RenamedBorder => self.renamed_border,
+            StatusColorField::Success => self.success,
+            StatusColorField::SuccessBackground => self.success_background,
+            StatusColorField::SuccessBorder => self.success_border,
+            StatusColorField::Unreachable => self.unreachable,
+            StatusColorField::UnreachableBackground => self.unreachable_background,
+            StatusColorField::UnreachableBorder => self.unreachable_border,
+            StatusColorField::Warning => self.warning,
+            StatusColorField::WarningBackground => self.warning_background,
+            StatusColorField::WarningBorder => self.warning_border,
+        }
+    }
+
+    pub fn set_color(&mut self, field: StatusColorField, value: Hsla) {
+        match field {
+            StatusColorField::Conflict => self.conflict = value,
+            StatusColorField::ConflictBackground => self.conflict_background = value,
+            StatusColorField::ConflictBorder => self.conflict_border = value,
+            StatusColorField::Created => self.created = value,
+            StatusColorField::CreatedBackground => self.created_background = value,
+            StatusColorField::CreatedBorder => self.created_border = value,
+            StatusColorField::Deleted => self.deleted = value,
+            StatusColorField::DeletedBackground => self.deleted_background = value,
+            StatusColorField::DeletedBorder => self.deleted_border = value,
+            StatusColorField::Error => self.error = value,
+            StatusColorField::ErrorBackground => self.error_background = value,
+            StatusColorField::ErrorBorder => self.error_border = value,
+            StatusColorField::Hidden => self.hidden = value,
+            StatusColorField::HiddenBackground => self.hidden_background = value,
+            StatusColorField::HiddenBorder => self.hidden_border = value,
+            StatusColorField::Hint => self.hint = value,
+            StatusColorField::HintBackground => self.hint_background = value,
+            StatusColorField::HintBorder => self.hint_border = value,
+            StatusColorField::Ignored => self.ignored = value,
+            StatusColorField::IgnoredBackground => self.ignored_background = value,
+            StatusColorField::IgnoredBorder => self.ignored_border = value,
+            StatusColorField::Info => self.info = value,
+            StatusColorField::InfoBackground => self.info_background = value,
+            StatusColorField::InfoBorder => self.info_border = value,
+            StatusColorField::Modified => self.modified = value,
+            StatusColorField::ModifiedBackground => self.modified_background = value,
+            StatusColorField::ModifiedBorder => self.modified_border = value,
+            StatusColorField::Predictive => self.predictive = value,
+            StatusColorField::PredictiveBackground => self.predictive_background = value,
+            StatusColorField::PredictiveBorder => self.predictive_border = value,
+            StatusColorField::Renamed => self.renamed = value,
+            StatusColorField::RenamedBackground => self.renamed_background = value,
+            StatusColorField::RenamedBorder => self.renamed_border = value,
+            StatusColorField::Success => self.success = value,
+            StatusColorField::SuccessBackground => self.success_background = value,
+            StatusColorField::SuccessBorder => self.success_border = value,
+            StatusColorField::Unreachable => self.unreachable = value,
+            StatusColorField::UnreachableBackground => self.unreachable_background = value,
+            StatusColorField::UnreachableBorder => self.unreachable_border = value,
+            StatusColorField::Warning => self.warning = value,
+            StatusColorField::WarningBackground => self.warning_background = value,
+            StatusColorField::WarningBorder => self.warning_border = value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlayerColorChannel {
+    Cursor,
+    Background,
+    Selection,
+}
+
+impl PlayerColorChannel {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Cursor => "cursor",
+            Self::Background => "background",
+            Self::Selection => "selection",
+        }
+    }
+}
+
+/// A single customizable color anywhere in the theme: the flat UI colors,
+/// status colors, per-player collaboration colors, accent colors, and syntax
+/// highlight colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CustomizableColor {
+    Theme(ThemeColorField),
+    Status(StatusColorField),
+    Player(usize, PlayerColorChannel),
+    Accent(usize),
+    Syntax(usize),
+}
+
+impl CustomizableColor {
+    pub fn category(&self) -> ColorCategory {
+        match self {
+            Self::Theme(field) => field.category(),
+            Self::Status(_) => ColorCategory::Status,
+            Self::Player(..) => ColorCategory::Player,
+            Self::Accent(_) => ColorCategory::Accent,
+            Self::Syntax(_) => ColorCategory::Syntax,
+        }
+    }
+
+    pub fn is_lathe_custom(&self) -> bool {
+        match self {
+            Self::Theme(field) => field.is_lathe_custom(),
+            _ => false,
+        }
+    }
+
+    /// Stable identifier, also shown as the technical name in the editor pane.
+    pub fn key(&self, styles: &ThemeStyles) -> String {
+        match self {
+            Self::Theme(field) => field.as_ref().to_string(),
+            Self::Status(field) => format!("status.{}", field.as_ref()),
+            Self::Player(index, channel) => format!("player.{index}.{}", channel.name()),
+            Self::Accent(index) => format!("accents.{index}"),
+            Self::Syntax(index) => format!(
+                "syntax.{}",
+                styles.syntax.get_capture_name(*index).unwrap_or("unknown")
+            ),
+        }
+    }
+
+    pub fn display_name(&self, styles: &ThemeStyles) -> String {
+        match self {
+            Self::Theme(field) => field.display_name(),
+            Self::Status(field) => field.display_name(),
+            Self::Player(index, channel) => format!("player {} {}", index + 1, channel.name()),
+            Self::Accent(index) => format!("accent {}", index + 1),
+            Self::Syntax(index) => format!(
+                "syntax {}",
+                styles.syntax.get_capture_name(*index).unwrap_or("unknown")
+            ),
+        }
+    }
+}
+
+impl ThemeStyles {
+    /// Every customizable color in this theme, ordered by group: theme colors,
+    /// status colors, player colors, accents, then syntax highlights sorted by
+    /// capture name.
+    pub fn all_customizable_colors(&self) -> Vec<CustomizableColor> {
+        let mut fields: Vec<CustomizableColor> = ThemeColorField::iter()
+            .map(CustomizableColor::Theme)
+            .collect();
+        fields.extend(StatusColorField::iter().map(CustomizableColor::Status));
+        for index in 0..self.player.0.len() {
+            for channel in [
+                PlayerColorChannel::Cursor,
+                PlayerColorChannel::Background,
+                PlayerColorChannel::Selection,
+            ] {
+                fields.push(CustomizableColor::Player(index, channel));
+            }
+        }
+        fields.extend((0..self.accents.0.len()).map(CustomizableColor::Accent));
+        fields.extend(
+            self.syntax
+                .capture_names_with_indices()
+                .map(|(_, index)| CustomizableColor::Syntax(index)),
+        );
+        fields
+    }
+
+    pub fn customizable_color(&self, field: CustomizableColor) -> Hsla {
+        match field {
+            CustomizableColor::Theme(field) => self.colors.color(field),
+            CustomizableColor::Status(field) => self.status.color(field),
+            CustomizableColor::Player(index, channel) => {
+                let player = self.player.0.get(index).copied().unwrap_or_default();
+                match channel {
+                    PlayerColorChannel::Cursor => player.cursor,
+                    PlayerColorChannel::Background => player.background,
+                    PlayerColorChannel::Selection => player.selection,
+                }
+            }
+            CustomizableColor::Accent(index) => {
+                self.accents.0.get(index).copied().unwrap_or_default()
+            }
+            CustomizableColor::Syntax(index) => self
+                .syntax
+                .highlight_color(index)
+                .unwrap_or(self.colors.editor_foreground),
+        }
+    }
+
+    pub fn set_customizable_color(&mut self, field: CustomizableColor, value: Hsla) {
+        match field {
+            CustomizableColor::Theme(field) => self.colors.set_color(field, value),
+            CustomizableColor::Status(field) => self.status.set_color(field, value),
+            CustomizableColor::Player(index, channel) => {
+                if let Some(player) = self.player.0.get_mut(index) {
+                    match channel {
+                        PlayerColorChannel::Cursor => player.cursor = value,
+                        PlayerColorChannel::Background => player.background = value,
+                        PlayerColorChannel::Selection => player.selection = value,
+                    }
+                }
+            }
+            CustomizableColor::Accent(index) => {
+                let mut accents = self.accents.0.to_vec();
+                if let Some(slot) = accents.get_mut(index) {
+                    *slot = value;
+                    self.accents.0 = Arc::from(accents);
+                }
+            }
+            CustomizableColor::Syntax(index) => {
+                Arc::make_mut(&mut self.syntax).set_highlight_color(index, value);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Proves the field enums cover every struct field on which the light and
+    // dark palettes disagree; a field missing from the enum leaves the light
+    // value in place and fails the equality check.
+    #[test]
+    fn theme_color_field_covers_all_theme_colors() {
+        let mut light = ThemeColors::light();
+        let dark = ThemeColors::dark();
+        for field in ThemeColorField::iter() {
+            light.set_color(field, dark.color(field));
+        }
+        assert_eq!(light, dark);
+    }
+
+    #[test]
+    fn status_color_field_covers_all_status_colors() {
+        let mut light = StatusColors::light();
+        let dark = StatusColors::dark();
+        for field in StatusColorField::iter() {
+            light.set_color(field, dark.color(field));
+        }
+        assert_eq!(light, dark);
+    }
+
+    #[test]
+    fn every_theme_color_field_is_categorized() {
+        for field in ThemeColorField::iter() {
+            assert_ne!(
+                field.category(),
+                ColorCategory::Other,
+                "{} is uncategorized",
+                field.as_ref()
+            );
         }
     }
 }

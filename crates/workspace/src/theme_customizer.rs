@@ -6,7 +6,7 @@ use gpui::{
     Window, actions, hsla, px,
 };
 use strum::IntoEnumIterator;
-use theme::{ActiveTheme, ColorCategory, GlobalTheme, Theme, ThemeColorField};
+use theme::{ActiveTheme, ColorCategory, CustomizableColor, GlobalTheme, Theme};
 use ui::prelude::*;
 use ui::{Label, LabelCommon, LabelSize};
 
@@ -33,8 +33,8 @@ pub fn init(cx: &mut App) {
 struct ThemeCustomizer {
     focus_handle: FocusHandle,
     base_theme: Arc<Theme>,
-    color_overrides: HashMap<ThemeColorField, Hsla>,
-    selected_field: Option<ThemeColorField>,
+    color_overrides: HashMap<CustomizableColor, Hsla>,
+    selected_field: Option<CustomizableColor>,
     active_category: Option<ColorCategory>,
     show_lathe_only: bool,
 }
@@ -52,19 +52,19 @@ impl ThemeCustomizer {
         }
     }
 
-    fn current_color(&self, field: ThemeColorField) -> Hsla {
+    fn current_color(&self, field: CustomizableColor) -> Hsla {
         self.color_overrides
             .get(&field)
             .copied()
-            .unwrap_or_else(|| self.base_theme.styles.colors.color(field))
+            .unwrap_or_else(|| self.base_theme.styles.customizable_color(field))
     }
 
-    fn set_color(&mut self, field: ThemeColorField, color: Hsla, cx: &mut Context<Self>) {
+    fn set_color(&mut self, field: CustomizableColor, color: Hsla, cx: &mut Context<Self>) {
         self.color_overrides.insert(field, color);
         self.apply_overrides(cx);
     }
 
-    fn reset_color(&mut self, field: ThemeColorField, cx: &mut Context<Self>) {
+    fn reset_color(&mut self, field: CustomizableColor, cx: &mut Context<Self>) {
         self.color_overrides.remove(&field);
         self.apply_overrides(cx);
     }
@@ -77,15 +77,18 @@ impl ThemeCustomizer {
     fn apply_overrides(&self, cx: &mut Context<Self>) {
         let mut theme = (*self.base_theme).clone();
         for (&field, &color) in &self.color_overrides {
-            theme.styles.colors.set_color(field, color);
+            theme.styles.set_customizable_color(field, color);
         }
         GlobalTheme::update_theme(cx, Arc::new(theme));
         cx.refresh_windows();
         cx.notify();
     }
 
-    fn filtered_fields(&self) -> Vec<ThemeColorField> {
-        ThemeColorField::iter()
+    fn filtered_fields(&self) -> Vec<CustomizableColor> {
+        self.base_theme
+            .styles
+            .all_customizable_colors()
+            .into_iter()
             .filter(|field| {
                 if self.show_lathe_only {
                     return field.is_lathe_custom();
@@ -223,7 +226,10 @@ impl ThemeCustomizer {
 
             list = list.child(
                 div()
-                    .id(SharedString::from(format!("color-{}", field.as_ref())))
+                    .id(SharedString::from(format!(
+                        "color-{}",
+                        field.key(&self.base_theme.styles)
+                    )))
                     .w_full()
                     .px_2()
                     .py_1()
@@ -251,7 +257,7 @@ impl ThemeCustomizer {
                                 h_flex()
                                     .gap_1()
                                     .child(
-                                        Label::new(field.display_name())
+                                        Label::new(field.display_name(&self.base_theme.styles))
                                             .size(LabelSize::Small)
                                             .color(if is_selected {
                                                 Color::Default
@@ -302,7 +308,7 @@ impl ThemeCustomizer {
 
         let color = self.current_color(field);
         let is_overridden = self.color_overrides.contains_key(&field);
-        let original = self.base_theme.styles.colors.color(field);
+        let original = self.base_theme.styles.customizable_color(field);
 
         v_flex()
             .id("color-editor")
@@ -314,9 +320,12 @@ impl ThemeCustomizer {
             .child(
                 v_flex()
                     .gap_1()
-                    .child(Label::new(field.display_name()).size(LabelSize::Large))
                     .child(
-                        Label::new(SharedString::from(field.as_ref().to_string()))
+                        Label::new(field.display_name(&self.base_theme.styles))
+                            .size(LabelSize::Large),
+                    )
+                    .child(
+                        Label::new(SharedString::from(field.key(&self.base_theme.styles)))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     ),
@@ -436,7 +445,7 @@ impl ThemeCustomizer {
         label: &str,
         value_text: String,
         value: f32,
-        field: ThemeColorField,
+        field: CustomizableColor,
         channel: SliderChannel,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -724,7 +733,7 @@ impl Render for ThemeCustomizer {
                             .child(
                                 Label::new(
                                     self.selected_field
-                                        .map(|f| f.display_name())
+                                        .map(|f| f.display_name(&self.base_theme.styles))
                                         .unwrap_or_else(|| "No selection".to_string()),
                                 )
                                 .size(LabelSize::Default)

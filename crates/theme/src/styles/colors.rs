@@ -359,6 +359,7 @@ pub enum ThemeColorField {
     ElementHover,
     ElementActive,
     ElementSelected,
+    ElementSelectionBackground,
     ElementDisabled,
     DropTargetBackground,
     DropTargetBorder,
@@ -377,6 +378,7 @@ pub enum ThemeColorField {
     IconDisabled,
     IconPlaceholder,
     IconAccent,
+    DebuggerAccent,
     StatusBarBackground,
     TitleBarBackground,
     TitleBarInactiveBackground,
@@ -422,14 +424,34 @@ pub enum ThemeColorField {
     MinimapThumbHoverBackground,
     MinimapThumbActiveBackground,
     MinimapThumbBorder,
+    VimHelixJumpLabelForeground,
+    VimNormalBackground,
+    VimInsertBackground,
+    VimReplaceBackground,
+    VimVisualBackground,
+    VimVisualLineBackground,
+    VimVisualBlockBackground,
+    VimYankBackground,
+    VimHelixNormalBackground,
+    VimHelixSelectBackground,
+    VimNormalForeground,
+    VimInsertForeground,
+    VimReplaceForeground,
+    VimVisualForeground,
+    VimVisualLineForeground,
+    VimVisualBlockForeground,
+    VimHelixNormalForeground,
+    VimHelixSelectForeground,
     EditorForeground,
     EditorBackground,
     EditorGutterBackground,
     EditorSubheaderBackground,
     EditorActiveLineBackground,
     EditorHighlightedLineBackground,
+    EditorDebuggerActiveLineBackground,
     EditorLineNumber,
     EditorActiveLineNumber,
+    EditorHoverLineNumber,
     EditorInvisible,
     EditorWrapGuide,
     EditorActiveWrapGuide,
@@ -438,6 +460,12 @@ pub enum ThemeColorField {
     EditorDocumentHighlightReadBackground,
     EditorDocumentHighlightWriteBackground,
     EditorDocumentHighlightBracketBackground,
+    EditorDiffHunkAddedBackground,
+    EditorDiffHunkAddedHollowBackground,
+    EditorDiffHunkAddedHollowBorder,
+    EditorDiffHunkDeletedBackground,
+    EditorDiffHunkDeletedHollowBackground,
+    EditorDiffHunkDeletedHollowBorder,
     TerminalBackground,
     TerminalForeground,
     TerminalBrightForeground,
@@ -474,6 +502,10 @@ pub enum ThemeColorField {
     VersionControlRenamed,
     VersionControlConflict,
     VersionControlIgnored,
+    VersionControlWordAdded,
+    VersionControlWordDeleted,
+    VersionControlConflictMarkerOurs,
+    VersionControlConflictMarkerTheirs,
     GutterAddedBackground,
     GutterModifiedBackground,
     GutterDeletedBackground,
@@ -495,6 +527,7 @@ impl ThemeColors {
             ThemeColorField::ElementHover => self.element_hover,
             ThemeColorField::ElementActive => self.element_active,
             ThemeColorField::ElementSelected => self.element_selected,
+            ThemeColorField::ElementSelectionBackground => self.element_selection_background,
             ThemeColorField::ElementDisabled => self.element_disabled,
             ThemeColorField::DropTargetBackground => self.drop_target_background,
             ThemeColorField::DropTargetBorder => self.drop_target_border,
@@ -513,6 +546,7 @@ impl ThemeColors {
             ThemeColorField::IconDisabled => self.icon_disabled,
             ThemeColorField::IconPlaceholder => self.icon_placeholder,
             ThemeColorField::IconAccent => self.icon_accent,
+            ThemeColorField::DebuggerAccent => self.debugger_accent,
             ThemeColorField::StatusBarBackground => self.status_bar_background,
             ThemeColorField::TitleBarBackground => self.title_bar_background,
             ThemeColorField::TitleBarInactiveBackground => self.title_bar_inactive_background,
@@ -560,6 +594,24 @@ impl ThemeColors {
             ThemeColorField::MinimapThumbHoverBackground => self.minimap_thumb_hover_background,
             ThemeColorField::MinimapThumbActiveBackground => self.minimap_thumb_active_background,
             ThemeColorField::MinimapThumbBorder => self.minimap_thumb_border,
+            ThemeColorField::VimHelixJumpLabelForeground => self.vim_helix_jump_label_foreground,
+            ThemeColorField::VimNormalBackground => self.vim_normal_background,
+            ThemeColorField::VimInsertBackground => self.vim_insert_background,
+            ThemeColorField::VimReplaceBackground => self.vim_replace_background,
+            ThemeColorField::VimVisualBackground => self.vim_visual_background,
+            ThemeColorField::VimVisualLineBackground => self.vim_visual_line_background,
+            ThemeColorField::VimVisualBlockBackground => self.vim_visual_block_background,
+            ThemeColorField::VimYankBackground => self.vim_yank_background,
+            ThemeColorField::VimHelixNormalBackground => self.vim_helix_normal_background,
+            ThemeColorField::VimHelixSelectBackground => self.vim_helix_select_background,
+            ThemeColorField::VimNormalForeground => self.vim_normal_foreground,
+            ThemeColorField::VimInsertForeground => self.vim_insert_foreground,
+            ThemeColorField::VimReplaceForeground => self.vim_replace_foreground,
+            ThemeColorField::VimVisualForeground => self.vim_visual_foreground,
+            ThemeColorField::VimVisualLineForeground => self.vim_visual_line_foreground,
+            ThemeColorField::VimVisualBlockForeground => self.vim_visual_block_foreground,
+            ThemeColorField::VimHelixNormalForeground => self.vim_helix_normal_foreground,
+            ThemeColorField::VimHelixSelectForeground => self.vim_helix_select_foreground,
             ThemeColorField::EditorForeground => self.editor_foreground,
             ThemeColorField::EditorBackground => self.editor_background,
             ThemeColorField::EditorGutterBackground => self.editor_gutter_background,
@@ -568,8 +620,12 @@ impl ThemeColors {
             ThemeColorField::EditorHighlightedLineBackground => {
                 self.editor_highlighted_line_background
             }
+            ThemeColorField::EditorDebuggerActiveLineBackground => {
+                self.editor_debugger_active_line_background
+            }
             ThemeColorField::EditorLineNumber => self.editor_line_number,
             ThemeColorField::EditorActiveLineNumber => self.editor_active_line_number,
+            ThemeColorField::EditorHoverLineNumber => self.editor_hover_line_number,
             ThemeColorField::EditorInvisible => self.editor_invisible,
             ThemeColorField::EditorWrapGuide => self.editor_wrap_guide,
             ThemeColorField::EditorActiveWrapGuide => self.editor_active_wrap_guide,
@@ -583,6 +639,24 @@ impl ThemeColors {
             }
             ThemeColorField::EditorDocumentHighlightBracketBackground => {
                 self.editor_document_highlight_bracket_background
+            }
+            ThemeColorField::EditorDiffHunkAddedBackground => {
+                self.editor_diff_hunk_added_background
+            }
+            ThemeColorField::EditorDiffHunkAddedHollowBackground => {
+                self.editor_diff_hunk_added_hollow_background
+            }
+            ThemeColorField::EditorDiffHunkAddedHollowBorder => {
+                self.editor_diff_hunk_added_hollow_border
+            }
+            ThemeColorField::EditorDiffHunkDeletedBackground => {
+                self.editor_diff_hunk_deleted_background
+            }
+            ThemeColorField::EditorDiffHunkDeletedHollowBackground => {
+                self.editor_diff_hunk_deleted_hollow_background
+            }
+            ThemeColorField::EditorDiffHunkDeletedHollowBorder => {
+                self.editor_diff_hunk_deleted_hollow_border
             }
             ThemeColorField::TerminalBackground => self.terminal_background,
             ThemeColorField::TerminalForeground => self.terminal_foreground,
@@ -620,6 +694,14 @@ impl ThemeColors {
             ThemeColorField::VersionControlRenamed => self.version_control_renamed,
             ThemeColorField::VersionControlConflict => self.version_control_conflict,
             ThemeColorField::VersionControlIgnored => self.version_control_ignored,
+            ThemeColorField::VersionControlWordAdded => self.version_control_word_added,
+            ThemeColorField::VersionControlWordDeleted => self.version_control_word_deleted,
+            ThemeColorField::VersionControlConflictMarkerOurs => {
+                self.version_control_conflict_marker_ours
+            }
+            ThemeColorField::VersionControlConflictMarkerTheirs => {
+                self.version_control_conflict_marker_theirs
+            }
             ThemeColorField::GutterAddedBackground => self.lathe.gutter_added_background,
             ThemeColorField::GutterModifiedBackground => self.lathe.gutter_modified_background,
             ThemeColorField::GutterDeletedBackground => self.lathe.gutter_deleted_background,
