@@ -502,6 +502,7 @@ impl super::GitPanel {
             return;
         };
         self.populate_cached_explorer_entries(cx);
+        cx.notify();
         let branches_rx = repo.update(cx, |repo, _| repo.branches());
         self.explorer_load_task = Some(cx.spawn(async move |this, cx| {
             let Ok(Ok(branches)) = branches_rx.await else {
@@ -533,19 +534,27 @@ impl super::GitPanel {
 
     /// Populate `explorer_entries` from data already on the cached repository
     /// snapshot (linked worktrees, stash entries) so the tab renders
-    /// immediately while the async branch fetch is in flight.
+    /// immediately while the async branch fetch is in flight. Existing branch
+    /// rows are kept as-is until that fetch lands, so a refresh never blanks
+    /// the branch sections.
     fn populate_cached_explorer_entries(&mut self, cx: &App) {
-        let mut entries: Vec<ExplorerEntry> = Vec::new();
+        self.explorer_entries.retain(|entry| {
+            matches!(
+                entry,
+                ExplorerEntry::LocalBranch(_) | ExplorerEntry::RemoteBranch(_)
+            )
+        });
         if let Some(repo) = self.active_repository.as_ref() {
             let repo_read = repo.read(cx);
             for worktree in repo_read.linked_worktrees().iter() {
-                entries.push(ExplorerEntry::Worktree(worktree.clone()));
+                self.explorer_entries
+                    .push(ExplorerEntry::Worktree(worktree.clone()));
             }
             for stash in repo_read.stash_entries.entries.iter() {
-                entries.push(ExplorerEntry::Stash(stash.clone()));
+                self.explorer_entries
+                    .push(ExplorerEntry::Stash(stash.clone()));
             }
         }
-        self.explorer_entries = entries;
     }
 
     /// Merge a freshly-fetched `Vec<Branch>` into `explorer_entries`,

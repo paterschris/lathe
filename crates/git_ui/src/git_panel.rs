@@ -33,9 +33,8 @@ use git::commit::ParsedCommitMessage;
 use git::repository::{
     Branch, CommitData, CommitDetails, CommitOptions, CommitSummary, DiffType, FetchOptions,
     GitCommitTemplate, GitCommitter, InitialGraphCommitData, LogOrder, LogSource, MergeOptions,
-    PushOptions, RebaseOptions,
-    Remote, RemoteCommandOutput, ResetMode, Upstream, UpstreamTracking, UpstreamTrackingStatus,
-    get_git_committer,
+    PushOptions, RebaseOptions, Remote, RemoteCommandOutput, ResetMode, Upstream, UpstreamTracking,
+    UpstreamTrackingStatus, get_git_committer,
 };
 use git::stash::GitStash;
 use git::status::{DiffStat, StageStatus};
@@ -4155,12 +4154,15 @@ impl GitPanel {
         // that runs ~UPDATE_DEBOUNCE later — without this upfront sync,
         // History reload + Explorer reload both fetch from the previous
         // repo until the debounce expires (or the user clicks again).
+        // Capture the previous repo's id first, or the change detection
+        // below compares the new repo against itself and never fires.
+        let previous_repository_id = self.active_repository.as_ref().map(Entity::entity_id);
         self.active_repository = self.project.read(cx).active_repository(cx);
 
         let handle = cx.entity().downgrade();
         let new_active_repository = self.project.read(cx).active_repository(cx);
-        let active_repository_changed = self.active_repository.as_ref().map(Entity::entity_id)
-            != new_active_repository.as_ref().map(Entity::entity_id);
+        let active_repository_changed =
+            previous_repository_id != new_active_repository.as_ref().map(Entity::entity_id);
         if active_repository_changed {
             if self.amend_pending {
                 // Leaving a repository with a pending amend: undo it so the amend
@@ -4189,13 +4191,15 @@ impl GitPanel {
             self.load_commit_history(cx);
         }
         if self.active_tab == GitPanelTab::Explorer {
-            // The branches/worktrees/stashes lists are cached on `self`, so
-            // they need an explicit reload whenever the active repository
-            // changes (e.g. the user clicks a different repo in the
-            // multi-repo strip). Reset selection too so a stale row index
-            // doesn't survive the switch.
-            self.explorer_selected_row = None;
-            self.explorer_entries.clear();
+            if active_repository_changed {
+                // Another repository's rows must not linger while the new
+                // one loads, and a stale row index must not survive the
+                // switch. On same-repo refreshes we keep the current rows
+                // on screen instead so the list doesn't visibly blank out
+                // while the branch fetch is in flight.
+                self.explorer_selected_row = None;
+                self.explorer_entries.clear();
+            }
             self.refresh_explorer_data(cx);
         }
         self.update_visible_entries_task = cx.spawn_in(window, async move |_, cx| {
