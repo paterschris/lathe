@@ -47,7 +47,10 @@ manage_target_storage() {
         return
     fi
 
-    [ -d target ] || return
+    # Bare `return` would propagate the failed test's status and, under
+    # `set -e`, abort the whole build on machines with no target/ yet
+    # (fresh CI runners).
+    [ -d target ] || return 0
 
     local soft_gb="${LATHE_TARGET_SOFT_GB:-80}"
     local hard_gb="${LATHE_TARGET_HARD_GB:-200}"
