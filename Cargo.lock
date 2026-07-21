@@ -23200,7 +23200,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.236.19"
+version = "0.236.20"
 dependencies = [
  "acp_thread",
  "acp_tools",
