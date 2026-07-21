@@ -22,6 +22,10 @@ case "$channel" in
         app_name="Lathe Preview"
         app_id="dev.lathe.Lathe-Preview"
         ;;
+    beta)
+        app_name="Lathe Beta"
+        app_id="dev.lathe.Lathe-Beta"
+        ;;
     nightly)
         app_name="Lathe Nightly"
         app_id="dev.lathe.Lathe-Nightly"

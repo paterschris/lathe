@@ -4,7 +4,7 @@ A customized code editor forked from [Zed](https://zed.dev), focused on better t
 
 Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks for my own workflow without waiting on upstream review, and without needing each change to fit Zed's product scope. Upstream Zed is the primary project — this fork tracks it closely and layers on my own changes.
 
-**Platforms:** macOS (Apple Silicon) and Linux (x86_64). Windows support is planned — upstream Zed builds on Windows, so it should be a manageable effort, but Lathe isn't yet built or tested there.
+**Platforms:** macOS (Apple Silicon), Linux (x86_64), and Windows (x86_64; experimental).
 
 **Stability:** Lathe is maintained for my own daily use. Upstream syncs can occasionally introduce breakage; bug reports are welcome.
 
@@ -111,6 +111,19 @@ Download the latest release from [Releases](https://github.com/paterschris/lathe
 
 - **macOS**: Download the `.dmg`, open it, and drag **Lathe.app** to `/Applications`. A `.zip` is also available if you prefer. macOS builds are code-signed and notarized by Apple.
 - **Linux**: Download the `.tar.gz` and extract it, or use the install script after building from source (see below).
+- **Windows**: Download the x86_64 setup `.exe` or `.zip`. Windows builds are currently unsigned; see [Installing on Windows](#installing-on-windows).
+
+### Installing on Windows
+
+The setup `.exe` is the simplest option. Because Lathe's Windows builds are unsigned, Microsoft Defender SmartScreen may show a warning. Select **More info**, verify that the file came from the Lathe GitHub release, then select **Run anyway**.
+
+For the portable path, download the x86_64 `.zip`, open PowerShell in a Lathe source checkout, and run:
+
+```powershell
+script/install-fork-windows.ps1 -ArchivePath C:\path\to\Lathe-version-x86_64-windows.zip
+```
+
+The install script removes Mark-of-the-Web from the extracted files, installs Lathe under `%LOCALAPPDATA%\Programs\Lathe`, adds its CLI to your user `PATH`, and creates a Start Menu shortcut. If Lathe installs but no window appears, run `script/diag-windows.ps1` from the source checkout and include its output in a bug report.
 
 ### Build from source
 
@@ -131,6 +144,16 @@ cd lathe
 script/build-fork-linux      # installs system deps, builds
 script/package-fork-linux    # creates .tar.gz
 script/install-fork-linux    # installs to ~/.local/share/lathe, symlinks CLI to ~/.local/bin
+```
+
+**Windows:**
+
+```powershell
+git clone https://github.com/paterschris/lathe.git
+cd lathe
+script/build-fork-windows.ps1 -Architecture x86_64
+script/package-fork-windows.ps1 -Architecture x86_64
+script/install-fork-windows.ps1
 ```
 
 Installs as **Lathe** and runs alongside stock Zed without conflicts.

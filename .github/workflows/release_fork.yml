@@ -299,6 +299,7 @@ jobs:
           if-no-files-found: error
 
   build-windows:
+    continue-on-error: ${{ matrix.arch == 'aarch64' }}
     strategy:
       fail-fast: false
       matrix:
@@ -410,8 +411,19 @@ jobs:
           cp artifacts/lathe-linux/Lathe-*-linux.tar.gz release-files/
           cp artifacts/lathe-windows-x86_64/Lathe-*-x86_64-windows.zip release-files/
           cp artifacts/lathe-windows-x86_64/Lathe-*-x86_64-windows-setup.exe release-files/
-          cp artifacts/lathe-windows-aarch64/Lathe-*-aarch64-windows.zip release-files/
-          cp artifacts/lathe-windows-aarch64/Lathe-*-aarch64-windows-setup.exe release-files/
+          shopt -s nullglob
+          windows_aarch64_zip=(artifacts/lathe-windows-aarch64/Lathe-*-aarch64-windows.zip)
+          windows_aarch64_installer=(artifacts/lathe-windows-aarch64/Lathe-*-aarch64-windows-setup.exe)
+          if [ ${#windows_aarch64_zip[@]} -gt 0 ]; then
+            cp "${windows_aarch64_zip[@]}" release-files/
+          else
+            echo "::warning::Windows aarch64 zip was not produced; continuing without it"
+          fi
+          if [ ${#windows_aarch64_installer[@]} -gt 0 ]; then
+            cp "${windows_aarch64_installer[@]}" release-files/
+          else
+            echo "::warning::Windows aarch64 installer was not produced; continuing without it"
+          fi
 
           # Mark any non-stable channel as prerelease so the GitHub UI
           # shows the prerelease badge and `gh release view --latest`

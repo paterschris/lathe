@@ -67,6 +67,10 @@ linux() {
         app_id="dev.lathe.Lathe-Preview"
         db_suffix="preview"
         ;;
+      beta)
+        app_id="dev.lathe.Lathe-Beta"
+        db_suffix="beta"
+        ;;
       dev)
         app_id="dev.lathe.Lathe-Dev"
         db_suffix="dev"

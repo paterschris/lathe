@@ -18,7 +18,7 @@ permissions:
   contents: read
 jobs:
   orchestrate:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: steps::harden_runner
@@ -140,7 +140,7 @@ jobs:
       run_tests: ${{ steps.filter.outputs.run_tests }}
       changed_extensions: ${{ steps.filter.outputs.changed_extensions }}
   check_style:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: namespace-profile-4x8-ubuntu-2204
     steps:
     - name: steps::harden_runner
@@ -191,7 +191,7 @@ jobs:
   clippy_windows:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: self-32vcpu-windows-2022
     steps:
     - name: steps::checkout_repo
@@ -221,7 +221,7 @@ jobs:
   clippy_linux:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-16x32-ubuntu-2204
     env:
       CC: clang
@@ -263,7 +263,7 @@ jobs:
   clippy_mac:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-mac-large
     steps:
     - name: steps::checkout_repo
@@ -294,7 +294,7 @@ jobs:
   clippy_mac_x86_64:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-mac-large
     steps:
     - name: steps::checkout_repo
@@ -327,7 +327,7 @@ jobs:
   run_tests_windows:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: self-32vcpu-windows-2022
     steps:
     - name: steps::checkout_repo
@@ -370,7 +370,7 @@ jobs:
   run_tests_linux:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-16x32-ubuntu-2204
     env:
       CC: clang
@@ -433,7 +433,7 @@ jobs:
   run_tests_mac:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-mac-large
     steps:
     - name: steps::checkout_repo
@@ -477,7 +477,7 @@ jobs:
   miri_scheduler:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-16x32-ubuntu-2204
     steps:
     - name: steps::harden_runner
@@ -509,7 +509,7 @@ jobs:
   doctests:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-16x32-ubuntu-2204
     env:
       CC: clang
@@ -557,7 +557,7 @@ jobs:
   check_workspace_binaries:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-8x16-ubuntu-2204
     env:
       CC: clang
@@ -605,7 +605,7 @@ jobs:
   build_visual_tests_binary:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-mac-large
     steps:
     - name: steps::checkout_repo
@@ -630,7 +630,7 @@ jobs:
   check_wasm:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-8x16-ubuntu-2204
     steps:
     - name: steps::harden_runner
@@ -674,7 +674,7 @@ jobs:
   check_dependencies:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-2x4-ubuntu-2404
     env:
       CC: clang
@@ -710,7 +710,7 @@ jobs:
   check_docs:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_docs == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_docs == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-16x32-ubuntu-2204
     env:
       DOCS_AMPLITUDE_API_KEY: ${{ secrets.DOCS_AMPLITUDE_API_KEY }}
@@ -768,7 +768,7 @@ jobs:
   check_licenses:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_licenses == 'true' && github.event_name != 'merge_group'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_licenses == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: steps::harden_runner
@@ -791,7 +791,7 @@ jobs:
   check_scripts:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_action_checks == 'true'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_action_checks == 'true'
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: steps::harden_runner
@@ -828,7 +828,7 @@ jobs:
   check_postgres_and_protobuf_migrations:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.run_tests == 'true'
     runs-on: namespace-profile-16x32-ubuntu-2204
     env:
       GIT_AUTHOR_NAME: Protobuf Action
@@ -873,7 +873,7 @@ jobs:
   extension_tests:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.changed_extensions != '[]'
+    if: github.repository == 'zed-industries/zed' && needs.orchestrate.outputs.changed_extensions != '[]'
     permissions:
       contents: read
     strategy:
@@ -905,7 +905,7 @@ jobs:
     - check_licenses
     - check_scripts
     - extension_tests
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris') && always()
+    if: github.repository == 'zed-industries/zed' && always()
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: run_tests::tests_pass

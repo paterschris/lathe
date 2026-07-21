@@ -14,7 +14,7 @@ permissions:
   contents: read
 jobs:
   check_style:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: namespace-profile-mac-large
     steps:
     - name: steps::checkout_repo
@@ -28,7 +28,7 @@ jobs:
       run: ./script/clippy
     timeout-minutes: 60
   run_tests_windows:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: self-32vcpu-windows-2022
     steps:
     - name: steps::checkout_repo
@@ -68,7 +68,7 @@ jobs:
       shell: pwsh
     timeout-minutes: 60
   clippy_windows:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: self-32vcpu-windows-2022
     steps:
     - name: steps::checkout_repo
@@ -96,6 +96,7 @@ jobs:
       shell: pwsh
     timeout-minutes: 60
   bundle_linux_aarch64:
+    if: github.repository == 'zed-industries/zed'
     needs:
     - check_style
     - run_tests_windows
@@ -142,6 +143,7 @@ jobs:
         if-no-files-found: error
     timeout-minutes: 60
   bundle_linux_x86_64:
+    if: github.repository == 'zed-industries/zed'
     needs:
     - check_style
     - run_tests_windows
@@ -188,6 +190,7 @@ jobs:
         if-no-files-found: error
     timeout-minutes: 60
   bundle_mac_aarch64:
+    if: github.repository == 'zed-industries/zed'
     needs:
     - check_style
     - run_tests_windows
@@ -239,6 +242,7 @@ jobs:
         if-no-files-found: error
     timeout-minutes: 60
   bundle_mac_x86_64:
+    if: github.repository == 'zed-industries/zed'
     needs:
     - check_style
     - run_tests_windows
@@ -290,6 +294,7 @@ jobs:
         if-no-files-found: error
     timeout-minutes: 60
   bundle_windows_aarch64:
+    if: github.repository == 'zed-industries/zed'
     needs:
     - check_style
     - run_tests_windows
@@ -343,6 +348,7 @@ jobs:
         if-no-files-found: error
     timeout-minutes: 60
   bundle_windows_x86_64:
+    if: github.repository == 'zed-industries/zed'
     needs:
     - check_style
     - run_tests_windows
@@ -399,7 +405,7 @@ jobs:
     needs:
     - check_style
     - run_tests_windows
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: namespace-profile-32x64-ubuntu-2004
     env:
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
@@ -433,7 +439,7 @@ jobs:
     needs:
     - check_style
     - run_tests_windows
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: namespace-profile-mac-large
     env:
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
@@ -486,7 +492,7 @@ jobs:
     - bundle_mac_x86_64
     - bundle_windows_aarch64
     - bundle_windows_x86_64
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: namespace-profile-4x8-ubuntu-2204
     steps:
     - name: steps::checkout_repo
@@ -548,7 +554,7 @@ jobs:
     - bundle_mac_x86_64
     - bundle_windows_aarch64
     - bundle_windows_x86_64
-    if: failure()
+    if: github.repository == 'zed-industries/zed' && failure()
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: release::send_slack_message

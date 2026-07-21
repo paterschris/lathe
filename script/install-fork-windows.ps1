@@ -71,6 +71,7 @@ $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid()
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 try {
     Expand-Archive -Path $ArchivePath -DestinationPath $tempDir -Force
+    Get-ChildItem -Path $tempDir -Recurse -File | Unblock-File
 
     # The zip wraps everything in `lathe${suffix}/` -- flatten one level.
     $inner = Join-Path $tempDir "lathe$suffix"

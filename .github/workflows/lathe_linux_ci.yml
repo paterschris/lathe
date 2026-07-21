@@ -1,0 +1,124 @@
+name: Lathe Linux CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'script/linux'
+      - 'script/*linux*'
+      - 'script/build-fork*'
+      - 'script/package-fork*'
+      - 'script/install-fork*'
+      - 'script/uninstall*'
+      - '.github/workflows/lathe_linux_ci.yml'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  CC: clang
+  CXX: clang++
+
+jobs:
+  check-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          cache-on-failure: true
+          shared-key: lathe-linux-check
+
+      - name: Install Linux dependencies
+        run: script/linux
+
+      - name: cargo check (full workspace)
+        run: cargo check --workspace
+
+  build-linux:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    needs: check-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          cache-on-failure: true
+          shared-key: lathe-linux-build
+
+      - name: Install Linux dependencies
+        run: script/linux
+
+      - name: Build
+        run: script/build-fork-linux
+
+      - name: Package
+        run: script/package-fork-linux
+
+      - name: Smoke-test install script
+        run: |
+          smoke_home="$RUNNER_TEMP/lathe-home"
+          mkdir -p "$smoke_home"
+          export HOME="$smoke_home"
+          export PATH="$HOME/.local/bin:$PATH"
+
+          script/install-fork-linux
+
+          channel=$(<crates/zed/RELEASE_CHANNEL)
+          suffix=""
+          if [ "$channel" != "stable" ]; then
+            suffix="-$channel"
+          fi
+
+          case "$channel" in
+            stable) app_id="dev.lathe.Lathe" ;;
+            preview) app_id="dev.lathe.Lathe-Preview" ;;
+            beta) app_id="dev.lathe.Lathe-Beta" ;;
+            nightly) app_id="dev.lathe.Lathe-Nightly" ;;
+            *) app_id="dev.lathe.Lathe-Dev" ;;
+          esac
+
+          install_dir="$HOME/.local/share/lathe${suffix}"
+          cli="$HOME/.local/bin/lathe"
+          desktop="$HOME/.local/share/applications/${app_id}.desktop"
+
+          test -x "$install_dir/bin/lathe"
+          test -x "$install_dir/libexec/lathe-editor"
+          test -L "$cli"
+          test "$(readlink -f "$cli")" = "$install_dir/bin/lathe"
+          test "$(command -v lathe)" = "$cli"
+          test -f "$desktop"
+          grep -Fq "Exec=$install_dir/bin/lathe" "$desktop"
+
+          printf '\n' | ZED_CHANNEL="$channel" sh script/uninstall.sh
+
+          test ! -e "$install_dir"
+          test ! -e "$cli"
+          test ! -e "$desktop"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lathe-linux-ci
+          path: target/release/Lathe-*-linux.tar.gz
+          if-no-files-found: error
+          retention-days: 7

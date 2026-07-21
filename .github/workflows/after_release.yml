@@ -26,7 +26,7 @@ permissions:
   contents: read
 jobs:
   rebuild_releases_page:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: after_release::rebuild_releases_page::refresh_cloud_releases
@@ -36,7 +36,7 @@ jobs:
       env:
         ZED_DEV_REVALIDATE_TOKEN: ${{ secrets.ZED_DEV_REVALIDATE_TOKEN }}
   deploy_docs:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
+    if: github.repository == 'zed-industries/zed'
     permissions:
       contents: read
     uses: zed-industries/zed/.github/workflows/deploy_docs.yml@3f16f7b9082f8828e4d6ae207d2349b1ef932517
@@ -51,7 +51,7 @@ jobs:
   post_to_discord:
     needs:
     - rebuild_releases_page
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - id: get-release-url
@@ -80,6 +80,7 @@ jobs:
         webhook-url: ${{ secrets.DISCORD_WEBHOOK_RELEASE_NOTES }}
         content: ${{ steps.get-content.outputs.string }}
   publish_winget:
+    if: github.repository == 'zed-industries/zed'
     runs-on: self-32vcpu-windows-2022
     steps:
     - name: after_release::publish_winget::sync_winget_pkgs_fork
@@ -120,7 +121,7 @@ jobs:
         max-versions-to-keep: 5
         token: ${{ secrets.WINGET_TOKEN }}
   create_sentry_release:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: github.repository == 'zed-industries/zed'
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: steps::checkout_repo
@@ -142,7 +143,7 @@ jobs:
     - publish_winget
     - create_sentry_release
     - deploy_docs
-    if: failure()
+    if: github.repository == 'zed-industries/zed' && failure()
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: release::send_slack_message

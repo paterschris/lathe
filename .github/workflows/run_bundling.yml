@@ -14,8 +14,10 @@ permissions:
 jobs:
   bundle_linux_aarch64:
     if: |-
-      (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      github.repository == 'zed-industries/zed' && (
+        (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      )
     runs-on: namespace-profile-8x32-ubuntu-2004-arm-m4
     env:
       CARGO_INCREMENTAL: 0
@@ -58,8 +60,10 @@ jobs:
     timeout-minutes: 60
   bundle_linux_x86_64:
     if: |-
-      (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      github.repository == 'zed-industries/zed' && (
+        (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      )
     runs-on: namespace-profile-32x64-ubuntu-2004
     env:
       CARGO_INCREMENTAL: 0
@@ -102,8 +106,10 @@ jobs:
     timeout-minutes: 60
   build_static_bwrap_linux_aarch64:
     if: |-
-      (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      github.repository == 'zed-industries/zed' && (
+        (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      )
     runs-on: namespace-profile-8x32-ubuntu-2004-arm-m4
     steps:
     - name: steps::cache_nix_dependencies_namespace
@@ -136,8 +142,10 @@ jobs:
     timeout-minutes: 60
   build_static_bwrap_linux_x86_64:
     if: |-
-      (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      github.repository == 'zed-industries/zed' && (
+        (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      )
     runs-on: namespace-profile-32x64-ubuntu-2004
     steps:
     - name: steps::cache_nix_dependencies_namespace
@@ -170,8 +178,10 @@ jobs:
     timeout-minutes: 60
   bundle_mac_aarch64:
     if: |-
-      (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      github.repository == 'zed-industries/zed' && (
+        (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      )
     runs-on: namespace-profile-mac-large
     env:
       CARGO_INCREMENTAL: 0
@@ -220,8 +230,10 @@ jobs:
     timeout-minutes: 60
   bundle_mac_x86_64:
     if: |-
-      (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      github.repository == 'zed-industries/zed' && (
+        (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      )
     runs-on: namespace-profile-mac-large
     env:
       CARGO_INCREMENTAL: 0
@@ -270,8 +282,10 @@ jobs:
     timeout-minutes: 60
   bundle_windows_aarch64:
     if: |-
-      (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      github.repository == 'zed-industries/zed' && (
+        (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      )
     runs-on: self-32vcpu-windows-2022
     env:
       CARGO_INCREMENTAL: 0
@@ -317,8 +331,10 @@ jobs:
     timeout-minutes: 60
   bundle_windows_x86_64:
     if: |-
-      (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      github.repository == 'zed-industries/zed' && (
+        (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
+      )
     runs-on: self-32vcpu-windows-2022
     env:
       CARGO_INCREMENTAL: 0
@@ -363,7 +379,7 @@ jobs:
         if-no-files-found: error
     timeout-minutes: 60
   build_nix_linux_x86_64:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris') && ((github.event.action == 'labeled' && github.event.label.name == 'run-bundling') || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling')))
+    if: github.repository == 'zed-industries/zed' && ((github.event.action == 'labeled' && github.event.label.name == 'run-bundling') || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling')))
     runs-on: namespace-profile-32x64-ubuntu-2004
     env:
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
@@ -395,7 +411,7 @@ jobs:
     timeout-minutes: 60
     continue-on-error: true
   build_nix_mac_aarch64:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris') && ((github.event.action == 'labeled' && github.event.label.name == 'run-bundling') || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling')))
+    if: github.repository == 'zed-industries/zed' && ((github.event.action == 'labeled' && github.event.label.name == 'run-bundling') || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling')))
     runs-on: namespace-profile-mac-large
     env:
       ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
