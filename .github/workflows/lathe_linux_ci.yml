@@ -81,6 +81,14 @@ jobs:
           ln -sf "$(command -v clang++-18)" /usr/local/bin/clang++
           echo "CC=clang" >> "$GITHUB_ENV"
           echo "CXX=clang++" >> "$GITHUB_ENV"
+          # focal's cmake 3.16 predates file(CONFIGURE ...), which
+          # wasmtime-c-api's build requires (cmake >= 3.19). Kitware's
+          # portable binary runs on any glibc >= 2.17.
+          apt-get install -y ninja-build
+          wget -qO /tmp/cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v3.30.5/cmake-3.30.5-linux-x86_64.tar.gz
+          tar -xzf /tmp/cmake.tar.gz -C /opt
+          ln -sf /opt/cmake-3.30.5-linux-x86_64/bin/cmake /usr/local/bin/cmake
+          cmake --version | head -1
 
       - uses: actions/checkout@v4
 
