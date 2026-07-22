@@ -120,6 +120,10 @@ jobs:
         run: script/linux
 
       - name: Build
+        env:
+          # Same env as release_fork.yml's build so CI artifacts are
+          # release-grade and can be uploaded to a release directly.
+          LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases?per_page=30
         run: script/build-fork-linux
 
       - name: Package
