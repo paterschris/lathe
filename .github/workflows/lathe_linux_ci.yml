@@ -69,9 +69,12 @@ jobs:
           # script/linux runs both as a step below and again inside
           # build-fork-linux; the second run's `gpg --dearmor` hits an
           # overwrite prompt and tries to open /dev/tty, which containers
-          # don't have. Make root's gpg answer prompts itself, headless.
-          mkdir -p /root/.gnupg && chmod 700 /root/.gnupg
-          printf 'no-tty\nyes\n' > /root/.gnupg/gpg.conf
+          # don't have. Configure gpg to answer prompts itself, headless.
+          # Container jobs run with HOME=/github/home, so the conf must go
+          # there; /root too in case sudo resets HOME.
+          mkdir -p "$HOME/.gnupg" /root/.gnupg
+          chmod 700 "$HOME/.gnupg" /root/.gnupg
+          printf 'no-tty\nyes\n' | tee "$HOME/.gnupg/gpg.conf" > /root/.gnupg/gpg.conf
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           bash /tmp/llvm.sh 18
           ln -sf "$(command -v clang-18)" /usr/local/bin/clang
