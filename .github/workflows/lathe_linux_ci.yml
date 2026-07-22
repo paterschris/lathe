@@ -50,9 +50,18 @@ jobs:
 
   build-linux:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
     # Same 20.04 container as release_fork.yml's build-linux so this job
     # validates the exact glibc-2.31 baseline that releases ship with.
+    # The image is multi-arch, so the arm runner pulls arm64.
     container: ubuntu:20.04
     env:
       DEBIAN_FRONTEND: noninteractive
@@ -81,13 +90,18 @@ jobs:
           ln -sf "$(command -v clang++-18)" /usr/local/bin/clang++
           echo "CC=clang" >> "$GITHUB_ENV"
           echo "CXX=clang++" >> "$GITHUB_ENV"
+          # build-fork-linux links with -fuse-ld=lld on aarch64 (libwebrtc);
+          # llvm.sh installs ld.lld-18 but clang looks for bare `ld.lld`.
+          if command -v ld.lld-18 >/dev/null; then ln -sf "$(command -v ld.lld-18)" /usr/local/bin/ld.lld; fi
           # focal's cmake 3.16 predates file(CONFIGURE ...), which
           # wasmtime-c-api's build requires (cmake >= 3.19). Kitware's
-          # portable binary runs on any glibc >= 2.17.
+          # portable binary runs on any glibc >= 2.17; its arch names
+          # match uname -m (linux-x86_64 / linux-aarch64).
           apt-get install -y ninja-build
-          wget -qO /tmp/cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v3.30.5/cmake-3.30.5-linux-x86_64.tar.gz
+          machine_arch=$(uname -m)
+          wget -qO /tmp/cmake.tar.gz "https://github.com/Kitware/CMake/releases/download/v3.30.5/cmake-3.30.5-linux-${machine_arch}.tar.gz"
           tar -xzf /tmp/cmake.tar.gz -C /opt
-          ln -sf /opt/cmake-3.30.5-linux-x86_64/bin/cmake /usr/local/bin/cmake
+          ln -sf "/opt/cmake-3.30.5-linux-${machine_arch}/bin/cmake" /usr/local/bin/cmake
           cmake --version | head -1
 
       - uses: actions/checkout@v4
@@ -100,7 +114,7 @@ jobs:
         continue-on-error: true
         with:
           cache-on-failure: true
-          shared-key: lathe-linux-glibc231
+          shared-key: lathe-linux-glibc231-${{ matrix.arch }}
 
       - name: Install Linux dependencies
         run: script/linux
@@ -165,7 +179,7 @@ jobs:
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lathe-linux-ci
+          name: lathe-linux-ci-${{ matrix.arch }}
           path: target/release/Lathe-*-linux.tar.gz
           if-no-files-found: error
           retention-days: 7
