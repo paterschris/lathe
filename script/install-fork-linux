@@ -16,23 +16,23 @@ fi
 case "$channel" in
     stable)
         app_name="Lathe"
-        app_id="dev.lathe.Lathe"
+        app_id="dev.lathe.lathe"
         ;;
     preview)
         app_name="Lathe Preview"
-        app_id="dev.lathe.Lathe-Preview"
+        app_id="dev.lathe.lathe-Preview"
         ;;
     beta)
         app_name="Lathe Beta"
-        app_id="dev.lathe.Lathe-Beta"
+        app_id="dev.lathe.lathe-Beta"
         ;;
     nightly)
         app_name="Lathe Nightly"
-        app_id="dev.lathe.Lathe-Nightly"
+        app_id="dev.lathe.lathe-Nightly"
         ;;
     *)
         app_name="Lathe Dev"
-        app_id="dev.lathe.Lathe-Dev"
+        app_id="dev.lathe.lathe-Dev"
         ;;
 esac
 

@@ -56,28 +56,28 @@ linux() {
     db_suffix="stable"
     case "$channel" in
       stable)
-        app_id="dev.lathe.Lathe"
+        app_id="dev.lathe.lathe"
         db_suffix="stable"
         ;;
       nightly)
-        app_id="dev.lathe.Lathe-Nightly"
+        app_id="dev.lathe.lathe-Nightly"
         db_suffix="nightly"
         ;;
       preview)
-        app_id="dev.lathe.Lathe-Preview"
+        app_id="dev.lathe.lathe-Preview"
         db_suffix="preview"
         ;;
       beta)
-        app_id="dev.lathe.Lathe-Beta"
+        app_id="dev.lathe.lathe-Beta"
         db_suffix="beta"
         ;;
       dev)
-        app_id="dev.lathe.Lathe-Dev"
+        app_id="dev.lathe.lathe-Dev"
         db_suffix="dev"
         ;;
       *)
         echo "Unknown release channel: ${channel}. Using stable app ID."
-        app_id="dev.lathe.Lathe"
+        app_id="dev.lathe.lathe"
         db_suffix="stable"
         ;;
     esac
@@ -103,27 +103,27 @@ linux() {
 macos() {
     app="Lathe.app"
     db_suffix="stable"
-    app_id="dev.lathe.Lathe"
+    app_id="dev.lathe.lathe"
     case "$channel" in
       nightly)
         app="Lathe Nightly.app"
         db_suffix="nightly"
-        app_id="dev.lathe.Lathe-Nightly"
+        app_id="dev.lathe.lathe-Nightly"
         ;;
       preview)
         app="Lathe Preview.app"
         db_suffix="preview"
-        app_id="dev.lathe.Lathe-Preview"
+        app_id="dev.lathe.lathe-Preview"
         ;;
       beta)
         app="Lathe Beta.app"
         db_suffix="beta"
-        app_id="dev.lathe.Lathe-Beta"
+        app_id="dev.lathe.lathe-Beta"
         ;;
       dev)
         app="Lathe Dev.app"
         db_suffix="dev"
-        app_id="dev.lathe.Lathe-Dev"
+        app_id="dev.lathe.lathe-Dev"
         ;;
     esac
 

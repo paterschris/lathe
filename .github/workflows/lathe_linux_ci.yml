@@ -151,11 +151,11 @@ jobs:
           fi
 
           case "$channel" in
-            stable) app_id="dev.lathe.Lathe" ;;
-            preview) app_id="dev.lathe.Lathe-Preview" ;;
-            beta) app_id="dev.lathe.Lathe-Beta" ;;
-            nightly) app_id="dev.lathe.Lathe-Nightly" ;;
-            *) app_id="dev.lathe.Lathe-Dev" ;;
+            stable) app_id="dev.lathe.lathe" ;;
+            preview) app_id="dev.lathe.lathe-Preview" ;;
+            beta) app_id="dev.lathe.lathe-Beta" ;;
+            nightly) app_id="dev.lathe.lathe-Nightly" ;;
+            *) app_id="dev.lathe.lathe-Dev" ;;
           esac
 
           install_dir="$HOME/.local/share/lathe${suffix}"
