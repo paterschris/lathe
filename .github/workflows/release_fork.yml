@@ -340,6 +340,8 @@ jobs:
         # exact path that silently broke every desktop-entry and PATH launch
         # of v0.236.20) without needing a display. ZED_ALLOW_ROOT because
         # container jobs run as root and the cli refuses root otherwise.
+        # bash explicitly: container jobs default to dash.
+        shell: bash
         env:
           ZED_ALLOW_ROOT: "true"
         run: |

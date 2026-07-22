@@ -112,6 +112,9 @@ jobs:
         run: script/package-fork-linux
 
       - name: Smoke-test install script
+        # Container jobs default to `sh` (dash), which silently breaks the
+        # $(<file) bashism below; runner-direct jobs default to bash.
+        shell: bash
         env:
           # Container jobs run as root; the cli refuses root otherwise.
           ZED_ALLOW_ROOT: "true"
