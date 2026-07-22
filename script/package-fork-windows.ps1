@@ -68,7 +68,6 @@ try {
     $appDir = Join-Path $tempDir "lathe$suffix"
     New-Item -ItemType Directory -Path "$appDir/bin"     -Force | Out-Null
     New-Item -ItemType Directory -Path "$appDir/libexec" -Force | Out-Null
-    New-Item -ItemType Directory -Path "$appDir/lib"     -Force | Out-Null
     New-Item -ItemType Directory -Path "$appDir/share"   -Force | Out-Null
 
     Copy-Item $zedExe "$appDir/libexec/lathe-editor.exe" -Force
@@ -82,12 +81,19 @@ try {
     Invoke-WebRequest -Uri $conptyUrl -OutFile $conptyNupkg
     Expand-Archive -Path $conptyNupkg -DestinationPath $conptyExtract -Force
 
+    # conpty.dll is loaded with LoadLibraryW("conpty.dll"), which searches the
+    # editor exe's own directory, and conpty locates OpenConsole.exe in an
+    # arch-named subdirectory next to itself (upstream ships {app}\conpty.dll
+    # and {app}\x64\OpenConsole.exe next to Zed.exe). Stage both beside
+    # lathe-editor.exe, NOT in lib\, or the terminal runs degraded.
     if ($Architecture -eq 'aarch64') {
-        Copy-Item "$conptyExtract/runtimes/win-arm64/native/conpty.dll"     "$appDir/lib/conpty.dll"     -Force
-        Copy-Item "$conptyExtract/build/native/runtimes/arm64/OpenConsole.exe" "$appDir/lib/OpenConsole.exe" -Force
+        New-Item -ItemType Directory -Path "$appDir/libexec/arm64" -Force | Out-Null
+        Copy-Item "$conptyExtract/runtimes/win-arm64/native/conpty.dll"     "$appDir/libexec/conpty.dll"     -Force
+        Copy-Item "$conptyExtract/build/native/runtimes/arm64/OpenConsole.exe" "$appDir/libexec/arm64/OpenConsole.exe" -Force
     } else {
-        Copy-Item "$conptyExtract/runtimes/win-x64/native/conpty.dll"     "$appDir/lib/conpty.dll"     -Force
-        Copy-Item "$conptyExtract/build/native/runtimes/x64/OpenConsole.exe" "$appDir/lib/OpenConsole.exe" -Force
+        New-Item -ItemType Directory -Path "$appDir/libexec/x64" -Force | Out-Null
+        Copy-Item "$conptyExtract/runtimes/win-x64/native/conpty.dll"     "$appDir/libexec/conpty.dll"     -Force
+        Copy-Item "$conptyExtract/build/native/runtimes/x64/OpenConsole.exe" "$appDir/libexec/x64/OpenConsole.exe" -Force
     }
 
     # --- Bundle AMD AGS SDK (x86_64 only, optional GPU detection) ---
@@ -98,7 +104,8 @@ try {
         $agsExtract = Join-Path $tempDir 'ags'
         Invoke-WebRequest -Uri $agsUrl -OutFile $agsZip
         Expand-Archive -Path $agsZip -DestinationPath $agsExtract -Force
-        Copy-Item "$agsExtract/AGS_SDK-6.3.0/ags_lib/lib/amd_ags_x64.dll" "$appDir/lib/amd_ags_x64.dll" -Force
+        # Loaded by name at runtime, so it must sit in the editor exe's directory.
+        Copy-Item "$agsExtract/AGS_SDK-6.3.0/ags_lib/lib/amd_ags_x64.dll" "$appDir/libexec/amd_ags_x64.dll" -Force
     }
 
     # --- Icon ---

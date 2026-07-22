@@ -62,6 +62,10 @@ fi
 
 export ZED_BUNDLE=true
 export CC=${CC:-$(which clang)}
+# Mirrors upstream bundle-linux: compiled into GPUI so the binary knows its
+# release version (updater comparisons, version reporting).
+RELEASE_VERSION="$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+export RELEASE_VERSION
 
 # Determine architecture
 version_info=$(rustc --version --verbose)

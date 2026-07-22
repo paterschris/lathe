@@ -900,9 +900,14 @@ mod linux {
                 let dir = cli.parent().context("no parent path for cli")?;
 
                 // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
-                // ./zed is for the target directory in development builds.
-                let possible_locations =
-                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zed"];
+                // ./zed is for the target directory in development builds. Lathe bundles
+                // rename the editor binary, so its libexec name is probed first.
+                let possible_locations = [
+                    "../libexec/lathe-editor",
+                    "../libexec/zed-editor",
+                    "../lib/zed/zed-editor",
+                    "./zed",
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -1238,8 +1243,14 @@ mod windows {
                 let dir = cli.parent().context("no parent path for cli")?;
 
                 // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
-                // directory in development builds.
-                let possible_locations = ["../Zed.exe", "../lib/zed/zed-editor.exe", "./zed.exe"];
+                // directory in development builds. Lathe bundles rename the editor binary
+                // and keep the Linux-style libexec split, so those names are probed first.
+                let possible_locations = [
+                    "../libexec/lathe-editor.exe",
+                    "../Zed.exe",
+                    "../lib/zed/zed-editor.exe",
+                    "./zed.exe",
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))

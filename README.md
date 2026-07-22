@@ -110,7 +110,7 @@ brew install --cask lathe
 Download the latest release from [Releases](https://github.com/paterschris/lathe/releases):
 
 - **macOS**: Download the `.dmg`, open it, and drag **Lathe.app** to `/Applications`. A `.zip` is also available if you prefer. macOS builds are code-signed and notarized by Apple.
-- **Linux**: Download the `.tar.gz` and extract it, or use the install script after building from source (see below).
+- **Linux**: Download the `.tar.gz` and extract it, or use the install script after building from source (see below). Like upstream Zed, the editor needs the host's ALSA runtime (`libasound2` on Debian/Ubuntu, `alsa-lib` on Fedora/Arch) and working Vulkan drivers; both are preinstalled on typical desktop distros.
 - **Windows**: Download the x86_64 setup `.exe` or `.zip`. Windows builds are currently unsigned; see [Installing on Windows](#installing-on-windows).
 
 ### Installing on Windows

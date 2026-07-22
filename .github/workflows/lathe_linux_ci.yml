@@ -49,10 +49,26 @@ jobs:
         run: cargo check --workspace
 
   build-linux:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
+    # Same 20.04 container as release_fork.yml's build-linux so this job
+    # validates the exact glibc-2.31 baseline that releases ship with.
+    container: ubuntu:20.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
     needs: check-linux
     steps:
+      - name: Install container prerequisites
+        run: |
+          apt-get update
+          apt-get install -y sudo curl wget git build-essential lsb-release software-properties-common gnupg
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          bash /tmp/llvm.sh 18
+          ln -sf "$(command -v clang-18)" /usr/local/bin/clang
+          ln -sf "$(command -v clang++-18)" /usr/local/bin/clang++
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CXX=clang++" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - name: Install Rust
@@ -63,7 +79,7 @@ jobs:
         continue-on-error: true
         with:
           cache-on-failure: true
-          shared-key: lathe-linux-build
+          shared-key: lathe-linux-glibc231
 
       - name: Install Linux dependencies
         run: script/linux
@@ -75,6 +91,9 @@ jobs:
         run: script/package-fork-linux
 
       - name: Smoke-test install script
+        env:
+          # Container jobs run as root; the cli refuses root otherwise.
+          ZED_ALLOW_ROOT: "true"
         run: |
           smoke_home="$RUNNER_TEMP/lathe-home"
           mkdir -p "$smoke_home"
@@ -108,6 +127,10 @@ jobs:
           test "$(command -v lathe)" = "$cli"
           test -f "$desktop"
           grep -Fq "Exec=$install_dir/bin/lathe" "$desktop"
+
+          # Launch through the cli: exercises editor-binary discovery (the
+          # path every desktop-entry/PATH launch takes), no display needed.
+          "$cli" --version
 
           printf '\n' | ZED_CHANNEL="$channel" sh script/uninstall.sh
 

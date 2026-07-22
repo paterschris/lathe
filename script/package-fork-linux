@@ -96,9 +96,13 @@ cp "$cli_binary" "${app_dir}/bin/lathe"
 # Bundle shared libraries
 echo "--- Bundling shared libraries ---"
 mkdir -p "${app_dir}/lib"
+# Exclusion list mirrors upstream bundle-linux's find_libs: ld-linux/libc
+# family and libasound stay host-provided (bundled ALSA breaks host plugin
+# discovery), but libstdc++ IS bundled on purpose so older distros without
+# the builder's GLIBCXX symbols can still run the editor.
 ldd "$zed_binary" | \
     cut -d' ' -f3 | \
-    grep -v '\<\(libstdc++.so\|libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' | \
+    grep -v '\<\(libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' | \
     while read -r lib; do
         if [ -f "$lib" ]; then
             cp "$lib" "${app_dir}/lib/"

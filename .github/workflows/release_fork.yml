@@ -263,10 +263,30 @@ jobs:
 
   build-linux:
     runs-on: ubuntu-22.04
+    # Build inside a 20.04 container to keep the glibc floor at 2.31 like
+    # upstream (which bundles x86_64 on ubuntu-2004 runner images). Building
+    # directly on the 22.04 runner produced binaries that refuse to start on
+    # Ubuntu 20.04 / Debian 11 / RHEL 8-era distros ("version `GLIBC_2.35'
+    # not found"). GitHub no longer offers 20.04 hosted runners, hence the
+    # container.
+    container: ubuntu:20.04
     env:
-      CC: clang
-      CXX: clang++
+      DEBIAN_FRONTEND: noninteractive
     steps:
+      - name: Install container prerequisites
+        # The bare image lacks sudo/curl/git that script/linux and the
+        # actions below assume; clang from 20.04's apt (v10) is too old for
+        # the codebase, so pull a modern toolchain from apt.llvm.org.
+        run: |
+          apt-get update
+          apt-get install -y sudo curl wget git build-essential lsb-release software-properties-common gnupg
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          bash /tmp/llvm.sh 18
+          ln -sf "$(command -v clang-18)" /usr/local/bin/clang
+          ln -sf "$(command -v clang++-18)" /usr/local/bin/clang++
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CXX=clang++" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - name: Install Rust
@@ -281,15 +301,29 @@ jobs:
         continue-on-error: true
         with:
           cache-on-failure: true
+          shared-key: lathe-linux-glibc231
 
       - name: Install Linux dependencies
         run: script/linux
 
       - name: Build
+        env:
+          LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases?per_page=30
         run: script/build-fork-linux
 
       - name: Package
         run: script/package-fork-linux
+
+      - name: Smoke-test CLI editor discovery
+        # `lathe --version` exercises the cli's editor-binary probing (the
+        # exact path that silently broke every desktop-entry and PATH launch
+        # of v0.236.20) without needing a display. ZED_ALLOW_ROOT because
+        # container jobs run as root and the cli refuses root otherwise.
+        env:
+          ZED_ALLOW_ROOT: "true"
+        run: |
+          tar -xzf target/release/Lathe-*-linux.tar.gz -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP"/lathe*.app/bin/lathe --version
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
@@ -338,6 +372,8 @@ jobs:
 
       - name: Build
         shell: pwsh
+        env:
+          LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases?per_page=30
         run: ./script/build-fork-windows.ps1 -Architecture ${{ matrix.arch }}
 
       - name: Package

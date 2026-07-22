@@ -89,6 +89,10 @@ $channel = (Get-Content 'crates/zed/RELEASE_CHANNEL').Trim()
 $env:ZED_RELEASE_CHANNEL = $channel
 $env:RELEASE_CHANNEL = $channel
 $env:ZED_BUNDLE = 'true'
+# Mirrors upstream bundling: compiled into GPUI so the binary knows its
+# release version (updater comparisons, version reporting).
+$versionLine = Select-String -Path 'crates/zed/Cargo.toml' -Pattern '^version = "(.*)"' | Select-Object -First 1
+$env:RELEASE_VERSION = $versionLine.Matches[0].Groups[1].Value
 
 Write-Output "Channel: $channel"
 Write-Output "Building release binaries..."

@@ -9,7 +9,7 @@
 ;   LatheChannel  - stable | beta | preview | nightly | dev
 ;   LatheVersion  - e.g. "0.236.2" (no leading v, no -beta suffix)
 ;   LatheArch     - x86_64 | aarch64
-;   StageDir      - absolute path to the staged install tree (bin/, libexec/, lib/, share/)
+;   StageDir      - absolute path to the staged install tree (bin/, libexec/, share/)
 ;   OutputDir     - absolute path where the compiled installer .exe is written
 
 #ifndef LatheChannel
@@ -109,11 +109,13 @@ Name: "addtopath"; Description: "Add the &lathe CLI to your PATH"; GroupDescript
 ; The staged tree mirrors script/install-fork-windows.ps1's layout:
 ;   bin\lathe.exe                 (cli)
 ;   libexec\lathe-editor.exe      (editor)
-;   lib\conpty.dll, OpenConsole.exe, optionally amd_ags_x64.dll
+;   libexec\conpty.dll, libexec\<arch>\OpenConsole.exe, optionally
+;   libexec\amd_ags_x64.dll -- runtime DLLs live beside the editor exe
+;   because they are loaded by bare name (exe-dir search), like upstream
+;   ships them next to Zed.exe.
 ;   share\lathe.ico
 Source: "{#StageDir}\bin\*";     DestDir: "{app}\bin";     Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\libexec\*"; DestDir: "{app}\libexec"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#StageDir}\lib\*";     DestDir: "{app}\lib";     Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\share\*";   DestDir: "{app}\share";   Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

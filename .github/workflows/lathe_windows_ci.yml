@@ -225,6 +225,21 @@ jobs:
             throw "FAIL: $binDir not added to user PATH"
           }
 
+          # Launch through the cli: exercises editor-binary discovery (the
+          # path shell launches take), no window needed. This is the check
+          # that would have caught v0.236.20's broken `lathe` command.
+          $versionOutput = & $cliExe --version 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "FAIL: '$cliExe --version' exited $LASTEXITCODE : $versionOutput"
+          }
+          Write-Output "cli --version: $versionOutput"
+
+          # The terminal runtime must sit beside the editor exe (bare-name
+          # LoadLibrary), not in lib\.
+          if (-not (Test-Path (Join-Path $installDir 'libexec\conpty.dll'))) {
+            throw "FAIL: conpty.dll not next to lathe-editor.exe"
+          }
+
           Write-Output "Install OK. Now testing uninstall."
           ./script/uninstall-fork-windows.ps1 -Channel $channel
 
