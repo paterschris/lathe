@@ -60,6 +60,10 @@ jobs:
     steps:
       - name: Install container prerequisites
         run: |
+          # archive.ubuntu.com is slow and flaky from GitHub's runners;
+          # Azure's mirror is in-network. Retries cover residual blips.
+          sed -i 's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+          echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
           apt-get update
           apt-get install -y sudo curl wget git build-essential lsb-release software-properties-common gnupg
           # script/linux runs both as a step below and again inside
