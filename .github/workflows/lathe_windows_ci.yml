@@ -242,6 +242,22 @@ jobs:
             throw "FAIL: conpty.dll not next to lathe-editor.exe"
           }
 
+          # Launch the editor GUI itself and require it to survive startup.
+          # This is the check that would have caught v0.236.22's fatal
+          # "could not find zed-cli" on real Windows installs: the cli
+          # --version check above only exercises the cli->editor direction.
+          # Runners have an interactive desktop and D3D falls back to WARP.
+          $editor = Start-Process -FilePath $editorExe -PassThru
+          Start-Sleep -Seconds 15
+          if ($editor.HasExited) {
+            throw "FAIL: lathe-editor.exe exited within 15s of launch (exit code $($editor.ExitCode))"
+          }
+          Write-Output "Editor GUI launched and stayed alive."
+          Stop-Process -Id $editor.Id -Force
+          # Give the process tree a moment to release file handles before
+          # the uninstall below deletes the install dir.
+          Start-Sleep -Seconds 3
+
           Write-Output "Install OK. Now testing uninstall."
           ./script/uninstall-fork-windows.ps1 -Channel $channel
 

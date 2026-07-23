@@ -381,11 +381,14 @@ pub fn get_zed_cli_path() -> Result<PathBuf> {
         // so here ./cli is for both installed and development builds.
         &["./cli"]
     } else if cfg!(target_os = "windows") {
-        // bin/zed.exe is for installed builds, ./cli.exe is for development builds.
-        &["bin/zed.exe", "./cli.exe"]
+        // Lathe installs the editor in libexec\ with the cli at ..\bin\lathe.exe;
+        // bin/zed.exe is upstream's flat installed layout, ./cli.exe is for
+        // development builds.
+        &["../bin/lathe.exe", "bin/zed.exe", "./cli.exe"]
     } else if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
-        // bin is the standard, ./cli is for the target directory in development builds.
-        &["../bin/zed", "./cli"]
+        // Lathe bundles rename the cli to lathe; ../bin/zed is upstream's
+        // standard, ./cli is for the target directory in development builds.
+        &["../bin/lathe", "../bin/zed", "./cli"]
     } else {
         anyhow::bail!("unsupported platform for determining zed-cli path");
     };
