@@ -106,10 +106,16 @@ if (-not $vsDevShell) {
     $installerArgs = @(
         '--passive', '--wait', '--norestart',
         '--add', 'Microsoft.VisualStudio.Workload.VCTools',
+        # msvc_spectre_libs' build script hard-requires the
+        # Spectre-mitigated runtime libs (see docs/src/development/windows.md).
+        '--add', 'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre',
         '--includeRecommended'
     )
     if ($Architecture -eq 'aarch64' -or $OSArchitecture -eq 'aarch64') {
-        $installerArgs += @('--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64')
+        $installerArgs += @(
+            '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
+            '--add', 'Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre'
+        )
     }
     Write-Output "Installing Build Tools (this takes a while)..."
     $installerProcess = Start-Process -FilePath $bootstrapper -ArgumentList $installerArgs -Verb RunAs -Wait -PassThru
