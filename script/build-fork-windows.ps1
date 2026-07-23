@@ -93,6 +93,18 @@ $env:ZED_BUNDLE = 'true'
 # release version (updater comparisons, version reporting).
 $versionLine = Select-String -Path 'crates/zed/Cargo.toml' -Pattern '^version = "(.*)"' | Select-Object -First 1
 $env:RELEASE_VERSION = $versionLine.Matches[0].Groups[1].Value
+# Embed the commit like upstream so the startup banner doesn't say
+# "sha unknown". CI sets this via github.sha; locally git works. try/catch
+# because PSNativeCommandUseErrorActionPreference turns git failures into
+# terminating errors.
+if (-not $env:ZED_COMMIT_SHA) {
+    try {
+        $commitSha = (& git rev-parse HEAD 2>$null)
+        if ($commitSha) { $env:ZED_COMMIT_SHA = "$commitSha".Trim() }
+    } catch {
+        Write-Output "Note: could not determine commit sha; banner will say unknown."
+    }
+}
 
 Write-Output "Channel: $channel"
 Write-Output "Building release binaries..."

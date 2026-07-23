@@ -83,6 +83,7 @@ jobs:
           # endpoint excludes them), and the auto-updater filters the result
           # by the running binary's channel via tag suffix.
           LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases?per_page=30
+          ZED_COMMIT_SHA: ${{ github.sha }}
         run: script/build-fork
 
       - name: Verify signing identity
@@ -346,6 +347,7 @@ jobs:
       - name: Build
         env:
           LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases?per_page=30
+          ZED_COMMIT_SHA: ${{ github.sha }}
         run: script/build-fork-linux
 
       - name: Package
@@ -413,6 +415,7 @@ jobs:
         shell: pwsh
         env:
           LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases?per_page=30
+          ZED_COMMIT_SHA: ${{ github.sha }}
         run: ./script/build-fork-windows.ps1 -Architecture ${{ matrix.arch }}
 
       - name: Package

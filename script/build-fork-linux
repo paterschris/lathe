@@ -66,6 +66,12 @@ export CC=${CC:-$(which clang)}
 # release version (updater comparisons, version reporting).
 RELEASE_VERSION="$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 export RELEASE_VERSION
+# Embed the commit like upstream so the startup banner doesn't say
+# "sha unknown". CI sets this from github.sha (git inside build.rs can
+# fail in containers); locally git works.
+if [ -z "${ZED_COMMIT_SHA:-}" ] && commit_sha=$(git rev-parse HEAD 2>/dev/null); then
+    export ZED_COMMIT_SHA="$commit_sha"
+fi
 
 # Determine architecture
 version_info=$(rustc --version --verbose)

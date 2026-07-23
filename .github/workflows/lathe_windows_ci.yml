@@ -184,6 +184,8 @@ jobs:
 
       - name: Build
         shell: pwsh
+        env:
+          ZED_COMMIT_SHA: ${{ github.sha }}
         run: ./script/build-fork-windows.ps1 -Architecture x86_64
 
       - name: Package

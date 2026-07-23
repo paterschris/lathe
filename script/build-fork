@@ -177,6 +177,15 @@ echo "Target: $target_triple"
 # Bound target/ growth before kicking off the (cache-reusing) release build.
 manage_target_storage
 
+# Mirror upstream's bundle scripts: bake the version and commit into the
+# binary (version reporting, updater comparisons, startup banner sha).
+# CI sets ZED_COMMIT_SHA from github.sha; locally git works.
+RELEASE_VERSION="$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+export RELEASE_VERSION
+if [ -z "${ZED_COMMIT_SHA:-}" ] && commit_sha=$(git rev-parse HEAD 2>/dev/null); then
+    export ZED_COMMIT_SHA="$commit_sha"
+fi
+
 echo "Building release binary..."
 
 cargo build --release --package zed --package cli --target "$target_triple"
