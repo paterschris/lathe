@@ -132,6 +132,41 @@ if (-not $vsDevShell) {
     exit 1
 }
 
+# --- Spectre-mitigated libs (msvc_spectre_libs hard-requires them) ---
+# A pre-existing VS/Build Tools install may lack them (the plain VCTools
+# workload doesn't include them); detect and add the component via the
+# installed VS Installer engine, which handles every edition. UAC prompt
+# expected.
+$vsRoot = Split-Path (Split-Path (Split-Path $vsDevShell -Parent) -Parent) -Parent
+$spectreLibDir = if ($Architecture -eq 'aarch64') { 'arm64' } else { 'x64' }
+$spectreComponent = if ($Architecture -eq 'aarch64') {
+    'Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre'
+} else {
+    'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre'
+}
+function Test-SpectreLibs {
+    [bool](Get-ChildItem -Path (Join-Path $vsRoot "VC\Tools\MSVC\*\lib\spectre\$spectreLibDir\*.lib") -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+if (-not (Test-SpectreLibs)) {
+    Write-Output "Spectre-mitigated libs not found in $vsRoot -- adding component (expect a UAC prompt)..."
+    $vsInstaller = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe'
+    if (-not (Test-Path $vsInstaller)) {
+        Write-Error "Visual Studio Installer not found at $vsInstaller. Add '$spectreComponent' manually via the Visual Studio Installer."
+        exit 1
+    }
+    $modifyArgs = @('modify', '--installPath', $vsRoot, '--passive', '--norestart', '--add', $spectreComponent)
+    $modifyProcess = Start-Process -FilePath $vsInstaller -ArgumentList $modifyArgs -Verb RunAs -Wait -PassThru
+    if ($modifyProcess.ExitCode -ne 0 -and $modifyProcess.ExitCode -ne 3010) {
+        Write-Error "Visual Studio Installer exited with $($modifyProcess.ExitCode) while adding $spectreComponent."
+        exit 1
+    }
+    if (-not (Test-SpectreLibs)) {
+        Write-Error "Spectre-mitigated libs still missing after the modify. Add '$spectreComponent' manually via the Visual Studio Installer."
+        exit 1
+    }
+    Write-Output "Spectre-mitigated libs installed."
+}
+
 Push-Location
 & $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture) | Out-Null
 Pop-Location
