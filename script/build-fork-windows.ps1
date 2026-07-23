@@ -69,20 +69,60 @@ function Get-VSArch {
     }
 }
 
-$vsRoots = @(
-    'C:\Program Files\Microsoft Visual Studio\2022\Community',
-    'C:\Program Files\Microsoft Visual Studio\2022\Professional',
-    'C:\Program Files\Microsoft Visual Studio\2022\Enterprise',
-    'C:\Program Files\Microsoft Visual Studio\2022\BuildTools'
-)
-$vsDevShell = $null
-foreach ($root in $vsRoots) {
-    $candidate = Join-Path $root 'Common7\Tools\Launch-VsDevShell.ps1'
-    if (Test-Path $candidate) { $vsDevShell = $candidate; break }
+function Find-VsDevShell {
+    # vswhere ships with any VS installer and knows about custom install
+    # locations the hardcoded roots below would miss.
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path $vswhere) {
+        $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1
+        if ($installPath) {
+            $candidate = Join-Path $installPath 'Common7\Tools\Launch-VsDevShell.ps1'
+            if (Test-Path $candidate) { return $candidate }
+        }
+    }
+    $vsRoots = @(
+        'C:\Program Files\Microsoft Visual Studio\2022\Community',
+        'C:\Program Files\Microsoft Visual Studio\2022\Professional',
+        'C:\Program Files\Microsoft Visual Studio\2022\Enterprise',
+        'C:\Program Files\Microsoft Visual Studio\2022\BuildTools'
+    )
+    foreach ($root in $vsRoots) {
+        $candidate = Join-Path $root 'Common7\Tools\Launch-VsDevShell.ps1'
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
+$vsDevShell = Find-VsDevShell
+
+if (-not $vsDevShell) {
+    # Mirror the rustup bootstrap above: fetch and install VS Build Tools
+    # with the C++ workload. The installer needs elevation, so expect a
+    # UAC prompt; --passive shows progress for what is a multi-GB,
+    # 10-30 minute install.
+    Write-Output "Visual Studio 2022 C++ tools not found -- downloading Build Tools installer..."
+    $bootstrapper = Join-Path $env:TEMP 'vs_BuildTools.exe'
+    Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $bootstrapper
+    $installerArgs = @(
+        '--passive', '--wait', '--norestart',
+        '--add', 'Microsoft.VisualStudio.Workload.VCTools',
+        '--includeRecommended'
+    )
+    if ($Architecture -eq 'aarch64' -or $OSArchitecture -eq 'aarch64') {
+        $installerArgs += @('--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64')
+    }
+    Write-Output "Installing Build Tools (this takes a while)..."
+    $installerProcess = Start-Process -FilePath $bootstrapper -ArgumentList $installerArgs -Verb RunAs -Wait -PassThru
+    # 3010 = success, reboot required; the linker works without one.
+    if ($installerProcess.ExitCode -ne 0 -and $installerProcess.ExitCode -ne 3010) {
+        Write-Error "Build Tools installer exited with $($installerProcess.ExitCode). Install manually from https://visualstudio.microsoft.com/downloads/ with the 'Desktop development with C++' workload."
+        exit 1
+    }
+    $vsDevShell = Find-VsDevShell
 }
 
 if (-not $vsDevShell) {
-    Write-Error "Visual Studio 2022 not found. Install VS 2022 with the C++ workload, or VS Build Tools."
+    Write-Error "Visual Studio 2022 C++ tools still not found after install. Install manually with the 'Desktop development with C++' workload."
     exit 1
 }
 
