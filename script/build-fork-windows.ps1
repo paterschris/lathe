@@ -11,10 +11,16 @@ Set-Location (Join-Path $PSScriptRoot '..')
 Write-Output "=== Building Lathe (Windows) ==="
 
 # --- Architecture resolution ---
-$OSArchitecture = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
-    'X64'   { 'x86_64' }
-    'Arm64' { 'aarch64' }
-    default { throw "Unsupported architecture" }
+# PROCESSOR_ARCHITEW6432 is set when running in a 32-bit process on a
+# 64-bit OS. Don't use RuntimeInformation::OSArchitecture here: on
+# Windows PowerShell 5.1 (.NET Framework) it reports the PROCESS
+# architecture, so a 32-bit shell on x64 yields X86 and a bogus
+# "Unsupported architecture" abort.
+$osArchRaw = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$OSArchitecture = switch ($osArchRaw) {
+    'AMD64' { 'x86_64' }
+    'ARM64' { 'aarch64' }
+    default { throw "Unsupported architecture: $osArchRaw" }
 }
 
 if (-not $Architecture) {

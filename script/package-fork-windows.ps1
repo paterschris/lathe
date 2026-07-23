@@ -9,10 +9,13 @@ $PSNativeCommandUseErrorActionPreference = $true
 Set-Location (Join-Path $PSScriptRoot '..')
 
 # --- Architecture and target ---
-$OSArchitecture = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
-    'X64'   { 'x86_64' }
-    'Arm64' { 'aarch64' }
-    default { throw "Unsupported architecture" }
+# See build-fork-windows.ps1: RuntimeInformation::OSArchitecture lies
+# about the OS arch under Windows PowerShell 5.1's .NET Framework.
+$osArchRaw = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$OSArchitecture = switch ($osArchRaw) {
+    'AMD64' { 'x86_64' }
+    'ARM64' { 'aarch64' }
+    default { throw "Unsupported architecture: $osArchRaw" }
 }
 if (-not $Architecture) { $Architecture = $OSArchitecture }
 $Target = "$Architecture-pc-windows-msvc"
