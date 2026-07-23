@@ -157,7 +157,9 @@ if (-not (Test-SpectreLibs)) {
     $modifyArgs = @('modify', '--installPath', $vsRoot, '--passive', '--norestart', '--add', $spectreComponent)
     $modifyProcess = Start-Process -FilePath $vsInstaller -ArgumentList $modifyArgs -Verb RunAs -Wait -PassThru
     if ($modifyProcess.ExitCode -ne 0 -and $modifyProcess.ExitCode -ne 3010) {
-        Write-Error "Visual Studio Installer exited with $($modifyProcess.ExitCode) while adding $spectreComponent."
+        Write-Error ("Visual Studio Installer exited with $($modifyProcess.ExitCode) while adding $spectreComponent. " +
+            "A pending reboot from a previous install commonly causes this: reboot and rerun this script. " +
+            "Otherwise add the component via the Visual Studio Installer GUI (Modify > Individual components > Spectre-mitigated libs).")
         exit 1
     }
     if (-not (Test-SpectreLibs)) {
