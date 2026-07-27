@@ -582,6 +582,60 @@ impl super::GitPanel {
         self.explorer_entries = combined;
     }
 
+    /// The remote ref a local branch corresponds to, according to the local
+    /// refs: its tracked upstream when one exists, otherwise a same-named
+    /// branch under any remote in the Remote section (a plain
+    /// `git push origin <branch>` doesn't configure tracking, so upstream
+    /// alone would miss those). Returns `(remote_name, remote_branch_name)`,
+    /// preferring "origin" when several remotes match. `None` means the
+    /// branch is local-only; callers use this both for the "on remote" row
+    /// indicator and to decide whether deleting on the remote is offered,
+    /// so the two always agree.
+    fn explorer_remote_counterpart(
+        &self,
+        branch: &Branch,
+    ) -> Option<(SharedString, SharedString)> {
+        if branch.is_remote() {
+            return None;
+        }
+        if let Some(upstream) = branch.upstream.as_ref() {
+            if matches!(upstream.tracking, UpstreamTracking::Tracked(_)) {
+                if let (Some(remote), Some(remote_branch)) =
+                    (upstream.remote_name(), upstream.branch_name())
+                {
+                    return Some((remote.to_string().into(), remote_branch.to_string().into()));
+                }
+            }
+        }
+        let local_name = branch.name();
+        let mut fallback: Option<(SharedString, SharedString)> = None;
+        for entry in &self.explorer_entries {
+            let ExplorerEntry::RemoteBranch(remote_branch) = entry else {
+                continue;
+            };
+            let Some(remote) = remote_branch.remote_name() else {
+                continue;
+            };
+            let name = remote_branch
+                .name()
+                .strip_prefix(remote)
+                .and_then(|rest| rest.strip_prefix('/'));
+            let Some(name) = name else {
+                continue;
+            };
+            if name != local_name {
+                continue;
+            }
+            if remote == "origin" {
+                return Some((remote.to_string().into(), name.to_string().into()));
+            }
+            if fallback.is_none() {
+                fallback = Some((remote.to_string().into(), name.to_string().into()));
+            }
+        }
+        fallback
+    }
+
     fn explorer_filter_text(&self, cx: &App) -> String {
         self.explorer_filter.read(cx).text(cx).to_lowercase()
     }
@@ -849,6 +903,10 @@ impl super::GitPanel {
                     _ => None,
                 }
                 .filter(|s| s.ahead > 0 || s.behind > 0);
+                let remote_counterpart = match &entry {
+                    ExplorerEntry::LocalBranch(b) => self.explorer_remote_counterpart(b),
+                    _ => None,
+                };
                 h_flex()
                     .id(("git-explorer-row", row_ix))
                     .w_full()
@@ -872,6 +930,20 @@ impl super::GitPanel {
                             .when(is_head, |label| label.color(Color::Accent)),
                     )
                     .child(div().flex_1())
+                    .when_some(remote_counterpart, |this, (remote_name, remote_branch_name)| {
+                        this.child(
+                            div()
+                                .id(("git-explorer-on-remote", entry_ix))
+                                .tooltip(Tooltip::text(format!(
+                                    "On {remote_name}/{remote_branch_name}"
+                                )))
+                                .child(
+                                    Icon::new(IconName::Public)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                    })
                     .when_some(tracking_status, |this, status| {
                         this.child(render_tracking_chip(status))
                     })
@@ -1131,21 +1203,13 @@ impl super::GitPanel {
         let current_branch_name = repo.read(cx).branch.as_ref().map(|b| b.name().to_string());
         let workspace = self.workspace.clone();
         let panel = cx.entity().downgrade();
-        // Local branches that actually have a remote-tracking upstream get the
-        // "delete on origin too" entry. We skip it when the tracking ref is
-        // `Gone` because there is no remote ref left to push a delete to.
-        let upstream_for_remote_delete: Option<(SharedString, SharedString)> = if is_remote {
-            None
-        } else {
-            branch.upstream.as_ref().and_then(|u| {
-                if !matches!(u.tracking, UpstreamTracking::Tracked(_)) {
-                    return None;
-                }
-                let remote = u.remote_name()?;
-                let remote_branch = u.branch_name()?;
-                Some((remote.to_string().into(), remote_branch.to_string().into()))
-            })
-        };
+        // Local branches that exist on a remote (tracked upstream, or a
+        // same-named branch under a remote) get the "delete on the remote
+        // too" entry; local-only branches don't, because there is no remote
+        // ref to push a delete to. Same source of truth as the on-remote row
+        // indicator, so the menu and the icon always agree.
+        let upstream_for_remote_delete: Option<(SharedString, SharedString)> =
+            self.explorer_remote_counterpart(&branch);
 
         let context_menu = ContextMenu::build(window, cx, |menu, _window, _cx| {
             let mut menu = menu
