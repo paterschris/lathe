@@ -1844,6 +1844,9 @@
     // Whether to show the Android device selector in the status bar
     // when a mobile (Expo) project is open.
     "mobile_device_selector_button": true,
+    // Whether to show the AWS profile selector in the status bar when
+    // AWS profiles are configured on this machine.
+    "aws_profile_selector_button": true,
   },
   // Settings specific to the terminal
   "terminal": {

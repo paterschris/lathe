@@ -28,6 +28,56 @@ pub struct Terminals {
     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
 }
 
+/// AWS profile picked in the status bar (see the `aws_dev` crate). When set,
+/// locally spawned terminals, tasks, and debug adapters get `AWS_PROFILE`
+/// pointing at the picked profile and lose any inherited static AWS key env
+/// vars, which would otherwise take precedence over the profile in every AWS
+/// SDK's credential chain.
+#[derive(Clone, Debug, Default)]
+pub struct ActiveAwsProfile {
+    pub profile: Option<String>,
+    /// Route `AWS_PROFILE` through the `lathe-<profile>` credential_process
+    /// wrapper profile, for AWS SDK v2 apps that can't resolve login sessions
+    /// natively.
+    pub v2_compat: bool,
+}
+
+impl gpui::Global for ActiveAwsProfile {}
+
+impl ActiveAwsProfile {
+    pub fn wrapper_name(profile: &str) -> String {
+        format!("lathe-{profile}")
+    }
+
+    /// The profile name spawned processes should see, or `None` when the
+    /// overlay is inactive.
+    pub fn effective(cx: &App) -> Option<String> {
+        let this = cx.try_global::<Self>()?;
+        let profile = this.profile.as_ref()?;
+        Some(if this.v2_compat {
+            Self::wrapper_name(profile)
+        } else {
+            profile.clone()
+        })
+    }
+
+    pub fn apply(env: &mut HashMap<String, String>, effective_profile: &str) {
+        // Set to empty rather than removing: dotenv-style loaders only skip
+        // keys that already exist in the process environment, so an empty
+        // var blocks a `.env` file from re-introducing static keys, while
+        // AWS SDKs treat empty credentials as unset and fall through to
+        // AWS_PROFILE.
+        for key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"] {
+            env.insert(key.to_string(), String::new());
+        }
+        env.insert("AWS_PROFILE".to_string(), effective_profile.to_string());
+        // aws-sdk v2 for JS ignores ~/.aws/config (where the lathe-* wrapper
+        // profiles live) unless this flag is set. Harmless everywhere else:
+        // v3, botocore, and the CLI always read the config file.
+        env.insert("AWS_SDK_LOAD_CONFIG".to_string(), "1".to_string());
+    }
+}
+
 impl Project {
     pub fn active_entry_directory(&self, cx: &App) -> Option<PathBuf> {
         let entry_id = self.active_entry()?;
@@ -114,6 +164,7 @@ impl Project {
         // Prepare a task for resolving the environment
         let env_task =
             self.resolve_directory_environment(&shell, path.clone(), remote_client.clone(), cx);
+        let aws_profile = ActiveAwsProfile::effective(cx);
 
         // Scope the toolchain lookup to the worktree the terminal is being
         // spawned in. Previously this iterated the active editor's worktree
@@ -139,6 +190,11 @@ impl Project {
         cx.spawn(async move |project, cx| {
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
+            if remote_client.is_none()
+                && let Some(aws_profile) = aws_profile.as_ref()
+            {
+                ActiveAwsProfile::apply(&mut env, aws_profile);
+            }
 
             let activation_script = maybe!(async {
                 for toolchain in toolchains {
@@ -376,12 +432,18 @@ impl Project {
         // Prepare a task for resolving the environment
         let env_task =
             self.resolve_directory_environment(&env_shell, path.clone(), remote_client.clone(), cx);
+        let aws_profile = ActiveAwsProfile::effective(cx);
 
         let lang_registry = self.languages.clone();
         cx.spawn(async move |project, cx| {
             let shell_kind = ShellKind::new(&shell, path_style.is_windows());
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
+            if remote_client.is_none()
+                && let Some(aws_profile) = aws_profile.as_ref()
+            {
+                ActiveAwsProfile::apply(&mut env, aws_profile);
+            }
 
             let activation_script = maybe!(async {
                 for toolchain in toolchains {
@@ -544,10 +606,16 @@ impl Project {
             remote_client.clone(),
             cx,
         );
+        let aws_profile = ActiveAwsProfile::effective(cx);
 
         cx.spawn(async move |project, cx| {
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
+            if remote_client.is_none()
+                && let Some(aws_profile) = aws_profile.as_ref()
+            {
+                ActiveAwsProfile::apply(&mut env, aws_profile);
+            }
 
             project.update(cx, move |_, cx| {
                 match remote_client {

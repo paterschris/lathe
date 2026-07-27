@@ -2040,6 +2040,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws_dev"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "db",
+ "gpui",
+ "log",
+ "paths",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "aws_http_client"
 version = "0.1.0"
 dependencies = [
@@ -23219,6 +23238,7 @@ dependencies = [
  "audio",
  "auto_update",
  "auto_update_ui",
+ "aws_dev",
  "breadcrumbs",
  "call",
  "channel",

@@ -200,6 +200,7 @@ pub struct StatusBarSettings {
     pub line_endings_button: bool,
     pub active_encoding_button: EncodingDisplayOptions,
     pub mobile_device_selector_button: bool,
+    pub aws_profile_selector_button: bool,
 }
 
 impl Settings for StatusBarSettings {
@@ -213,6 +214,7 @@ impl Settings for StatusBarSettings {
             line_endings_button: status_bar.line_endings_button.unwrap(),
             active_encoding_button: status_bar.active_encoding_button.unwrap(),
             mobile_device_selector_button: status_bar.mobile_device_selector_button.unwrap(),
+            aws_profile_selector_button: status_bar.aws_profile_selector_button.unwrap(),
         }
     }
 }

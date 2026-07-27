@@ -272,6 +272,7 @@ impl DapStore {
                 let user_env = dap_settings.and_then(|s| s.env.clone());
 
                 let delegate = self.delegate(worktree, console, cx);
+                let aws_profile = crate::terminals::ActiveAwsProfile::effective(cx);
 
                 let worktree = worktree.clone();
                 cx.spawn(async move |this, cx| {
@@ -300,6 +301,12 @@ impl DapStore {
                     if let Some(mut env) = env {
                         env.extend(std::mem::take(&mut binary.envs));
                         binary.envs = env;
+                    }
+                    // The debuggee inherits the adapter's environment when the
+                    // adapter launches it itself (non-runInTerminal), so the
+                    // profile overlay must land on the adapter process.
+                    if let Some(aws_profile) = aws_profile.as_ref() {
+                        crate::terminals::ActiveAwsProfile::apply(&mut binary.envs, aws_profile);
                     }
 
                     Ok(binary)

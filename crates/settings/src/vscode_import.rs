@@ -805,6 +805,7 @@ impl VsCodeSettings {
             line_endings_button: None,
             active_encoding_button: None,
             mobile_device_selector_button: None,
+            aws_profile_selector_button: None,
         })
     }
 

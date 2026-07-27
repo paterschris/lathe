@@ -526,6 +526,11 @@ pub struct StatusBarSettingsContent {
     ///
     /// Default: true
     pub mobile_device_selector_button: Option<bool>,
+    /// Whether to show the AWS profile selector in the status bar when AWS
+    /// profiles are configured on this machine.
+    ///
+    /// Default: true
+    pub aws_profile_selector_button: Option<bool>,
 }
 
 #[derive(
