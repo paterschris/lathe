@@ -188,7 +188,18 @@ pub struct EditorSettingsContent {
     /// Default: FindAllReferences
     pub go_to_definition_fallback: Option<GoToDefinitionFallback>,
 
-    /// How to scroll the target into view when navigating to a definition or reference.
+    /// Where to show LSP results that can contain multiple locations
+    /// (Go to Definition, Go to Implementation, Find All References). A single
+    /// result always opens directly. Individual actions can override this with
+    /// their `open_results_in` argument.
+    ///
+    /// Default: multi_buffer
+    pub lsp_results_location: Option<OpenResultsIn>,
+
+    /// How to scroll the target into view when navigating to a definition or reference
+    /// (e.g. Go to Definition, Go to Type Definition, Find All References).
+    ///
+    /// Default: center
     pub go_to_definition_scroll_strategy: Option<GoToDefinitionScrollStrategy>,
 
     /// Jupyter REPL settings.
@@ -833,9 +844,7 @@ pub enum GoToDefinitionFallback {
     FindAllReferences,
 }
 
-/// Determines when the mouse cursor should be hidden in an editor or input box.
-///
-/// Default: on_typing_and_movement
+/// Where to show LSP results that can contain multiple locations.
 #[derive(
     Copy,
     Clone,
@@ -851,14 +860,12 @@ pub enum GoToDefinitionFallback {
     strum::VariantNames,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum HideMouseMode {
-    /// Never hide the mouse cursor
-    Never,
-    /// Hide only when typing
-    OnTyping,
-    /// Hide on both typing and cursor movement
+pub enum OpenResultsIn {
+    /// Open the results in a multibuffer.
     #[default]
-    OnTypingAndMovement,
+    MultiBuffer,
+    /// Open the results in a filterable picker.
+    Picker,
 }
 
 /// How to scroll the target into view when navigating to a definition or reference.

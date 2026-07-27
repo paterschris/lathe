@@ -60,3 +60,8 @@ chris.r.paterson@pricehawk.dev.p12
 # Local scratch files
 /entities.json
 /mempalace.yaml
+
+# NixOS integration test state
+.nixos-test-history
+
+.local*

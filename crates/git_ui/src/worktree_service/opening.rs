@@ -310,7 +310,7 @@ pub(super) async fn open_worktree_workspace(
                 new_workspace.update(cx, |workspace, cx| {
                     let dock = workspace.dock_at_position(dock_position);
                     if let Some(panel) = dock.read(cx).active_panel() {
-                        panel.panel_focus_handle(cx).focus(window, cx);
+                        panel.activation_focus_handle(cx).focus(window, cx);
                     }
                 });
             })?;

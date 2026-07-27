@@ -183,9 +183,6 @@ static ACTION_STATISTICS: spin::Mutex<ActionStatistics> =
 
 #[doc(hidden)]
 #[cfg(feature = "profiler")]
-// TODO(merge): upstream calls this from window.rs action dispatch; Lathe's dispatch
-// path does not wire it up, so it stays unused (pre-merge carried #[allow(dead_code)]).
-#[allow(dead_code)]
 pub(crate) fn update_running_action(action: &(dyn Action + 'static), cx: &mut crate::App) {
     let now = Instant::now();
     let action = action.type_id();
@@ -195,23 +192,16 @@ pub(crate) fn update_running_action(action: &(dyn Action + 'static), cx: &mut cr
 
 #[doc(hidden)]
 #[cfg(not(feature = "profiler"))]
-// TODO(merge): see profiler-feature variant above; unused in Lathe's dispatch path.
-#[allow(dead_code)]
 pub(crate) fn update_running_action(_: &(dyn Action + 'static), _: &mut crate::App) {}
 
 #[doc(hidden)]
 #[cfg(feature = "profiler")]
-// TODO(merge): upstream calls this from window.rs action dispatch; Lathe's dispatch
-// path does not wire it up, so it stays unused (pre-merge carried #[allow(dead_code)]).
-#[allow(dead_code)]
 pub(crate) fn save_action_timing() {
     ACTION_STATISTICS.lock().save_action_timing();
 }
 
 #[doc(hidden)]
 #[cfg(not(feature = "profiler"))]
-// TODO(merge): see profiler-feature variant above; unused in Lathe's dispatch path.
-#[allow(dead_code)]
 pub(crate) fn save_action_timing() {}
 
 #[doc(hidden)]

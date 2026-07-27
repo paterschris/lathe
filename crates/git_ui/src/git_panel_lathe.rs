@@ -1343,7 +1343,7 @@ impl super::GitPanel {
 
             menu
         });
-        self.set_context_menu(context_menu, position, window, cx);
+        self.set_context_menu(context_menu, position, None, window, cx);
     }
 
     fn deploy_stash_context_menu(
@@ -1405,7 +1405,7 @@ impl super::GitPanel {
 
             menu
         });
-        self.set_context_menu(context_menu, position, window, cx);
+        self.set_context_menu(context_menu, position, None, window, cx);
     }
 }
 

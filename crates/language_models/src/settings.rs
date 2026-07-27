@@ -148,6 +148,7 @@ impl settings::Settings for AllLanguageModelSettings {
             openai: OpenAiSettings {
                 api_url: openai.api_url.unwrap(),
                 available_models: openai.available_models.unwrap_or_default(),
+                custom_headers: custom_headers_from("OpenAI", openai.custom_headers, &[]),
             },
             openai_compatible: openai_compatible
                 .into_iter()

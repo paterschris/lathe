@@ -348,8 +348,6 @@ impl Render for TitleBar {
         let status = self.client.status();
         let status = &*status.borrow();
         let user = self.user_store.read(cx).current_user();
-
-        let signed_in = user.is_some();
         let is_signing_in = user.is_none()
             && matches!(
                 status,
@@ -365,13 +363,7 @@ impl Render for TitleBar {
 
         children.push(
             h_flex()
-                .map(|this| {
-                    if signed_in {
-                        this.pr_1p5()
-                    } else {
-                        this.pr_1()
-                    }
-                })
+                .pr_1()
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(self.render_call_controls(window, cx))
@@ -477,7 +469,6 @@ impl TitleBar {
         );
 
         subscriptions.push(cx.observe(&active_call, |this, _, cx| this.active_call_changed(cx)));
-        subscriptions.push(cx.observe_window_activation(window, Self::window_activation_changed));
         subscriptions.push(
             cx.subscribe(&git_store, move |_, _, event, cx| match event {
                 GitStoreEvent::ActiveRepositoryChanged(_)
@@ -1012,7 +1003,7 @@ impl TitleBar {
             worktree_label.clone()
         };
 
-        let worktree_button = {
+        let worktree_button = settings.show_worktree_name.then(|| {
             let project = self.project.clone();
             let workspace_handle = workspace.downgrade();
             PopoverMenu::new("worktree-picker-menu")
@@ -1046,7 +1037,7 @@ impl TitleBar {
                     },
                 )
                 .anchor(gpui::Anchor::TopLeft)
-        };
+        });
 
         let branch_tooltip_label = branch_name.clone();
         let (branch_icon, branch_icon_color) = if settings.show_branch_status_icon {
@@ -1078,57 +1069,50 @@ impl TitleBar {
                 )
         };
 
-        let git_picker_button = PopoverMenu::new("branch-menu")
-            .menu(move |window, cx| {
-                Some(git_ui::git_picker::popover(
-                    workspace.downgrade(),
-                    effective_repository.clone(),
-                    git_ui::git_picker::GitPickerTab::Branches,
-                    gpui::rems(34.),
-                    window,
-                    cx,
-                ))
-            })
-            .trigger_with_tooltip(trigger, move |_window, cx| {
-                let meta = if is_detached_head {
-                    format!("Detached HEAD: {}", branch_tooltip_label)
-                } else {
-                    format!("Currently Checked Out: {}", branch_tooltip_label)
-                };
-                Tooltip::with_meta("Branch & Stash", Some(&zed_actions::git::Branch), meta, cx)
-            })
-            .anchor(gpui::Anchor::TopLeft);
+        let git_picker_button = settings.show_branch_name.then(|| {
+            PopoverMenu::new("branch-menu")
+                .menu(move |window, cx| {
+                    Some(git_ui::git_picker::popover(
+                        workspace.downgrade(),
+                        effective_repository.clone(),
+                        git_ui::git_picker::GitPickerTab::Branches,
+                        gpui::rems(34.),
+                        window,
+                        cx,
+                    ))
+                })
+                .trigger_with_tooltip(trigger, move |_window, cx| {
+                    let meta = if is_detached_head {
+                        format!("Detached HEAD: {}", branch_tooltip_label)
+                    } else {
+                        format!("Currently Checked Out: {}", branch_tooltip_label)
+                    };
+                    Tooltip::with_meta("Branch & Stash", Some(&zed_actions::git::Branch), meta, cx)
+                })
+                .anchor(gpui::Anchor::TopLeft)
+        });
+
+        if worktree_button.is_none() && git_picker_button.is_none() {
+            return None;
+        }
+
+        let show_separator = worktree_button.is_some() && git_picker_button.is_some();
 
         Some(
             h_flex()
                 .gap_px()
-                .child(worktree_button)
-                .child(
-                    Label::new("/")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .alpha(0.25),
-                )
-                .child(git_picker_button)
+                .children(worktree_button)
+                .when(show_separator, |this| {
+                    this.child(
+                        Label::new("/")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .alpha(0.25),
+                    )
+                })
+                .children(git_picker_button)
                 .into_any_element(),
         )
-    }
-
-    fn window_activation_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.is_window_active() {
-            ActiveCall::global(cx)
-                .update(cx, |call, cx| call.set_location(Some(&self.project), cx))
-                .detach_and_log_err(cx);
-        } else if cx.active_window().is_none() {
-            ActiveCall::global(cx)
-                .update(cx, |call, cx| call.set_location(None, cx))
-                .detach_and_log_err(cx);
-        }
-        self.workspace
-            .update(cx, |workspace, cx| {
-                workspace.update_active_view_for_followers(window, cx);
-            })
-            .ok();
     }
 
     fn active_call_changed(&mut self, cx: &mut Context<Self>) {

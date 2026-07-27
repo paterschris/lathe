@@ -1156,7 +1156,7 @@ impl SplittableEditor {
         }
     }
 
-    fn toggle_soft_wrap(
+    pub fn toggle_soft_wrap(
         &mut self,
         _: &ToggleSoftWrap,
         window: &mut Window,

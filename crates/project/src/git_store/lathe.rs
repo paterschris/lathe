@@ -147,7 +147,7 @@ impl super::GitStore {
                     author_email: entry.author_email.to_string(),
                 })
                 .collect(),
-            path: file_history.path.to_proto(),
+            path: file_history.path.as_unix_str().to_owned(),
         })
     }
 }
@@ -177,7 +177,7 @@ impl super::Repository {
                         .request(proto::GitFileHistory {
                             project_id: project_id.0,
                             repository_id: id.to_proto(),
-                            path: path.to_proto(),
+                            path: path.as_unix_str().to_owned(),
                             skip: skip as u64,
                             limit: limit.map(|l| l as u64),
                         })

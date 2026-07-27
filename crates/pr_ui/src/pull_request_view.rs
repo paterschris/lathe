@@ -992,7 +992,7 @@ async fn add_patch_file(
     if new_text.is_empty() && old_text.is_none() {
         return Ok(None);
     }
-    let Ok(rel_path) = RelPath::unix(&file.path) else {
+    let Ok(rel_path) = RelPath::from_unix_str(&file.path) else {
         return Ok(None);
     };
     let rel_path: Arc<RelPath> = rel_path.into();
@@ -1069,7 +1069,7 @@ async fn add_changed_file_full(
         None => None,
     };
 
-    let Ok(rel_path) = RelPath::unix(&file.path) else {
+    let Ok(rel_path) = RelPath::from_unix_str(&file.path) else {
         return Ok(None);
     };
     let rel_path: Arc<RelPath> = rel_path.into();
@@ -1135,7 +1135,7 @@ async fn add_unchanged_file(
             build_context.http_client.clone(),
         )
         .await?;
-    let Ok(rel_path) = RelPath::unix(path) else {
+    let Ok(rel_path) = RelPath::from_unix_str(path) else {
         return Ok(None);
     };
     let rel_path: Arc<RelPath> = rel_path.into();
@@ -1788,7 +1788,7 @@ async fn build_buffer(
     let language = cx.update(|cx| language_registry.language_for_file(&blob, Some(&text), cx));
     let language = if let Some(language) = language {
         language_registry
-            .load_language(&language)
+            .load_language(language)
             .await
             .ok()
             .and_then(|e| e.log_err())

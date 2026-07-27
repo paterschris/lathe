@@ -10,9 +10,8 @@ use fuzzy::StringMatchCandidate;
 use gpui::{
     Action, App, AsyncApp, ClipboardItem, DEFAULT_ADDITIONAL_WINDOW_SIZE, Div, Entity, FocusHandle,
     Focusable, Global, KeyContext, ListState, ReadGlobal as _, Role, ScrollHandle, Stateful,
-    Subscription, Task, Tiling, TitlebarOptions, UniformListScrollHandle, WeakEntity, Window,
-    WindowBounds, WindowHandle, WindowOptions, actions, div, list, point, prelude::*, px,
-    uniform_list,
+    Subscription, Task, TitlebarOptions, UniformListScrollHandle, WeakEntity, Window, WindowBounds,
+    WindowHandle, WindowOptions, actions, div, list, point, prelude::*, px, uniform_list,
 };
 
 use language::Buffer;
@@ -564,6 +563,8 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::SeedQuerySetting>(render_dropdown)
         .add_basic_renderer::<settings::DoubleClickInMultibuffer>(render_dropdown)
         .add_basic_renderer::<settings::GoToDefinitionFallback>(render_dropdown)
+        .add_basic_renderer::<settings::GoToDefinitionScrollStrategy>(render_dropdown)
+        .add_basic_renderer::<settings::OpenResultsIn>(render_dropdown)
         .add_basic_renderer::<settings::ActivateOnClose>(render_dropdown)
         .add_basic_renderer::<settings::ShowDiagnostics>(render_dropdown)
         .add_basic_renderer::<settings::ShowCloseButton>(render_dropdown)
@@ -4043,7 +4044,7 @@ impl SettingsWindow {
                 } else {
                     Some(worktree.update(cx, |tree, cx| {
                         tree.create_entry(
-                            settings_path.clone(),
+                            settings_path.clone().into(),
                             false,
                             Some(initial_project_settings_content().as_bytes().to_vec()),
                             cx,
@@ -4485,7 +4486,6 @@ impl Render for SettingsWindow {
                 ),
             window,
             cx,
-            Tiling::default(),
         )
     }
 }
@@ -4577,7 +4577,7 @@ fn update_settings_file(
                 anyhow::bail!("No settings window found");
             };
 
-            update_project_setting_file(worktree_id, rel_path, update, settings_window, cx)
+            update_project_setting_file(worktree_id, rel_path.into(), update, settings_window, cx)
         }
         SettingsUiFile::User => {
             // todo(settings_ui) error?
@@ -6408,7 +6408,7 @@ mod project_settings_update_tests {
             (worktree.read(cx).id(), worktree.downgrade())
         });
 
-        let rel_path: Arc<RelPath> = RelPath::unix(".zed/settings.json")
+        let rel_path: Arc<RelPath> = RelPath::from_unix_str(".zed/settings.json")
             .expect("valid path")
             .into_arc();
         let project_path = ProjectPath {

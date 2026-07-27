@@ -20,6 +20,8 @@ pub(crate) struct DockerPs {
 #[serde(rename_all = "PascalCase")]
 pub(crate) struct DockerState {
     pub(crate) running: bool,
+    #[serde(default)]
+    pub(crate) started_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
@@ -143,7 +145,13 @@ pub(crate) struct DockerComposeService {
     pub(crate) build: Option<DockerComposeServiceBuild>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) privileged: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) init: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_compose_volumes"
+    )]
     pub(crate) volumes: Vec<MountDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) env_file: Option<Vec<String>>,
@@ -157,6 +165,12 @@ pub(crate) struct DockerComposeService {
         deserialize_with = "deserialize_nullable_vec"
     )]
     pub(crate) command: Vec<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "deserialize_environment"
+    )]
+    pub(crate) environment: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq, Default)]
@@ -268,11 +282,17 @@ impl Docker {
 #[async_trait]
 impl DockerClient for Docker {
     async fn inspect(&self, id: &String) -> Result<DockerInspect, DevContainerError> {
-        // Try to pull the image, continue on failure; Image may be local only, id a reference to a running container
+        // Always try inspect first — avoid pulling unless necessary.
+        let command = self.create_docker_inspect(id);
+        match evaluate_json_command::<DockerInspect>(command).await {
+            Ok(Some(docker_inspect)) => return Ok(docker_inspect),
+            Ok(None) | Err(_) => {}
+        }
+
+        // Inspect failed — try pulling and retry.
         self.pull_image(id).await.ok();
 
         let command = self.create_docker_inspect(id);
-
         let Some(docker_inspect): Option<DockerInspect> = evaluate_json_command(command).await?
         else {
             log::error!("Docker inspect produced no deserializable output");
@@ -362,12 +382,13 @@ impl DockerClient for Docker {
             log::error!("Error running command {e} in container exec");
             DevContainerError::ContainerNotValid(container_id.to_string())
         })?;
+        let std_out = String::from_utf8_lossy(&output.stdout);
+        log::debug!("Command output:\n {std_out}");
         if !output.status.success() {
             let std_err = String::from_utf8_lossy(&output.stderr);
             log::error!("Command produced a non-successful output. StdErr: {std_err}");
+            return Err(DevContainerError::DevContainerScriptsFailed);
         }
-        let std_out = String::from_utf8_lossy(&output.stdout);
-        log::debug!("Command output:\n {std_out}");
 
         Ok(())
     }
@@ -487,6 +508,41 @@ pub(crate) trait DockerClient {
     fn docker_cli(&self) -> String;
 }
 
+fn deserialize_environment<'de, D>(
+    deserializer: D,
+) -> Result<Option<HashMap<String, String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<serde_json_lenient::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    match value {
+        serde_json_lenient::Value::Object(object) => Ok(Some(
+            object
+                .into_iter()
+                .filter_map(|(key, value)| match value {
+                    serde_json_lenient::Value::Null => None,
+                    serde_json_lenient::Value::String(value) => Some((key, value)),
+                    other => Some((key, other.to_string())),
+                })
+                .collect(),
+        )),
+        serde_json_lenient::Value::Array(values) => Ok(Some(
+            values
+                .into_iter()
+                .filter_map(|value| {
+                    let value = value.as_str()?;
+                    let (key, value) = value.split_once('=').unwrap_or((value, ""));
+                    Some((key.to_string(), value.to_string()))
+                })
+                .collect(),
+        )),
+        _ => Ok(None),
+    }
+}
+
 fn deserialize_labels<'de, D>(deserializer: D) -> Result<Option<HashMap<String, String>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -551,6 +607,93 @@ where
     Option::<Vec<T>>::deserialize(deserializer).map(|opt| opt.unwrap_or_default())
 }
 
+fn deserialize_compose_volumes<'de, D>(deserializer: D) -> Result<Vec<MountDefinition>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum VolumeItem {
+        Object(MountDefinition),
+        String(String),
+    }
+
+    let items = Vec::<VolumeItem>::deserialize(deserializer)?;
+    items
+        .into_iter()
+        .map(|item| match item {
+            VolumeItem::Object(mount) => Ok(mount),
+            VolumeItem::String(s) => parse_compose_volume_string(&s)
+                .ok_or_else(|| de::Error::custom(format!("invalid volume string: {s}"))),
+        })
+        .collect()
+}
+
+/// Parses Docker Compose short volume syntax: `[SOURCE:]TARGET[:MODE]`.
+/// A leading drive letter (e.g. `C:`) on the source is treated as part of the
+/// path rather than as a source/target separator.
+fn parse_compose_volume_string(s: &str) -> Option<MountDefinition> {
+    let bytes = s.as_bytes();
+
+    // Find the colon that separates source from target, skipping a possible
+    // Windows drive-letter prefix (single ASCII letter followed by `:`).
+    let separator_start = if bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes.get(2).map_or(false, |&b| b == b'/' || b == b'\\')
+    {
+        // Skip past the drive letter prefix (e.g. "C:\")
+        3
+    } else {
+        0
+    };
+
+    if let Some(colon_pos) = s[separator_start..].find(':') {
+        let colon_pos = colon_pos + separator_start;
+        let source = &s[..colon_pos];
+
+        let rest = &s[colon_pos + 1..];
+
+        // `rest` may itself start with a Windows drive letter, so skip past
+        // that before looking for a second colon that would delimit the mode.
+        let mode_search_start = if rest.len() >= 2
+            && rest.as_bytes()[0].is_ascii_alphabetic()
+            && rest.as_bytes()[1] == b':'
+        {
+            2
+        } else {
+            0
+        };
+
+        let (target, _mode) = if let Some(pos) = rest[mode_search_start..].find(':') {
+            let pos = pos + mode_search_start;
+            (&rest[..pos], Some(&rest[pos + 1..]))
+        } else {
+            (rest, None)
+        };
+
+        if target.is_empty() {
+            return None;
+        }
+
+        Some(MountDefinition {
+            source: Some(source.to_string()),
+            target: target.to_string(),
+            mount_type: None,
+        })
+    } else {
+        // No colon at all: anonymous volume with only a target path
+        if s.is_empty() {
+            return None;
+        }
+        Some(MountDefinition {
+            source: None,
+            target: s.to_string(),
+            mount_type: None,
+        })
+    }
+}
+
 fn deserialize_nullable_labels<'de, D>(deserializer: D) -> Result<DockerConfigLabels, D::Error>
 where
     D: Deserializer<'de>,
@@ -604,6 +747,8 @@ mod test {
             parse_find_process_output,
         },
     };
+    #[cfg(not(target_os = "windows"))]
+    use util::command::Command;
 
     #[test]
     fn parse_find_process_output_none() {
@@ -749,6 +894,28 @@ mod test {
                 OsStr::new(given_id)
             ]
         )
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn docker_exec_returns_error_on_nonzero_exit() {
+        let docker = Docker {
+            docker_cli: "false".to_string(),
+            has_buildx: false,
+        };
+
+        let result = gpui::block_on(docker.run_docker_exec(
+            "container",
+            "/workspace",
+            "root",
+            &HashMap::new(),
+            Command::new("true"),
+        ));
+
+        assert!(matches!(
+            result,
+            Err(DevContainerError::DevContainerScriptsFailed)
+        ));
     }
 
     #[test]
@@ -986,6 +1153,13 @@ mod test {
                                 name: Some("custom port".to_string()),
                             },
                         ],
+                        environment: Some(HashMap::from([
+                            ("POSTGRES_DB".to_string(), "postgres".to_string()),
+                            ("POSTGRES_HOSTNAME".to_string(), "localhost".to_string()),
+                            ("POSTGRES_PASSWORD".to_string(), "postgres".to_string()),
+                            ("POSTGRES_PORT".to_string(), "5432".to_string()),
+                            ("POSTGRES_USER".to_string(), "postgres".to_string()),
+                        ])),
                         ..Default::default()
                     },
                 ),
@@ -998,6 +1172,13 @@ mod test {
                             source: Some("postgres-data".to_string()),
                             target: "/var/lib/postgresql/data".to_string(),
                         }],
+                        environment: Some(HashMap::from([
+                            ("POSTGRES_DB".to_string(), "postgres".to_string()),
+                            ("POSTGRES_HOSTNAME".to_string(), "localhost".to_string()),
+                            ("POSTGRES_PASSWORD".to_string(), "postgres".to_string()),
+                            ("POSTGRES_PORT".to_string(), "5432".to_string()),
+                            ("POSTGRES_USER".to_string(), "postgres".to_string()),
+                        ])),
                         ..Default::default()
                     },
                 ),
@@ -1064,6 +1245,44 @@ mod test {
             service.labels,
             Some(HashMap::from([(
                 "com.example.test".to_string(),
+                "value".to_string()
+            )]))
+        );
+    }
+
+    #[test]
+    fn should_deserialize_compose_environment_key_only_entries() {
+        let given_config = r#"
+        {
+            "name": "devcontainer",
+            "services": {
+                "array": {
+                    "image": "node:22-alpine",
+                    "environment": ["USER_INPUT", "DEFINED=value"]
+                },
+                "map": {
+                    "image": "node:22-alpine",
+                    "environment": {
+                        "USER_INPUT": null,
+                        "DEFINED": "value"
+                    }
+                }
+            }
+        }
+        "#;
+
+        let config: DockerComposeConfig = serde_json_lenient::from_str(given_config).unwrap();
+        assert_eq!(
+            config.services.get("array").unwrap().environment,
+            Some(HashMap::from([
+                ("DEFINED".to_string(), "value".to_string()),
+                ("USER_INPUT".to_string(), "".to_string()),
+            ]))
+        );
+        assert_eq!(
+            config.services.get("map").unwrap().environment,
+            Some(HashMap::from([(
+                "DEFINED".to_string(),
                 "value".to_string()
             )]))
         );

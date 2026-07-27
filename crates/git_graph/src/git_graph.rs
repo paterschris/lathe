@@ -1,4 +1,5 @@
 use collections::{BTreeMap, BTreeSet, HashMap, IndexSet};
+use git_ui::commit_context_menu::{CopyCommitSha, CopyCommitTag, OpenCommitView};
 use editor::Editor;
 use futures::channel::oneshot;
 use git::{
@@ -37,6 +38,7 @@ use project::{
         RepositoryEvent, RepositoryId, undo_log::UndoAction,
     },
 };
+use task::{ResolvedTask, TaskContext, TaskVariables, VariableName};
 use search::{
     SearchOption, SearchOptions, SearchSource, SelectNextMatch, SelectPreviousMatch,
     ToggleCaseSensitive, buffer_search,
@@ -49,7 +51,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
-use task::{ResolvedTask, TaskContext, TaskVariables, VariableName};
+
 use theme::AccentColors;
 use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
 use ui::{
@@ -412,12 +414,6 @@ impl SplitState {
 actions!(
     git_graph,
     [
-        /// Copies the SHA of the selected commit to the clipboard.
-        CopyCommitSha,
-        /// Copies a tag from the selected commit to the clipboard.
-        CopyCommitTag,
-        /// Opens the commit view for the selected commit.
-        OpenCommitView,
         /// Focuses the search field.
         FocusSearch,
         /// Toggles "filter mode": when on, rows that don't match the current
@@ -1624,8 +1620,9 @@ impl GitGraph {
                 .map(|branch| SharedString::from(branch.name().to_string()))
         });
 
-        let row_height = Self::row_height(window, cx);
         let has_context_menu = self.has_context_menu();
+
+        let row_height = Self::row_height(window, cx);
 
         // When filter mode is on the range comes in as display-row positions;
         // resolve them to absolute commit indices once up front so the rest of
@@ -5094,7 +5091,9 @@ mod tests {
     use git::repository::InitialGraphCommitData;
     use gpui::{TestAppContext, UpdateGlobal};
     use project::git_store::{GitStoreEvent, RepositoryEvent};
-    use project::{Project, TaskSourceKind, task_store::TaskSettingsLocation};
+    use project::{
+        GIT_COMMAND_TASK_TAG, Project, TaskSourceKind, task_store::TaskSettingsLocation,
+    };
     use rand::prelude::*;
     use serde_json::json;
     use settings::{SettingsStore, ThemeSettingsContent};

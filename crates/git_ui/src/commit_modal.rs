@@ -1,12 +1,11 @@
 use crate::branch_picker::{self, BranchList};
 use crate::git_panel::{GitPanel, commit_message_editor, panel_editor_style};
-use git::repository::CommitOptions;
-use git::{Amend, Commit, GenerateCommitMessage, Signoff};
+use git::{Amend, Commit, GenerateCommitMessage, Signoff, SkipHooks};
 use project::DisableAiSettings;
 use settings::Settings;
 use ui::{
-    ButtonLike, ContextMenu, ElevationIndex, KeybindingHint, PopoverMenu, PopoverMenuHandle,
-    SplitButton, Tooltip, prelude::*,
+    ButtonLike, ContextMenu, ContextMenuEntry, DocumentationSide, ElevationIndex, KeybindingHint,
+    PopoverMenu, PopoverMenuHandle, SplitButton, Tooltip, prelude::*,
 };
 
 use editor::{Editor, EditorElement};
@@ -263,21 +262,26 @@ impl CommitModal {
         &self,
         id: impl Into<ElementId>,
         keybinding_target: Option<FocusHandle>,
+        disabled: bool,
     ) -> impl IntoElement {
         let menu_open = self.commit_menu_handle.is_deployed();
 
         PopoverMenu::new(id.into())
             .with_handle(self.commit_menu_handle.clone())
-            .trigger(crate::render_split_button_chevron_trigger(
-                "modal-commit-split-button-right",
-                menu_open,
-            ))
+            .trigger(
+                crate::render_split_button_chevron_trigger(
+                    "modal-commit-split-button-right",
+                    menu_open,
+                )
+                .disabled(disabled),
+            )
             .menu({
                 let git_panel_entity = self.git_panel.clone();
                 move |window, cx| {
                     let git_panel = git_panel_entity.read(cx);
                     let amend_enabled = git_panel.amend_pending();
                     let signoff_enabled = git_panel.signoff_enabled();
+                    let skip_hooks_enabled = git_panel.skip_hooks_enabled();
                     let has_previous_commit = git_panel.head_commit(cx).is_some();
 
                     Some(ContextMenu::build(window, cx, |context_menu, _, _| {
@@ -317,6 +321,17 @@ impl CommitModal {
                                     }
                                 },
                             )
+                            .item(
+                                ContextMenuEntry::new("Skip Hooks")
+                                    .toggleable(IconPosition::Start, skip_hooks_enabled)
+                                    .action(Box::new(SkipHooks))
+                                    .handler(move |window, cx| {
+                                        window.dispatch_action(Box::new(SkipHooks), cx)
+                                    })
+                                    .documentation_aside(DocumentationSide::Left, |_| {
+                                        Label::new("git commit --no-verify").into_any_element()
+                                    }),
+                            )
                     }))
                 }
             })
@@ -335,17 +350,17 @@ impl CommitModal {
             co_authors,
             generate_commit_message,
             active_repo,
-            is_amend_pending,
-            is_signoff_enabled,
+            commit_options,
             workspace,
+            is_generating,
         ) = self.git_panel.update(cx, |git_panel, cx| {
             let (can_commit, tooltip) = git_panel.configure_commit_button(cx);
             let title = git_panel.commit_button_title();
             let co_authors = git_panel.render_co_authors(cx);
             let generate_commit_message = git_panel.render_generate_commit_message_button(cx);
             let active_repo = git_panel.active_repository.clone();
-            let is_amend_pending = git_panel.amend_pending();
-            let is_signoff_enabled = git_panel.signoff_enabled();
+            let commit_options = git_panel.commit_options();
+            let is_generating = git_panel.is_generating_commit_message();
             (
                 can_commit,
                 tooltip,
@@ -353,9 +368,9 @@ impl CommitModal {
                 co_authors,
                 generate_commit_message,
                 active_repo,
-                is_amend_pending,
-                is_signoff_enabled,
+                commit_options,
                 git_panel.workspace.clone(),
+                is_generating,
             )
         });
 
@@ -438,15 +453,8 @@ impl CommitModal {
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 telemetry::event!("Git Committed", source = "Git Modal");
                                 this.git_panel.update(cx, |git_panel, cx| {
-                                    git_panel.commit_changes(
-                                        CommitOptions {
-                                            amend: is_amend_pending,
-                                            signoff: is_signoff_enabled,
-                                            allow_empty: false,
-                                        },
-                                        window,
-                                        cx,
-                                    )
+                                    let options = git_panel.commit_options();
+                                    git_panel.commit_changes(options, window, cx)
                                 });
                                 cx.emit(DismissEvent);
                             }))
@@ -458,9 +466,18 @@ impl CommitModal {
                                             tooltip,
                                             Some(&git::Commit),
                                             format!(
-                                                "git commit{}{}",
-                                                if is_amend_pending { " --amend" } else { "" },
-                                                if is_signoff_enabled { " --signoff" } else { "" }
+                                                "git commit{}{}{}",
+                                                if commit_options.amend { " --amend" } else { "" },
+                                                if commit_options.signoff {
+                                                    " --signoff"
+                                                } else {
+                                                    ""
+                                                },
+                                                if commit_options.no_verify {
+                                                    " --no-verify"
+                                                } else {
+                                                    ""
+                                                }
                                             ),
                                             &focus_handle.clone(),
                                             cx,
@@ -473,6 +490,7 @@ impl CommitModal {
                         self.render_git_commit_menu(
                             format!("split-button-right-{}", commit_label),
                             Some(focus_handle),
+                            is_generating,
                         )
                         .into_any_element(),
                     )),
@@ -501,6 +519,17 @@ impl CommitModal {
             }
             cx.emit(DismissEvent);
         }
+    }
+
+    fn on_toggle_skip_hooks(
+        &mut self,
+        action: &git::SkipHooks,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.git_panel.update(cx, |git_panel, cx| {
+            git_panel.toggle_skip_hooks(action, window, cx)
+        });
     }
 
     fn on_amend(&mut self, _: &git::Amend, window: &mut Window, cx: &mut Context<Self>) {
@@ -534,6 +563,7 @@ impl Render for CommitModal {
             .key_context("GitCommit")
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::on_commit))
+            .on_action(cx.listener(Self::on_toggle_skip_hooks))
             .on_action(cx.listener(Self::on_amend))
             .when(!DisableAiSettings::get_global(cx).disable_ai, |this| {
                 this.on_action(cx.listener(|this, _: &GenerateCommitMessage, _, cx| {
