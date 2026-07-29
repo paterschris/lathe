@@ -2,7 +2,7 @@
 
 A customized code editor forked from [Zed](https://zed.dev), focused on better terminal workflows, visual git integration, and deep theme customization.
 
-Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks for my own workflow without waiting on upstream review, and without needing each change to fit Zed's product scope. Upstream Zed is the primary project — this fork tracks it closely and layers on my own changes.
+Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks for my own workflow without waiting on upstream review, and without needing each change to fit Zed's product scope. Upstream Zed is the primary project - this fork tracks it closely and layers on my own changes.
 
 **Platforms:** macOS (Apple Silicon), Linux (x86_64), and Windows (x86_64; experimental).
 
@@ -11,7 +11,7 @@ Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks
 ## Features
 
 ### Custom theme and syntax highlighting
-Lathe ships with its own default theme and a refined syntax highlighting palette applied across all supported languages. The theme is tuned for long coding sessions — balanced contrast, distinct-but-not-loud accent colors for keywords, strings, and types, and deliberate choices for diagnostic and git-status colors so the editor stays readable when things go wrong. Pair it with the Theme Customizer (below) to tweak any of the 135+ color tokens to taste.
+Lathe ships with its own default theme and a refined syntax highlighting palette applied across all supported languages. The theme is tuned for long coding sessions - balanced contrast, distinct-but-not-loud accent colors for keywords, strings, and types, and deliberate choices for diagnostic and git-status colors so the editor stays readable when things go wrong. Pair it with the Theme Customizer (below) to tweak any of the 135+ color tokens to taste.
 
 ![Default Theme](assets/screenshots/default-theme-code.png)
 
