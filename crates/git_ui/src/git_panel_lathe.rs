@@ -907,10 +907,12 @@ impl super::GitPanel {
                     ExplorerEntry::LocalBranch(b) => self.explorer_remote_counterpart(b),
                     _ => None,
                 };
+                let indent = px(20.0 + (depth as f32) * 14.0);
                 h_flex()
                     .id(("git-explorer-row", row_ix))
                     .w_full()
-                    .pl(px(20.0 + (depth as f32) * 14.0))
+                    .relative()
+                    .pl(indent)
                     .pr_3()
                     .py_0p5()
                     .gap_2()
@@ -931,9 +933,16 @@ impl super::GitPanel {
                     )
                     .child(div().flex_1())
                     .when_some(remote_counterpart, |this, (remote_name, remote_branch_name)| {
+                        // Rendered in the indent gutter just left of the branch
+                        // icon, so rows keep the same alignment whether or not
+                        // the branch exists on a remote.
                         this.child(
-                            div()
+                            h_flex()
                                 .id(("git-explorer-on-remote", entry_ix))
+                                .absolute()
+                                .left(indent - px(16.0))
+                                .top_0()
+                                .bottom_0()
                                 .tooltip(Tooltip::text(format!(
                                     "On {remote_name}/{remote_branch_name}"
                                 )))
