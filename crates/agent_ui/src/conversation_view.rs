@@ -1390,11 +1390,17 @@ impl ConversationView {
                 });
         }
 
-        let approval_selector =
-            agent_supports_approval(self.agent.agent_id().0.as_ref()).then(|| {
-                let fs = self.project.read(cx).fs().clone();
-                cx.new(|_cx| ApprovalSelector::new(self.agent.clone(), fs))
-            });
+        // Agents that advertise their own approval control over ACP (session
+        // modes or config options, like codex-acp >= 1.x) apply it per session
+        // and ignore the launch-time flags this selector sets, so only offer
+        // the launch-flag selector when the agent provides neither.
+        let approval_selector = (config_options_view.is_none()
+            && mode_selector.is_none()
+            && agent_supports_approval(self.agent.agent_id().0.as_ref()))
+        .then(|| {
+            let fs = self.project.read(cx).fs().clone();
+            cx.new(|_cx| ApprovalSelector::new(self.agent.clone(), fs))
+        });
 
         let subscriptions = vec![
             cx.subscribe_in(&thread, window, Self::handle_thread_event),
