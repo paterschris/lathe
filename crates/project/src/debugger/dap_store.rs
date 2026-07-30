@@ -99,6 +99,10 @@ pub struct DapStore {
     sessions: BTreeMap<SessionId, Entity<Session>>,
     next_session_id: u32,
     adapter_options: BTreeMap<DebugAdapterName, Arc<PersistedAdapterOptions>>,
+    // Mirror of the owning project's per-window selection, pushed down via
+    // `Project::set_active_aws_profile` since sessions here have no handle
+    // back to the project.
+    active_aws_profile: crate::terminals::ActiveAwsProfile,
 }
 
 impl EventEmitter<DapStoreEvent> for DapStore {}
@@ -237,7 +241,12 @@ impl DapStore {
             worktree_store,
             sessions: Default::default(),
             adapter_options: Default::default(),
+            active_aws_profile: Default::default(),
         }
+    }
+
+    pub fn set_active_aws_profile(&mut self, state: crate::terminals::ActiveAwsProfile) {
+        self.active_aws_profile = state;
     }
 
     pub fn get_debug_adapter_binary(
@@ -272,7 +281,7 @@ impl DapStore {
                 let user_env = dap_settings.and_then(|s| s.env.clone());
 
                 let delegate = self.delegate(worktree, console, cx);
-                let aws_profile = crate::terminals::ActiveAwsProfile::effective(cx);
+                let aws_profile = self.active_aws_profile.clone();
 
                 let worktree = worktree.clone();
                 cx.spawn(async move |this, cx| {
@@ -305,9 +314,7 @@ impl DapStore {
                     // The debuggee inherits the adapter's environment when the
                     // adapter launches it itself (non-runInTerminal), so the
                     // profile overlay must land on the adapter process.
-                    if let Some(aws_profile) = aws_profile.as_ref() {
-                        crate::terminals::ActiveAwsProfile::apply(&mut binary.envs, aws_profile);
-                    }
+                    aws_profile.apply(&mut binary.envs);
 
                     Ok(binary)
                 })

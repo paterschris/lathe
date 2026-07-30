@@ -241,6 +241,7 @@ pub struct Project {
     git_diff_debouncer: DebouncedDelay<Self>,
     remotely_created_models: Arc<Mutex<RemotelyCreatedModels>>,
     terminals: Terminals,
+    active_aws_profile: terminals::ActiveAwsProfile,
     node: Option<NodeRuntime>,
     search_history: SearchHistory,
     search_included_history: SearchHistory,
@@ -1372,6 +1373,7 @@ impl Project {
                 terminals: Terminals {
                     local_handles: Vec::new(),
                 },
+                active_aws_profile: Default::default(),
                 node: Some(node),
                 search_history: Self::new_search_history(),
                 environment,
@@ -1615,6 +1617,7 @@ impl Project {
                 terminals: Terminals {
                     local_handles: Vec::new(),
                 },
+                active_aws_profile: Default::default(),
                 node: Some(node),
                 search_history: Self::new_search_history(),
                 environment,
@@ -1905,6 +1908,7 @@ impl Project {
                 terminals: Terminals {
                     local_handles: Vec::new(),
                 },
+                active_aws_profile: Default::default(),
                 node: None,
                 search_history: Self::new_search_history(),
                 search_included_history: Self::new_search_history(),

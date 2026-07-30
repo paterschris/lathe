@@ -1707,6 +1707,17 @@ impl WorkspaceDb {
                 host = Some(format!("mock-{}", id));
                 user = Some(format!("mock-user-{}", id));
             }
+            // `remote`'s test-support feature (which adds the Mock variant)
+            // can be enabled by another crate in the build graph while
+            // workspace's isn't, leaving the arm above compiled out; Mock
+            // identities only occur in tests, so nothing meaningful reaches
+            // here.
+            #[cfg(not(any(test, feature = "test-support")))]
+            #[allow(unreachable_patterns)]
+            _ => {
+                kind = RemoteConnectionKind::Ssh;
+                user = None;
+            }
         }
 
         if let RemoteConnectionOptions::Docker(options) = options {
