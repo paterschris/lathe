@@ -18,7 +18,6 @@ on:
   workflow_dispatch:
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
@@ -29,7 +28,7 @@ jobs:
   validate-scripts:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Parse PowerShell scripts
         shell: pwsh
@@ -91,7 +90,7 @@ jobs:
   check-windows:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Enable Windows long paths
         shell: pwsh
@@ -151,7 +150,7 @@ jobs:
     runs-on: windows-2022
     needs: [validate-scripts, check-windows]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Enable Windows long paths
         shell: pwsh
@@ -269,7 +268,7 @@ jobs:
           Write-Output "Uninstall OK."
 
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: lathe-windows-x86_64-ci
           path: target/release/Lathe-*-windows.zip
