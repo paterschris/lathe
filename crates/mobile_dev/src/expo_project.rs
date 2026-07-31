@@ -26,6 +26,9 @@ pub struct ExpoProject {
     /// brand-new Expo projects often don't have it set yet; we surface that
     /// gap to the UI so the user knows what to add to `app.json`.
     pub android_package: Option<String>,
+    /// iOS bundle identifier from `expo.ios.bundleIdentifier`. Same deal as
+    /// the Android package: optional on fresh projects.
+    pub ios_bundle_identifier: Option<String>,
 }
 
 /// Look for `<root>/app.json` and parse it for the `expo` block. Returns
@@ -44,6 +47,7 @@ pub fn detect_at(root: &Path) -> Option<ExpoProject> {
         slug: expo.slug,
         display_name,
         android_package: expo.android.and_then(|a| a.package),
+        ios_bundle_identifier: expo.ios.and_then(|i| i.bundle_identifier),
     })
 }
 
@@ -57,11 +61,18 @@ struct ExpoSection {
     slug: String,
     name: Option<String>,
     android: Option<AndroidSection>,
+    ios: Option<IosSection>,
 }
 
 #[derive(Debug, Deserialize)]
 struct AndroidSection {
     package: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IosSection {
+    #[serde(rename = "bundleIdentifier")]
+    bundle_identifier: Option<String>,
 }
 
 #[cfg(test)]
@@ -95,6 +106,7 @@ mod tests {
         assert_eq!(project.slug, "myapp");
         assert_eq!(project.display_name, "myapp");
         assert!(project.android_package.is_none());
+        assert!(project.ios_bundle_identifier.is_none());
     }
 
     #[test]
@@ -108,6 +120,9 @@ mod tests {
                     "slug": "unbenched",
                     "android": {
                         "package": "com.paterschris.unbenched"
+                    },
+                    "ios": {
+                        "bundleIdentifier": "com.paterschris.unbenched"
                     }
                 }
             }"#,
@@ -117,6 +132,10 @@ mod tests {
         assert_eq!(project.display_name, "UnBenched");
         assert_eq!(
             project.android_package.as_deref(),
+            Some("com.paterschris.unbenched")
+        );
+        assert_eq!(
+            project.ios_bundle_identifier.as_deref(),
             Some("com.paterschris.unbenched")
         );
     }

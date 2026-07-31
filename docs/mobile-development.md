@@ -1,6 +1,6 @@
 # Mobile development with Lathe
 
-Lathe ships a workflow for building React Native / Expo apps and installing them on an Android device, with no Android Studio install required. Phase 1 (this doc) covers the manual setup and the cheapest path for common workflows. The Mobile panel can now install the whole toolchain for you (see "Toolchain" below), so the manual route is optional.
+Lathe ships a workflow for building React Native / Expo apps and installing them on an Android device, with no Android Studio install required. Phase 1 (this doc) covers the manual setup and the cheapest path for common workflows. The Mobile panel can now install the whole toolchain for you (see "Toolchain" below), so the manual route is optional. On macOS the panel also covers iOS; see "iOS (macOS only)" below.
 
 ## Pick your workflow
 
@@ -83,6 +83,17 @@ export JAVA_HOME="$(brew --prefix zulu@17)"           # macOS via Homebrew
 
 (Linux paths: `~/Android/sdk` and a distro-installed JDK 17.)
 
+## iOS (macOS only)
+
+The Mobile panel supports iOS alongside Android when running on a Mac:
+
+- **Devices**: the devices section and the status-bar selector list iOS simulators (via `simctl`) and physical iPhones/iPads (via `devicectl`) next to the Android devices. To keep the list short, only booted simulators plus the device set of the newest installed iOS runtime are shown.
+- **Apple toolchain**: the panel detects Xcode (the standalone Command Line Tools don't count; iOS builds need full Xcode), the iOS simulator runtime, and CocoaPods. Xcode can't be auto-installed, so the panel links to the download when it's missing. The simulator runtime can be fetched in-panel via `xcodebuild -downloadPlatform iOS` (also the `install ios runtime` action). CocoaPods is easiest via `brew install cocoapods`.
+- **Builds**: "Build & Run" follows the selected device's platform; with an iOS simulator or device picked it runs `npx expo run:ios --device <udid>`. Cloud builds: the `build eas preview ios` action runs `eas build --platform ios --profile preview --non-interactive`. Set `expo.ios.bundleIdentifier` in `app.json`; the panel surfaces it in the project section.
+- **Logs**: with a booted simulator selected, the `open logcat` action streams the simulator's unified log filtered to the app's process. Physical-device log streaming isn't supported.
+
+Signing note: `expo run:ios` against a physical device needs an Apple Developer account and a development team configured in Xcode; simulators need no signing.
+
 ## Project tasks
 
 Copy `assets/templates/expo-android/tasks.json` from this repo to your Expo project's `.zed/tasks.json`. It defines:
@@ -160,5 +171,6 @@ Your `android/app/build.gradle` should reference those properties in the `signin
 
 - **Phase 2 (shipped)**: the `mobile_dev` panel inside Lathe. Device list with selection, per-app logcat tail, "Build & Run" and EAS build actions in the command palette, and a status-bar device selector that appears whenever an Expo project is open. The panel docks bottom or right via the `mobile_dev_panel` settings; the selector can be hidden with `status_bar.mobile_device_selector_button`.
 - **Phase 3 (shipped)**: the panel's "Android toolchain" section detects JDK 17, SDK command-line tools, platform-tools, and license state, and installs anything missing into a Lathe-managed directory with licenses accepted. Panel-started builds automatically use the managed toolchain via injected `JAVA_HOME` / `ANDROID_HOME` / `PATH`; adb calls prefer the managed platform-tools. The NDK is left to gradle (it fetches the project's pinned revision on first build). Still open from the original Phase 3 scope: storing release keystore passwords in the macOS Keychain, which lands together with panel-driven local release builds.
+- **iOS support (shipped)**: device list, builds, simulator log streaming, and Apple toolchain detection per "iOS (macOS only)" above.
 
 Phase 1 (this doc) remains the reference for the manual, terminal-based workflow.

@@ -246,7 +246,7 @@ impl InstallSession {
     }
 }
 
-async fn send_line(tx: &channel::Sender<InstallEvent>, line: impl Into<SharedString>) {
+pub(crate) async fn send_line(tx: &channel::Sender<InstallEvent>, line: impl Into<SharedString>) {
     tx.send(InstallEvent::Line(line.into())).await.ok();
 }
 

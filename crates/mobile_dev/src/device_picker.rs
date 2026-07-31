@@ -1,5 +1,6 @@
-//! Status-bar Android device selector. Hidden unless the workspace contains
-//! a detected Expo project, so non-mobile projects never see it.
+//! Status-bar mobile device selector (Android devices plus iOS simulators
+//! and devices on macOS). Hidden unless the workspace contains a detected
+//! Expo project, so non-mobile projects never see it.
 
 use gpui::{
     Action as _, App, Context, Empty, Entity, IntoElement, Render, SharedString, Subscription,
@@ -10,7 +11,8 @@ use ui::prelude::*;
 use ui::{Button, ContextMenu, IconPosition, PopoverMenu, Tooltip};
 use workspace::{HideStatusItem, StatusBarSettings, StatusItemView, Workspace, item::ItemHandle};
 
-use crate::{MobileDevPanel, PickDevice, ToggleFocus};
+use crate::build::MobilePlatform;
+use crate::{MobileDevPanel, PickDevice, SelectedDevice, ToggleFocus};
 
 pub struct MobileDeviceSelector {
     panel: Option<Entity<MobileDevPanel>>,
@@ -60,11 +62,12 @@ impl Render for MobileDeviceSelector {
         let Some(panel) = self.panel.clone() else {
             return Empty.into_any_element();
         };
-        let (devices, selected_serial, expo_detected) = {
+        let (devices, apple_devices, selected_device, expo_detected) = {
             let panel = panel.read(cx);
             (
                 panel.device_state.devices.clone(),
-                panel.selected_serial.clone(),
+                panel.apple_device_state.devices.clone(),
+                panel.selected_device.clone(),
                 panel.expo_project.is_some(),
             )
         };
@@ -72,19 +75,25 @@ impl Render for MobileDeviceSelector {
             return Empty.into_any_element();
         }
 
-        let selected_label = selected_serial
+        let selected_label = selected_device
             .as_ref()
-            .and_then(|serial| devices.iter().find(|device| &device.serial == serial))
-            .map(|device| device.label())
+            .and_then(|selected| match selected.platform {
+                MobilePlatform::Android => devices
+                    .iter()
+                    .find(|device| device.serial == selected.id)
+                    .map(|device| device.label()),
+                MobilePlatform::Ios => apple_devices
+                    .iter()
+                    .find(|device| device.udid == selected.id)
+                    .map(|device| device.label()),
+            })
             .unwrap_or_else(|| SharedString::from("No device"));
 
         PopoverMenu::new("mobile-device-selector")
             .trigger(
                 Button::new("mobile-device-selector-trigger", selected_label)
                     .label_size(LabelSize::Small)
-                    .tooltip(|_window, cx| {
-                        Tooltip::for_action("Select Android Device", &PickDevice, cx)
-                    }),
+                    .tooltip(|_window, cx| Tooltip::for_action("Select Device", &PickDevice, cx)),
             )
             .menu(move |window, cx| {
                 let panel = panel.clone();
@@ -93,14 +102,18 @@ impl Render for MobileDeviceSelector {
                     cx,
                     move |mut menu, _window, cx| {
                         let devices = panel.read(cx).device_state.devices.clone();
-                        let selected_serial = panel.read(cx).selected_serial.clone();
-                        menu = menu.header("Android Devices");
+                        let apple_devices = panel.read(cx).apple_device_state.devices.clone();
+                        let selected = panel.read(cx).selected_device.clone();
+                        menu = menu.header("Android");
                         if devices.is_empty() {
-                            menu = menu.label("No devices detected");
+                            menu = menu.label("No Android devices");
                         }
                         for device in devices {
-                            let toggled = selected_serial.as_ref() == Some(&device.serial);
-                            let serial = device.serial.clone();
+                            let selection = SelectedDevice {
+                                platform: MobilePlatform::Android,
+                                id: device.serial.clone(),
+                            };
+                            let toggled = selected.as_ref() == Some(&selection);
                             let panel = panel.clone();
                             menu = menu.toggleable_entry(
                                 device.label(),
@@ -109,10 +122,35 @@ impl Render for MobileDeviceSelector {
                                 None,
                                 move |_window, cx| {
                                     panel.update(cx, |panel, cx| {
-                                        panel.select_device(serial.clone(), cx);
+                                        panel.select_device(selection.clone(), cx);
                                     });
                                 },
                             );
+                        }
+                        if cfg!(target_os = "macos") {
+                            menu = menu.header("iOS");
+                            if apple_devices.is_empty() {
+                                menu = menu.label("No iOS devices");
+                            }
+                            for device in apple_devices {
+                                let selection = SelectedDevice {
+                                    platform: MobilePlatform::Ios,
+                                    id: device.udid.clone(),
+                                };
+                                let toggled = selected.as_ref() == Some(&selection);
+                                let panel = panel.clone();
+                                menu = menu.toggleable_entry(
+                                    device.label(),
+                                    toggled,
+                                    IconPosition::Start,
+                                    None,
+                                    move |_window, cx| {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.select_device(selection.clone(), cx);
+                                        });
+                                    },
+                                );
+                            }
                         }
                         menu.separator()
                             .action("Open Mobile Panel", ToggleFocus.boxed_clone())
