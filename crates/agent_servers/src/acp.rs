@@ -405,6 +405,13 @@ pub struct AcpConnection {
     agent_server_store: WeakEntity<AgentServerStore>,
     agent_capabilities: acp::AgentCapabilities,
     request_elicitations: Entity<ElicitationStore>,
+    /// The fully-resolved env the agent subprocess was spawned with, including
+    /// the per-account config-dir injection (e.g. CLAUDE_CONFIG_DIR). Login
+    /// terminals must run with this same env: otherwise the login writes
+    /// credentials into the global config dir while the running agent reads
+    /// the bound account's isolated one, so authenticating never takes effect
+    /// and the panel asks to authenticate again on every restart.
+    spawn_env: HashMap<String, String>,
     defaults: AcpConnectionDefaults,
     child: Option<Child>,
     session_list: Option<Rc<AcpSessionList>>,
@@ -1184,6 +1191,7 @@ impl AcpConnection {
             pending_sessions: Rc::new(RefCell::new(HashMap::default())),
             agent_capabilities: response.agent_capabilities,
             request_elicitations,
+            spawn_env: env,
             defaults,
             session_list,
             debug_log,
@@ -1229,6 +1237,7 @@ impl AcpConnection {
             defaults,
             child: None,
             session_list: None,
+            spawn_env: HashMap::default(),
             debug_log: AcpDebugLog::default(),
             _settings_subscription: settings_subscription,
             _io_task: io_task,
@@ -1639,6 +1648,7 @@ fn meta_terminal_auth_task(
     agent_id: &AgentId,
     method_id: &acp::AuthMethodId,
     method: &acp::AuthMethod,
+    spawn_env: &HashMap<String, String>,
 ) -> Option<SpawnInTerminal> {
     #[derive(Deserialize)]
     struct MetaTerminalAuth {
@@ -1659,12 +1669,18 @@ fn meta_terminal_auth_task(
     let terminal_auth =
         serde_json::from_value::<MetaTerminalAuth>(meta.get("terminal-auth")?.clone()).ok()?;
 
+    // Base the login env on the agent subprocess's resolved env so per-account
+    // config-dir vars reach the login command (see the `spawn_env` field docs);
+    // the method's own env wins on conflict.
+    let mut env = spawn_env.clone();
+    env.extend(terminal_auth.env);
+
     Some(acp_thread::build_terminal_auth_task(
         terminal_auth_task_id(agent_id, method_id),
         terminal_auth.label.clone(),
         terminal_auth.command,
         terminal_auth.args,
-        terminal_auth.env,
+        env,
     ))
 }
 
@@ -1981,6 +1997,11 @@ impl AgentConnection for AcpConnection {
                 let agent_id = self.id.clone();
                 let terminal = terminal.clone();
                 let store = self.agent_server_store.clone();
+                // Base the login env on the agent subprocess's resolved env so
+                // per-account config-dir vars reach the login command (see the
+                // `spawn_env` field docs); the method's own env wins on conflict.
+                let mut login_env = self.spawn_env.clone();
+                login_env.extend(terminal.env.clone());
                 Some(cx.spawn(async move |cx| {
                     let command = store
                         .update(cx, |store, cx| {
@@ -1989,7 +2010,7 @@ impl AgentConnection for AcpConnection {
                                 .context("Agent server not found")?;
                             anyhow::Ok(agent.get_command(
                                 terminal.args.clone(),
-                                HashMap::from_iter(terminal.env.clone()),
+                                login_env,
                                 &mut cx.to_async(),
                             ))
                         })?
@@ -1998,7 +2019,7 @@ impl AgentConnection for AcpConnection {
                     Ok(terminal_auth_task(&command, &agent_id, &terminal))
                 }))
             }
-            _ => meta_terminal_auth_task(&self.id, method_id, method)
+            _ => meta_terminal_auth_task(&self.id, method_id, method, &self.spawn_env)
                 .map(|task| Task::ready(Ok(task))),
         }
     }
@@ -3190,15 +3211,23 @@ mod tests {
             )])),
         );
 
-        let task = meta_terminal_auth_task(&AgentId::new("test-agent"), &method_id, &method)
-            .expect("expected legacy terminal auth task");
+        let spawn_env = HashMap::from_iter([
+            ("CLAUDE_CONFIG_DIR".into(), "/tmp/account".into()),
+            ("AUTH_MODE".into(), "from-spawn".into()),
+        ]);
+        let task =
+            meta_terminal_auth_task(&AgentId::new("test-agent"), &method_id, &method, &spawn_env)
+                .expect("expected legacy terminal auth task");
 
         assert_eq!(task.id.0, "external-agent-test-agent-legacy-login-login");
         assert_eq!(task.command.as_deref(), Some("legacy-agent"));
         assert_eq!(task.args, vec!["auth", "--interactive"]);
         assert_eq!(
             task.env,
-            HashMap::from_iter([("AUTH_MODE".into(), "interactive".into())])
+            HashMap::from_iter([
+                ("CLAUDE_CONFIG_DIR".into(), "/tmp/account".into()),
+                ("AUTH_MODE".into(), "interactive".into()),
+            ])
         );
         assert_eq!(task.label, "legacy /auth");
     }
@@ -3216,7 +3245,13 @@ mod tests {
         );
 
         assert!(
-            meta_terminal_auth_task(&AgentId::new("test-agent"), &method_id, &method).is_none()
+            meta_terminal_auth_task(
+                &AgentId::new("test-agent"),
+                &method_id,
+                &method,
+                &HashMap::default()
+            )
+            .is_none()
         );
     }
 
