@@ -3,17 +3,20 @@ use std::collections::HashSet;
 use ai_accounts::{
     AccountState, AgentDescriptor, AiAccount, AiAccountsIndex, BrandAccent, CLAUDE_CODE_DESCRIPTOR,
     ConversationSummary, LoginFlow, TIER_A_DESCRIPTORS, api_key_keychain_url, claude_profiles_dir,
-    delete_account, descriptor_for, import_from_claude_profiles, list_conversations, load_index,
-    resume_command, save_index, verify_account,
+    delete_account, descriptor_for, import_from_claude_profiles, is_managed_config_dir,
+    list_conversations, load_index, resume_command, save_index, verify_account,
 };
+use fs::RemoveOptions;
 use gpui::{
     AnyElement, DismissEvent, EventEmitter, FocusHandle, Focusable, Hsla, Rgba, ScrollHandle,
     WeakEntity, WindowAppearance, prelude::*, px,
 };
 use notifications::status_toast::StatusToast;
+use settings::update_settings_file;
 use ui::{ListItem, ListItemSpacing, ListSeparator, Tooltip, WithScrollbar, prelude::*};
 use workspace::{ModalView, Workspace};
 
+use crate::ai_account_chip::unbind_account;
 use crate::{AddAiAccount, ManageAiAccounts};
 
 pub struct ManageAiAccountsModal {
@@ -73,44 +76,110 @@ impl ManageAiAccountsModal {
     }
 
     fn delete(&mut self, account_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        // Look up the display name up-front so the prompt is informative even
-        // if the index changes between user click and prompt resolution.
-        let display_name = self
-            .index
-            .find(&account_id)
-            .map(|account| account.display_name.clone())
-            .unwrap_or_else(|| account_id.clone());
+        // Snapshot the account up-front so the prompt stays informative even
+        // if the index changes between the click and the prompt resolving.
+        let Some(account) = self.index.find(&account_id).cloned() else {
+            return;
+        };
+        let display_name = account.display_name.clone();
+        let config_dir = account.config_dir.clone();
+        let managed = is_managed_config_dir(&config_dir);
 
         // For API-key accounts, capture the keychain location now (while the
         // account still exists in the index) so we can clean up the stored key
         // after the registry entry is removed.
-        let keychain_url = self.index.find(&account_id).and_then(|account| {
-            descriptor_for(&account.agent_id)
-                .filter(|descriptor| matches!(descriptor.login_flow, LoginFlow::ApiKey { .. }))
-                .map(|_| api_key_keychain_url(&account.agent_id, &account.id))
-        });
+        let keychain_url = descriptor_for(&account.agent_id)
+            .filter(|descriptor| matches!(descriptor.login_flow, LoginFlow::ApiKey { .. }))
+            .map(|_| api_key_keychain_url(&account.agent_id, &account.id));
         let credentials_provider = zed_credentials_provider::global(cx);
+        let fs = self
+            .workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).app_state().fs.clone());
 
-        let prompt = window.prompt(
-            gpui::PromptLevel::Critical,
-            &format!("Delete AI account \"{display_name}\"?"),
-            Some("This removes the registry entry and deletes the account's config directory on disk. Cannot be undone."),
-            &["Delete", "Cancel"],
-            cx,
-        );
+        // An account Lathe created owns its config dir, so removing it is the
+        // expected outcome. An imported account only *references* a directory
+        // the user maintains elsewhere. A `~/.claude-profiles` profile holds
+        // their real conversation history and credentials, and the shell
+        // helper keeps using it, so touching those files is opt-in and never
+        // the default button.
+        let prompt = if managed {
+            window.prompt(
+                gpui::PromptLevel::Critical,
+                &format!("Delete AI account \"{display_name}\"?"),
+                Some(&format!(
+                    "Removes the account and moves {} to the Trash.",
+                    config_dir.display()
+                )),
+                &["Delete", "Cancel"],
+                cx,
+            )
+        } else {
+            window.prompt(
+                gpui::PromptLevel::Critical,
+                &format!("Remove AI account \"{display_name}\"?"),
+                Some(&format!(
+                    "{} was not created by Lathe and may still be in use outside it. \
+                     Removing the account leaves that directory untouched.",
+                    config_dir.display()
+                )),
+                &["Remove Account", "Remove and Trash Files", "Cancel"],
+                cx,
+            )
+        };
         cx.spawn(async move |this, cx| {
-            let Ok(Some(0)) = prompt.await.map(Some) else {
+            let Ok(answer) = prompt.await else {
                 return;
             };
-            // Always trash files alongside the registry entry. A "keep files
-            // but unregister" toggle can be added later if users ask for it.
-            let success = match delete_account(&account_id, true) {
+            let trash_files = match (managed, answer) {
+                (true, 0) => true,
+                (false, 0) => false,
+                (false, 1) => true,
+                _ => return,
+            };
+
+            // Both the registry write and the directory move are blocking
+            // filesystem work. Running them on the foreground thread stalled
+            // the window long enough to trip the hang detector on config dirs
+            // with a lot of history in them.
+            let deleted = cx
+                .background_spawn({
+                    let account_id = account_id.clone();
+                    async move { delete_account(&account_id) }
+                })
+                .await;
+            let success = match deleted {
                 Ok(_) => true,
                 Err(error) => {
                     log::error!("ai_accounts: delete failed: {error:#}");
                     false
                 }
             };
+
+            let files_trashed = if success && trash_files {
+                match fs.clone() {
+                    Some(fs) => {
+                        let options = RemoveOptions {
+                            recursive: true,
+                            ignore_if_not_exists: true,
+                        };
+                        match fs.trash(&config_dir, options).await {
+                            Ok(_) => true,
+                            Err(error) => {
+                                log::error!(
+                                    "ai_accounts: failed to move {} to the trash: {error:#}",
+                                    config_dir.display()
+                                );
+                                false
+                            }
+                        }
+                    }
+                    None => false,
+                }
+            } else {
+                false
+            };
+
             // Best-effort keychain cleanup: a leftover key is harmless but
             // untidy, so don't fail the delete on it.
             if success {
@@ -120,13 +189,30 @@ impl ManageAiAccountsModal {
                     }
                 }
             }
+
             this.update(cx, |this, cx| {
-                this.refresh(cx);
+                // A binding left pointing at the deleted account makes
+                // `resolve_account` fall back to a different one, so the agent
+                // would quietly run under credentials the user never picked.
                 if success {
-                    this.toast(format!("Deleted account \"{display_name}\""), cx);
-                } else {
-                    this.toast("Delete failed — see logs", cx);
+                    if let Some(fs) = fs {
+                        update_settings_file(fs, cx, move |settings, _| {
+                            unbind_account(settings, &account_id);
+                        });
+                    }
                 }
+                this.refresh(cx);
+                let message = match (success, trash_files, files_trashed) {
+                    (false, _, _) => format!("Couldn't remove \"{display_name}\", see logs"),
+                    (true, true, false) => {
+                        format!("Removed \"{display_name}\", but its files couldn't be trashed")
+                    }
+                    (true, true, true) => format!("Deleted account \"{display_name}\""),
+                    (true, false, _) => {
+                        format!("Removed \"{display_name}\". Its files were left on disk")
+                    }
+                };
+                this.toast(message, cx);
             })
             .ok();
         })

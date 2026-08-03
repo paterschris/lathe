@@ -263,3 +263,17 @@ pub(crate) fn bind_account(
         }
     }
 }
+
+/// Drops every binding that points at `account_id`, whichever agent holds it.
+/// Called after an account is deleted: a binding left pointing at a missing
+/// account makes `AiAccountsSettings::resolve_account` fall back to some other
+/// account, which silently runs the agent under credentials the user didn't
+/// pick. Only user-level settings are rewritten, so a stale binding in a
+/// workspace `.zed/settings.json` survives; `resolve_account` logs when it
+/// hits one.
+pub(crate) fn unbind_account(settings: &mut SettingsContent, account_id: &str) {
+    let Some(map) = settings.ai_accounts.as_mut() else {
+        return;
+    };
+    map.0.retain(|_, bound_id| bound_id.as_str() != account_id);
+}

@@ -356,6 +356,15 @@ impl AiAccountsSettings {
             if let Some(account) = index.find(bound_id) {
                 return Some(account);
             }
+            // A binding can outlive its account when the account was deleted
+            // from a different workspace, or when the binding lives in a
+            // workspace `.zed/settings.json` that account deletion doesn't
+            // rewrite. Falling through silently would run the agent against
+            // some other account's credentials, so leave a trail.
+            log::warn!(
+                "ai_accounts: {agent_id} is bound to unknown account {bound_id}; \
+                 falling back to the default account for {agent_id}"
+            );
         }
         index.default_for_agent(agent_id)
     }
@@ -365,6 +374,14 @@ impl AiAccountsSettings {
 /// Each individual account lives at `<accounts_root>/<agent_id>/<account_id>/`.
 pub fn accounts_root() -> PathBuf {
     paths::data_dir().join("ai_accounts")
+}
+
+/// Whether `config_dir` is a directory Lathe created and owns. Accounts
+/// imported from `~/.claude-profiles` (and any other account registered by
+/// reference) point at directories the user's own workflow still depends on,
+/// so removing such an account must not imply removing its files.
+pub fn is_managed_config_dir(config_dir: &Path) -> bool {
+    config_dir.starts_with(accounts_root())
 }
 
 /// Keychain lookup key under which an account's provider API key is stored, for
@@ -503,25 +520,20 @@ pub fn mark_account_used(account_id: &str) -> Result<()> {
     save_index(&index)
 }
 
-/// Removes an account from the registry. When `delete_files` is true the
-/// account's config dir is removed from disk; otherwise it is left in place
-/// (caller can offer "unregister but keep auth files" as a UX option).
-/// Returns the removed account, or Err if no account with that id exists.
-pub fn delete_account(account_id: &str, delete_files: bool) -> Result<AiAccount> {
+/// Removes an account from the registry and returns it. The config dir is
+/// deliberately left on disk: a caller that wants it gone should move it to
+/// the system trash (see the Manage AI Accounts modal) so the operation stays
+/// recoverable, and so accounts that merely reference an external directory
+/// (`is_managed_config_dir` is false) can be unregistered without destroying
+/// data the user still uses outside Lathe.
+///
+/// Returns Err if no account with that id exists.
+pub fn delete_account(account_id: &str) -> Result<AiAccount> {
     let mut index = load_index();
     let account = index
         .remove(account_id)
         .ok_or_else(|| anyhow!("no account with id {account_id}"))?;
     save_index(&index)?;
-
-    if delete_files && account.config_dir.exists() {
-        std::fs::remove_dir_all(&account.config_dir).with_context(|| {
-            format!(
-                "removing account config dir {}",
-                account.config_dir.display()
-            )
-        })?;
-    }
     Ok(account)
 }
 
@@ -1095,6 +1107,17 @@ mod tests {
         assert_eq!(index.global_defaults.get("claude-acp"), Some(&id));
         index.remove(&id);
         assert!(!index.global_defaults.contains_key("claude-acp"));
+    }
+
+    #[test]
+    fn is_managed_config_dir_only_matches_lathe_owned_dirs() {
+        let managed = accounts_root().join("claude-acp").join("account-id");
+        assert!(is_managed_config_dir(&managed));
+        // Imported profiles are registered by reference and stay the user's.
+        assert!(!is_managed_config_dir(Path::new(
+            "/Users/someone/.claude-profiles/personal"
+        )));
+        assert!(!is_managed_config_dir(Path::new("/Users/someone/.claude")));
     }
 
     #[test]
