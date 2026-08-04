@@ -527,3 +527,67 @@ jobs:
               --generate-notes \
               $prerelease_flag
           fi
+
+      - name: Update Homebrew cask
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          channel=$(<crates/zed/RELEASE_CHANNEL)
+
+          # The cask tracks stable only. Beta and friends reach users
+          # through the in-app updater, and the cask URL has no channel
+          # suffix, so bumping it off a prerelease would point Homebrew at
+          # a tag that doesn't exist.
+          if [ "$channel" != "stable" ]; then
+            echo "Channel is ${channel}; leaving the cask alone."
+            exit 0
+          fi
+
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is unset, so the cask cannot be bumped. Add the secret and re-run this job; the release itself is already published."
+            exit 1
+          fi
+
+          asset="Lathe-${version}-aarch64-macos.zip"
+          download="${RUNNER_TEMP}/${asset}"
+
+          # Hash what GitHub actually serves, not release-files/. Homebrew
+          # verifies the bytes it downloads, so anything that replaces the
+          # asset after this job builds it (a re-upload, a notarization
+          # redo) has to be reflected here or the cask breaks on install.
+          # That drift is what stranded the cask on 0.235.2.
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$download" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${asset}"
+          sha=$(sha256sum "$download" | cut -d' ' -f1)
+
+          git clone --quiet "https://x-access-token:${GH_TOKEN}@github.com/paterschris/homebrew-tap.git" "${RUNNER_TEMP}/tap"
+          cd "${RUNNER_TEMP}/tap"
+
+          sed -i -E "s|^  version \".*\"$|  version \"${version}\"|" Casks/lathe.rb
+          sed -i -E "s|^  sha256 \".*\"$|  sha256 \"${sha}\"|" Casks/lathe.rb
+
+          # A sed that matches nothing exits 0, which would hand us a
+          # green check and an untouched cask. Confirm both edits landed.
+          if ! grep -qx "  version \"${version}\"" Casks/lathe.rb \
+            || ! grep -qx "  sha256 \"${sha}\"" Casks/lathe.rb; then
+            echo "::error::Failed to rewrite Casks/lathe.rb; its version/sha256 lines no longer match the expected shape."
+            exit 1
+          fi
+
+          if git diff --quiet; then
+            echo "Cask is already at ${version} with this checksum."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --quiet -am "Update Lathe to ${version}"
+          git push --quiet
+
+          {
+            echo ""
+            echo "- **Cask:** bumped to \`${version}\` (\`${sha}\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
