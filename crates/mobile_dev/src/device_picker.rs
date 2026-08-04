@@ -62,16 +62,16 @@ impl Render for MobileDeviceSelector {
         let Some(panel) = self.panel.clone() else {
             return Empty.into_any_element();
         };
-        let (devices, apple_devices, selected_device, expo_detected) = {
+        let (devices, apple_devices, selected_device, project_detected) = {
             let panel = panel.read(cx);
             (
                 panel.device_state.devices.clone(),
                 panel.apple_device_state.devices.clone(),
                 panel.selected_device.clone(),
-                panel.expo_project.is_some(),
+                panel.mobile_project.is_some(),
             )
         };
-        if !expo_detected {
+        if !project_detected {
             return Empty.into_any_element();
         }
 

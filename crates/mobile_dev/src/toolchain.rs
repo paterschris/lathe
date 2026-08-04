@@ -221,7 +221,7 @@ pub enum InstallOutcome {
 }
 
 /// One running toolchain install plus a receiver for its progress lines.
-/// Unlike [`crate::build::BuildSession`] the work is a sequence of steps
+/// The work is a sequence of steps
 /// (two downloads, then sdkmanager runs), so a single task drives it all.
 pub struct InstallSession {
     events: channel::Receiver<InstallEvent>,

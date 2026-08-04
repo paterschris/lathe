@@ -174,3 +174,17 @@ Your `android/app/build.gradle` should reference those properties in the `signin
 - **iOS support (shipped)**: device list, builds, simulator log streaming, and Apple toolchain detection per "iOS (macOS only)" above.
 
 Phase 1 (this doc) remains the reference for the manual, terminal-based workflow.
+
+
+## Bare React Native projects (not just Expo)
+
+The `mobile_dev` panel now detects **bare React Native** projects too, not only Expo. A worktree qualifies when its `package.json` lists a `react-native` (or `expo`) dependency, or when it has sibling `ios/` and `android/` folders. For a detected project the panel probes and surfaces only the methods that apply:
+
+- **Package manager** is inferred from the lockfile (`yarn` / `npm` / `pnpm` / `bun`) and used to run scripts and Metro.
+- **Scripts** section: one button per `package.json` script. Scripts that need positional args (for example a `yarn ios <variant> <config>` wrapper) print their own usage into the output pane when run with none.
+- **Native run** section (bare RN only): pick an iOS **scheme** (parsed from the shared Xcode schemes) or an Android **variant** (parsed from `productFlavors` in `android/app/build.gradle`), then **Build & run** drives `react-native run-ios --scheme=…` / `react-native run-android --mode=…` on the selected device.
+- **Simulators & emulators**: boot the selected iOS simulator (`simctl boot` + Simulator.app), and start any installed Android AVD (`emulator -avd`).
+- **Services**: start/stop the **Metro** bundler and the **Spotlight** Sentry sidecar as managed background processes with their own output panes.
+- **One-shot commands**: `pod install` (when an `ios/Podfile` exists), `adb reverse tcp:8081` (when a USB Android device is selected), plus lint / test / e2e via the project's own scripts.
+
+Expo projects keep their existing `expo run:*` and EAS cloud-build actions; EAS buttons appear only when an `eas.json` exists or the project is Expo.

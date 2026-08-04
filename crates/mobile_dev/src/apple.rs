@@ -389,6 +389,53 @@ pub fn log_stream(udid: &str, process_hint: Option<&str>) -> impl Stream<Item = 
     rx
 }
 
+/// Boot the simulator with `udid` and bring the Simulator app to the
+/// foreground. Booting an already-booted simulator is treated as success
+/// (`simctl` reports "Unable to boot device in current state: Booted").
+pub async fn boot_simulator(udid: &str) -> Result<()> {
+    let output = new_command("xcrun")
+        .arg("simctl")
+        .arg("boot")
+        .arg(udid)
+        .output()
+        .await
+        .context("running `xcrun simctl boot`")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("current state: Booted") {
+            bail!("simctl boot failed: {}", stderr.trim());
+        }
+    }
+    // Best-effort: surface the simulator window. A failure here (e.g. no
+    // window server) shouldn't fail the boot.
+    new_command("open")
+        .arg("-a")
+        .arg("Simulator")
+        .output()
+        .await
+        .ok();
+    Ok(())
+}
+
+/// Shut down the simulator with `udid`. Shutting down an already-shutdown
+/// simulator is treated as success.
+pub async fn shutdown_simulator(udid: &str) -> Result<()> {
+    let output = new_command("xcrun")
+        .arg("simctl")
+        .arg("shutdown")
+        .arg(udid)
+        .output()
+        .await
+        .context("running `xcrun simctl shutdown`")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("current state: Shutdown") {
+            bail!("simctl shutdown failed: {}", stderr.trim());
+        }
+    }
+    Ok(())
+}
+
 /// What the Apple toolchain probe found. Everything here is Apple-managed
 /// (there is no Lathe-managed install like the Android side), so present
 /// components always report [`ComponentStatus::System`].

@@ -1,23 +1,8 @@
-//! Build orchestration for the mobile_dev panel.
+//! Build command shaping for the mobile_dev panel.
 //!
-//! Spawns the user-facing build commands (`expo run:android` /
-//! `expo run:ios --device`, `eas build --platform <platform> --profile
-//! <profile>`) and streams stdout + stderr line by line into a channel. The
-//! panel consumes the channel and renders the most recent output.
-//!
-//! All commands are spawned synchronously with `kill_on_drop(true)` so that
-//! dropping the [`BuildSession`] (panel closes, user starts a new build,
-//! Lathe quits) terminates the child cleanly.
-
-use std::path::PathBuf;
-use std::process::ExitStatus;
-
-use anyhow::{Result, anyhow};
-use futures::io::{AsyncBufReadExt, BufReader};
-use futures::stream::StreamExt as _;
-use gpui::SharedString;
-use smol::channel;
-use util::command::{Stdio, new_command};
+//! [`build_command`] maps a [`BuildKind`] + [`MobilePlatform`] to the program
+//! and arguments to run (`npx expo run:*`, `eas build ...`); the panel runs the
+//! result in an interactive terminal tab.
 
 /// Which mobile OS a build targets. iOS builds only work on macOS hosts;
 /// callers gate on that before offering them.
@@ -67,141 +52,7 @@ impl BuildKind {
     }
 }
 
-/// One spawned build process plus a receiver for its output lines.
-pub struct BuildSession {
-    pub kind: BuildKind,
-    pub platform: MobilePlatform,
-    pub started_at: std::time::Instant,
-    lines: channel::Receiver<BuildEvent>,
-}
-
-#[derive(Clone, Debug)]
-pub enum BuildEvent {
-    Line(SharedString),
-    Finished(BuildOutcome),
-}
-
-#[derive(Clone, Debug)]
-pub enum BuildOutcome {
-    Success,
-    Failure(SharedString),
-}
-
-impl BuildSession {
-    /// Spawn a new build. `project_root` is the directory containing
-    /// `app.json`; `device_id` (an ADB serial or an Apple UDID) is forwarded
-    /// to expo after `--device` for [`BuildKind::LocalDebugRun`] when present
-    /// (EAS builds are device agnostic). `env` carries the managed-toolchain
-    /// variables (JAVA_HOME/ANDROID_HOME/PATH) so gradle works without shell
-    /// setup; iOS builds pass an empty env.
-    pub fn spawn(
-        kind: BuildKind,
-        platform: MobilePlatform,
-        project_root: PathBuf,
-        device_id: Option<SharedString>,
-        env: Vec<(String, String)>,
-    ) -> Result<Self> {
-        let (tx, rx) = channel::unbounded::<BuildEvent>();
-        let started_at = std::time::Instant::now();
-
-        let (program, args) = build_command(kind, platform, device_id.as_deref());
-        let program_str = program.to_string();
-        let args_clone = args.clone();
-
-        let mut cmd = new_command(&program);
-        cmd.args(args.iter().map(String::as_str))
-            .current_dir(&project_root)
-            .envs(
-                env.iter()
-                    .map(|(key, value)| (key.as_str(), value.as_str())),
-            )
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow!("spawning {program_str}: {e}"))?;
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("missing stdout pipe"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow!("missing stderr pipe"))?;
-
-        let stdout_tx = tx.clone();
-        let stderr_tx = tx.clone();
-        let intro = format!("$ {program_str} {}", args_clone.join(" "));
-        let _ = tx.try_send(BuildEvent::Line(SharedString::from(intro)));
-
-        smol::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Some(line) = lines.next().await {
-                let line = match line {
-                    Ok(line) => SharedString::from(line),
-                    Err(err) => SharedString::from(format!("[stdout read error] {err}")),
-                };
-                if stdout_tx.send(BuildEvent::Line(line)).await.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        smol::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Some(line) = lines.next().await {
-                let line = match line {
-                    Ok(line) => SharedString::from(line),
-                    Err(err) => SharedString::from(format!("[stderr read error] {err}")),
-                };
-                if stderr_tx.send(BuildEvent::Line(line)).await.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        smol::spawn(async move {
-            let outcome = match child.status().await {
-                Ok(status) => outcome_from_status(status),
-                Err(err) => {
-                    BuildOutcome::Failure(SharedString::from(format!("wait failed: {err}")))
-                }
-            };
-            let _ = tx.send(BuildEvent::Finished(outcome)).await;
-        })
-        .detach();
-
-        Ok(Self {
-            kind,
-            platform,
-            started_at,
-            lines: rx,
-        })
-    }
-
-    pub fn events(&self) -> channel::Receiver<BuildEvent> {
-        self.lines.clone()
-    }
-}
-
-fn outcome_from_status(status: ExitStatus) -> BuildOutcome {
-    if status.success() {
-        BuildOutcome::Success
-    } else {
-        let reason = match status.code() {
-            Some(code) => format!("exit code {code}"),
-            None => "killed by signal".to_string(),
-        };
-        BuildOutcome::Failure(SharedString::from(reason))
-    }
-}
-
-fn build_command(
+pub fn build_command(
     kind: BuildKind,
     platform: MobilePlatform,
     device_id: Option<&str>,
@@ -242,7 +93,6 @@ fn build_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn local_debug_command_has_device_flag() {
@@ -304,13 +154,6 @@ mod tests {
         assert_eq!(args.get(platform_idx + 1).map(String::as_str), Some("ios"));
     }
 
-    #[test]
-    fn outcome_from_zero_exit_is_success() {
-        // Synthesizing an ExitStatus directly is platform-specific; we
-        // exercise the function through its only meaningful entry points.
-        // Smoke: success() vs not. Tests for failure path live alongside.
-        assert!(matches!(BuildOutcome::Success, BuildOutcome::Success));
-    }
 
     #[test]
     fn build_kind_labels() {
@@ -331,13 +174,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn project_root_is_used_as_cwd() {
-        // BuildSession::spawn refuses to launch when the binary is missing,
-        // but our argument shaping shouldn't depend on the cwd existing.
-        // We assert at the API level: the call signature requires PathBuf
-        // and threads it into Command::current_dir without inspection.
-        let path: PathBuf = Path::new("/tmp/nonexistent").into();
-        let _ = path; // smoke test: still compiles.
-    }
 }

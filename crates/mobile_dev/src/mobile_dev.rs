@@ -9,8 +9,10 @@
 pub mod adb;
 pub mod apple;
 pub mod build;
+pub mod commands;
 mod device_picker;
-pub mod expo_project;
+pub mod emulator;
+pub mod mobile_project;
 pub mod toolchain;
 
 pub use device_picker::MobileDeviceSelector;
@@ -21,31 +23,39 @@ use anyhow::Result;
 use futures::StreamExt as _;
 use futures::pin_mut;
 use gpui::{
-    App, AsyncWindowContext, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, actions, div, px,
 };
 use project::Project;
 use serde::{Deserialize, Serialize};
+use task::{HideStrategy, RevealStrategy, RevealTarget, SaveStrategy, Shell, SpawnInTerminal, TaskId};
+use terminal_view::TerminalView;
 use settings::{RegisterSetting, Settings};
 use ui::prelude::*;
-use ui::{Color, Headline, HeadlineSize, IconName, Label, LabelSize, Tooltip, h_flex, v_flex};
+use ui::{
+    Color, ContextMenu, CopyButton, Headline, HeadlineSize, IconName, IconPosition, Label,
+    LabelSize, PopoverMenu, Tooltip, h_flex, v_flex,
+};
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
-use crate::adb::{AdbDevice, AdbDeviceState, AdbTransport};
+use crate::adb::AdbDevice;
 use crate::apple::{AppleDevice, AppleDeviceKind, AppleDeviceState};
-use crate::build::{BuildEvent, BuildKind, BuildOutcome, BuildSession, MobilePlatform};
-use crate::expo_project::ExpoProject;
+use crate::build::{BuildKind, MobilePlatform};
+use crate::commands::ResolvedCommand;
+use crate::mobile_project::{MobileProject, ProjectKind};
 
 const PANEL_KEY: &str = "MobileDevPanel";
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Slower than the ADB cadence: `devicectl` takes noticeably longer per
 /// invocation than `adb devices`.
 const APPLE_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// AVD listing barely changes, so poll it lazily.
+const AVD_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const BUILD_OUTPUT_LINE_CAP: usize = 500;
 const LOGCAT_LINE_CAP: usize = 1000;
 
@@ -89,6 +99,30 @@ actions!(
         InstallAndroidToolchain,
         /// Download the iOS simulator runtime via xcodebuild.
         InstallIosRuntime,
+        /// Start the Metro bundler for the active project.
+        StartMetro,
+        /// Stop the running Metro bundler.
+        StopMetro,
+        /// Boot the selected iOS simulator.
+        BootSimulator,
+        /// Shut down the selected iOS simulator.
+        ShutdownSimulator,
+        /// Install iOS CocoaPods for the active project.
+        PodInstall,
+        /// Run the project's lint script.
+        RunLint,
+        /// Run the project's test script.
+        RunTests,
+        /// Run the project's iOS end-to-end (Appium) test script.
+        RunE2eIos,
+        /// Run the project's Android end-to-end (Appium) test script.
+        RunE2eAndroid,
+        /// Forward the Metro dev-server port to a USB-attached Android device.
+        AdbReverse,
+        /// Launch the Spotlight sidecar for live Sentry monitoring.
+        StartSpotlight,
+        /// Stop the running Spotlight sidecar.
+        StopSpotlight,
         /// Toggle the Mobile panel's focus.
         ToggleFocus,
     ]
@@ -109,27 +143,20 @@ fn register_workspace_actions(
         .register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<MobileDevPanel>(window, cx);
         })
-        .register_action(|workspace, _: &BuildAndRun, _, cx| {
-            if let Some(panel) = workspace.panel::<MobileDevPanel>(cx) {
-                panel.update(cx, |panel, cx| {
-                    let platform = panel.selected_platform();
-                    panel.start_build(BuildKind::LocalDebugRun, platform, cx);
-                });
-            }
+        .register_action(|workspace, _: &BuildAndRun, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.build_and_run(window, cx)
+            });
         })
-        .register_action(|workspace, _: &BuildEasPreview, _, cx| {
-            if let Some(panel) = workspace.panel::<MobileDevPanel>(cx) {
-                panel.update(cx, |panel, cx| {
-                    panel.start_build(BuildKind::EasPreview, MobilePlatform::Android, cx);
-                });
-            }
+        .register_action(|workspace, _: &BuildEasPreview, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.start_build(BuildKind::EasPreview, MobilePlatform::Android, window, cx)
+            });
         })
-        .register_action(|workspace, _: &BuildEasPreviewIos, _, cx| {
-            if let Some(panel) = workspace.panel::<MobileDevPanel>(cx) {
-                panel.update(cx, |panel, cx| {
-                    panel.start_build(BuildKind::EasPreview, MobilePlatform::Ios, cx);
-                });
-            }
+        .register_action(|workspace, _: &BuildEasPreviewIos, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.start_build(BuildKind::EasPreview, MobilePlatform::Ios, window, cx)
+            });
         })
         .register_action(|_, _: &InstallApk, _, _| {
             log::warn!("mobile_dev: InstallApk is not yet implemented");
@@ -168,7 +195,132 @@ fn register_workspace_actions(
                     panel.start_ios_runtime_install(cx);
                 });
             }
+        })
+        .register_action(|workspace, _: &StartMetro, window, cx| {
+            if let Some(panel) = workspace.panel::<MobileDevPanel>(cx) {
+                panel.update(cx, |panel, cx| panel.start_metro(window, cx));
+            }
+        })
+        .register_action(|workspace, _: &BootSimulator, _, cx| {
+            with_panel(workspace, cx, |panel, cx| panel.boot_selected_simulator(cx));
+        })
+        .register_action(|workspace, _: &ShutdownSimulator, _, cx| {
+            with_panel(workspace, cx, |panel, cx| panel.shutdown_selected_simulator(cx));
+        })
+        .register_action(|workspace, _: &PodInstall, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.pod_install(window, cx)
+            });
+        })
+        .register_action(|workspace, _: &RunLint, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.run_named_script("lint", window, cx)
+            });
+        })
+        .register_action(|workspace, _: &RunTests, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.run_named_script("test", window, cx)
+            });
+        })
+        .register_action(|workspace, _: &RunE2eIos, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.run_named_script("test:e2e:ios", window, cx)
+            });
+        })
+        .register_action(|workspace, _: &RunE2eAndroid, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.run_named_script("test:e2e:android", window, cx)
+            });
+        })
+        .register_action(|workspace, _: &AdbReverse, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.adb_reverse(window, cx)
+            });
+        })
+        .register_action(|workspace, _: &StartSpotlight, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.start_spotlight(window, cx)
+            });
         });
+}
+
+/// Like [`with_panel`] but threads the window through, for actions that spawn
+/// terminals (which need a `Window` to build the [`TerminalView`]).
+fn with_panel_in(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    f: impl FnOnce(&mut MobileDevPanel, &mut Window, &mut Context<MobileDevPanel>),
+) {
+    if let Some(panel) = workspace.panel::<MobileDevPanel>(cx) {
+        panel.update(cx, |panel, cx| f(panel, window, cx));
+    }
+}
+
+/// Run `f` against the workspace's mobile panel if it exists. Keeps the action
+/// handlers above to a single line each.
+fn with_panel(
+    workspace: &mut Workspace,
+    cx: &mut Context<Workspace>,
+    f: impl FnOnce(&mut MobileDevPanel, &mut Context<MobileDevPanel>),
+) {
+    if let Some(panel) = workspace.panel::<MobileDevPanel>(cx) {
+        panel.update(cx, |panel, cx| f(panel, cx));
+    }
+}
+
+/// POSIX single-quote escaping for embedding a path/arg in a shell command.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Join `commands` into one `&&`-chained shell command, each step `cd`-ing into
+/// its own working directory first. When any step needs the managed Android
+/// toolchain, its env is exported up front (prepended to `$PATH` so the user's
+/// shell PATH still wins for everything else).
+fn build_compound_command(
+    commands: &[ResolvedCommand],
+    toolchain: Option<&toolchain::ToolchainStatus>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if commands.iter().any(|command| command.wants_android_env) {
+        let exports = android_export_prefix(toolchain);
+        if !exports.is_empty() {
+            parts.push(exports);
+        }
+    }
+    for command in commands {
+        let mut step = format!("cd {} && {}", shell_quote(&command.cwd.to_string_lossy()), shell_quote(&command.program));
+        for arg in &command.args {
+            step.push(' ');
+            step.push_str(&shell_quote(arg));
+        }
+        parts.push(step);
+    }
+    parts.join(" && ")
+}
+
+/// `export`s for the Lathe-managed Android toolchain, or an empty string when
+/// nothing is managed (the user's own env is assumed set up).
+fn android_export_prefix(toolchain: Option<&toolchain::ToolchainStatus>) -> String {
+    let Some(status) = toolchain else {
+        return String::new();
+    };
+    let mut exports: Vec<String> = Vec::new();
+    if let toolchain::ComponentStatus::Managed(home) = &status.jdk {
+        exports.push(format!("export JAVA_HOME={}", shell_quote(&home.to_string_lossy())));
+    }
+    if let toolchain::ComponentStatus::Managed(sdk) = &status.sdk {
+        let sdk = sdk.to_string_lossy();
+        exports.push(format!("export ANDROID_HOME={}", shell_quote(&sdk)));
+        exports.push(format!("export ANDROID_SDK_ROOT={}", shell_quote(&sdk)));
+        // Double-quoted so $PATH expands; managed SDK paths never contain
+        // spaces (see toolchain::managed_root).
+        exports.push(format!(
+            "export PATH=\"{sdk}/platform-tools:{sdk}/cmdline-tools/latest/bin:$PATH\""
+        ));
+    }
+    exports.join(" && ")
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -230,18 +382,21 @@ struct ToolchainInstallUiState {
     _forwarder: Task<()>,
 }
 
-/// Live state for the currently-running (or most-recent) build.
-struct BuildUiState {
-    kind: BuildKind,
-    platform: MobilePlatform,
-    status: BuildStatus,
-    lines: Vec<SharedString>,
-    /// Detached forwarder task that pulls events off the BuildSession's
-    /// channel and pushes into [`lines`]. Holding it keeps the task alive;
-    /// dropping it (e.g. starting a new build) cancels the forwarder, which
-    /// drops the BuildSession, which kills the underlying subprocess via
-    /// `kill_on_drop`.
-    _forwarder: Task<()>,
+
+
+
+
+
+
+
+
+/// One interactive terminal tab: a PTY-backed process (Metro, a build, a
+/// script) rendered as a real terminal with input, scrollback, and colors.
+/// Dropping the [`TerminalView`] tears down the terminal and kills its child.
+struct TerminalTab {
+    id: usize,
+    title: SharedString,
+    view: Entity<TerminalView>,
 }
 
 /// Bottom-dock panel for mobile development.
@@ -255,15 +410,25 @@ pub struct MobileDevPanel {
     apple_device_state: AppleDeviceListState,
     /// The currently selected device, if any.
     selected_device: Option<SelectedDevice>,
-    /// Detected Expo project metadata, if any worktree root contains an
-    /// app.json with an `expo` key. `None` while detection is in flight or
-    /// when the project is not a mobile project.
-    expo_project: Option<ExpoProject>,
+    /// Detected React Native / Expo project metadata for the active workspace.
+    /// `None` while detection is in flight or when the project is not a mobile
+    /// project.
+    mobile_project: Option<MobileProject>,
     /// `true` once the first detection pass has completed (so we can show
     /// the "not a mobile project" empty state instead of a perpetual
     /// loading spinner).
     project_scanned: bool,
-    build_state: Option<BuildUiState>,
+    /// Installed Android emulator (AVD) names, from `emulator -list-avds`.
+    avds: Vec<SharedString>,
+    /// The iOS scheme chosen for the native Build & run, if the project has
+    /// shared schemes. Defaults to the first detected scheme.
+    selected_scheme: Option<SharedString>,
+    /// The Android gradle variant chosen for the native Build & run.
+    selected_variant: Option<SharedString>,
+    /// Interactive terminal tabs, one per started process.
+    terminals: Vec<TerminalTab>,
+    active_terminal: usize,
+    next_terminal_id: usize,
     logcat_state: Option<LogcatUiState>,
     toolchain_status: Option<toolchain::ToolchainStatus>,
     toolchain_install: Option<ToolchainInstallUiState>,
@@ -277,6 +442,7 @@ pub struct MobileDevPanel {
     toolchain_offer_made: bool,
     _device_tracker: Task<()>,
     _apple_device_tracker: Task<()>,
+    _avd_tracker: Task<()>,
     _project_detector: Task<()>,
     _toolchain_detector: Task<()>,
     _apple_toolchain_detector: Task<()>,
@@ -347,7 +513,7 @@ impl MobileDevPanel {
                 let detected = cx
                     .background_spawn(async move {
                         for root in worktree_roots {
-                            if let Some(project) = expo_project::detect_at(&root) {
+                            if let Some(project) = mobile_project::detect_at(&root) {
                                 return Some(project);
                             }
                         }
@@ -356,12 +522,42 @@ impl MobileDevPanel {
                     .await;
 
                 this.update(cx, |panel, cx| {
-                    panel.expo_project = detected;
+                    panel.selected_scheme = detected
+                        .as_ref()
+                        .and_then(|project| project.ios_schemes.first().cloned())
+                        .map(SharedString::from);
+                    panel.selected_variant = detected
+                        .as_ref()
+                        .and_then(|project| project.android_variants.first().cloned())
+                        .map(SharedString::from);
+                    panel.mobile_project = detected;
                     panel.project_scanned = true;
                     panel.maybe_offer_toolchain_install(cx);
                     cx.notify();
                 })
                 .ok();
+            }
+        });
+
+        let avd_tracker = cx.spawn(async move |this, cx| {
+            loop {
+                let env = this
+                    .read_with(cx, |panel, _| {
+                        toolchain::build_env(panel.toolchain_status.as_ref())
+                    })
+                    .unwrap_or_default();
+                let avds = cx
+                    .background_spawn(async move { emulator::list_avds(&env).await })
+                    .await;
+                let Ok(_) = this.update(cx, |panel, cx| {
+                    if let Ok(avds) = avds {
+                        panel.avds = avds.into_iter().map(SharedString::from).collect();
+                        cx.notify();
+                    }
+                }) else {
+                    break;
+                };
+                cx.background_executor().timer(AVD_POLL_INTERVAL).await;
             }
         });
 
@@ -373,9 +569,14 @@ impl MobileDevPanel {
             device_state: DeviceListState::default(),
             apple_device_state: AppleDeviceListState::default(),
             selected_device: None,
-            expo_project: None,
+            mobile_project: None,
             project_scanned: false,
-            build_state: None,
+            avds: Vec::new(),
+            selected_scheme: None,
+            selected_variant: None,
+            terminals: Vec::new(),
+            active_terminal: 0,
+            next_terminal_id: 0,
             logcat_state: None,
             toolchain_status: None,
             toolchain_install: None,
@@ -384,6 +585,7 @@ impl MobileDevPanel {
             toolchain_offer_made: false,
             _device_tracker: device_tracker,
             _apple_device_tracker: apple_device_tracker,
+            _avd_tracker: avd_tracker,
             _project_detector: project_detector,
             _toolchain_detector: Self::spawn_toolchain_detection(cx),
             _apple_toolchain_detector: Self::spawn_apple_toolchain_detection(cx),
@@ -424,7 +626,7 @@ impl MobileDevPanel {
         struct ToolchainInstallOffer;
 
         if self.toolchain_offer_made
-            || self.expo_project.is_none()
+            || self.mobile_project.is_none()
             || self.toolchain_install.is_some()
         {
             return;
@@ -447,7 +649,7 @@ impl MobileDevPanel {
                 |cx| {
                     cx.new(|cx| {
                         MessageNotification::new(
-                            "This is an Expo project, but some of the Android build tools it \
+                            "This is a mobile project, but some of the Android build tools it \
                              needs are missing. Lathe can download JDK 17 and the Android SDK \
                              into a managed directory and accept the SDK licenses for you.",
                             cx,
@@ -587,12 +789,12 @@ impl MobileDevPanel {
     /// selected device. Bails (with a warning) if the project, device, or
     /// package isn't known yet.
     fn start_android_logcat(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.expo_project.clone() else {
-            log::warn!("mobile_dev: cannot start logcat without a detected Expo project");
+        let Some(project) = self.mobile_project.clone() else {
+            log::warn!("mobile_dev: cannot start logcat without a detected mobile project");
             return;
         };
         let Some(package) = project.android_package else {
-            log::warn!("mobile_dev: cannot start logcat; app.json has no expo.android.package");
+            log::warn!("mobile_dev: cannot start logcat; no Android application id detected");
             return;
         };
         let Some(device) = self
@@ -646,8 +848,8 @@ impl MobileDevPanel {
     /// filtered to the project's process. Physical iOS devices are not
     /// supported (CoreDevice has no stable log-streaming CLI).
     fn start_ios_log_stream(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.expo_project.clone() else {
-            log::warn!("mobile_dev: cannot stream logs without a detected Expo project");
+        let Some(project) = self.mobile_project.clone() else {
+            log::warn!("mobile_dev: cannot stream logs without a detected mobile project");
             return;
         };
         let Some(device) = self.selected_apple_device().cloned() else {
@@ -681,7 +883,7 @@ impl MobileDevPanel {
 
         self.logcat_state = Some(LogcatUiState {
             platform: MobilePlatform::Ios,
-            device_label: device.name.clone(),
+            device_label: device.name,
             target: SharedString::from(project.display_name),
             pid: None,
             lines: Vec::new(),
@@ -709,93 +911,276 @@ impl MobileDevPanel {
         }
     }
 
-    /// Spawn the requested build and start streaming output into the panel.
-    /// Bails (with a `log::warn!`) if no Expo project has been detected.
-    pub fn start_build(&mut self, kind: BuildKind, platform: MobilePlatform, cx: &mut Context<Self>) {
-        let Some(project) = self.expo_project.clone() else {
-            log::warn!("mobile_dev: cannot start build without a detected Expo project");
+    /// Route the primary "Build & run" affordance to the right command for the
+    /// project kind, run in an interactive terminal tab.
+    pub fn build_and_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.mobile_project.clone() else {
+            log::warn!("mobile_dev: cannot build without a detected mobile project");
             return;
         };
-        if platform == MobilePlatform::Ios && !cfg!(target_os = "macos") {
-            log::warn!("mobile_dev: iOS builds require macOS");
+        let platform = self.selected_platform();
+        let run = match platform {
+            MobilePlatform::Ios => {
+                let udid = self.selected_apple_device().map(|device| device.udid.clone());
+                let scheme = match project.kind {
+                    ProjectKind::BareReactNative => self.selected_scheme.as_deref(),
+                    ProjectKind::Expo => None,
+                };
+                commands::run_ios(&project, scheme, udid.as_deref())
+            }
+            MobilePlatform::Android => {
+                let serial = self
+                    .selected_android_device()
+                    .map(|device| device.serial.clone());
+                let variant = match project.kind {
+                    ProjectKind::BareReactNative => self.selected_variant.as_deref(),
+                    ProjectKind::Expo => None,
+                };
+                commands::run_android(&project, variant, serial.as_deref())
+            }
+        };
+        let steps = self.with_prereqs(&project, run, platform == MobilePlatform::Ios);
+        self.run_in_terminal(format!("Run {}", platform.label()), steps, window, cx);
+    }
+
+    /// Start an EAS cloud build in a terminal tab.
+    pub fn start_build(
+        &mut self,
+        kind: BuildKind,
+        platform: MobilePlatform,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.mobile_project.clone() else {
+            log::warn!("mobile_dev: cannot start build without a detected mobile project");
+            return;
+        };
+        let (program, args) = crate::build::build_command(kind, platform, None);
+        let command = ResolvedCommand {
+            label: kind.label(platform),
+            program,
+            args,
+            cwd: project.root,
+            wants_android_env: false,
+        };
+        self.run_in_terminal(kind.label(platform), vec![command], window, cx);
+    }
+
+    /// Prepend prerequisite installs (JS deps, and CocoaPods setup for an iOS
+    /// run) to `command` so a terminal never fails just because setup hasn't
+    /// been done.
+    fn with_prereqs(
+        &self,
+        project: &MobileProject,
+        command: ResolvedCommand,
+        needs_pods: bool,
+    ) -> Vec<ResolvedCommand> {
+        let mut steps = Vec::new();
+        if !project.root.join("node_modules").is_dir() {
+            steps.push(commands::install_deps(project));
+        }
+        if needs_pods && project.has_podfile && !project.root.join("ios/Pods").is_dir() {
+            steps.extend(Self::ios_pod_commands(project));
+        }
+        steps.push(command);
+        steps
+    }
+
+    /// Project-specific iOS pod setup: Bundler under the project's pinned Ruby
+    /// (provisioned via rbenv) when it has a Gemfile, else a direct pod install
+    /// (installing CocoaPods via Homebrew first when missing).
+    fn ios_pod_commands(project: &MobileProject) -> Vec<ResolvedCommand> {
+        let mut steps = Vec::new();
+        if project.has_gemfile {
+            if let Some(version) = project.ruby_version.as_deref() {
+                if let Some(rbenv) = commands::install_rbenv(project) {
+                    steps.push(rbenv);
+                }
+                if !commands::ruby_installed(version) {
+                    steps.push(commands::install_ruby(project, version));
+                }
+            }
+            steps.push(commands::bundle_install(project));
+            steps.push(commands::pod_install(project));
+        } else {
+            if let Some(cocoapods) = commands::install_cocoapods(project) {
+                steps.push(cocoapods);
+            }
+            steps.push(commands::pod_install(project));
+        }
+        steps
+    }
+
+    fn run_named_script(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.mobile_project.clone() else {
+            return;
+        };
+        if !project.scripts.iter().any(|script| script.name == name) {
+            log::warn!("mobile_dev: project has no `{name}` script");
             return;
         }
+        let steps = self.with_prereqs(&project, commands::run_script(&project, name), false);
+        let title = format!("{} {name}", project.package_manager.program());
+        self.run_in_terminal(title, steps, window, cx);
+    }
 
-        let device_id = match kind {
-            BuildKind::LocalDebugRun => match platform {
-                MobilePlatform::Android => self
-                    .selected_android_device()
-                    .filter(|d| d.is_usable())
-                    .map(|d| d.serial.clone()),
-                MobilePlatform::Ios => self
-                    .selected_apple_device()
-                    .filter(|d| d.is_usable())
-                    .map(|d| d.udid.clone()),
-            },
-            BuildKind::EasPreview | BuildKind::EasProduction => None,
+    fn run_project_script(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.mobile_project.clone() else {
+            return;
+        };
+        let steps = self.with_prereqs(&project, commands::run_script(&project, name), false);
+        let title = format!("{} {name}", project.package_manager.program());
+        self.run_in_terminal(title, steps, window, cx);
+    }
+
+    fn pod_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.mobile_project.clone() else {
+            return;
+        };
+        let mut steps = Vec::new();
+        if !project.root.join("node_modules").is_dir() {
+            steps.push(commands::install_deps(&project));
+        }
+        steps.extend(Self::ios_pod_commands(&project));
+        self.run_in_terminal("Install pods", steps, window, cx);
+    }
+
+    fn adb_reverse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.mobile_project.clone() else {
+            return;
+        };
+        let serial = self
+            .selected_android_device()
+            .map(|device| device.serial.to_string());
+        self.run_in_terminal(
+            "adb reverse",
+            vec![commands::adb_reverse(&project, serial.as_deref())],
+            window,
+            cx,
+        );
+    }
+
+    pub fn start_metro(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.mobile_project.clone() else {
+            return;
+        };
+        let mut commands = Vec::new();
+        if !project.root.join("node_modules").is_dir() {
+            commands.push(commands::install_deps(&project));
+        }
+        commands.push(commands::metro(&project));
+        self.run_in_terminal("Metro", commands, window, cx);
+    }
+
+    /// Run `commands` (chained with `&&`) in a new interactive terminal tab.
+    /// The compound is executed by the user's login+interactive shell so it
+    /// inherits their real PATH (nvm, rbenv, Homebrew); managed Android tools
+    /// are exported inline when a step needs them.
+    fn run_in_terminal(
+        &mut self,
+        title: impl Into<SharedString>,
+        commands: Vec<ResolvedCommand>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(first) = commands.first() else {
+            return;
+        };
+        let title = title.into();
+        let cwd = first.cwd.clone();
+        let compound = build_compound_command(&commands, self.toolchain_status.as_ref());
+        let login_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let id = self.next_terminal_id;
+        self.next_terminal_id += 1;
+
+        let spawn = SpawnInTerminal {
+            id: TaskId(format!("mobile-dev-{id}")),
+            full_label: title.to_string(),
+            label: title.to_string(),
+            command: Some(login_shell),
+            args: vec!["-lic".to_string(), compound],
+            command_label: title.to_string(),
+            cwd: Some(cwd),
+            env: Default::default(),
+            use_new_terminal: true,
+            allow_concurrent_runs: true,
+            reveal: RevealStrategy::NoFocus,
+            reveal_target: RevealTarget::Dock,
+            hide: HideStrategy::Never,
+            shell: Shell::System,
+            show_summary: false,
+            show_command: false,
+            show_rerun: false,
+            save: SaveStrategy::default(),
         };
 
-        let toolchain_env = match platform {
-            MobilePlatform::Android => toolchain::build_env(self.toolchain_status.as_ref()),
-            MobilePlatform::Ios => Vec::new(),
-        };
-        let session =
-            match BuildSession::spawn(kind, platform, project.root, device_id, toolchain_env) {
-                Ok(session) => session,
-                Err(err) => {
-                    log::error!("mobile_dev: failed to spawn build: {err:#}");
-                    self.build_state = Some(BuildUiState {
-                        kind,
-                        platform,
-                        status: BuildStatus::Failure(SharedString::from(format!("{err:#}"))),
-                        lines: Vec::new(),
-                        _forwarder: cx.background_spawn(async {}),
-                    });
-                    cx.notify();
-                    return;
-                }
-            };
+        let project = self.project.clone();
+        let workspace = self.workspace.clone();
+        let terminal_task =
+            project.update(cx, |project, cx| project.create_terminal_task(spawn, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            let terminal = terminal_task.await?;
+            let view = cx.new_window_entity(|window, cx| {
+                TerminalView::new(terminal, workspace, None, project.downgrade(), window, cx)
+            })?;
+            this.update_in(cx, |this, _window, cx| {
+                this.terminals.push(TerminalTab { id, title, view });
+                this.active_terminal = this.terminals.len() - 1;
+                cx.notify();
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
 
-        let forwarder = cx.spawn(async move |this, cx| {
-            let events = session.events();
-            pin_mut!(events);
-            while let Some(event) = events.next().await {
-                let Ok(_) = this.update(cx, |panel, cx| {
-                    if let Some(state) = panel.build_state.as_mut() {
-                        match event {
-                            BuildEvent::Line(line) => {
-                                state.lines.push(line);
-                                if state.lines.len() > BUILD_OUTPUT_LINE_CAP {
-                                    let overflow = state.lines.len() - BUILD_OUTPUT_LINE_CAP;
-                                    state.lines.drain(..overflow);
-                                }
-                            }
-                            BuildEvent::Finished(outcome) => {
-                                state.status = match outcome {
-                                    BuildOutcome::Success => BuildStatus::Success,
-                                    BuildOutcome::Failure(reason) => BuildStatus::Failure(reason),
-                                };
-                            }
-                        }
-                        cx.notify();
-                    }
-                }) else {
-                    break;
-                };
+    fn close_terminal(&mut self, id: usize, cx: &mut Context<Self>) {
+        if let Some(index) = self.terminals.iter().position(|tab| tab.id == id) {
+            self.terminals.remove(index);
+            if self.active_terminal >= self.terminals.len() {
+                self.active_terminal = self.terminals.len().saturating_sub(1);
             }
-            // Keep the session alive for the duration of this task so that
-            // dropping the panel mid-build also kills the child.
-            drop(session);
-        });
+            cx.notify();
+        }
+    }
 
-        self.build_state = Some(BuildUiState {
-            kind,
-            platform,
-            status: BuildStatus::Running,
-            lines: Vec::new(),
-            _forwarder: forwarder,
-        });
-        cx.notify();
+    pub fn start_spotlight(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.mobile_project.clone() else {
+            return;
+        };
+        self.run_in_terminal("Spotlight", vec![commands::spotlight(&project)], window, cx);
+    }
+
+    fn boot_selected_simulator(&mut self, cx: &mut Context<Self>) {
+        let Some(device) = self.selected_apple_device().cloned() else {
+            log::warn!("mobile_dev: no iOS simulator selected to boot");
+            return;
+        };
+        if device.kind != AppleDeviceKind::Simulator {
+            log::warn!("mobile_dev: the selected iOS device is not a simulator");
+            return;
+        }
+        let udid = device.udid.to_string();
+        cx.background_spawn(async move { apple::boot_simulator(&udid).await })
+            .detach_and_log_err(cx);
+    }
+
+    fn shutdown_selected_simulator(&mut self, cx: &mut Context<Self>) {
+        let Some(device) = self.selected_apple_device().cloned() else {
+            return;
+        };
+        if device.kind != AppleDeviceKind::Simulator {
+            return;
+        }
+        let udid = device.udid.to_string();
+        cx.background_spawn(async move { apple::shutdown_simulator(&udid).await })
+            .detach_and_log_err(cx);
+    }
+
+    fn start_emulator(&mut self, name: SharedString, cx: &mut Context<Self>) {
+        let env = toolchain::build_env(self.toolchain_status.as_ref());
+        let name = name.to_string();
+        cx.background_spawn(async move { emulator::launch_avd(&name, &env) })
+            .detach_and_log_err(cx);
     }
 
     fn apply_device_poll(&mut self, result: Result<Vec<AdbDevice>>) {
@@ -950,261 +1335,157 @@ impl MobileDevPanel {
     }
 
     fn render_devices_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut section = v_flex().gap_1().w_full().p_3().child(
-            Label::new("Devices")
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-        );
-        section = section.child(self.render_android_device_group(cx));
+        let mut row = h_flex()
+            .w_full()
+            .gap_4()
+            .items_start()
+            .child(self.render_android_dropdown(cx));
         if cfg!(target_os = "macos") {
-            section = section.child(self.render_apple_device_group(cx));
+            row = row.child(self.render_apple_dropdown(cx));
         }
-        section
+        v_flex()
+            .w_full()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .child(
+                Label::new("Devices")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(row)
     }
 
-    fn render_android_device_group(&self, cx: &mut Context<Self>) -> Div {
-        let mut group = v_flex().gap_1().w_full();
-        // The platform subheader is only useful next to the iOS group, which
-        // exists on macOS hosts only.
-        if cfg!(target_os = "macos") {
-            group = group.child(
+    /// Android device + emulator picker as a compact dropdown.
+    fn render_android_dropdown(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let devices = self.device_state.devices.clone();
+        let avds = self.avds.clone();
+        let selected = self.selected_device.clone();
+        let trigger_label = selected
+            .as_ref()
+            .filter(|selection| selection.platform == MobilePlatform::Android)
+            .and_then(|selection| {
+                devices
+                    .iter()
+                    .find(|device| device.serial == selection.id)
+                    .map(|device| device.label())
+            })
+            .unwrap_or_else(|| SharedString::from("Select device"));
+        let panel = cx.entity();
+        let menu = PopoverMenu::new("mobile-android-devices")
+            .trigger(
+                Button::new("mobile-android-devices-trigger", trigger_label)
+                    .style(ui::ButtonStyle::Filled)
+                    .label_size(LabelSize::Small),
+            )
+            .menu(move |window, cx| {
+                let panel = panel.clone();
+                let devices = devices.clone();
+                let avds = avds.clone();
+                let selected = selected.clone();
+                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
+                    if devices.is_empty() {
+                        menu = menu.label("No devices connected");
+                    }
+                    for device in &devices {
+                        let selection = SelectedDevice {
+                            platform: MobilePlatform::Android,
+                            id: device.serial.clone(),
+                        };
+                        let toggled = selected.as_ref() == Some(&selection);
+                        let panel = panel.clone();
+                        menu = menu.toggleable_entry(
+                            device.label(),
+                            toggled,
+                            IconPosition::Start,
+                            None,
+                            move |_window, cx| {
+                                panel.update(cx, |panel, cx| {
+                                    panel.select_device(selection.clone(), cx)
+                                });
+                            },
+                        );
+                    }
+                    if !avds.is_empty() {
+                        menu = menu.separator().header("Emulators");
+                        for avd in &avds {
+                            let name = avd.clone();
+                            let panel = panel.clone();
+                            menu = menu.entry(format!("Start {avd}"), None, move |_window, cx| {
+                                panel.update(cx, |panel, cx| panel.start_emulator(name.clone(), cx));
+                            });
+                        }
+                    }
+                    menu
+                }))
+            });
+        v_flex()
+            .flex_1()
+            .gap_1()
+            .child(
                 Label::new("Android")
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
-            );
-        }
-
-        if !self.device_state.loaded {
-            return group.child(
-                Label::new("Looking for devices...")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            );
-        }
-
-        if let Some(err) = self.device_state.error.as_ref() {
-            return group.child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        Label::new("adb error")
-                            .size(LabelSize::Small)
-                            .color(Color::Error),
-                    )
-                    .child(
-                        Label::new(err.clone())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
-            );
-        }
-
-        if self.device_state.devices.is_empty() {
-            return group.child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        Label::new("No devices connected")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        Label::new(
-                            "Plug a phone in over USB, or run the 'adb: pair wireless' task.",
-                        )
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                    ),
-            );
-        }
-
-        for (index, device) in self.device_state.devices.iter().enumerate() {
-            group = group.child(self.render_device_row(index, device, cx));
-        }
-        group
+            )
+            .child(menu)
     }
 
-    fn render_apple_device_group(&self, cx: &mut Context<Self>) -> Div {
-        let mut group = v_flex().gap_1().w_full().mt_1().child(
-            Label::new("iOS")
-                .size(LabelSize::XSmall)
-                .color(Color::Muted),
-        );
-
-        let xcode_missing = self
-            .apple_toolchain_status
+    /// iOS simulator + device picker as a compact dropdown.
+    fn render_apple_dropdown(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let devices = self.apple_device_state.devices.clone();
+        let selected = self.selected_device.clone();
+        let trigger_label = selected
             .as_ref()
-            .is_some_and(|status| !status.xcode.is_present());
-        if xcode_missing {
-            return group.child(
-                Label::new("Install Xcode to see iOS simulators and devices.")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            );
-        }
-
-        if !self.apple_device_state.loaded {
-            return group.child(
-                Label::new("Looking for devices...")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            );
-        }
-
-        if let Some(err) = self.apple_device_state.error.as_ref() {
-            return group.child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        Label::new("simctl error")
-                            .size(LabelSize::Small)
-                            .color(Color::Error),
-                    )
-                    .child(
-                        Label::new(err.clone())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
-            );
-        }
-
-        if self.apple_device_state.devices.is_empty() {
-            return group.child(
-                Label::new("No simulators or devices found")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            );
-        }
-
-        for (index, device) in self.apple_device_state.devices.iter().enumerate() {
-            group = group.child(self.render_apple_device_row(index, device, cx));
-        }
-        group
-    }
-
-    fn render_device_row(
-        &self,
-        index: usize,
-        device: &AdbDevice,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let selection = SelectedDevice {
-            platform: MobilePlatform::Android,
-            id: device.serial.clone(),
-        };
-        let selected = self.selected_device.as_ref() == Some(&selection);
-        let label = device.label();
-        let state_label: SharedString = match device.state {
-            AdbDeviceState::Online => "online".into(),
-            AdbDeviceState::Offline => "offline".into(),
-            AdbDeviceState::Unauthorized => "unauthorized".into(),
-            AdbDeviceState::Other => "other".into(),
-        };
-        let state_color = match device.state {
-            AdbDeviceState::Online => Color::Success,
-            AdbDeviceState::Unauthorized => Color::Warning,
-            AdbDeviceState::Offline | AdbDeviceState::Other => Color::Muted,
-        };
-        let transport_icon = match device.transport {
-            AdbTransport::Usb => IconName::ArrowDownRight,
-            AdbTransport::Wireless => IconName::SignalHigh,
-        };
-
-        self.device_row(
-            ("device-row", index),
-            transport_icon,
-            label,
-            state_label,
-            state_color,
-            selected,
-            selection,
-            cx,
-        )
-    }
-
-    fn render_apple_device_row(
-        &self,
-        index: usize,
-        device: &AppleDevice,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let selection = SelectedDevice {
-            platform: MobilePlatform::Ios,
-            id: device.udid.clone(),
-        };
-        let selected = self.selected_device.as_ref() == Some(&selection);
-        let label = device.label();
-        let state_label: SharedString = match device.state {
-            AppleDeviceState::Booted => "booted".into(),
-            AppleDeviceState::Shutdown => "shutdown".into(),
-            AppleDeviceState::Connected => "connected".into(),
-            AppleDeviceState::Unavailable => "unavailable".into(),
-            AppleDeviceState::Other => "other".into(),
-        };
-        let state_color = match device.state {
-            AppleDeviceState::Booted | AppleDeviceState::Connected => Color::Success,
-            AppleDeviceState::Shutdown
-            | AppleDeviceState::Unavailable
-            | AppleDeviceState::Other => Color::Muted,
-        };
-        let kind_icon = match device.kind {
-            AppleDeviceKind::Simulator => IconName::Screen,
-            AppleDeviceKind::Physical => IconName::ArrowDownRight,
-        };
-
-        self.device_row(
-            ("apple-device-row", index),
-            kind_icon,
-            label,
-            state_label,
-            state_color,
-            selected,
-            selection,
-            cx,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn device_row(
-        &self,
-        id: (&'static str, usize),
-        icon: IconName,
-        label: SharedString,
-        state_label: SharedString,
-        state_color: Color,
-        selected: bool,
-        selection: SelectedDevice,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        h_flex()
-            .id(id)
-            .w_full()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .cursor_pointer()
-            .when(selected, |this| {
-                this.bg(cx.theme().colors().element_selected)
+            .filter(|selection| selection.platform == MobilePlatform::Ios)
+            .and_then(|selection| {
+                devices
+                    .iter()
+                    .find(|device| device.udid == selection.id)
+                    .map(|device| device.label())
             })
-            .when(!selected, |this| {
-                this.hover(|s| s.bg(cx.theme().colors().element_hover))
-            })
-            .child(
-                ui::Icon::new(icon)
-                    .size(ui::IconSize::XSmall)
-                    .color(Color::Muted),
+            .unwrap_or_else(|| SharedString::from("Select device"));
+        let panel = cx.entity();
+        let menu = PopoverMenu::new("mobile-apple-devices")
+            .trigger(
+                Button::new("mobile-apple-devices-trigger", trigger_label)
+                    .style(ui::ButtonStyle::Filled)
+                    .label_size(LabelSize::Small),
             )
-            .child(Label::new(label).size(LabelSize::Small))
-            .child(div().flex_1())
-            .child(
-                Label::new(state_label)
-                    .size(LabelSize::XSmall)
-                    .color(state_color),
-            )
-            .on_click(cx.listener(move |panel, _, _, cx| {
-                panel.select_device(selection.clone(), cx);
-            }))
+            .menu(move |window, cx| {
+                let panel = panel.clone();
+                let devices = devices.clone();
+                let selected = selected.clone();
+                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
+                    if devices.is_empty() {
+                        menu = menu.label("No simulators or devices");
+                    }
+                    for device in &devices {
+                        let selection = SelectedDevice {
+                            platform: MobilePlatform::Ios,
+                            id: device.udid.clone(),
+                        };
+                        let toggled = selected.as_ref() == Some(&selection);
+                        let panel = panel.clone();
+                        menu = menu.toggleable_entry(
+                            device.label(),
+                            toggled,
+                            IconPosition::Start,
+                            None,
+                            move |_window, cx| {
+                                panel.update(cx, |panel, cx| {
+                                    panel.select_device(selection.clone(), cx)
+                                });
+                            },
+                        );
+                    }
+                    menu
+                }))
+            });
+        v_flex()
+            .flex_1()
+            .gap_1()
+            .child(Label::new("iOS").size(LabelSize::XSmall).color(Color::Muted))
+            .child(menu)
     }
 }
 
@@ -1223,6 +1504,7 @@ impl MobileDevPanel {
 
         let visible_lines: Vec<SharedString> =
             state.lines.iter().rev().take(80).rev().cloned().collect();
+        let copy_text = state.lines.join("\n");
 
         // The pid annotation only means something for logcat; the iOS log
         // stream is filtered by process name instead.
@@ -1261,7 +1543,8 @@ impl MobileDevPanel {
                         .size(LabelSize::XSmall)
                         .color(Color::Muted),
                 )
-            });
+            })
+            .child(CopyButton::new("mobile-logcat-copy", copy_text).tooltip_label("Copy log"));
 
         let error_line = state.error.as_ref().map(|err| {
             Label::new(err.clone())
@@ -1290,68 +1573,12 @@ impl MobileDevPanel {
                         .h(px(240.))
                         .w_full()
                         .overflow_y_scroll()
+                        .occlude()
                         .child(log),
                 ),
         )
     }
 
-    fn render_build_section(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let state = self.build_state.as_ref()?;
-        let border_color = cx.theme().colors().border;
-        let (status_label, status_color) = match &state.status {
-            BuildStatus::Running => ("running...", Color::Info),
-            BuildStatus::Success => ("succeeded", Color::Success),
-            BuildStatus::Failure(_) => ("failed", Color::Error),
-        };
-
-        let visible_lines: Vec<SharedString> =
-            state.lines.iter().rev().take(50).rev().cloned().collect();
-
-        let header = h_flex()
-            .gap_2()
-            .child(Label::new(state.kind.label(state.platform)).size(LabelSize::Small))
-            .child(div().flex_1())
-            .child(
-                Label::new(status_label)
-                    .size(LabelSize::XSmall)
-                    .color(status_color),
-            );
-
-        let failure_line = if let BuildStatus::Failure(reason) = &state.status {
-            Some(
-                Label::new(reason.clone())
-                    .size(LabelSize::XSmall)
-                    .color(Color::Error),
-            )
-        } else {
-            None
-        };
-
-        let mut log = v_flex().w_full().gap_0p5();
-        for line in visible_lines {
-            log = log.child(Label::new(line).size(LabelSize::XSmall).color(Color::Muted));
-        }
-
-        Some(
-            v_flex()
-                .w_full()
-                .gap_1()
-                .px_3()
-                .py_2()
-                .border_t_1()
-                .border_color(border_color)
-                .child(header)
-                .when_some(failure_line, |this, line| this.child(line))
-                .child(
-                    div()
-                        .id("mobile-build-output")
-                        .h(px(240.))
-                        .w_full()
-                        .overflow_y_scroll()
-                        .child(log),
-                ),
-        )
-    }
 
     fn render_toolchain_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let border_color = cx.theme().colors().border;
@@ -1454,6 +1681,7 @@ impl MobileDevPanel {
             .h(px(120.))
             .w_full()
             .overflow_y_scroll()
+            .occlude()
             .child(log)
     }
 
@@ -1586,97 +1814,145 @@ impl MobileDevPanel {
     }
 
     /// One-click access to the operations that are otherwise only reachable
-    /// through the command palette. Hidden until an Expo project is detected,
-    /// mirroring when the actions themselves can do anything.
+    /// through the command palette. Hidden until a mobile project is detected,
+    /// and each button is shown only when the project supports it.
     fn render_actions_section(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        self.expo_project.as_ref()?;
+        let project = self.mobile_project.clone()?;
         let build_label = match self.selected_platform() {
             MobilePlatform::Android => "Build & run (Android)",
             MobilePlatform::Ios => "Build & run (iOS)",
         };
+        // Whether the selected device is a simulator, and if so whether it is
+        // already booted (drives the boot/shutdown button).
+        let simulator_booted = self
+            .selected_apple_device()
+            .filter(|device| device.kind == AppleDeviceKind::Simulator)
+            .map(|device| device.state == AppleDeviceState::Booted);
+        let has_android_device = self.selected_android_device().is_some();
 
-        Some(
-            h_flex()
-                .w_full()
-                .flex_wrap()
-                .gap_1()
-                .px_3()
-                .py_2()
-                .border_t_1()
-                .border_color(cx.theme().colors().border)
-                .child(
-                    // Dispatches the action rather than calling into the
-                    // panel so the button is the palette entry by
-                    // construction. A re-click during a run intentionally
-                    // restarts the build (and its Metro server), same as the
-                    // palette.
-                    Button::new("mobile-action-build-run", build_label)
-                        .style(ui::ButtonStyle::Tinted(ui::TintColor::Success))
-                        .label_size(LabelSize::Small)
-                        .tooltip(|_window, cx| {
-                            Tooltip::for_action(
-                                "Debug build on the selected device",
-                                &BuildAndRun,
-                                cx,
-                            )
-                        })
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(BuildAndRun), cx);
-                        }),
+        let mut row = h_flex()
+            .w_full()
+            .flex_wrap()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .child(
+                Button::new("mobile-action-build-run", build_label)
+                    .style(ui::ButtonStyle::Tinted(ui::TintColor::Success))
+                    .label_size(LabelSize::Small)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action("Debug build on the selected device", &BuildAndRun, cx)
+                    })
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(BuildAndRun), cx);
+                    }),
+            )
+            .child(
+                Button::new("mobile-action-metro", "Start Metro")
+                    .style(ui::ButtonStyle::Filled)
+                    .label_size(LabelSize::Small)
+                    .tooltip(Tooltip::text("Start the Metro dev server in a terminal"))
+                    .on_click(cx.listener(|this, _, window, cx| this.start_metro(window, cx))),
+            )
+            .child(
+                Button::new("mobile-action-logs", "Logs")
+                    .style(ui::ButtonStyle::Filled)
+                    .label_size(LabelSize::Small)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action("Stream the selected device's log", &OpenLogcat, cx)
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.start_logcat(cx))),
+            );
+
+        if let Some(booted) = simulator_booted {
+            row = row.child(
+                Button::new(
+                    "mobile-action-simulator",
+                    if booted { "Shut down simulator" } else { "Boot simulator" },
                 )
-                .child(
-                    Button::new("mobile-action-eas-android", "EAS preview (Android)")
+                .style(ui::ButtonStyle::Filled)
+                .label_size(LabelSize::Small)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if booted {
+                        this.shutdown_selected_simulator(cx);
+                    } else {
+                        this.boot_selected_simulator(cx);
+                    }
+                })),
+            );
+        }
+
+        if project.has_podfile {
+            row = row.child(
+                Button::new("mobile-action-pods", "Install pods")
+                    .style(ui::ButtonStyle::Filled)
+                    .label_size(LabelSize::Small)
+                    .tooltip(|_window, cx| Tooltip::for_action("Run pod install", &PodInstall, cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.pod_install(window, cx))),
+            );
+        }
+
+        if has_android_device {
+            row = row.child(
+                Button::new("mobile-action-adb-reverse", "adb reverse")
+                    .style(ui::ButtonStyle::Filled)
+                    .label_size(LabelSize::Small)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action("Forward Metro to the device", &AdbReverse, cx)
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| this.adb_reverse(window, cx))),
+            );
+        }
+
+        row = row.child(
+            Button::new("mobile-action-spotlight", "Spotlight")
+                .style(ui::ButtonStyle::Filled)
+                .label_size(LabelSize::Small)
+                .on_click(cx.listener(|this, _, window, cx| this.start_spotlight(window, cx))),
+        );
+
+        if project.uses_eas {
+            row = row.child(
+                Button::new("mobile-action-eas-android", "EAS preview (Android)")
+                    .style(ui::ButtonStyle::Tinted(ui::TintColor::Accent))
+                    .label_size(LabelSize::Small)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action("Cloud preview build", &BuildEasPreview, cx)
+                    })
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(BuildEasPreview), cx);
+                    }),
+            );
+            if cfg!(target_os = "macos") {
+                row = row.child(
+                    Button::new("mobile-action-eas-ios", "EAS preview (iOS)")
                         .style(ui::ButtonStyle::Tinted(ui::TintColor::Accent))
                         .label_size(LabelSize::Small)
                         .tooltip(|_window, cx| {
-                            Tooltip::for_action("Cloud preview build", &BuildEasPreview, cx)
+                            Tooltip::for_action("Cloud preview build", &BuildEasPreviewIos, cx)
                         })
                         .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(BuildEasPreview), cx);
+                            window.dispatch_action(Box::new(BuildEasPreviewIos), cx);
                         }),
-                )
-                .when(cfg!(target_os = "macos"), |this| {
-                    this.child(
-                        Button::new("mobile-action-eas-ios", "EAS preview (iOS)")
-                            .style(ui::ButtonStyle::Tinted(ui::TintColor::Accent))
-                            .label_size(LabelSize::Small)
-                            .tooltip(|_window, cx| {
-                                Tooltip::for_action("Cloud preview build", &BuildEasPreviewIos, cx)
-                            })
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(BuildEasPreviewIos), cx);
-                            }),
-                    )
-                })
-                .child(
-                    // Direct call instead of dispatching OpenLogcat: the
-                    // action also toggles panel focus, which is meaningless
-                    // (and surprising) when clicked from inside the panel.
-                    Button::new("mobile-action-logs", "Logs")
-                        .style(ui::ButtonStyle::Filled)
-                        .label_size(LabelSize::Small)
-                        .tooltip(|_window, cx| {
-                            Tooltip::for_action(
-                                "Stream the selected device's log",
-                                &OpenLogcat,
-                                cx,
-                            )
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.start_logcat(cx))),
-                ),
-        )
+                );
+            }
+        }
+
+        Some(row)
     }
 
     fn render_project_section(&self) -> impl IntoElement {
         let v = v_flex().w_full().gap_1().px_3().py_2();
         if !self.project_scanned {
             return v.child(
-                Label::new("Scanning workspace for an Expo project...")
+                Label::new("Scanning workspace for a mobile project...")
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             );
         }
-        match &self.expo_project {
+        match &self.mobile_project {
             Some(project) => v
                 .child(
                     Label::new("Project")
@@ -1694,13 +1970,26 @@ impl MobileDevPanel {
                         .child(
                             Label::new(SharedString::from(project.display_name.clone()))
                                 .size(LabelSize::Small),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Label::new(project.kind.label())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(project.package_manager.label())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
                         ),
                 )
                 .child(
                     h_flex()
                         .gap_2()
                         .child(
-                            Label::new("Android package").size(LabelSize::XSmall).color(Color::Muted),
+                            Label::new("Android package")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
                         )
                         .child(
                             Label::new(SharedString::from(
@@ -1721,7 +2010,9 @@ impl MobileDevPanel {
                     h_flex()
                         .gap_2()
                         .child(
-                            Label::new("iOS bundle id").size(LabelSize::XSmall).color(Color::Muted),
+                            Label::new("iOS bundle id")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
                         )
                         .child(
                             Label::new(SharedString::from(
@@ -1740,18 +2031,269 @@ impl MobileDevPanel {
                 ),
             None => v
                 .child(
-                    Label::new("No Expo project detected")
+                    Label::new("No mobile project detected")
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
                 .child(
                     Label::new(
-                        "Open a worktree whose root contains an app.json with an `expo` key to enable build and install actions.",
+                        "Open a React Native or Expo project (a package.json with a react-native \
+                         or expo dependency, or ios/ and android/ folders) to enable build and run \
+                         actions.",
                     )
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
                 ),
         }
+    }
+
+    /// Native scheme/variant run controls for bare React Native projects.
+    /// Hidden for Expo (which runs through `expo run:*`) and when no schemes or
+    /// gradle variants were detected.
+    fn render_run_section(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let project = self.mobile_project.as_ref()?;
+        if project.kind != ProjectKind::BareReactNative
+            || (project.ios_schemes.is_empty() && project.android_variants.is_empty())
+        {
+            return None;
+        }
+        let mut section = v_flex()
+            .w_full()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .child(
+                Label::new("Native run")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            );
+
+        if !project.ios_schemes.is_empty() {
+            let scheme = self
+                .selected_scheme
+                .clone()
+                .unwrap_or_else(|| SharedString::from(project.ios_schemes[0].clone()));
+            section = section.child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Label::new("iOS scheme")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("mobile-scheme-cycle", scheme)
+                            .style(ui::ButtonStyle::Filled)
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _, _, cx| this.cycle_scheme(cx))),
+                    ),
+            );
+        }
+
+        if !project.android_variants.is_empty() {
+            let variant = self
+                .selected_variant
+                .clone()
+                .unwrap_or_else(|| SharedString::from(project.android_variants[0].clone()));
+            section = section.child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Label::new("Android variant")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("mobile-variant-cycle", variant)
+                            .style(ui::ButtonStyle::Filled)
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _, _, cx| this.cycle_variant(cx))),
+                    ),
+            );
+        }
+        Some(section)
+    }
+
+    /// A button per `package.json` script, so every command the project
+    /// defines is one click away. Scripts that need positional arguments print
+    /// their own usage into the output pane, which is itself useful feedback.
+    fn render_scripts_section(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let project = self.mobile_project.as_ref()?;
+        if project.scripts.is_empty() {
+            return None;
+        }
+        let mut row = h_flex().w_full().flex_wrap().gap_1();
+        for (index, script) in project.scripts.iter().enumerate() {
+            let name = script.name.clone();
+            let command = script.command.clone();
+            row = row.child(
+                Button::new(("mobile-script", index), script.name.clone())
+                    .style(ui::ButtonStyle::Filled)
+                    .label_size(LabelSize::Small)
+                    .tooltip(Tooltip::text(command))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_project_script(&name, window, cx);
+                    })),
+            );
+        }
+        Some(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(cx.theme().colors().border)
+                .child(
+                    Label::new("Scripts")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(row),
+        )
+    }
+
+    /// Interactive terminal tabs (Metro, builds, scripts): a tab strip plus
+    /// the active terminal, fully interactive with its own scrollback.
+    fn render_terminals_section(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.terminals.is_empty() {
+            return None;
+        }
+        let active = self.active_terminal.min(self.terminals.len() - 1);
+        let border = cx.theme().colors().border;
+
+        let mut tabs = h_flex().w_full().gap_1().flex_wrap();
+        for (index, tab) in self.terminals.iter().enumerate() {
+            let is_active = index == active;
+            let id = tab.id;
+            tabs = tabs.child(
+                h_flex()
+                    .id(("mobile-term-tab", tab.id))
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(is_active, |this| {
+                        this.bg(cx.theme().colors().element_selected)
+                    })
+                    .when(!is_active, |this| {
+                        this.hover(|style| style.bg(cx.theme().colors().element_hover))
+                    })
+                    .child(Label::new(tab.title.clone()).size(LabelSize::Small))
+                    .child(
+                        ui::IconButton::new(("mobile-term-close", tab.id), IconName::Close)
+                            .icon_size(ui::IconSize::XSmall)
+                            .on_click(cx.listener(move |this, _, _, cx| this.close_terminal(id, cx))),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.active_terminal = index;
+                        cx.notify();
+                    })),
+            );
+        }
+
+        let view = self.terminals[active].view.clone();
+        Some(
+            v_flex()
+                .w_full()
+                .border_t_1()
+                .border_color(border)
+                .child(h_flex().w_full().px_3().py_1().child(tabs))
+                .child(div().w_full().h(px(320.)).occlude().child(view)),
+        )
+    }
+
+
+
+    /// Run/start commands scraped from the project's README, so the panel
+    /// suggests how to run this specific app. Hidden when the README yielded
+    /// no recognizable commands.
+    fn render_readme_section(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let project = self.mobile_project.as_ref()?;
+        if project.readme_run_hints.is_empty() {
+            return None;
+        }
+        let mut rows = v_flex().w_full().gap_1();
+        for (index, hint) in project.readme_run_hints.iter().enumerate() {
+            rows = rows.child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        ui::Icon::new(IconName::Terminal)
+                            .size(ui::IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(hint.clone()).size(LabelSize::XSmall))
+                    .child(div().flex_1())
+                    .child(
+                        CopyButton::new(("mobile-readme-hint", index), hint.clone())
+                            .tooltip_label("Copy command"),
+                    ),
+            );
+        }
+        Some(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(cx.theme().colors().border)
+                .child(
+                    Label::new("How to run (from README)")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(
+                    div()
+                        .id("mobile-readme-scroll")
+                        .max_h(px(160.))
+                        .w_full()
+                        .overflow_y_scroll()
+                        .occlude()
+                        .child(rows),
+                ),
+        )
+    }
+
+    fn cycle_scheme(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.mobile_project.as_ref() else {
+            return;
+        };
+        if project.ios_schemes.is_empty() {
+            return;
+        }
+        let next = self
+            .selected_scheme
+            .as_deref()
+            .and_then(|current| project.ios_schemes.iter().position(|s| s == current))
+            .map(|index| (index + 1) % project.ios_schemes.len())
+            .unwrap_or(0);
+        self.selected_scheme = Some(SharedString::from(project.ios_schemes[next].clone()));
+        cx.notify();
+    }
+
+    fn cycle_variant(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.mobile_project.as_ref() else {
+            return;
+        };
+        if project.android_variants.is_empty() {
+            return;
+        }
+        let next = self
+            .selected_variant
+            .as_deref()
+            .and_then(|current| project.android_variants.iter().position(|v| v == current))
+            .map(|index| (index + 1) % project.android_variants.len())
+            .unwrap_or(0);
+        self.selected_variant = Some(SharedString::from(project.android_variants[next].clone()));
+        cx.notify();
     }
 }
 
@@ -1797,15 +2339,24 @@ impl Render for MobileDevPanel {
                     .w_full()
                     .overflow_y_scroll()
                     .child(self.render_project_section())
+                    .when_some(self.render_run_section(cx), |this, section| {
+                        this.child(section)
+                    })
+                    .when_some(self.render_readme_section(cx), |this, section| {
+                        this.child(section)
+                    })
+                    .when_some(self.render_scripts_section(cx), |this, section| {
+                        this.child(section)
+                    })
                     .when_some(self.render_actions_section(cx), |this, section| {
                         this.child(section)
                     })
+                    .child(self.render_devices_section(cx))
                     .child(self.render_toolchain_section(cx))
                     .when_some(self.render_apple_toolchain_section(cx), |this, section| {
                         this.child(section)
                     })
-                    .child(self.render_devices_section(cx))
-                    .when_some(self.render_build_section(cx), |this, section| {
+                    .when_some(self.render_terminals_section(cx), |this, section| {
                         this.child(section)
                     })
                     .when_some(self.render_logcat_section(cx), |this, section| {
