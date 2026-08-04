@@ -1278,28 +1278,42 @@ async fn install_release_macos(
     );
 
     // hdiutil's "attach" output ends with one line per mounted partition:
-    //   <dev>  <scheme>  <mount-point>
-    // Older Apple-Partition-Map DMGs emit tab-separated columns; newer
-    // GPT-formatted DMGs (with a Protective MBR + GPT layout) emit
-    // multi-space-separated columns and include a verbose Checksumming
-    // preamble before the partition rows. split_whitespace handles both
-    // shapes, and the mountroot prefix check rejects preamble/header
-    // lines that don't carry a path under the mountroot we requested.
-    // (The volume name baked into the DMG is channel-specific, e.g.
-    // "Lathe" or "Lathe Beta", so we have to consult hdiutil's output
-    // rather than hard-code a path.)
+    //   <dev>\t<scheme>\t<mount-point>
+    // The columns are space-padded but tab-delimited, and GPT-formatted DMGs
+    // add a verbose Checksumming preamble before the partition rows. Take the
+    // last tab-delimited field rather than the last whitespace-delimited
+    // token: the volume name is channel-specific and can contain a space
+    // ("Lathe Beta"), which whitespace splitting would truncate to "Beta".
+    // The mountroot prefix check then rejects preamble and partition-scheme
+    // rows, which carry no path under the mountroot we requested.
+    // hdiutil reports mount points as fully resolved paths (/private/var/...),
+    // while `std::env::temp_dir()` hands back the /var symlink on macOS.
+    // `Path::starts_with` matches whole components, so the prefix check never
+    // fires unless the mountroot is resolved the same way first.
+    let canonical_mountroot = fs::canonicalize(mountroot)
+        .await
+        .unwrap_or_else(|_| mountroot.to_path_buf());
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mount_path = stdout
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let last = line.split_whitespace().next_back()?;
-            let path = PathBuf::from(last);
-            path.starts_with(mountroot).then_some(path)
-        })
-        .with_context(|| {
-            format!("failed to determine DMG mount point from hdiutil output: {stdout}")
-        })?;
+    let mount_path = stdout.lines().rev().find_map(|line| {
+        let last = line.rsplit('\t').next()?.trim();
+        let path = PathBuf::from(last);
+        (path.starts_with(&canonical_mountroot) || path.starts_with(mountroot)).then_some(path)
+    });
+
+    let Some(mount_path) = mount_path else {
+        // The image attached even though we can't tell where. Detach it by
+        // device before bailing, otherwise the volume stays mounted for the
+        // rest of the login session, the temp dir can never be removed, and
+        // its copy of the DMG is stranded on disk.
+        if let Some(device) = stdout
+            .split_whitespace()
+            .find(|token| token.starts_with("/dev/disk"))
+        {
+            unmount_disk_image(Path::new(device)).await;
+        }
+        anyhow::bail!("failed to determine DMG mount point from hdiutil output: {stdout}");
+    };
 
     let unmounter = MacOsUnmounter {
         mount_path: mount_path.clone(),
@@ -1330,6 +1344,27 @@ async fn install_release_macos(
     Ok(None)
 }
 
+/// Mount points of currently attached volumes that live under `dir`, which
+/// must already be canonicalized: `mount` reports fully resolved paths.
+#[cfg(any(rust_analyzer, all(not(target_os = "windows"), not(test))))]
+async fn mounted_volumes_under(dir: &Path) -> Vec<PathBuf> {
+    let Ok(output) = new_command("/sbin/mount").output().await else {
+        log::warn!("failed to list mounts while cleaning up installer dirs");
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            // "<device> on <mount point> (<options>)". Mount points can contain
+            // spaces, so split on the surrounding literals rather than columns.
+            let (_, rest) = line.split_once(" on ")?;
+            let (mount_point, _) = rest.rsplit_once(" (")?;
+            let path = PathBuf::from(mount_point);
+            path.starts_with(dir).then_some(path)
+        })
+        .collect()
+}
+
 /// Removes stale installer dirs from the system temp dir. Older Zed versions
 /// leaked one per update by deleting the dir while the downloaded disk image
 /// was still mounted inside it, which made the deletion fail silently.
@@ -1342,6 +1377,11 @@ async fn cleanup_stale_installer_dirs() {
         log::warn!("failed to read temp dir {temp_dir:?} while cleaning up installer dirs");
         return;
     };
+
+    let canonical_temp_dir = fs::canonicalize(&temp_dir)
+        .await
+        .unwrap_or_else(|_| temp_dir.clone());
+    let mounted_volumes = mounted_volumes_under(&canonical_temp_dir).await;
     while let Some(entry) = entries.next().await {
         let Ok(entry) = entry else {
             continue;
@@ -1364,6 +1404,19 @@ async fn cleanup_stale_installer_dirs() {
                 })
         });
         if is_stale {
+            // A disk image leaked by an earlier failed update is still mounted
+            // inside the dir, which makes the removal fail with EROFS. Detach
+            // it first so the dir (and its copy of the DMG) can actually go.
+            let canonical_entry = fs::canonicalize(entry.path())
+                .await
+                .unwrap_or_else(|_| entry.path());
+            for mount_point in mounted_volumes
+                .iter()
+                .filter(|path| path.starts_with(&canonical_entry))
+            {
+                unmount_disk_image(mount_point).await;
+            }
+
             if let Err(error) = fs::remove_dir_all(entry.path()).await {
                 log::warn!(
                     "failed to remove stale installer dir {:?}: {error}",
