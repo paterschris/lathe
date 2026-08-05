@@ -34,18 +34,46 @@ pub struct AdbDevice {
     /// the `ip:port` pair the host connected to.
     pub serial: SharedString,
     pub state: AdbDeviceState,
-    /// Human-readable model name when `adb` reports one.
+    /// The raw `model:` value `adb devices -l` reports (underscored, e.g.
+    /// `Pixel_7`). Kept verbatim because it is also the name the Expo CLI
+    /// matches `--device` against; [`AdbDevice::label`] prettifies it.
     pub model: Option<SharedString>,
+    /// For emulators, the AVD name from `adb -s <serial> emu avd name`.
+    pub avd_name: Option<SharedString>,
     pub transport: AdbTransport,
 }
 
 impl AdbDevice {
     /// Convenience: pretty label for UI display.
     pub fn label(&self) -> SharedString {
+        // An emulator's model (`sdk_gphone64_arm64`) says nothing about which
+        // AVD it is, so prefer the AVD name when we have one.
+        if let Some(avd) = &self.avd_name {
+            return SharedString::from(format!("{avd} ({})", self.serial));
+        }
         match &self.model {
-            Some(model) => SharedString::from(format!("{model} ({})", self.serial)),
+            Some(model) => {
+                SharedString::from(format!("{} ({})", model.replace('_', " "), self.serial))
+            }
             None => self.serial.clone(),
         }
+    }
+
+    /// Whether this is a local emulator rather than a physical device.
+    pub fn is_emulator(&self) -> bool {
+        self.serial.starts_with("emulator-")
+    }
+
+    /// What to pass to `expo run:android --device`. The Expo CLI resolves that
+    /// flag against its OWN device names, never the adb serial: the AVD name
+    /// for an emulator, the raw `model:` value for a physical device (see
+    /// `getAttachedDevicesAsync` in @expo/cli). Passing the serial fails with
+    /// "Could not find device with name: emulator-5554".
+    pub fn expo_device_name(&self) -> SharedString {
+        self.avd_name
+            .clone()
+            .or_else(|| self.model.clone())
+            .unwrap_or_else(|| self.serial.clone())
     }
 
     pub fn is_usable(&self) -> bool {
@@ -110,7 +138,33 @@ pub async fn list_devices() -> Result<Vec<AdbDevice>> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(parse_devices(&String::from_utf8_lossy(&output.stdout)))
+    let mut devices = parse_devices(&String::from_utf8_lossy(&output.stdout));
+    for device in &mut devices {
+        if device.is_emulator() && device.is_usable() {
+            device.avd_name = avd_name(&device.serial).await;
+        }
+    }
+    Ok(devices)
+}
+
+/// The AVD an emulator was booted from, via `adb -s <serial> emu avd name`.
+/// `None` when the console query fails (a still-booting emulator answers
+/// nothing useful), so callers just fall back to the serial.
+async fn avd_name(serial: &str) -> Option<SharedString> {
+    let output = new_command(adb_program())
+        .args(["-s", serial, "emu", "avd", "name"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // Output is the name followed by adb's own "OK" acknowledgement line.
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != "OK")
+        .map(|name| SharedString::from(name.to_string()))
 }
 
 /// Parse the output of `adb devices -l`. Public for tests.
@@ -140,7 +194,7 @@ pub(crate) fn parse_devices(output: &str) -> Vec<AdbDevice> {
         let mut model = None;
         for tag in parts {
             if let Some(value) = tag.strip_prefix("model:") {
-                model = Some(SharedString::from(value.replace('_', " ")));
+                model = Some(SharedString::from(value.to_string()));
             }
         }
 
@@ -148,6 +202,7 @@ pub(crate) fn parse_devices(output: &str) -> Vec<AdbDevice> {
             serial,
             state,
             model,
+            avd_name: None,
             transport,
         });
     }
@@ -374,7 +429,7 @@ mod tests {
         assert_eq!(d.serial.as_ref(), "ABC123XYZ");
         assert_eq!(d.state, AdbDeviceState::Online);
         assert_eq!(d.transport, AdbTransport::Usb);
-        assert_eq!(d.model.as_deref(), Some("Pixel 7"));
+        assert_eq!(d.model.as_deref(), Some("Pixel_7"));
     }
 
     #[test]
@@ -405,7 +460,7 @@ mod tests {
                  ABC123XYZ              device model:Pixel_8\n";
         let devices = parse_devices(s);
         assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].model.as_deref(), Some("Pixel 8"));
+        assert_eq!(devices[0].model.as_deref(), Some("Pixel_8"));
     }
 
     #[test]
@@ -427,6 +482,7 @@ mod tests {
             serial: SharedString::from("ABC"),
             state: AdbDeviceState::Online,
             model: None,
+            avd_name: None,
             transport: AdbTransport::Usb,
         };
         assert_eq!(d.label().as_ref(), "ABC");
@@ -437,9 +493,50 @@ mod tests {
         let d = AdbDevice {
             serial: SharedString::from("ABC"),
             state: AdbDeviceState::Online,
-            model: Some(SharedString::from("Pixel 8")),
+            model: Some(SharedString::from("Pixel_8")),
+            avd_name: None,
             transport: AdbTransport::Usb,
         };
         assert_eq!(d.label().as_ref(), "Pixel 8 (ABC)");
+    }
+
+    #[test]
+    fn emulator_prefers_avd_name_over_model() {
+        let d = AdbDevice {
+            serial: SharedString::from("emulator-5554"),
+            state: AdbDeviceState::Online,
+            model: Some(SharedString::from("sdk_gphone64_arm64")),
+            avd_name: Some(SharedString::from("Lathe_Pixel_API35")),
+            transport: AdbTransport::Usb,
+        };
+        assert!(d.is_emulator());
+        assert_eq!(d.label().as_ref(), "Lathe_Pixel_API35 (emulator-5554)");
+        // Never the serial: `expo run:android --device emulator-5554` fails.
+        assert_eq!(d.expo_device_name().as_ref(), "Lathe_Pixel_API35");
+    }
+
+    #[test]
+    fn physical_device_expo_name_is_the_raw_model() {
+        let d = AdbDevice {
+            serial: SharedString::from("ABC123XYZ"),
+            state: AdbDeviceState::Online,
+            model: Some(SharedString::from("Pixel_7")),
+            avd_name: None,
+            transport: AdbTransport::Usb,
+        };
+        assert!(!d.is_emulator());
+        assert_eq!(d.expo_device_name().as_ref(), "Pixel_7");
+    }
+
+    #[test]
+    fn expo_name_falls_back_to_serial_without_model() {
+        let d = AdbDevice {
+            serial: SharedString::from("ABC"),
+            state: AdbDeviceState::Online,
+            model: None,
+            avd_name: None,
+            transport: AdbTransport::Usb,
+        };
+        assert_eq!(d.expo_device_name().as_ref(), "ABC");
     }
 }

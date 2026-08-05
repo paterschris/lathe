@@ -17,6 +17,7 @@ pub mod toolchain;
 
 pub use device_picker::MobileDeviceSelector;
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -119,6 +120,8 @@ actions!(
         RunE2eAndroid,
         /// Forward the Metro dev-server port to a USB-attached Android device.
         AdbReverse,
+        /// Create a default Android emulator (AVD) within Lathe.
+        CreateAvd,
         /// Launch the Spotlight sidecar for live Sentry monitoring.
         StartSpotlight,
         /// Stop the running Spotlight sidecar.
@@ -198,7 +201,7 @@ fn register_workspace_actions(
         })
         .register_action(|workspace, _: &StartMetro, window, cx| {
             if let Some(panel) = workspace.panel::<MobileDevPanel>(cx) {
-                panel.update(cx, |panel, cx| panel.start_metro(window, cx));
+                panel.update(cx, |panel, cx| panel.start_metro(false, window, cx));
             }
         })
         .register_action(|workspace, _: &BootSimulator, _, cx| {
@@ -235,6 +238,11 @@ fn register_workspace_actions(
         .register_action(|workspace, _: &AdbReverse, window, cx| {
             with_panel_in(workspace, window, cx, |panel, window, cx| {
                 panel.adb_reverse(window, cx)
+            });
+        })
+        .register_action(|workspace, _: &CreateAvd, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.create_avd(window, cx)
             });
         })
         .register_action(|workspace, _: &StartSpotlight, window, cx| {
@@ -919,28 +927,53 @@ impl MobileDevPanel {
             return;
         };
         let platform = self.selected_platform();
-        let run = match platform {
+        let run_commands: Vec<ResolvedCommand> = match platform {
             MobilePlatform::Ios => {
                 let udid = self.selected_apple_device().map(|device| device.udid.clone());
                 let scheme = match project.kind {
                     ProjectKind::BareReactNative => self.selected_scheme.as_deref(),
                     ProjectKind::Expo => None,
                 };
-                commands::run_ios(&project, scheme, udid.as_deref())
+                vec![commands::run_ios(&project, scheme, udid.as_deref())]
             }
             MobilePlatform::Android => {
-                let serial = self
-                    .selected_android_device()
-                    .map(|device| device.serial.clone());
-                let variant = match project.kind {
-                    ProjectKind::BareReactNative => self.selected_variant.as_deref(),
-                    ProjectKind::Expo => None,
-                };
-                commands::run_android(&project, variant, serial.as_deref())
+                let device = self.selected_android_device();
+                let serial = device.map(|device| device.serial.clone());
+                let expo_name = device.map(|device| device.expo_device_name());
+                self.android_run_commands(&project, serial.as_deref(), expo_name.as_deref())
             }
         };
-        let steps = self.with_prereqs(&project, run, platform == MobilePlatform::Ios);
+        let steps = self.with_prereqs(&project, run_commands, platform == MobilePlatform::Ios);
         self.run_in_terminal(format!("Run {}", platform.label()), steps, window, cx);
+    }
+
+    /// Android run commands. For bare React Native with a known variant and
+    /// applicationId, use gradle install + adb launch (robust against the RN
+    /// CLI's flavored-APK bug); otherwise fall back to `react-native
+    /// run-android` / `expo run:android`.
+    fn android_run_commands(
+        &self,
+        project: &MobileProject,
+        serial: Option<&str>,
+        expo_device_name: Option<&str>,
+    ) -> Vec<ResolvedCommand> {
+        if project.kind == ProjectKind::BareReactNative {
+            let variant = self
+                .selected_variant
+                .clone()
+                .or_else(|| project.android_variants.first().cloned().map(SharedString::from));
+            if let Some(variant) = variant
+                && let Some(application_id) = project.variant_application_id(&variant)
+            {
+                return commands::run_android_gradle(project, &variant, serial, &application_id);
+            }
+        }
+        vec![commands::run_android(
+            project,
+            None,
+            serial,
+            expo_device_name,
+        )]
     }
 
     /// Start an EAS cloud build in a terminal tab.
@@ -967,12 +1000,12 @@ impl MobileDevPanel {
     }
 
     /// Prepend prerequisite installs (JS deps, and CocoaPods setup for an iOS
-    /// run) to `command` so a terminal never fails just because setup hasn't
-    /// been done.
+    /// run) to `run_commands` so a terminal never fails just because setup
+    /// hasn't been done.
     fn with_prereqs(
         &self,
         project: &MobileProject,
-        command: ResolvedCommand,
+        run_commands: Vec<ResolvedCommand>,
         needs_pods: bool,
     ) -> Vec<ResolvedCommand> {
         let mut steps = Vec::new();
@@ -982,7 +1015,7 @@ impl MobileDevPanel {
         if needs_pods && project.has_podfile && !project.root.join("ios/Pods").is_dir() {
             steps.extend(Self::ios_pod_commands(project));
         }
-        steps.push(command);
+        steps.extend(run_commands);
         steps
     }
 
@@ -1019,18 +1052,48 @@ impl MobileDevPanel {
             log::warn!("mobile_dev: project has no `{name}` script");
             return;
         }
-        let steps = self.with_prereqs(&project, commands::run_script(&project, name), false);
-        let title = format!("{} {name}", project.package_manager.program());
-        self.run_in_terminal(title, steps, window, cx);
+        self.run_script(&project, name, window, cx);
     }
 
     fn run_project_script(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.mobile_project.clone() else {
             return;
         };
-        let steps = self.with_prereqs(&project, commands::run_script(&project, name), false);
-        let title = format!("{} {name}", project.package_manager.program());
+        self.run_script(&project, name, window, cx);
+    }
+
+    /// Run a package.json script, appending the selected scheme (iOS-named
+    /// scripts) or gradle variant (Android-named scripts) as positional
+    /// `variant config` arguments when the project defines them.
+    fn run_script(
+        &mut self,
+        project: &MobileProject,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let extra = self.script_extra_args(name);
+        let command = commands::run_script(project, name, &extra);
+        let title = command.label.clone();
+        let steps = self.with_prereqs(project, vec![command], false);
         self.run_in_terminal(title, steps, window, cx);
+    }
+
+    /// The scheme/variant arguments to append to a script, based on its name:
+    /// an `ios`-named script gets the selected iOS scheme, an `android`-named
+    /// one gets the selected gradle variant, both split into `variant config`.
+    fn script_extra_args(&self, script_name: &str) -> Vec<String> {
+        let lower = script_name.to_lowercase();
+        if lower.contains("ios") {
+            if let Some(scheme) = self.selected_scheme.as_deref() {
+                return mobile_project::split_variant_config(scheme);
+            }
+        } else if lower.contains("android")
+            && let Some(variant) = self.selected_variant.as_deref()
+        {
+            return mobile_project::split_variant_config(variant);
+        }
+        Vec::new()
     }
 
     fn pod_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1060,7 +1123,9 @@ impl MobileDevPanel {
         );
     }
 
-    pub fn start_metro(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Start the Metro dev server. When `localhost` (Expo only), serves the
+    /// dev-server URL on localhost so an Android emulator can reach it.
+    pub fn start_metro(&mut self, localhost: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.mobile_project.clone() else {
             return;
         };
@@ -1068,8 +1133,9 @@ impl MobileDevPanel {
         if !project.root.join("node_modules").is_dir() {
             commands.push(commands::install_deps(&project));
         }
-        commands.push(commands::metro(&project));
-        self.run_in_terminal("Metro", commands, window, cx);
+        commands.push(commands::metro(&project, localhost));
+        let title = if localhost { "Metro (localhost)" } else { "Metro" };
+        self.run_in_terminal(title, commands, window, cx);
     }
 
     /// Run `commands` (chained with `&&`) in a new interactive terminal tab.
@@ -1086,9 +1152,47 @@ impl MobileDevPanel {
         let Some(first) = commands.first() else {
             return;
         };
-        let title = title.into();
         let cwd = first.cwd.clone();
         let compound = build_compound_command(&commands, self.toolchain_status.as_ref());
+        self.spawn_terminal(title, compound, cwd, window, cx);
+    }
+
+    /// Run a raw shell command string in a terminal tab. When `android_env`,
+    /// the managed Android toolchain is exported first (so `sdkmanager` /
+    /// `avdmanager` find Java and the SDK).
+    fn run_shell_in_terminal(
+        &mut self,
+        title: impl Into<SharedString>,
+        shell_command: String,
+        cwd: PathBuf,
+        android_env: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let compound = if android_env {
+            let exports = android_export_prefix(self.toolchain_status.as_ref());
+            if exports.is_empty() {
+                shell_command
+            } else {
+                format!("{exports} && {shell_command}")
+            }
+        } else {
+            shell_command
+        };
+        self.spawn_terminal(title, compound, cwd, window, cx);
+    }
+
+    /// Open a new interactive terminal tab running `compound` in the user's
+    /// login+interactive shell.
+    fn spawn_terminal(
+        &mut self,
+        title: impl Into<SharedString>,
+        compound: String,
+        cwd: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = title.into();
         let login_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let id = self.next_terminal_id;
         self.next_terminal_id += 1;
@@ -1181,6 +1285,37 @@ impl MobileDevPanel {
         let name = name.to_string();
         cx.background_spawn(async move { emulator::launch_avd(&name, &env) })
             .detach_and_log_err(cx);
+    }
+
+    /// Create a default Pixel AVD entirely within Lathe (no Android Studio):
+    /// installs the emulator package and a system image via the SDK's
+    /// `sdkmanager`, then creates the AVD with `avdmanager`, all in a terminal
+    /// tab so the (large) download is visible. The new AVD appears in the
+    /// Android dropdown once the tracker next polls.
+    fn create_avd(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(sdkmanager), Some(avdmanager), Some(sdk)) = (
+            emulator::sdkmanager_path(),
+            emulator::avdmanager_path(),
+            toolchain::sdk_dir(),
+        ) else {
+            log::warn!(
+                "mobile_dev: Android SDK command-line tools not found; install the Android \
+                 toolchain first"
+            );
+            return;
+        };
+        let image = emulator::default_system_image();
+        let name = "Lathe_Pixel_API35";
+        let sdkmanager = shell_quote(&sdkmanager.to_string_lossy());
+        let avdmanager = shell_quote(&avdmanager.to_string_lossy());
+        // Accept licenses, install the emulator + system image, then create the
+        // AVD, answering avdmanager's hardware-profile prompt with the default.
+        let command = format!(
+            "yes | {sdkmanager} --licenses >/dev/null 2>&1; \
+             {sdkmanager} 'emulator' '{image}' && \
+             echo no | {avdmanager} create avd -n '{name}' -k '{image}' -d pixel_7 --force"
+        );
+        self.run_shell_in_terminal("Create AVD", command, sdk, true, window, cx);
     }
 
     fn apply_device_poll(&mut self, result: Result<Vec<AdbDevice>>) {
@@ -1376,7 +1511,8 @@ impl MobileDevPanel {
             .trigger(
                 Button::new("mobile-android-devices-trigger", trigger_label)
                     .style(ui::ButtonStyle::Filled)
-                    .label_size(LabelSize::Small),
+                    .label_size(LabelSize::Small)
+                    .end_icon(ui::Icon::new(IconName::ChevronDown).size(ui::IconSize::XSmall).color(Color::Muted)),
             )
             .menu(move |window, cx| {
                 let panel = panel.clone();
@@ -1416,6 +1552,13 @@ impl MobileDevPanel {
                             });
                         }
                     }
+                    menu = menu.separator().entry(
+                        "Create AVD (Pixel, API 35)",
+                        None,
+                        move |window, cx| {
+                            panel.update(cx, |panel, cx| panel.create_avd(window, cx));
+                        },
+                    );
                     menu
                 }))
             });
@@ -1449,7 +1592,8 @@ impl MobileDevPanel {
             .trigger(
                 Button::new("mobile-apple-devices-trigger", trigger_label)
                     .style(ui::ButtonStyle::Filled)
-                    .label_size(LabelSize::Small),
+                    .label_size(LabelSize::Small)
+                    .end_icon(ui::Icon::new(IconName::ChevronDown).size(ui::IconSize::XSmall).color(Color::Muted)),
             )
             .menu(move |window, cx| {
                 let panel = panel.clone();
@@ -1854,7 +1998,7 @@ impl MobileDevPanel {
                     .style(ui::ButtonStyle::Filled)
                     .label_size(LabelSize::Small)
                     .tooltip(Tooltip::text("Start the Metro dev server in a terminal"))
-                    .on_click(cx.listener(|this, _, window, cx| this.start_metro(window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.start_metro(false, window, cx))),
             )
             .child(
                 Button::new("mobile-action-logs", "Logs")
@@ -1865,6 +2009,20 @@ impl MobileDevPanel {
                     })
                     .on_click(cx.listener(|this, _, _, cx| this.start_logcat(cx))),
             );
+
+        // Expo only: the LAN dev-server URL an emulator can't reach is the
+        // usual Android-emulator failure, so offer a localhost variant.
+        if project.kind == ProjectKind::Expo {
+            row = row.child(
+                Button::new("mobile-action-metro-localhost", "Metro (localhost)")
+                    .style(ui::ButtonStyle::Filled)
+                    .label_size(LabelSize::Small)
+                    .tooltip(Tooltip::text(
+                        "Start Metro on localhost so an Android emulator can reach it (via adb reverse)",
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.start_metro(true, window, cx))),
+            );
+        }
 
         if let Some(booted) = simulator_booted {
             row = row.child(
@@ -2069,53 +2227,103 @@ impl MobileDevPanel {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             );
-
         if !project.ios_schemes.is_empty() {
-            let scheme = self
-                .selected_scheme
-                .clone()
-                .unwrap_or_else(|| SharedString::from(project.ios_schemes[0].clone()));
-            section = section.child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Label::new("iOS scheme")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("mobile-scheme-cycle", scheme)
-                            .style(ui::ButtonStyle::Filled)
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener(|this, _, _, cx| this.cycle_scheme(cx))),
-                    ),
-            );
+            let options: Vec<SharedString> = project
+                .ios_schemes
+                .iter()
+                .cloned()
+                .map(SharedString::from)
+                .collect();
+            let selected = self.selected_scheme.clone().or_else(|| options.first().cloned());
+            section = section.child(self.render_selection_dropdown(
+                "iOS scheme",
+                "mobile-scheme",
+                options,
+                selected,
+                true,
+                cx,
+            ));
         }
-
         if !project.android_variants.is_empty() {
-            let variant = self
-                .selected_variant
-                .clone()
-                .unwrap_or_else(|| SharedString::from(project.android_variants[0].clone()));
-            section = section.child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Label::new("Android variant")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("mobile-variant-cycle", variant)
-                            .style(ui::ButtonStyle::Filled)
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener(|this, _, _, cx| this.cycle_variant(cx))),
-                    ),
-            );
+            let options: Vec<SharedString> = project
+                .android_variants
+                .iter()
+                .cloned()
+                .map(SharedString::from)
+                .collect();
+            let selected = self.selected_variant.clone().or_else(|| options.first().cloned());
+            section = section.child(self.render_selection_dropdown(
+                "Android variant",
+                "mobile-variant",
+                options,
+                selected,
+                false,
+                cx,
+            ));
         }
         Some(section)
+    }
+
+    /// A labeled dropdown of `options`; picking one sets the iOS scheme (when
+    /// `is_scheme`) or the Android variant.
+    fn render_selection_dropdown(
+        &self,
+        label: &'static str,
+        id: &'static str,
+        options: Vec<SharedString>,
+        selected: Option<SharedString>,
+        is_scheme: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let trigger_label = selected.clone().unwrap_or_else(|| SharedString::from("Select"));
+        let panel = cx.entity();
+        let menu = PopoverMenu::new(id)
+            .trigger(
+                Button::new(SharedString::from(format!("{id}-trigger")), trigger_label)
+                    .style(ui::ButtonStyle::Filled)
+                    .label_size(LabelSize::Small)
+                    .end_icon(ui::Icon::new(IconName::ChevronDown).size(ui::IconSize::XSmall).color(Color::Muted)),
+            )
+            .menu(move |window, cx| {
+                let panel = panel.clone();
+                let options = options.clone();
+                let selected = selected.clone();
+                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
+                    for option in &options {
+                        let toggled = selected.as_ref() == Some(option);
+                        let value = option.clone();
+                        let panel = panel.clone();
+                        menu = menu.toggleable_entry(
+                            option.clone(),
+                            toggled,
+                            IconPosition::Start,
+                            None,
+                            move |_window, cx| {
+                                let value = value.clone();
+                                panel.update(cx, |panel, cx| {
+                                    if is_scheme {
+                                        panel.selected_scheme = Some(value);
+                                    } else {
+                                        panel.selected_variant = Some(value);
+                                    }
+                                    cx.notify();
+                                });
+                            },
+                        );
+                    }
+                    menu
+                }))
+            });
+        h_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                Label::new(label)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(div().flex_1())
+            .child(menu)
     }
 
     /// A button per `package.json` script, so every command the project
@@ -2262,39 +2470,7 @@ impl MobileDevPanel {
         )
     }
 
-    fn cycle_scheme(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.mobile_project.as_ref() else {
-            return;
-        };
-        if project.ios_schemes.is_empty() {
-            return;
-        }
-        let next = self
-            .selected_scheme
-            .as_deref()
-            .and_then(|current| project.ios_schemes.iter().position(|s| s == current))
-            .map(|index| (index + 1) % project.ios_schemes.len())
-            .unwrap_or(0);
-        self.selected_scheme = Some(SharedString::from(project.ios_schemes[next].clone()));
-        cx.notify();
-    }
 
-    fn cycle_variant(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.mobile_project.as_ref() else {
-            return;
-        };
-        if project.android_variants.is_empty() {
-            return;
-        }
-        let next = self
-            .selected_variant
-            .as_deref()
-            .and_then(|current| project.android_variants.iter().position(|v| v == current))
-            .map(|index| (index + 1) % project.android_variants.len())
-            .unwrap_or(0);
-        self.selected_variant = Some(SharedString::from(project.android_variants[next].clone()));
-        cx.notify();
-    }
 }
 
 impl Render for MobileDevPanel {

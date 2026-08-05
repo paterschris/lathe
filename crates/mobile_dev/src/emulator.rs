@@ -11,18 +11,40 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use util::command::{Stdio, new_command};
 
-use crate::toolchain::{self, ComponentStatus};
+use crate::toolchain;
 
-/// The emulator binary. Prefer the Lathe-managed SDK's copy (consistent with
-/// the env the panel injects); fall back to `emulator` on `PATH`.
+/// The emulator binary, searched for in every known SDK (Lathe-managed and
+/// system); falls back to `emulator` on `PATH`.
 pub fn emulator_program() -> PathBuf {
-    if let ComponentStatus::Managed(sdk) = toolchain::detect().sdk {
-        let managed = sdk.join("emulator/emulator");
-        if managed.is_file() {
-            return managed;
+    for sdk in toolchain::sdk_dirs() {
+        let emulator = sdk.join("emulator/emulator");
+        if emulator.is_file() {
+            return emulator;
         }
     }
     PathBuf::from("emulator")
+}
+
+/// Path to `sdkmanager` in the SDK that has the command-line tools, if any.
+pub fn sdkmanager_path() -> Option<PathBuf> {
+    let path = toolchain::sdk_dir()?.join("cmdline-tools/latest/bin/sdkmanager");
+    path.is_file().then_some(path)
+}
+
+/// Path to `avdmanager` in the SDK that has the command-line tools, if any.
+pub fn avdmanager_path() -> Option<PathBuf> {
+    let path = toolchain::sdk_dir()?.join("cmdline-tools/latest/bin/avdmanager");
+    path.is_file().then_some(path)
+}
+
+/// A sensible default system image for this host's architecture. Google APIs
+/// images match what Android Studio picks for a fresh AVD.
+pub fn default_system_image() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "system-images;android-35;google_apis;arm64-v8a"
+    } else {
+        "system-images;android-35;google_apis;x86_64"
+    }
 }
 
 /// The names of the AVDs installed on this machine, from

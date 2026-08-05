@@ -101,6 +101,10 @@ pub struct MobileProject {
     /// Best-effort gradle build variants (`<flavor>Debug`) for the native
     /// Android run. Empty when the gradle files couldn't be parsed.
     pub android_variants: Vec<String>,
+    /// Per-flavor `applicationId` from `build.gradle`, so the panel can launch
+    /// the exact package a flavored variant installs (which the React Native
+    /// CLI mis-resolves for flavored builds).
+    pub android_flavor_application_ids: BTreeMap<String, String>,
     pub has_ios: bool,
     pub has_android: bool,
     pub has_podfile: bool,
@@ -125,6 +129,22 @@ pub struct MobileProject {
     /// Whether cloud (EAS) builds are relevant: an `eas.json` exists, or the
     /// project is Expo.
     pub uses_eas: bool,
+}
+
+impl MobileProject {
+    /// The `applicationId` a gradle variant installs. Strips the build type
+    /// (`Debug`/`Release`) to get the flavor, then looks up its per-flavor
+    /// `applicationId`, falling back to the project's default Android package.
+    pub fn variant_application_id(&self, variant: &str) -> Option<String> {
+        let flavor = variant
+            .strip_suffix("Debug")
+            .or_else(|| variant.strip_suffix("Release"))
+            .unwrap_or(variant);
+        self.android_flavor_application_ids
+            .get(flavor)
+            .cloned()
+            .or_else(|| self.android_package.clone())
+    }
 }
 
 /// Recognise the project rooted at `root`, or `None` if it isn't a React
@@ -190,6 +210,7 @@ pub fn detect_at(root: &Path) -> Option<MobileProject> {
         scripts,
         ios_schemes: detect_ios_schemes(root),
         android_variants: detect_android_variants(root),
+        android_flavor_application_ids: detect_flavor_application_ids(root),
         has_ios,
         has_android,
         has_podfile: root.join("ios/Podfile").is_file(),
@@ -445,6 +466,65 @@ fn is_gradle_identifier(token: &str) -> bool {
         && token.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
 }
 
+fn detect_flavor_application_ids(root: &Path) -> BTreeMap<String, String> {
+    read_first_existing(
+        root,
+        &["android/app/build.gradle", "android/app/build.gradle.kts"],
+    )
+    .map(|gradle| parse_flavor_application_ids(&gradle))
+    .unwrap_or_default()
+}
+
+/// Map each product flavor to its `applicationId`, scanning every
+/// `productFlavors { ... }` block (a flavor's id may be declared in the
+/// top-level block while another block only sets its signing config).
+fn parse_flavor_application_ids(gradle: &str) -> BTreeMap<String, String> {
+    let mut ids = BTreeMap::new();
+    let mut offset = 0;
+    while let Some(pos) = gradle[offset..].find("productFlavors") {
+        let start = offset + pos + "productFlavors".len();
+        offset = start;
+        let rest = &gradle[start..];
+        // Skip `productFlavors.all { ... }` and similar (not a flavor container).
+        if rest.trim_start().starts_with('.') {
+            continue;
+        }
+        let Some(open) = rest.find('{') else { break };
+        let mut depth = 1i32;
+        let mut current_flavor: Option<String> = None;
+        for line in rest[open + 1..].lines() {
+            let trimmed = line.trim();
+            // A `<flavor> {` opens a flavor block at productFlavors depth (1).
+            if depth == 1
+                && let Some(name) = trimmed.strip_suffix('{')
+                && is_gradle_identifier(name.trim())
+            {
+                current_flavor = Some(name.trim().to_string());
+            }
+            if let Some(flavor) = current_flavor.clone()
+                && let Some(after) = trimmed.strip_prefix("applicationId")
+                && !after
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                && let Some(app_id) = extract_quoted(after)
+            {
+                ids.entry(flavor).or_insert(app_id);
+            }
+            depth += trimmed.matches('{').count() as i32;
+            depth -= trimmed.matches('}').count() as i32;
+            // Back at productFlavors level: the current flavor block closed.
+            if depth <= 1 {
+                current_flavor = None;
+            }
+            if depth <= 0 {
+                break;
+            }
+        }
+    }
+    ids
+}
+
 fn detect_ios_bundle_identifier(root: &Path) -> Option<String> {
     let ios = root.join("ios");
     let entries = std::fs::read_dir(&ios).ok()?;
@@ -491,6 +571,45 @@ fn read_first_existing(root: &Path, relatives: &[&str]) -> Option<String> {
 }
 
 /// Extract the first single- or double-quoted string from `input`.
+/// Split a scheme or gradle-variant name into positional `[app_variant,
+/// configuration]` script arguments (lowercased), for projects whose scripts
+/// take them positionally (e.g. `yarn ios tommys staging`). A trailing build
+/// type (`Debug`/`Release`) is dropped, the name is split on camelCase
+/// boundaries, the last token is the configuration, and the rest are joined as
+/// the variant. `TommysStaging` and `tommysStagingDebug` both yield
+/// `["tommys", "staging"]`; `WashClubStaging` yields `["washclub", "staging"]`.
+pub fn split_variant_config(name: &str) -> Vec<String> {
+    let base = name
+        .strip_suffix("Debug")
+        .or_else(|| name.strip_suffix("Release"))
+        .unwrap_or(name);
+    let tokens = split_camel_case(base);
+    match tokens.len() {
+        0 => Vec::new(),
+        1 => vec![tokens[0].to_lowercase()],
+        _ => {
+            let (config, variant_tokens) = tokens.split_last().unwrap();
+            let variant: String = variant_tokens.iter().map(|t| t.to_lowercase()).collect();
+            vec![variant, config.to_lowercase()]
+        }
+    }
+}
+
+fn split_camel_case(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        if ch.is_uppercase() && !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
 fn extract_quoted(input: &str) -> Option<String> {
     for quote in ['"', '\''] {
         if let Some(start) = input.find(quote) {
@@ -770,6 +889,80 @@ mod tests {
                 "adb reverse tcp:8081 tcp:8081".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn parses_per_flavor_application_ids() {
+        // Mirrors tommys: a signing-only productFlavors block, a
+        // `productFlavors.all`, then the real block with applicationIds.
+        let gradle = r#"
+            android {
+                buildTypes {
+                    release {
+                        productFlavors {
+                            tommysStaging { signingConfig signingConfigs.tommysStaging }
+                            tommysProd { signingConfig signingConfigs.tommysProduction }
+                        }
+                    }
+                }
+                productFlavors.all {
+                    buildConfigField "String", "x", "\"y\""
+                }
+                productFlavors {
+                    tommysStaging {
+                        dimension "operatorGroup"
+                        applicationId "com.tommycarwash.tommysexpress.staging"
+                    }
+                    tommysProd {
+                        dimension "operatorGroup"
+                        applicationId "com.superoperator.tommyexpress"
+                    }
+                }
+            }
+        "#;
+        let ids = parse_flavor_application_ids(gradle);
+        assert_eq!(
+            ids.get("tommysStaging").map(String::as_str),
+            Some("com.tommycarwash.tommysexpress.staging")
+        );
+        assert_eq!(
+            ids.get("tommysProd").map(String::as_str),
+            Some("com.superoperator.tommyexpress")
+        );
+    }
+
+    #[test]
+    fn variant_application_id_strips_build_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name": "app", "dependencies": {"react-native": "0.85.0"}}"#,
+        );
+        let mut project = detect_at(tmp.path()).unwrap();
+        project.android_flavor_application_ids = BTreeMap::from([(
+            "tommysStaging".to_string(),
+            "com.tommycarwash.tommysexpress.staging".to_string(),
+        )]);
+        assert_eq!(
+            project.variant_application_id("tommysStagingDebug").as_deref(),
+            Some("com.tommycarwash.tommysexpress.staging")
+        );
+    }
+
+    #[test]
+    fn splits_scheme_and_variant_into_args() {
+        assert_eq!(split_variant_config("TommysStaging"), vec!["tommys", "staging"]);
+        assert_eq!(
+            split_variant_config("tommysStagingDebug"),
+            vec!["tommys", "staging"]
+        );
+        assert_eq!(
+            split_variant_config("WashClubStaging"),
+            vec!["washclub", "staging"]
+        );
+        assert_eq!(split_variant_config("TommysProd"), vec!["tommys", "prod"]);
+        assert_eq!(split_variant_config("Tommys"), vec!["tommys"]);
     }
 
     #[test]

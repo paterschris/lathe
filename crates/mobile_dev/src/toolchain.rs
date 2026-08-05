@@ -60,6 +60,42 @@ pub fn managed_adb_path() -> Option<PathBuf> {
     adb.is_file().then_some(adb)
 }
 
+/// The Android SDK directory that has the command-line tools (`sdkmanager` /
+/// `avdmanager`): the Lathe-managed SDK if present, else a system SDK. Used to
+/// install packages and create AVDs.
+pub fn sdk_dir() -> Option<PathBuf> {
+    let managed = managed_sdk_root();
+    if managed.join(SDKMANAGER_RELATIVE).is_file() {
+        return Some(managed);
+    }
+    system_sdk_dir()
+}
+
+/// Every known Android SDK directory (managed first, then system), for callers
+/// that want to locate a binary in whichever SDK actually has it (e.g. the
+/// `emulator`, which may live in the managed SDK, a system SDK, or neither).
+pub fn sdk_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let managed = managed_sdk_root();
+    if managed.is_dir() {
+        dirs.push(managed);
+    }
+    if let Some(system) = system_sdk_dir()
+        && !dirs.contains(&system)
+    {
+        dirs.push(system);
+    }
+    // The default Android Studio location, even when it isn't a "complete"
+    // SDK yet (system_sdk_dir requires cmdline-tools or adb to be present).
+    if let Some(home) = std::env::var_os("HOME") {
+        let default = PathBuf::from(home).join("Library/Android/sdk");
+        if default.is_dir() && !dirs.contains(&default) {
+            dirs.push(default);
+        }
+    }
+    dirs
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComponentStatus {
     /// Installed in the Lathe-managed directory; the path is the component's

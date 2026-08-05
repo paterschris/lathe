@@ -40,11 +40,23 @@ impl ResolvedCommand {
 /// Run a `package.json` script by name (no extra positional args; scripts that
 /// require them print their own usage into the output pane, which is itself
 /// useful feedback).
-pub fn run_script(project: &MobileProject, name: &str) -> ResolvedCommand {
+pub fn run_script(project: &MobileProject, name: &str, extra_args: &[String]) -> ResolvedCommand {
+    let mut args = project.package_manager.run_script_args(name);
+    args.extend(extra_args.iter().cloned());
+    let label = if extra_args.is_empty() {
+        format!("{} {}", project.package_manager.program(), name)
+    } else {
+        format!(
+            "{} {} {}",
+            project.package_manager.program(),
+            name,
+            extra_args.join(" ")
+        )
+    };
     ResolvedCommand {
-        label: format!("{} {}", project.package_manager.program(), name),
+        label,
         program: project.package_manager.program().to_string(),
-        args: project.package_manager.run_script_args(name),
+        args,
         cwd: project.root.clone(),
         // Scripts may invoke gradle; the env is a harmless superset for the
         // iOS/JS ones.
@@ -66,11 +78,22 @@ pub fn install_deps(project: &MobileProject) -> ResolvedCommand {
 
 /// Start the Metro bundler (`<pm> start`). Long-lived; the panel keeps the
 /// session alive until the user stops it.
-pub fn metro(project: &MobileProject) -> ResolvedCommand {
+pub fn metro(project: &MobileProject, localhost: bool) -> ResolvedCommand {
+    let mut args = project.package_manager.run_script_args("start");
+    if localhost {
+        // Expo serves the dev-server URL on localhost instead of the host's LAN
+        // IP, so an Android emulator (which can't reach the LAN IP but does have
+        // `adb reverse tcp:8081`) can load the app in Expo Go.
+        args.push("--localhost".to_string());
+    }
     ResolvedCommand {
-        label: "Metro bundler".to_string(),
+        label: if localhost {
+            "Metro (localhost)".to_string()
+        } else {
+            "Metro bundler".to_string()
+        },
         program: project.package_manager.program().to_string(),
-        args: project.package_manager.run_script_args("start"),
+        args,
         cwd: project.root.clone(),
         wants_android_env: false,
     }
@@ -288,17 +311,27 @@ pub fn run_ios(
 /// Build and run on Android: `expo run:android` for Expo, `react-native
 /// run-android` for bare RN. `variant` picks the gradle build variant (bare RN
 /// only); `device_serial` targets a specific device/emulator.
+///
+/// The two CLIs disagree on how to name a device: the RN CLI takes the adb
+/// serial, while Expo matches `--device` against its own device names (AVD name
+/// for an emulator, `model:` for a phone), hence `expo_device_name` alongside
+/// `device_serial`. See [`crate::adb::AdbDevice::expo_device_name`].
 pub fn run_android(
     project: &MobileProject,
     variant: Option<&str>,
     device_serial: Option<&str>,
+    expo_device_name: Option<&str>,
 ) -> ResolvedCommand {
     match project.kind {
         ProjectKind::Expo => {
-            let mut args =
-                vec!["expo".to_string(), "run:android".to_string(), "--device".to_string()];
-            if let Some(serial) = device_serial {
-                args.push(serial.to_string());
+            let mut args = vec!["expo".to_string(), "run:android".to_string()];
+            // A bare `--device` makes the Expo CLI prompt for a device, which
+            // works in the panel's interactive terminal; omitting the flag
+            // entirely makes it pick the booted device itself. Only pass the
+            // flag when we have a name Expo will actually recognise.
+            if let Some(name) = expo_device_name {
+                args.push("--device".to_string());
+                args.push(name.to_string());
             }
             ResolvedCommand::npx("Run Android", args, project.root.clone(), true)
         }
@@ -313,6 +346,62 @@ pub fn run_android(
             }
             ResolvedCommand::npx("Run Android", args, project.root.clone(), true)
         }
+    }
+}
+
+/// Build + install a bare React Native Android app via gradle, then launch it
+/// with adb. This bypasses `react-native run-android`, whose `getInstallApkName`
+/// mis-resolves the APK for product-flavor builds: it looks for
+/// `app-<variant>.apk` while gradle emits `app-<flavor>-<buildType>.apk`, so the
+/// CLI errors ("Could not find the correct install APK file") even though the
+/// app installed. Gradle's `install<Variant>` task has no such problem, and we
+/// launch the flavor's exact `application_id` with `monkey`.
+pub fn run_android_gradle(
+    project: &MobileProject,
+    variant: &str,
+    device_serial: Option<&str>,
+    application_id: &str,
+) -> Vec<ResolvedCommand> {
+    let task = format!(":app:install{}", capitalize(variant));
+    let install = ResolvedCommand {
+        label: format!("gradlew {task}"),
+        program: "./gradlew".to_string(),
+        args: vec![task, "-PreactNativeDevServerPort=8081".to_string()],
+        cwd: project.root.join("android"),
+        wants_android_env: true,
+    };
+    let adb = toolchain::managed_adb_path()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "adb".to_string());
+    let mut launch_args = Vec::new();
+    if let Some(serial) = device_serial {
+        launch_args.push("-s".to_string());
+        launch_args.push(serial.to_string());
+    }
+    launch_args.extend([
+        "shell".to_string(),
+        "monkey".to_string(),
+        "-p".to_string(),
+        application_id.to_string(),
+        "-c".to_string(),
+        "android.intent.category.LAUNCHER".to_string(),
+        "1".to_string(),
+    ]);
+    let launch = ResolvedCommand {
+        label: format!("launch {application_id}"),
+        program: adb,
+        args: launch_args,
+        cwd: project.root.clone(),
+        wants_android_env: true,
+    };
+    vec![install, launch]
+}
+
+fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -332,6 +421,7 @@ mod tests {
             scripts: Vec::new(),
             ios_schemes: Vec::new(),
             android_variants: Vec::new(),
+            android_flavor_application_ids: Default::default(),
             has_ios: true,
             has_android: true,
             has_podfile: true,
@@ -346,9 +436,19 @@ mod tests {
 
     #[test]
     fn run_script_uses_package_manager() {
-        let command = run_script(&project(ProjectKind::BareReactNative), "lint");
+        let command = run_script(&project(ProjectKind::BareReactNative), "lint", &[]);
         assert_eq!(command.program, "yarn");
         assert_eq!(command.args, vec!["lint"]);
+    }
+
+    #[test]
+    fn run_script_appends_extra_args() {
+        let command = run_script(
+            &project(ProjectKind::BareReactNative),
+            "ios",
+            &["tommys".to_string(), "staging".to_string()],
+        );
+        assert_eq!(command.args, vec!["ios", "tommys", "staging"]);
     }
 
     #[test]
@@ -378,9 +478,44 @@ mod tests {
             &project(ProjectKind::BareReactNative),
             Some("tommysStagingDebug"),
             None,
+            None,
         );
         assert!(command.args.iter().any(|a| a == "--mode=tommysStagingDebug"));
         assert!(command.wants_android_env);
+    }
+
+    #[test]
+    fn bare_rn_run_android_targets_the_serial() {
+        let command = run_android(
+            &project(ProjectKind::BareReactNative),
+            None,
+            Some("emulator-5554"),
+            Some("Lathe_Pixel_API35"),
+        );
+        let idx = command.args.iter().position(|a| a == "--deviceId").unwrap();
+        assert_eq!(command.args.get(idx + 1).map(String::as_str), Some("emulator-5554"));
+    }
+
+    #[test]
+    fn expo_run_android_targets_the_expo_device_name_not_the_serial() {
+        let command = run_android(
+            &project(ProjectKind::Expo),
+            None,
+            Some("emulator-5554"),
+            Some("Lathe_Pixel_API35"),
+        );
+        let idx = command.args.iter().position(|a| a == "--device").unwrap();
+        assert_eq!(
+            command.args.get(idx + 1).map(String::as_str),
+            Some("Lathe_Pixel_API35")
+        );
+        assert!(!command.args.iter().any(|a| a == "emulator-5554"));
+    }
+
+    #[test]
+    fn expo_run_android_omits_device_flag_without_a_name() {
+        let command = run_android(&project(ProjectKind::Expo), None, None, None);
+        assert_eq!(command.args, vec!["expo", "run:android"]);
     }
 
     #[test]
