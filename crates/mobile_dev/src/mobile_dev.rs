@@ -59,6 +59,9 @@ const APPLE_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const AVD_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const BUILD_OUTPUT_LINE_CAP: usize = 500;
 const LOGCAT_LINE_CAP: usize = 1000;
+/// Up to this many README run-hints render inline (flowing with the panel
+/// scroll); beyond it the section becomes its own fixed-height scroll pane.
+const README_INLINE_HINT_LIMIT: usize = 8;
 
 #[derive(Debug, RegisterSetting)]
 pub struct MobileDevPanelSettings {
@@ -1562,15 +1565,35 @@ impl MobileDevPanel {
                     menu
                 }))
             });
-        v_flex()
-            .flex_1()
-            .gap_1()
-            .child(
-                Label::new("Android")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            )
-            .child(menu)
+        let mut column = v_flex().flex_1().gap_1().child(
+            Label::new("Android")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        );
+        if let Some(project) = self.mobile_project.as_ref()
+            && project.kind == ProjectKind::BareReactNative
+            && !project.android_variants.is_empty()
+        {
+            let options: Vec<SharedString> = project
+                .android_variants
+                .iter()
+                .cloned()
+                .map(SharedString::from)
+                .collect();
+            let selected_variant = self
+                .selected_variant
+                .clone()
+                .or_else(|| options.first().cloned());
+            column = column.child(self.render_selection_dropdown(
+                "Variant",
+                "mobile-variant",
+                options,
+                selected_variant,
+                false,
+                cx,
+            ));
+        }
+        column.child(menu)
     }
 
     /// iOS simulator + device picker as a compact dropdown.
@@ -1625,11 +1648,34 @@ impl MobileDevPanel {
                     menu
                 }))
             });
-        v_flex()
+        let mut column = v_flex()
             .flex_1()
             .gap_1()
-            .child(Label::new("iOS").size(LabelSize::XSmall).color(Color::Muted))
-            .child(menu)
+            .child(Label::new("iOS").size(LabelSize::XSmall).color(Color::Muted));
+        if let Some(project) = self.mobile_project.as_ref()
+            && project.kind == ProjectKind::BareReactNative
+            && !project.ios_schemes.is_empty()
+        {
+            let options: Vec<SharedString> = project
+                .ios_schemes
+                .iter()
+                .cloned()
+                .map(SharedString::from)
+                .collect();
+            let selected_scheme = self
+                .selected_scheme
+                .clone()
+                .or_else(|| options.first().cloned());
+            column = column.child(self.render_selection_dropdown(
+                "Scheme",
+                "mobile-scheme",
+                options,
+                selected_scheme,
+                true,
+                cx,
+            ));
+        }
+        column.child(menu)
     }
 }
 
@@ -2205,65 +2251,6 @@ impl MobileDevPanel {
         }
     }
 
-    /// Native scheme/variant run controls for bare React Native projects.
-    /// Hidden for Expo (which runs through `expo run:*`) and when no schemes or
-    /// gradle variants were detected.
-    fn render_run_section(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let project = self.mobile_project.as_ref()?;
-        if project.kind != ProjectKind::BareReactNative
-            || (project.ios_schemes.is_empty() && project.android_variants.is_empty())
-        {
-            return None;
-        }
-        let mut section = v_flex()
-            .w_full()
-            .gap_1()
-            .px_3()
-            .py_2()
-            .border_t_1()
-            .border_color(cx.theme().colors().border)
-            .child(
-                Label::new("Native run")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            );
-        if !project.ios_schemes.is_empty() {
-            let options: Vec<SharedString> = project
-                .ios_schemes
-                .iter()
-                .cloned()
-                .map(SharedString::from)
-                .collect();
-            let selected = self.selected_scheme.clone().or_else(|| options.first().cloned());
-            section = section.child(self.render_selection_dropdown(
-                "iOS scheme",
-                "mobile-scheme",
-                options,
-                selected,
-                true,
-                cx,
-            ));
-        }
-        if !project.android_variants.is_empty() {
-            let options: Vec<SharedString> = project
-                .android_variants
-                .iter()
-                .cloned()
-                .map(SharedString::from)
-                .collect();
-            let selected = self.selected_variant.clone().or_else(|| options.first().cloned());
-            section = section.child(self.render_selection_dropdown(
-                "Android variant",
-                "mobile-variant",
-                options,
-                selected,
-                false,
-                cx,
-            ));
-        }
-        Some(section)
-    }
-
     /// A labeled dropdown of `options`; picking one sets the iOS scheme (when
     /// `is_scheme`) or the Android variant.
     fn render_selection_dropdown(
@@ -2458,15 +2445,22 @@ impl MobileDevPanel {
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
-                .child(
+                .child(if project.readme_run_hints.len() > README_INLINE_HINT_LIMIT {
+                    // Long list: its own scrollable, occluded pane.
                     div()
                         .id("mobile-readme-scroll")
                         .max_h(px(160.))
                         .w_full()
                         .overflow_y_scroll()
                         .occlude()
-                        .child(rows),
-                ),
+                        .child(rows)
+                        .into_any_element()
+                } else {
+                    // Short list: flow with the panel so hovering it doesn't
+                    // lock the panel's scroll (occlude would block a pane that
+                    // has nothing to scroll).
+                    rows.into_any_element()
+                }),
         )
     }
 
@@ -2515,9 +2509,6 @@ impl Render for MobileDevPanel {
                     .w_full()
                     .overflow_y_scroll()
                     .child(self.render_project_section())
-                    .when_some(self.render_run_section(cx), |this, section| {
-                        this.child(section)
-                    })
                     .when_some(self.render_readme_section(cx), |this, section| {
                         this.child(section)
                     })
