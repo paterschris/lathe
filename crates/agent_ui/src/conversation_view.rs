@@ -1148,20 +1148,22 @@ impl ConversationView {
                         return;
                     }
                     Err(err) => {
-                        // If the agent reports the stored session_id is gone
-                        // (ACP code -32002), the local ThreadMetadata is
-                        // pointing at a session the agent's own store no
-                        // longer has (auth rotation, agent reinstall, agent
-                        // upgrade that changed session format). Clear the
-                        // stale id and start a fresh session so the panel is
-                        // usable instead of stuck on a permanent load error.
-                        let stale_session = attempted_resume
-                            && err
-                                .downcast_ref::<acp::Error>()
-                                .is_some_and(|e| e.code == acp::ErrorCode::ResourceNotFound);
+                        // A freshly spawned connection cannot load or resume a
+                        // session it doesn't have. The stored session_id may be
+                        // gone from the agent's own store (ACP ResourceNotFound,
+                        // code -32002, after auth rotation, agent reinstall, or
+                        // an upgrade that changed the session format), or the
+                        // agent may simply fail to rehydrate it for another
+                        // reason. In every one of these cases the local
+                        // ThreadMetadata points at a session the connection
+                        // can't use, so clear the stale id and start a fresh
+                        // session, keeping the panel usable instead of stuck on
+                        // a permanent load error. Auth failures are handled in
+                        // the outer match above, so they never reach here.
+                        let stale_session = attempted_resume;
                         if stale_session {
                             log::warn!(
-                                "agent server reported stored session_id missing; \
+                                "agent server could not load stored session_id ({err:#}); \
                                  clearing stale metadata and starting a fresh session"
                             );
                             cx.update(|_, cx| {
