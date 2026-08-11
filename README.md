@@ -1,6 +1,6 @@
 # Lathe
 
-A customized code editor forked from [Zed](https://zed.dev), focused on better terminal workflows, visual git integration, and deep theme customization.
+A customized code editor forked from [Zed](https://zed.dev), focused on visual git integration, deep theme customization, and better terminal and AI agent workflows.
 
 Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks for my own workflow without waiting on upstream review, and without needing each change to fit Zed's product scope. Upstream Zed is the primary project - this fork tracks it closely and layers on my own changes.
 
@@ -10,41 +10,61 @@ Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks
 
 ## Features
 
-### Custom theme and syntax highlighting
-Lathe ships with its own default theme and a refined syntax highlighting palette applied across all supported languages. The theme is tuned for long coding sessions - balanced contrast, distinct-but-not-loud accent colors for keywords, strings, and types, and deliberate choices for diagnostic and git-status colors so the editor stays readable when things go wrong. Pair it with the Theme Customizer (below) to tweak any of the 135+ color tokens to taste.
+Roughly in order of how much they change day-to-day work:
 
-![Default Theme](assets/screenshots/default-theme-code.png)
+1. [Visual git workflow](#visual-git-workflow) - commit graph, three-tab git panel, rebase, merge editor, undo
+2. [Theme and syntax highlighting](#theme-and-syntax-highlighting) - custom theme, live 135+ color customizer
+3. [AI agent integration](#ai-agent-integration) - multi-account sign-in, approval control
+4. [Terminal workflow](#terminal-workflow) - awaiting-input indicator, tab tint, bell sounds
+5. [Pull request reviews](#pull-request-reviews) - GitHub and Bitbucket Cloud, in-editor
+6. [Mobile development](#mobile-development-expo--react-native) - Expo and bare React Native panel
+7. [Windows, workspaces, and accounts](#windows-workspaces-and-accounts) - workspace groups, per-window zoom, account switching
+8. [AWS profiles](#aws-profiles) - per-window profile selector
 
+---
 
-### Theme Customizer
-A built-in panel for editing all 135+ theme colors with HSLA sliders and live preview. Includes category filters, Lathe-specific color badges, and per-color reset. Open via the command palette: `theme customizer: Open`.
+## Visual git workflow
 
-![Command Palette](assets/screenshots/theme-customizer-command-palette.png)
+The largest area of the fork. Most of what you'd normally leave the editor for (GitKraken, Fork, Sourcetree, the terminal) is available in-editor.
 
-![Theme Customizer](assets/screenshots/theme-customizer.gif)
+### Commit graph
+A full commit graph opens as an editor tab (`git graph: Open`, or the graph button in the git panel). It draws branch lanes and merge edges, streams history incrementally for large repositories, and supports search with a filter mode that hides non-matching rows. Right-click any commit to tag it, cherry-pick it onto the current branch, revert it, or reset the current branch to it (soft or hard). Drag a commit or branch onto another to rebase or cherry-pick, with a confirmation modal previewing what will run.
+
+### Undo for destructive operations
+Branch resets, deletes, renames, and tag creation record an undo entry, and the resulting toast offers a one-click **Undo**. Discards stash defensively first, so they can be restored too. Up to 50 entries are kept per repository.
+
+### Git panel: Changes, History, and Explorer
+The git panel has three tabs. **Changes** is the familiar staging view, **History** shows the commit log inline, and **Explorer** lists branches, worktrees, and stashes for the repository in one filterable tree. A multi-repo strip keeps every repository in the workspace one click away, with fetch-all and pull-all actions, plus any external repositories pinned via `repository_dashboard_pinned_repos`.
+
+### Hierarchical branch folder tree
+The Explorer tab renders Local and Remote branches as a collapsible folder tree, splitting names on `/`. So `feature/auth/login` and `feature/auth/signup` collapse under a single `feature/auth/` folder you can fold or expand. Folders show counts of contained branches and remember their open/closed state per section. Local branches that exist on the remote get an on-remote indicator. When the filter input is active the tree flattens so filter results stay legible.
+
+### Interactive rebase with drag-and-drop
+The interactive rebase modal supports drag-and-drop reordering of commits and per-row pick / squash / edit / drop actions inline. Dragging a branch onto another shows a confirmation modal with a preview of what the rebase will do before anything runs.
+
+### Merge conflict editor with full-file split view
+Resolve conflicts with **Take ours** / **Take theirs** / **Take both** per conflict, or step through them with previous/next navigation. The split view shows each side as a complete file (every conflict region replaced by that side's kept content), scrolls both panes in lockstep, and highlights the selected conflict across them. "Edit manually" drops you into the buffer when the buttons aren't enough.
 
 ### Git-aware tab and panel styling
-Tabs and project panel entries are color-coded by git status — modified, created, deleted, conflict, error, and warning states each get distinct colors.
+Tabs and project panel entries are color-coded by git status: modified, created, deleted, conflict, error, and warning states each get distinct colors.
 
 ![Git Tab Styling](assets/screenshots/git-aware-editor-tabs.png)
 
-### Hierarchical branch folder tree
-The Git Explorer panel renders Local and Remote branches as a collapsible folder tree, splitting names on `/`. So `feature/auth/login` and `feature/auth/signup` collapse under a single `feature/auth/` folder you can fold or expand. Folders show counts of contained branches and remember their open/closed state per section. When the filter input is active the tree flattens so filter results stay legible.
+### Inline hunk staging
+Expand any file row in the Changes list to see its individual hunks and stage or unstage them one at a time, without opening a diff view.
+
+### Git Flow commands
+Start and finish feature, release, and hotfix branches from the command palette. Finishing merges with `--no-ff` into the right target, tags releases and hotfixes, merges back into `develop`, and deletes the local branch. Failures surface as errors rather than half-completing silently.
+
+- `git flow: Start Feature` / `git flow: Finish Feature`
+- `git flow: Start Release` / `git flow: Finish Release`
+- `git flow: Start Hotfix` / `git flow: Finish Hotfix`
 
 ### Branch from commit
-From any commit in the Git history view, create a new branch off that revision without first checking out. Useful for forking experimental work off a specific point.
+From any commit in the history view or graph, create a new branch off that revision without first checking out. Useful for forking experimental work off a specific point.
 
 ### Detached HEAD checkout from history
 Check out any commit SHA from the history view into detached HEAD. For inspecting old state without losing your current branch position. Local repositories only for now; collab projects bail with a clear error.
-
-### Interactive rebase with drag-and-drop
-The interactive rebase modal supports drag-and-drop reordering of commits and per-row pick / squash / edit / drop actions inline. Dragging a branch onto another in the history view shows a confirmation modal with a preview of what the rebase will do before anything runs.
-
-### Git panel: Explorer and History tabs
-The git panel has three tabs. **Changes** is the familiar staging view, **History** shows the commit log inline, and **Explorer** lists branches, worktrees, and stashes for the repository in one filterable tree. A multi-repo strip keeps every repository in the workspace one click away, with fetch-all and pull-all actions.
-
-### Inline hunk staging
-Expand any file row in the Changes list to see its individual hunks and stage or unstage them one at a time, without opening a diff view.
 
 ### Worktrees that start up to date
 Creating a worktree from a remote branch fetches the latest origin state first, so the new worktree starts from the current remote tip instead of a stale local ref.
@@ -52,11 +72,38 @@ Creating a worktree from a remote branch fetches the latest origin state first, 
 ### File history view
 Open the full commit history of a single file from the project panel and browse how it changed over time.
 
-### Pull request reviews (in progress)
-A pull request panel with browser-based auth for GitHub and Bitbucket Cloud: browse PRs, read and leave review comments, see reviewers, and approve or request changes. Verdict buttons toggle, so clicking Approve again retracts your approval. Hidden in the current beta while the credentials UI is finished.
+### Branch status indicator and git activity panel
+The status bar shows the active repository's branch with its push/pull state. A separate git activity panel (docked bottom by default) shows in-flight git commands live, so long fetches and clones aren't invisible.
 
-### Terminal awaiting-input indicator
-Shows a return icon in the terminal tab and title bar when Claude Code or other interactive prompts are waiting for input.
+---
+
+## Theme and syntax highlighting
+
+### Custom theme and syntax palette
+Lathe ships with its own default theme and a refined syntax highlighting palette applied across all supported languages. The theme is tuned for long coding sessions: balanced contrast, distinct-but-not-loud accent colors for keywords, strings, and types, and deliberate choices for diagnostic and git-status colors so the editor stays readable when things go wrong.
+
+![Default Theme](assets/screenshots/default-theme-code.png)
+
+### Theme Customizer
+A built-in panel for editing all 135+ theme colors, including syntax token colors, with HSLA sliders and live preview. Includes category filters, Lathe-specific color badges, and per-color reset. Open via the command palette: `theme customizer: Open`.
+
+![Command Palette](assets/screenshots/theme-customizer-command-palette.png)
+
+![Theme Customizer](assets/screenshots/theme-customizer.gif)
+
+---
+
+## AI agent integration
+
+### Agent accounts and approval control
+Sign in to multiple subscription accounts for the external agents in the Agent Panel (Claude Code, Codex, Gemini) and switch between them from the panel's account chip. Account selection is per-workspace, so a work project and a personal project can each stay on their own identity. An approval selector picks each agent's approval / sandbox level; the level is applied when the agent process spawns, so changes take effect on the next thread. Agents with their own native approval control keep it and skip the selector.
+
+---
+
+## Terminal workflow
+
+### Awaiting-input indicator
+Shows a return icon in the terminal tab and title bar when Claude Code or other interactive prompts are waiting for input, with the tooltip distinguishing a general prompt, a confirmation, and a multiple-choice selection.
 
 ![Awaiting Input Indicator](assets/screenshots/awaiting-input-indicator.gif)
 
@@ -69,17 +116,24 @@ Switching to a terminal tab via ctrl+tab properly activates the cursor without n
 ### Terminal bell sound
 Choose what sound plays when a terminal rings its bell via the `terminal.bell` setting. Imported automatically from VS Code's `accessibility.signals.terminalBell` when migrating settings.
 
-### AI agent accounts and approval control
-Sign in to multiple subscription accounts for the external agents in the Agent Panel (Claude Code, Codex, Gemini) and switch between them from the panel's account chip. An approval selector picks each agent's approval / sandbox level; the level is applied when the agent process spawns, so changes take effect on the next thread.
+---
 
-### Multi-account collab switcher
-Sign into more than one Zed Cloud account and switch between them from the avatar menu. Saved accounts are listed under **Accounts** by their GitHub username, with **Add Account…** and **Sign Out** actions.
+## Pull request reviews
 
-### Copy collab link dialog
-When generating a shareable collab link, a dialog lets you pick which saved account to link from — useful when you work across personal and work Zed Cloud accounts.
+A pull request panel with browser-based auth for GitHub and Bitbucket Cloud: browse PRs, read and leave review comments, see reviewers, and approve or request changes without leaving the editor. Verdict buttons toggle, so clicking Approve again retracts your approval. A separate section lists PRs you authored, with reviewer roll-ups showing where each one stands. Still being polished; the panel button can be hidden via `pull_request_panel.button`.
+
+---
+
+## Mobile development (Expo / React Native)
+
+Lathe ships a first-class Mobile panel that auto-detects the kind of mobile project you open (Expo or bare React Native) and surfaces only the workflows that apply to it. For bare React Native projects it reads the project's own package scripts and the run hints in its README, offers iOS scheme and Android variant dropdowns that feed those scripts, and installs Android builds reliably with `gradlew :app:install<Variant>` plus an `adb` launch (sidestepping the React Native CLI's flavored-APK bug). Long-running processes (Metro, builds, and any script you start) open as interactive terminal tabs with their own scrollback. The panel can also create an Android emulator (AVD) for you without Android Studio, shows a live device list with per-app logcat, drives one-click debug build & run and EAS cloud builds, and installs the whole Android toolchain (JDK 17 plus the Android SDK, licenses accepted) into a Lathe-managed directory. On macOS it covers iOS as well. A drop-in `.zed/tasks.json` template and a full setup walkthrough live in [docs/mobile-development.md](docs/mobile-development.md).
+
+---
+
+## Windows, workspaces, and accounts
 
 ### Workspace groups with account binding
-Save the set of currently open projects as a named **workspace group**, then reopen the whole group in a new window later. Each group can optionally be bound to a saved collab account, so opening the group automatically switches to that account first.
+Save the set of currently open projects as a named **workspace group**, then reopen the whole group in a new window later. Each group can optionally be bound to a saved collab account, so opening the group automatically switches to that account first. Groups can also be written to a portable `.lathe-workspace` file that travels with the project.
 
 Commands (via the command palette):
 
@@ -93,8 +147,17 @@ Commands (via the command palette):
 ### Per-window zoom
 `Cmd +`, `Cmd -`, and `Cmd 0` adjust the buffer and UI font size of only the active Lathe window, so two windows side-by-side can be zoomed independently. The "Reset Zoom" menu action and `Cmd +scroll-wheel` (when mouse-wheel zoom is enabled) also stay scoped to the focused window. The persisted variants (the menu's `… (persisted)` items) still write to `settings.json` and apply globally.
 
-### Mobile (Expo / React Native) workflow
-Lathe ships a first-class Mobile panel that auto-detects the kind of mobile project you open (Expo or bare React Native) and surfaces only the workflows that apply to it. For bare React Native projects it reads the project's own package scripts and the run hints in its README, offers iOS scheme and Android variant dropdowns that feed those scripts, and installs Android builds reliably with `gradlew :app:install<Variant>` plus an `adb` launch (sidestepping the React Native CLI's flavored-APK bug). Long-running processes (Metro, builds, and any script you start) open as interactive terminal tabs with their own scrollback. The panel can also create an Android emulator (AVD) for you without Android Studio, shows a live device list with per-app logcat, drives one-click debug build & run and EAS cloud builds, and installs the whole Android toolchain (JDK 17 plus the Android SDK, licenses accepted) into a Lathe-managed directory. On macOS it covers iOS as well. A drop-in `.zed/tasks.json` template and a full setup walkthrough live in [docs/mobile-development.md](docs/mobile-development.md).
+### Multi-account collab switcher
+Sign into more than one Zed Cloud account and switch between them from the avatar menu. Saved accounts are listed under **Accounts** by their GitHub username, with **Add Account…** and **Sign Out** actions.
+
+### Copy collab link dialog
+When generating a shareable collab link, a dialog lets you pick which saved account to link from, which helps when you work across personal and work Zed Cloud accounts.
+
+---
+
+## AWS profiles
+
+A status-bar AWS profile selector, scoped per window, so two windows can target different accounts at once. Everything Lathe spawns (terminals, tasks) inherits the selected `AWS_PROFILE`. The menu shows only profiles you've used in this workspace, with the rest behind **Show All Profiles**, and it polls SSO session status so an expired login is visible before a command fails. A project-local `.aws/config` takes over from the global one when present. The whole selector stays hidden unless the machine actually has AWS profiles configured.
 
 ## Install
 
