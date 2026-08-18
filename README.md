@@ -27,6 +27,12 @@ Ordered by how much each one differentiates Lathe from stock Zed. Upstream alrea
 
 Lathe ships a first-class Mobile panel that auto-detects the kind of mobile project you open (Expo or bare React Native) and surfaces only the workflows that apply to it. For bare React Native projects it reads the project's own package scripts and the run hints in its README, offers iOS scheme and Android variant dropdowns that feed those scripts, and installs Android builds reliably with `gradlew :app:install<Variant>` plus an `adb` launch (sidestepping the React Native CLI's flavored-APK bug). Long-running processes (Metro, builds, and any script you start) open as interactive terminal tabs with their own scrollback. The panel can also create an Android emulator (AVD) for you without Android Studio, shows a live device list with per-app logcat, drives one-click debug build & run and EAS cloud builds, and installs the whole Android toolchain (JDK 17 plus the Android SDK, licenses accepted) into a Lathe-managed directory. On macOS it covers iOS as well. A drop-in `.zed/tasks.json` template and a full setup walkthrough live in [docs/mobile-development.md](docs/mobile-development.md).
 
+![Mobile Panel, iOS](assets/screenshots/mobile-panel-ios.png)
+
+Both toolchain sections report their own state, so a missing JDK or an unaccepted SDK licence is visible before a build fails rather than after. The action row follows the platform you're targeting: an iOS project offers **Boot simulator** and **Install pods**, while an Android one swaps in **adb reverse** and builds against whichever emulator or device is selected.
+
+![Mobile Panel, Android](assets/screenshots/mobile-panel-android.png)
+
 ---
 
 ## Merge conflicts and interactive rebase
@@ -34,8 +40,12 @@ Lathe ships a first-class Mobile panel that auto-detects the kind of mobile proj
 ### Conflict reporting and resolution
 When a merge, rebase, cherry-pick, revert, pull, or stash pop stops on conflicts, a notification names the conflicted files and offers **Resolve**, which opens a tab listing every conflicted file beside the merge editor for the selected one. Resolve a whole file as ours or theirs, stage files as you finish them, and abort or continue the operation from the same header without dropping to a terminal. The same tab is reachable any time from the git panel's Conflicts section or `git: resolve conflicts`.
 
+![Conflict Resolution](assets/screenshots/conflict-resolution.png)
+
 ### Merge conflict editor with full-file split view
-Resolve conflicts with **Take ours** / **Take theirs** / **Take both** per conflict, or step through them with previous/next navigation. The split view shows each side as a complete file (every conflict region replaced by that side's kept content), scrolls both panes in lockstep, and highlights the selected conflict across them. "Edit manually" drops you into the buffer when the buttons aren't enough.
+Resolve conflicts with **Take ours** / **Take theirs** / **Take both** per conflict, or step through them with previous/next navigation. A **Split view** toggle switches between per-conflict cards and full-file panes. The split view shows each side as a complete file (every conflict region replaced by that side's kept content), scrolls both panes in lockstep, and highlights the selected conflict across them. "Edit manually" drops you into the buffer when the buttons aren't enough.
+
+![Merge Editor Split View](assets/screenshots/conflict-split-view.png)
 
 ### Interactive rebase with drag-and-drop
 The interactive rebase modal supports drag-and-drop reordering of commits and per-row pick / squash / edit / drop actions inline. Dragging a commit or branch onto another in the commit graph shows a confirmation modal with a preview of what the rebase will do before anything runs.
@@ -52,6 +62,10 @@ A pull request panel with browser-based auth for GitHub and Bitbucket Cloud: bro
 
 ### Agent accounts and approval control
 Sign in to multiple subscription accounts for the external agents in the Agent Panel (Claude Code, Codex, Gemini) and switch between them from the panel's account chip. Account selection is per-workspace, so a work project and a personal project can each stay on their own identity. An approval selector picks each agent's approval / sandbox level; the level is applied when the agent process spawns, so changes take effect on the next thread. Agents with their own native approval control keep it and skip the selector.
+
+**Manage AI Accounts** lists every account for each agent alongside its connection status, lets you nominate a default per agent, and can import existing logins from `claude-account-switcher`. Individual workspaces bind their own account per agent via `ai_accounts` in `.zed/settings.json`.
+
+![Manage AI Accounts](assets/screenshots/ai-accounts-manager.png)
 
 ---
 
@@ -116,6 +130,8 @@ The status bar shows the active repository's branch with its push/pull state. A 
 ## AWS profiles
 
 A status-bar AWS profile selector, scoped per window, so two windows can target different accounts at once. Everything Lathe spawns (terminals, tasks) inherits the selected `AWS_PROFILE`. The menu shows only profiles you've used in this workspace, with the rest behind **Show All Profiles**, and it polls SSO session status so an expired login is visible before a command fails. A project-local `.aws/config` takes over from the global one when present. The whole selector stays hidden unless the machine actually has AWS profiles configured.
+
+The same menu creates a new SSO profile through a wizard, opens the AWS config file for editing, appends a `credential_process` wrapper profile for tooling that still expects SDK v2 credentials, and deactivates the current selection.
 
 ---
 
