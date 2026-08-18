@@ -44,6 +44,12 @@ enum MergeViewMode {
     Split,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum ConflictSide {
+    Ours,
+    Theirs,
+}
+
 /// Marker type for the row highlight showing the selected conflict in the
 /// split panes.
 struct SelectedConflictRows;
@@ -226,6 +232,21 @@ impl MergeEditorView {
             syncing_split_scroll: false,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Resolves every remaining conflict in the file in favour of one side.
+    /// The regions are anchored, so resolving them in sequence stays correct as
+    /// earlier edits shift the text.
+    pub fn resolve_all(&mut self, side: ConflictSide, cx: &mut Context<Self>) {
+        let conflicts = self.conflict_set.read(cx).snapshot.conflicts.clone();
+        for conflict in conflicts.iter() {
+            let kept = match side {
+                ConflictSide::Ours => vec![conflict.ours.clone()],
+                ConflictSide::Theirs => vec![conflict.theirs.clone()],
+            };
+            conflict.resolve(self.buffer.clone(), &kept, cx);
+        }
+        cx.notify();
     }
 
     /// Opens the underlying buffer in a regular editor so the user can edit
@@ -719,7 +740,63 @@ impl Render for MergeEditorView {
             .then(|| conflicts.get(selected_index).cloned())
             .flatten();
 
-        let header = h_flex()
+        let header = self.render_header(
+            file_label,
+            total,
+            selected_index,
+            nav_enabled,
+            selected_conflict,
+            view_mode,
+            is_dirty,
+            cx,
+        );
+
+        let body = if view_mode == MergeViewMode::Split && self.split.is_some() {
+            self.render_split_body(cx)
+        } else if total == 0 {
+            v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .child(
+                    Label::new("No conflicts remaining")
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
+                .into_any_element()
+        } else {
+            let rows = (0..total).map(|ix| {
+                let conflict = conflicts[ix].clone();
+                self.render_conflict(ix, total, ix == selected_index, &conflict, cx)
+            });
+            v_flex().p_3().gap_3().children(rows).into_any_element()
+        };
+
+        v_flex()
+            .key_context("MergeEditorView")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .bg(cx.theme().colors().editor_background)
+            .child(header)
+            .child(Divider::horizontal())
+            .child(body)
+    }
+}
+
+impl MergeEditorView {
+    #[allow(clippy::too_many_arguments)]
+    fn render_header(
+        &self,
+        file_label: SharedString,
+        total: usize,
+        selected_index: usize,
+        nav_enabled: bool,
+        selected_conflict: Option<ConflictRegion>,
+        view_mode: MergeViewMode,
+        is_dirty: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        h_flex()
             .px_4()
             .py_2()
             .gap_3()
@@ -799,6 +876,28 @@ impl Render for MergeEditorView {
                     )
             })
             .child(
+                Button::new("take-all-ours", "All ours")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::Small)
+                    .disabled(total == 0)
+                    .tooltip(Tooltip::text("Resolve every conflict in this file as ours"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.resolve_all(ConflictSide::Ours, cx);
+                    })),
+            )
+            .child(
+                Button::new("take-all-theirs", "All theirs")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::Small)
+                    .disabled(total == 0)
+                    .tooltip(Tooltip::text(
+                        "Resolve every conflict in this file as theirs",
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.resolve_all(ConflictSide::Theirs, cx);
+                    })),
+            )
+            .child(
                 Button::new(
                     "toggle-view-mode",
                     match view_mode {
@@ -834,37 +933,8 @@ impl Render for MergeEditorView {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.save_buffer(cx);
                     })),
-            );
-
-        let body = if view_mode == MergeViewMode::Split && self.split.is_some() {
-            self.render_split_body(cx)
-        } else if total == 0 {
-            v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(
-                    Label::new("No conflicts remaining")
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                )
-                .into_any_element()
-        } else {
-            let rows = (0..total).map(|ix| {
-                let conflict = conflicts[ix].clone();
-                self.render_conflict(ix, total, ix == selected_index, &conflict, cx)
-            });
-            v_flex().p_3().gap_3().children(rows).into_any_element()
-        };
-
-        v_flex()
-            .key_context("MergeEditorView")
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .bg(cx.theme().colors().editor_background)
-            .child(header)
-            .child(Divider::horizontal())
-            .child(body)
+            )
+            .into_any_element()
     }
 }
 
@@ -888,6 +958,35 @@ impl Item for MergeEditorView {
     fn show_toolbar(&self) -> bool {
         false
     }
+}
+
+/// Opens the merge editor for the file in the active editor. Does nothing when
+/// the active item isn't an editor over a single file.
+pub fn open_merge_editor_for_active_item(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(editor) = workspace.active_item_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(buffer) = editor.read(cx).buffer().read(cx).as_singleton() else {
+        return;
+    };
+    let git_store = workspace.project().read(cx).git_store().clone();
+    let workspace_handle = cx.weak_entity();
+    cx.spawn_in(window, async move |_, cx| {
+        let conflict_set = git_store
+            .update(cx, |git_store, cx| {
+                git_store.open_conflict_set(buffer.clone(), cx)
+            })
+            .await;
+        cx.update(|window, cx| {
+            open_merge_editor(workspace_handle, buffer, conflict_set, window, cx);
+        })
+        .log_err();
+    })
+    .detach();
 }
 
 /// Open the merge editor as a workspace item for the given buffer. The buffer

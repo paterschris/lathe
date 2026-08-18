@@ -37,12 +37,12 @@ use git::{
     parse_git_remote_url,
     repository::{
         Branch, BranchesScanResult, CommitData, CommitDetails, CommitDiff, CommitFile,
-        CommitOptions, CommitSummary, CreateWorktreeTarget, DiffStatType, DiffType, FetchOptions,
-        GitCommitTemplate, GitProgressEvent, GitRepository, GitRepositoryCheckpoint,
-        InitialGraphCommitData, LogOrder, LogSource, MergeOptions, PushOptions,
-        RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, ReflogEntry, Remote,
-        RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, Tag, UpstreamTrackingStatus,
-        Worktree as GitWorktree, delete_branch_flag,
+        CommitOptions, CommitSummary, ConflictResolutionAction, ConflictingOperation,
+        CreateWorktreeTarget, DiffStatType, DiffType, FetchOptions, GitCommitTemplate,
+        GitProgressEvent, GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder,
+        LogSource, MergeOptions, PushOptions, RebaseInProgressAction, RebaseOptions,
+        RebaseTodoEntry, ReflogEntry, Remote, RemoteCommandOutput, RepoPath, ResetMode,
+        SearchCommitArgs, Tag, UpstreamTrackingStatus, Worktree as GitWorktree, delete_branch_flag,
     },
     stash::{GitStash, StashEntry},
     status::{

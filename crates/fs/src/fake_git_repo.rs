@@ -10,11 +10,12 @@ use git::{
     blame::Blame,
     repository::{
         AskPassDelegate, Branch, BranchesScanResult, CommitData, CommitDataReader, CommitDetails,
-        CommitOptions, CommitSummary, CreateWorktreeTarget, FetchOptions,
-        FileHistoryChangedFileSets, GRAPH_CHUNK_SIZE, GitRepository, GitRepositoryCheckpoint,
-        InitialGraphCommitData, LogOrder, LogSource, MergeOptions, PushOptions,
-        RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, RefEdit, ReflogEntry, Remote,
-        RepoPath, ResetMode, SearchCommitArgs, Tag, Worktree, commit_hash_search_query,
+        CommitOptions, CommitSummary, ConflictResolutionAction, ConflictingOperation,
+        CreateWorktreeTarget, FetchOptions, FileHistoryChangedFileSets, GRAPH_CHUNK_SIZE,
+        GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource,
+        MergeOptions, PushOptions, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, RefEdit,
+        ReflogEntry, Remote, RepoPath, ResetMode, SearchCommitArgs, Tag, Worktree,
+        commit_hash_search_query,
     },
     stash::GitStash,
     status::{
@@ -1729,6 +1730,19 @@ impl GitRepository for FakeGitRepository {
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
         async { bail!("rebase_action not implemented for FakeGitRepository") }.boxed()
+    }
+
+    fn operation_in_progress(&self) -> BoxFuture<'_, Result<Option<ConflictingOperation>>> {
+        async { Ok(None) }.boxed()
+    }
+
+    fn resolve_operation(
+        &self,
+        _operation: ConflictingOperation,
+        _action: ConflictResolutionAction,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { bail!("resolve_operation not implemented for FakeGitRepository") }.boxed()
     }
 
     fn tag_create(

@@ -140,6 +140,108 @@ pub enum RebaseInProgressAction {
     Abort,
 }
 
+/// A git operation that can stop part-way through, leaving unmerged paths in
+/// the working tree for the user to resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictingOperation {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    Pull,
+    StashPop,
+}
+
+impl ConflictingOperation {
+    /// The git subcommand that owns the in-progress state, e.g. the `merge` in
+    /// `git merge --abort`. `Pull` and `StashPop` don't have one: a conflicted
+    /// pull leaves either a merge or a rebase in progress, and a conflicted
+    /// stash pop leaves no sequencer state at all.
+    pub fn subcommand(self) -> Option<&'static str> {
+        match self {
+            ConflictingOperation::Merge => Some("merge"),
+            ConflictingOperation::Rebase => Some("rebase"),
+            ConflictingOperation::CherryPick => Some("cherry-pick"),
+            ConflictingOperation::Revert => Some("revert"),
+            ConflictingOperation::Pull | ConflictingOperation::StashPop => None,
+        }
+    }
+
+    /// Whether `git <subcommand> --continue` and `--skip` apply. A merge is
+    /// finished by committing rather than by continuing a sequencer.
+    pub fn is_sequenced(self) -> bool {
+        matches!(
+            self,
+            ConflictingOperation::Rebase
+                | ConflictingOperation::CherryPick
+                | ConflictingOperation::Revert
+        )
+    }
+}
+
+impl std::fmt::Display for ConflictingOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            ConflictingOperation::Merge => "merge",
+            ConflictingOperation::Rebase => "rebase",
+            ConflictingOperation::CherryPick => "cherry-pick",
+            ConflictingOperation::Revert => "revert",
+            ConflictingOperation::Pull => "pull",
+            ConflictingOperation::StashPop => "stash pop",
+        };
+        f.write_str(name)
+    }
+}
+
+/// What to do with an operation that stopped on conflicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictResolutionAction {
+    Continue,
+    Skip,
+    Abort,
+}
+
+impl ConflictResolutionAction {
+    pub fn flag(self) -> &'static str {
+        match self {
+            ConflictResolutionAction::Continue => "--continue",
+            ConflictResolutionAction::Skip => "--skip",
+            ConflictResolutionAction::Abort => "--abort",
+        }
+    }
+}
+
+/// Returned when a git operation fails and leaves unmerged paths behind, so
+/// callers can offer conflict resolution instead of surfacing raw git output.
+/// Travels as an `anyhow::Error` payload; recover it with `downcast_ref`.
+#[derive(Debug, Clone)]
+pub struct ConflictingOperationError {
+    pub operation: ConflictingOperation,
+    /// Paths git reports as unmerged, relative to the repository root.
+    pub conflicted_paths: Vec<RepoPath>,
+    /// Combined stdout/stderr of the failed invocation, for the "View Log"
+    /// affordance.
+    pub output: String,
+}
+
+impl std::fmt::Display for ConflictingOperationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} stopped: {} conflicted file{}",
+            self.operation,
+            self.conflicted_paths.len(),
+            if self.conflicted_paths.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )
+    }
+}
+
+impl std::error::Error for ConflictingOperationError {}
+
 #[derive(Debug, Clone)]
 pub struct ReflogEntry {
     /// SHA before the operation that produced this entry.

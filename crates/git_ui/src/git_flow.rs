@@ -3,6 +3,7 @@ use git::repository::MergeOptions;
 use gpui::{AppContext as _, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, actions};
 use project::git_store::Repository;
 use ui::{Headline, HeadlineSize, prelude::*};
+use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 
 actions!(
@@ -242,6 +243,7 @@ fn finish_current_branch(
     let tag_on_finish = kind.tag_on_finish();
 
     let repo_for_task = repo;
+    let workspace_handle = cx.weak_entity();
     cx.spawn_in(window, async move |_, cx| {
         for (idx, target) in targets.iter().enumerate() {
             let target = (*target).to_string();
@@ -260,7 +262,23 @@ fn finish_current_branch(
             });
             let res: anyhow::Result<()> = receiver.await.unwrap_or_else(|_| Ok(()));
             if let Err(err) = res {
-                anyhow::bail!("merge {current_branch} into {target}: {err}");
+                // Report rather than bail: a merge that stopped on conflicts
+                // carries the conflicted paths, and stringifying it into a new
+                // error would throw them away.
+                let repo_for_report = repo_for_task.clone();
+                cx.update(|_, cx| {
+                    if let Some(workspace) = workspace_handle.upgrade() {
+                        crate::conflict_resolution::report_operation_error(
+                            &workspace,
+                            Some(repo_for_report),
+                            format!("flow finish {}", kind.prefix()),
+                            err.context(format!("merge {current_branch} into {target}")),
+                            cx,
+                        );
+                    }
+                })
+                .log_err();
+                return Ok(());
             }
 
             // Tag the *first* finish target's merge commit when the flow

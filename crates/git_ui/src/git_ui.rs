@@ -42,6 +42,7 @@ pub mod commit_context_menu;
 mod commit_modal;
 pub mod commit_tooltip;
 pub mod commit_view;
+pub mod conflict_resolution;
 mod conflict_view;
 pub mod created_worktrees;
 mod diff_multibuffer;
@@ -116,6 +117,33 @@ pub fn init(cx: &mut App) {
         repository_selector::register(workspace);
         git_picker::register(workspace);
         // PR panel + picker are registered from zed.rs (in the `pr_ui` crate).
+
+        workspace.register_action(|workspace, _: &git::ResolveConflicts, window, cx| {
+            let Some(repository) =
+                workspace
+                    .project()
+                    .read(cx)
+                    .active_repository(cx)
+                    .or_else(|| {
+                        workspace
+                            .project()
+                            .read(cx)
+                            .git_store()
+                            .read(cx)
+                            .repositories()
+                            .values()
+                            .next()
+                            .cloned()
+                    })
+            else {
+                return;
+            };
+            conflict_resolution::open_conflict_resolution(cx.entity(), repository, window, cx);
+        });
+
+        workspace.register_action(|workspace, _: &git::OpenMergeEditor, window, cx| {
+            merge_editor_view::open_merge_editor_for_active_item(workspace, window, cx);
+        });
 
         workspace.register_action(
             |workspace, action: &zed_actions::CreateWorktree, window, cx| {

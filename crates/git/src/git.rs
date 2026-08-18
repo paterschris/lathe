@@ -149,6 +149,11 @@ actions!(
         AddToGitInfoExclude,
         /// Copies the current branch name to the clipboard.
         CopyBranchName,
+        /// Opens the conflicted files of the in-progress operation in the merge
+        /// editor.
+        ResolveConflicts,
+        /// Opens the current file in the merge editor.
+        OpenMergeEditor,
     ]
 );
 

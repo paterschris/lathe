@@ -1,5 +1,4 @@
 use collections::{BTreeMap, BTreeSet, HashMap, IndexSet};
-use git_ui::commit_context_menu::{CopyCommitSha, CopyCommitTag, OpenCommitView};
 use editor::Editor;
 use futures::channel::oneshot;
 use git::{
@@ -11,6 +10,7 @@ use git::{
     },
     status::{FileStatus, StatusCode, TrackedStatus},
 };
+use git_ui::commit_context_menu::{CopyCommitSha, CopyCommitTag, OpenCommitView};
 use git_ui::{
     branch_from_commit_modal::BranchFromCommitModal,
     commit_tooltip::CommitAvatar,
@@ -20,7 +20,7 @@ use git_ui::{
     rebase_confirm_modal::RebaseConfirmModal,
 };
 use gpui::{
-    Action, Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardItem, DefiniteLength,
+    Action, Anchor, AnyElement, App, AsyncApp, Bounds, ClickEvent, ClipboardItem, DefiniteLength,
     DismissEvent, DragMoveEvent, ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable,
     Hsla, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, ScrollStrategy,
     ScrollWheelEvent, SharedString, Subscription, Task, TextStyleRefinement,
@@ -38,7 +38,6 @@ use project::{
         RepositoryEvent, RepositoryId, undo_log::UndoAction,
     },
 };
-use task::{ResolvedTask, TaskContext, TaskVariables, VariableName};
 use search::{
     SearchOption, SearchOptions, SearchSource, SelectNextMatch, SelectPreviousMatch,
     ToggleCaseSensitive, buffer_search,
@@ -51,6 +50,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
+use task::{ResolvedTask, TaskContext, TaskVariables, VariableName};
 
 use theme::AccentColors;
 use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
@@ -1110,14 +1110,45 @@ fn take_value(input: &str) -> (String, String) {
     (value.to_string(), remainder.to_string())
 }
 
-/// Detach an in-flight git op and log any error from the receiver.
-fn detach_op(cx: &mut App, receiver: oneshot::Receiver<Result<(), anyhow::Error>>) {
-    cx.spawn(async move |_| match receiver.await {
-        Ok(Err(error)) => log::error!("git op failed: {error:?}"),
+/// Detach an in-flight git op, reporting any failure to the user. Operations
+/// that stopped on conflicts get the conflict resolution surface; anything else
+/// gets the usual git error toast.
+fn detach_op(
+    cx: &mut App,
+    receiver: oneshot::Receiver<Result<(), anyhow::Error>>,
+    workspace: WeakEntity<Workspace>,
+    repository: Entity<Repository>,
+    label: String,
+) {
+    cx.spawn(async move |cx| match receiver.await {
+        Ok(Err(error)) => {
+            report_op_error(cx, &workspace, Some(repository), &label, error);
+        }
         Err(_) => log::error!("git op cancelled before completion"),
         Ok(Ok(())) => {}
     })
     .detach();
+}
+
+/// Surfaces a failed git op through the git_ui error/conflict toasts, falling
+/// back to the log when the workspace is gone.
+fn report_op_error(
+    cx: &mut AsyncApp,
+    workspace: &WeakEntity<Workspace>,
+    repository: Option<Entity<Repository>>,
+    label: &str,
+    error: anyhow::Error,
+) {
+    let Some(workspace) = workspace.upgrade() else {
+        log::error!("git op failed: {error:?}");
+        return;
+    };
+    let label = label.to_owned();
+    cx.update(|cx| {
+        git_ui::conflict_resolution::report_operation_error(
+            &workspace, repository, label, error, cx,
+        );
+    });
 }
 
 /// Detach an in-flight git op; on success, record an undo entry and surface a
@@ -1163,7 +1194,12 @@ fn detach_op_with_undo(
                     .ok();
             });
         }
-        Ok(Err(error)) => log::error!("git op failed: {error:?}"),
+        Ok(Err(error)) => {
+            let repository = git_store.read_with(cx, |git_store, _| {
+                git_store.repositories().get(&repo_id).cloned()
+            });
+            report_op_error(cx, &workspace, repository, &label, error);
+        }
         Err(_) => log::error!("git op cancelled before completion"),
     })
     .detach();
@@ -1200,7 +1236,7 @@ fn deploy_reset_action(
                 },
             );
         } else {
-            detach_op(cx, receiver);
+            detach_op(cx, receiver, workspace.clone(), repo, op_label.to_string());
         }
     }
 }
@@ -3771,12 +3807,20 @@ impl GitGraph {
                 menu = menu.entry("Checkout this commit", None, {
                     let sha = sha_full.clone();
                     let git_store = git_store.clone();
+                    let workspace = workspace.clone();
                     move |_window, cx| {
                         let sha = sha.to_string();
                         let repo = git_store.read(cx).repositories().get(&repo_id).cloned();
                         if let Some(repo) = repo {
-                            let receiver = repo.update(cx, |repo, _cx| repo.change_to_commit(sha));
-                            detach_op(cx, receiver);
+                            let receiver =
+                                repo.update(cx, |repo, _cx| repo.change_to_commit(sha.clone()));
+                            detach_op(
+                                cx,
+                                receiver,
+                                workspace.clone(),
+                                repo,
+                                format!("checkout {sha}"),
+                            );
                         }
                     }
                 });
@@ -3867,7 +3911,7 @@ impl GitGraph {
                                 is_current: true,
                             },
                         ),
-                        None => detach_op(cx, receiver),
+                        None => detach_op(cx, receiver, workspace.clone(), repo, label),
                     }
                 }
             });
@@ -3912,7 +3956,7 @@ impl GitGraph {
                                     is_current: true,
                                 },
                             ),
-                            None => detach_op(cx, receiver),
+                            None => detach_op(cx, receiver, workspace.clone(), repo, label),
                         }
                     }
                 });
@@ -3943,7 +3987,7 @@ impl GitGraph {
                                 is_current: true,
                             },
                         ),
-                        None => detach_op(cx, receiver),
+                        None => detach_op(cx, receiver, workspace.clone(), repo, label),
                     }
                 }
             });
@@ -4027,7 +4071,7 @@ impl GitGraph {
                                     is_current: true,
                                 },
                             ),
-                            None => detach_op(cx, receiver),
+                            None => detach_op(cx, receiver, workspace.clone(), repo, label),
                         }
                     }
                 });

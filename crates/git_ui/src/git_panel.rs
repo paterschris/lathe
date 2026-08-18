@@ -6,6 +6,7 @@ use crate::commit_context_menu::{
 use crate::commit_modal::CommitModal;
 use crate::commit_tooltip::{CommitAvatar, CommitTooltip};
 use crate::commit_view::CommitView;
+use crate::conflict_resolution;
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
 use crate::project_diff::{DeployBranchDiff, Diff, ProjectDiff};
 use crate::remote_output::{self, RemoteAction, SuccessMessage};
@@ -4957,11 +4958,29 @@ impl GitPanel {
             .any(|entry| entry.status.is_conflicted() && entry.staging.has_unstaged())
     }
 
+    /// Opens the conflict resolution tab for the active repository.
+    pub fn open_conflict_resolution(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(workspace), Some(repository)) =
+            (self.workspace.upgrade(), self.active_repository.clone())
+        else {
+            return;
+        };
+        conflict_resolution::open_conflict_resolution(workspace, repository, window, cx);
+    }
+
     fn show_error_toast(&self, action: impl Into<SharedString>, e: anyhow::Error, cx: &mut App) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        show_error_toast(workspace, action, e, cx)
+        // Operations that stopped on conflicts get the resolution surface
+        // instead of a bare failure message.
+        conflict_resolution::report_operation_error(
+            &workspace,
+            self.active_repository.clone(),
+            action,
+            e,
+            cx,
+        )
     }
 
     fn show_git_job_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -7093,6 +7112,20 @@ impl GitPanel {
                         .single_line(),
                 ),
             )
+            .when(section == Section::Conflict && !section_is_empty, |this| {
+                this.child(
+                    Button::new("resolve-conflicts", "Resolve")
+                        .style(ButtonStyle::Subtle)
+                        .label_size(LabelSize::Small)
+                        .tooltip(Tooltip::text(
+                            "Open the conflicted files in the merge editor",
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_conflict_resolution(window, cx);
+                            cx.stop_propagation();
+                        })),
+                )
+            })
             .child(if section_is_empty {
                 gpui::Empty.into_any_element()
             } else {

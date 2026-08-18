@@ -503,6 +503,52 @@ impl super::Repository {
         })
     }
 
+    /// The merge/rebase/cherry-pick/revert this repository is part-way through,
+    /// if any.
+    pub fn operation_in_progress(
+        &mut self,
+    ) -> oneshot::Receiver<Result<Option<ConflictingOperation>>> {
+        self.send_job("operation_in_progress", None, move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.operation_in_progress().await
+                }
+                RepositoryState::Remote(_) => Ok(None),
+            }
+        })
+    }
+
+    pub fn resolve_operation(
+        &mut self,
+        operation: ConflictingOperation,
+        action: ConflictResolutionAction,
+    ) -> oneshot::Receiver<Result<()>> {
+        let label: SharedString = match operation.subcommand() {
+            Some(subcommand) => format!("git {subcommand} {}", action.flag()).into(),
+            None => format!("git {operation}").into(),
+        };
+        self.send_job(
+            "resolve_operation",
+            Some(label),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => {
+                        backend
+                            .resolve_operation(operation, action, environment)
+                            .await
+                    }
+                    RepositoryState::Remote(_) => {
+                        bail!("resolving conflicts is not yet supported on remote projects")
+                    }
+                }
+            },
+        )
+    }
+
     pub fn tag_create(
         &mut self,
         name: String,

@@ -45,7 +45,8 @@ pub use askpass::{AskPassDelegate, AskPassResult, AskPassSession};
 // module; re-export them here so `git::repository::{...}` import paths (used by
 // git_ui/git_graph/pr_ui) and the trait methods below keep resolving unchanged.
 pub use crate::lathe_repository::{
-    FileHistory, FileHistoryEntry, GitProgressEvent, GitProgressSender, MergeOptions, RebaseAction,
+    ConflictResolutionAction, ConflictingOperation, ConflictingOperationError, FileHistory,
+    FileHistoryEntry, GitProgressEvent, GitProgressSender, MergeOptions, RebaseAction,
     RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, ReflogEntry, Tag,
 };
 
@@ -1207,6 +1208,19 @@ pub trait GitRepository: Send + Sync {
     fn rebase_action(
         &self,
         action: RebaseInProgressAction,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// The merge, rebase, cherry-pick, or revert this repository is part-way
+    /// through, if any. Reported from the sequencer state in the git directory,
+    /// so it stays accurate no matter which client started the operation.
+    fn operation_in_progress(&self) -> BoxFuture<'_, Result<Option<ConflictingOperation>>>;
+
+    /// Continue, skip, or abort an operation that stopped on conflicts.
+    fn resolve_operation(
+        &self,
+        operation: ConflictingOperation,
+        action: ConflictResolutionAction,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
 
@@ -2710,11 +2724,16 @@ impl GitRepository for RealGitRepository {
                 }
                 let output = git.build_command(&args).envs(env.iter()).output().await?;
 
-                anyhow::ensure!(
-                    output.status.success(),
-                    "Failed to stash pop:\n{}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                if !output.status.success() {
+                    return Err(operation_failure(
+                        &git,
+                        ConflictingOperation::StashPop,
+                        "Failed to stash pop",
+                        &output.stdout,
+                        &output.stderr,
+                    )
+                    .await);
+                }
                 Ok(())
             })
             .boxed()
@@ -3019,7 +3038,23 @@ impl GitRepository for RealGitRepository {
                 command.arg("--progress");
             }
 
-            run_git_command(env, ask_pass, command, executor, progress_tx).await
+            match run_git_command(env, ask_pass, command, executor, progress_tx).await {
+                Ok(output) => Ok(output),
+                Err(error) => {
+                    // A conflicted pull leaves a merge or rebase in progress;
+                    // git reports the conflicts on stdout, which the remote
+                    // command error doesn't carry, so ask the index directly.
+                    let conflicted_paths = unmerged_paths(&git).await;
+                    if conflicted_paths.is_empty() {
+                        return Err(error);
+                    }
+                    Err(anyhow::Error::new(ConflictingOperationError {
+                        operation: ConflictingOperation::Pull,
+                        conflicted_paths,
+                        output: error.to_string(),
+                    }))
+                }
+            }
         }
         .boxed()
     }
@@ -3743,11 +3778,16 @@ impl GitRepository for RealGitRepository {
                 args.push(commit.into());
             }
             let output = git.build_command(&args).envs(env.iter()).output().await?;
-            anyhow::ensure!(
-                output.status.success(),
-                "Failed to cherry-pick:\n{}",
-                String::from_utf8_lossy(&output.stderr),
-            );
+            if !output.status.success() {
+                return Err(operation_failure(
+                    &git,
+                    ConflictingOperation::CherryPick,
+                    "Failed to cherry-pick",
+                    &output.stdout,
+                    &output.stderr,
+                )
+                .await);
+            }
             Ok(())
         }
         .boxed()
@@ -3776,11 +3816,16 @@ impl GitRepository for RealGitRepository {
                 args.push(commit.into());
             }
             let output = git.build_command(&args).envs(env.iter()).output().await?;
-            anyhow::ensure!(
-                output.status.success(),
-                "Failed to revert:\n{}",
-                String::from_utf8_lossy(&output.stderr),
-            );
+            if !output.status.success() {
+                return Err(operation_failure(
+                    &git,
+                    ConflictingOperation::Revert,
+                    "Failed to revert",
+                    &output.stdout,
+                    &output.stderr,
+                )
+                .await);
+            }
             Ok(())
         }
         .boxed()
@@ -3819,11 +3864,16 @@ impl GitRepository for RealGitRepository {
             }
             args.push(commit.into());
             let output = git.build_command(&args).envs(env.iter()).output().await?;
-            anyhow::ensure!(
-                output.status.success(),
-                "Failed to merge:\n{}",
-                String::from_utf8_lossy(&output.stderr),
-            );
+            if !output.status.success() {
+                return Err(operation_failure(
+                    &git,
+                    ConflictingOperation::Merge,
+                    "Failed to merge",
+                    &output.stdout,
+                    &output.stderr,
+                )
+                .await);
+            }
             Ok(())
         }
         .boxed()
@@ -3848,11 +3898,16 @@ impl GitRepository for RealGitRepository {
             }
             args.push(upstream.into());
             let output = git.build_command(&args).envs(env.iter()).output().await?;
-            anyhow::ensure!(
-                output.status.success(),
-                "Failed to rebase:\n{}",
-                String::from_utf8_lossy(&output.stderr),
-            );
+            if !output.status.success() {
+                return Err(operation_failure(
+                    &git,
+                    ConflictingOperation::Rebase,
+                    "Failed to rebase",
+                    &output.stdout,
+                    &output.stderr,
+                )
+                .await);
+            }
             Ok(())
         }
         .boxed()
@@ -3990,11 +4045,16 @@ impl GitRepository for RealGitRepository {
                 .env("GIT_EDITOR", "true")
                 .output()
                 .await?;
-            anyhow::ensure!(
-                output.status.success(),
-                "Failed to rebase --interactive:\n{}",
-                String::from_utf8_lossy(&output.stderr),
-            );
+            if !output.status.success() {
+                return Err(operation_failure(
+                    &git,
+                    ConflictingOperation::Rebase,
+                    "Failed to rebase --interactive",
+                    &output.stdout,
+                    &output.stderr,
+                )
+                .await);
+            }
             Ok(())
         }
         .boxed()
@@ -4019,11 +4079,81 @@ impl GitRepository for RealGitRepository {
                 .env("GIT_EDITOR", "true")
                 .output()
                 .await?;
+            if !output.status.success() {
+                // `--continue` and `--skip` can stop again on the next commit;
+                // `--abort` failing is never a conflict, and `operation_failure`
+                // falls back to a plain error when nothing is unmerged.
+                return Err(operation_failure(
+                    &git,
+                    ConflictingOperation::Rebase,
+                    &format!("Failed to {flag}"),
+                    &output.stdout,
+                    &output.stderr,
+                )
+                .await);
+            }
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn operation_in_progress(&self) -> BoxFuture<'_, Result<Option<ConflictingOperation>>> {
+        let git_directory = self.path();
+        self.executor
+            .spawn(async move {
+                // Order matters: a conflicted `git pull --rebase` writes both
+                // rebase state and (for the stopped commit) CHERRY_PICK-like
+                // markers, and a rebase is the operation the user must drive.
+                let candidates: [(&str, ConflictingOperation); 5] = [
+                    (crate::REBASE_MERGE_DIR, ConflictingOperation::Rebase),
+                    (crate::REBASE_APPLY_DIR, ConflictingOperation::Rebase),
+                    ("MERGE_HEAD", ConflictingOperation::Merge),
+                    ("CHERRY_PICK_HEAD", ConflictingOperation::CherryPick),
+                    ("REVERT_HEAD", ConflictingOperation::Revert),
+                ];
+                for (entry, operation) in candidates {
+                    if smol::fs::metadata(git_directory.join(entry)).await.is_ok() {
+                        return Ok(Some(operation));
+                    }
+                }
+                Ok(None)
+            })
+            .boxed()
+    }
+
+    fn resolve_operation(
+        &self,
+        operation: ConflictingOperation,
+        action: ConflictResolutionAction,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        async move {
+            let subcommand = operation
+                .subcommand()
+                .with_context(|| format!("a {operation} cannot be continued or aborted"))?;
             anyhow::ensure!(
-                output.status.success(),
-                "Failed to {flag}:\n{}",
-                String::from_utf8_lossy(&output.stderr),
+                action != ConflictResolutionAction::Skip || operation.is_sequenced(),
+                "a {operation} has no commit to skip",
             );
+            let git = git_binary;
+            let flag = action.flag();
+            let output = git
+                .build_command(&[subcommand, flag])
+                .envs(env.iter())
+                .env("GIT_EDITOR", "true")
+                .output()
+                .await?;
+            if !output.status.success() {
+                return Err(operation_failure(
+                    &git,
+                    operation,
+                    &format!("Failed to {subcommand} {flag}"),
+                    &output.stdout,
+                    &output.stderr,
+                )
+                .await);
+            }
             Ok(())
         }
         .boxed()
@@ -4646,6 +4776,56 @@ struct GitBinaryCommandError {
     stdout: String,
     stderr: String,
     status: ExitStatus,
+}
+
+/// Paths git currently reports as unmerged. Empty when the working tree has no
+/// conflicts, including when the query itself fails — this only ever runs to
+/// enrich an error that is already being reported.
+async fn unmerged_paths(git: &GitBinary) -> Vec<RepoPath> {
+    let Some(output) = git
+        .build_command(&["diff", "--name-only", "--diff-filter=U", "-z"])
+        .output()
+        .await
+        .log_err()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| RepoPath::new(path).log_err())
+        .collect()
+}
+
+/// Builds the error for a failed git invocation, upgrading it to a
+/// [`ConflictingOperationError`] when the failure left unmerged paths behind so
+/// callers can offer conflict resolution rather than just raw git output.
+async fn operation_failure(
+    git: &GitBinary,
+    operation: ConflictingOperation,
+    context: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> anyhow::Error {
+    let conflicted_paths = unmerged_paths(git).await;
+    if conflicted_paths.is_empty() {
+        return anyhow!("{context}:\n{}", String::from_utf8_lossy(stderr));
+    }
+    // Git reports conflicts on stdout and diagnostics on stderr; the log view
+    // wants both.
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    anyhow::Error::new(ConflictingOperationError {
+        operation,
+        conflicted_paths,
+        output,
+    })
 }
 
 async fn run_git_command(
@@ -6954,6 +7134,151 @@ mod tests {
         assert_eq!(
             remote_urls.get("upstream").unwrap(),
             "/Users/user/My Projects/upstream.git"
+        );
+    }
+
+    /// Sets up a repository whose `other` branch conflicts with `main` on
+    /// `file.txt`, leaving `main` checked out.
+    fn init_conflicting_repo(repo_dir: &Path) {
+        git_init_repo(repo_dir);
+        fs::write(repo_dir.join("file.txt"), "base\n").unwrap();
+        git_command(repo_dir, ["add", "file.txt"]);
+        git_command(repo_dir, ["commit", "-m", "initial"]);
+
+        git_command(repo_dir, ["checkout", "-b", "other"]);
+        fs::write(repo_dir.join("file.txt"), "theirs\n").unwrap();
+        git_command(repo_dir, ["commit", "-am", "theirs"]);
+
+        git_command(repo_dir, ["checkout", "main"]);
+        fs::write(repo_dir.join("file.txt"), "ours\n").unwrap();
+        git_command(repo_dir, ["commit", "-am", "ours"]);
+    }
+
+    #[gpui::test]
+    async fn test_merge_conflict_reports_conflicted_paths(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_conflicting_repo(repo_dir.path());
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        let error = repo
+            .merge(
+                "other".to_string(),
+                MergeOptions::default(),
+                Arc::new(HashMap::default()),
+            )
+            .await
+            .expect_err("merging conflicting branches should fail");
+        let conflict = error
+            .downcast_ref::<ConflictingOperationError>()
+            .expect("a conflicted merge should report its conflicted paths");
+        assert_eq!(conflict.operation, ConflictingOperation::Merge);
+        assert_eq!(
+            conflict.conflicted_paths,
+            vec![RepoPath::new("file.txt").unwrap()]
+        );
+
+        assert_eq!(
+            repo.operation_in_progress().await.unwrap(),
+            Some(ConflictingOperation::Merge)
+        );
+
+        repo.resolve_operation(
+            ConflictingOperation::Merge,
+            ConflictResolutionAction::Abort,
+            Arc::new(HashMap::default()),
+        )
+        .await
+        .expect("aborting the merge should succeed");
+
+        assert_eq!(repo.operation_in_progress().await.unwrap(), None);
+        assert_eq!(
+            fs::read_to_string(repo_dir.path().join("file.txt")).unwrap(),
+            "ours\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_failed_operation_without_conflicts_is_a_plain_error(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_conflicting_repo(repo_dir.path());
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        let error = repo
+            .merge(
+                "no-such-branch".to_string(),
+                MergeOptions::default(),
+                Arc::new(HashMap::default()),
+            )
+            .await
+            .expect_err("merging a missing branch should fail");
+        assert!(error.downcast_ref::<ConflictingOperationError>().is_none());
+        assert_eq!(repo.operation_in_progress().await.unwrap(), None);
+    }
+
+    #[gpui::test]
+    async fn test_conflicted_rebase_can_be_continued(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_conflicting_repo(repo_dir.path());
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        let error = repo
+            .rebase(
+                "other".to_string(),
+                RebaseOptions::default(),
+                Arc::new(HashMap::default()),
+            )
+            .await
+            .expect_err("rebasing onto a conflicting branch should fail");
+        let conflict = error
+            .downcast_ref::<ConflictingOperationError>()
+            .expect("a conflicted rebase should report its conflicted paths");
+        assert_eq!(conflict.operation, ConflictingOperation::Rebase);
+        assert_eq!(
+            repo.operation_in_progress().await.unwrap(),
+            Some(ConflictingOperation::Rebase)
+        );
+
+        fs::write(repo_dir.path().join("file.txt"), "resolved\n").unwrap();
+        git_command(repo_dir.path(), ["add", "file.txt"]);
+        repo.resolve_operation(
+            ConflictingOperation::Rebase,
+            ConflictResolutionAction::Continue,
+            Arc::new(HashMap::default()),
+        )
+        .await
+        .expect("continuing the rebase should succeed");
+
+        assert_eq!(repo.operation_in_progress().await.unwrap(), None);
+        assert_eq!(
+            fs::read_to_string(repo_dir.path().join("file.txt")).unwrap(),
+            "resolved\n"
         );
     }
 }
