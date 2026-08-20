@@ -17,7 +17,7 @@ impl RenderOnce for ParallelAgentsIllustration {
 
         let loading_bar = |id: &'static str, width: DefiniteLength, duration_ms: u64| {
             div()
-                .h(rems_from_px(5.))
+                .h(rems_from_px(5.0_f32))
                 .w(width)
                 .rounded_full()
                 .bg(cx.theme().colors().element_selected)
@@ -31,7 +31,7 @@ impl RenderOnce for ParallelAgentsIllustration {
         };
 
         let skeleton_bar = |width: DefiniteLength| {
-            div().h(rems_from_px(5.)).w(width).rounded_full().bg(cx
+            div().h(rems_from_px(5.0_f32)).w(width).rounded_full().bg(cx
                 .theme()
                 .colors()
                 .text_muted
@@ -228,20 +228,20 @@ impl RenderOnce for ParallelAgentsIllustration {
             .bg(cx.theme().colors().panel_background)
             .child(
                 v_flex()
-                    .child(file_row(0, true, rems_from_px(42.0)))
-                    .child(file_row(1, true, rems_from_px(28.0)))
-                    .child(file_row(2, false, rems_from_px(52.0)))
-                    .child(file_row(2, false, rems_from_px(36.0)))
-                    .child(file_row(2, false, rems_from_px(44.0)))
-                    .child(file_row(1, true, rems_from_px(34.0)))
-                    .child(file_row(2, false, rems_from_px(48.0)))
-                    .child(file_row(2, true, rems_from_px(26.0)))
-                    .child(file_row(3, false, rems_from_px(40.0)))
-                    .child(file_row(3, false, rems_from_px(56.0)))
-                    .child(file_row(1, false, rems_from_px(38.0)))
-                    .child(file_row(0, true, rems_from_px(30.0)))
-                    .child(file_row(1, false, rems_from_px(46.0)))
-                    .child(file_row(1, false, rems_from_px(32.0))),
+                    .child(file_row(0, true, rems_from_px(42.0_f32)))
+                    .child(file_row(1, true, rems_from_px(28.0_f32)))
+                    .child(file_row(2, false, rems_from_px(52.0_f32)))
+                    .child(file_row(2, false, rems_from_px(36.0_f32)))
+                    .child(file_row(2, false, rems_from_px(44.0_f32)))
+                    .child(file_row(1, true, rems_from_px(34.0_f32)))
+                    .child(file_row(2, false, rems_from_px(48.0_f32)))
+                    .child(file_row(2, true, rems_from_px(26.0_f32)))
+                    .child(file_row(3, false, rems_from_px(40.0_f32)))
+                    .child(file_row(3, false, rems_from_px(56.0_f32)))
+                    .child(file_row(1, false, rems_from_px(38.0_f32)))
+                    .child(file_row(0, true, rems_from_px(30.0_f32)))
+                    .child(file_row(1, false, rems_from_px(46.0_f32)))
+                    .child(file_row(1, false, rems_from_px(32.0_f32))),
             );
 
         let workspace = div()
@@ -249,7 +249,7 @@ impl RenderOnce for ParallelAgentsIllustration {
             .top_8()
             .grid()
             .grid_cols(7)
-            .w(rems_from_px(380.))
+            .w(rems_from_px(380.0_f32))
             .rounded_t_sm()
             .border_1()
             .border_color(cx.theme().colors().border.opacity(0.5))
@@ -260,7 +260,7 @@ impl RenderOnce for ParallelAgentsIllustration {
 
         h_flex()
             .relative()
-            .h(rems_from_px(180.))
+            .h(rems_from_px(180.0_f32))
             .bg(cx.theme().colors().editor_background.opacity(0.6))
             .justify_center()
             .items_end()

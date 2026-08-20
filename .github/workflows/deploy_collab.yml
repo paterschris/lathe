@@ -11,7 +11,7 @@ permissions:
   contents: read
 jobs:
   style:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
     name: Check formatting and Clippy lints
     runs-on: namespace-profile-16x32-ubuntu-2204
     env:

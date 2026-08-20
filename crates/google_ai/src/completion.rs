@@ -67,6 +67,7 @@ pub fn into_google(
                         function_call: crate::FunctionCall {
                             name: tool_use.name.to_string(),
                             args: input,
+                            id: Some(tool_use.id.to_string()),
                         },
                         thought_signature,
                     }));
@@ -101,6 +102,7 @@ pub fn into_google(
                             response: serde_json::json!({
                                 "output": output
                             }),
+                            id: Some(tool_result.tool_use_id.to_string()),
                         },
                     }));
                     mapped_parts.extend(images.into_iter().map(Part::InlineDataPart));
@@ -109,6 +111,8 @@ pub fn into_google(
         }
         Ok(mapped_parts)
     }
+
+    let thinking_config = thinking_config_for_request(&request, &model_id, mode);
 
     let system_instructions = if request
         .messages
@@ -122,8 +126,6 @@ pub fn into_google(
     } else {
         None
     };
-
-    let thinking_config = thinking_config_for_request(&request, &model_id, mode);
 
     let tools = if request.tools.is_empty() {
         None
@@ -177,7 +179,7 @@ pub fn into_google(
             candidate_count: Some(1),
             stop_sequences: Some(request.stop),
             max_output_tokens: None,
-            temperature: request.temperature.map(|t| t as f64).or(Some(1.0)),
+            temperature: request.temperature.map(|t| t as f64),
             thinking_config,
             top_p: None,
             top_k: None,
@@ -247,7 +249,12 @@ fn is_google_thinking_model(model_id: &str) -> bool {
 
 fn disabled_thinking_level(model_id: &str) -> Option<ThinkingLevel> {
     match model_id {
-        model_id if model_id.starts_with("gemini-3") && model_id.contains("-pro") => {
+        // `gemini-3.7-flash` rejects `MINIMAL` with a validation error, so `LOW` is
+        // the lowest level available to it.
+        model_id
+            if model_id.starts_with("gemini-3.7-flash")
+                || (model_id.starts_with("gemini-3") && model_id.contains("-pro")) =>
+        {
             Some(ThinkingLevel::Low)
         }
         model_id if model_id.starts_with("gemini-3") => Some(ThinkingLevel::Minimal),
@@ -337,6 +344,23 @@ impl GoogleEventMapper {
                     self.stop_reason = match finish_reason {
                         "STOP" => StopReason::EndTurn,
                         "MAX_TOKENS" => StopReason::MaxTokens,
+                        "SAFETY"
+                        | "RECITATION"
+                        | "LANGUAGE"
+                        | "OTHER"
+                        | "BLOCKLIST"
+                        | "PROHIBITED_CONTENT"
+                        | "SPII"
+                        | "MALFORMED_FUNCTION_CALL"
+                        | "IMAGE_SAFETY"
+                        | "IMAGE_PROHIBITED_CONTENT"
+                        | "IMAGE_OTHER"
+                        | "NO_IMAGE"
+                        | "IMAGE_RECITATION"
+                        | "UNEXPECTED_TOOL_CALL"
+                        | "TOO_MANY_TOOL_CALLS"
+                        | "MISSING_THOUGHT_SIGNATURE"
+                        | "MALFORMED_RESPONSE" => StopReason::Refusal,
                         _ => {
                             log::error!("Unexpected google finish_reason: {finish_reason}");
                             StopReason::EndTurn
@@ -376,10 +400,14 @@ impl GoogleEventMapper {
                         Part::FunctionCallPart(function_call_part) => {
                             wants_to_use_tool = true;
                             let name: Arc<str> = function_call_part.function_call.name.into();
-                            let next_tool_id =
-                                TOOL_CALL_COUNTER.fetch_add(1, atomic::Ordering::SeqCst);
                             let id: LanguageModelToolUseId =
-                                format!("{}-{}", name, next_tool_id).into();
+                                if let Some(ref call_id) = function_call_part.function_call.id {
+                                    call_id.clone().into()
+                                } else {
+                                    let next_tool_id =
+                                        TOOL_CALL_COUNTER.fetch_add(1, atomic::Ordering::SeqCst);
+                                    format!("{}-{}", name, next_tool_id).into()
+                                };
 
                             // Normalize empty string signatures to None
                             let thought_signature = function_call_part
@@ -456,7 +484,247 @@ mod tests {
         Content, FunctionCall, FunctionCallPart, GenerateContentCandidate, GenerateContentResponse,
         Part, Role as GoogleRole,
     };
+    use language_model_core::LanguageModelRequestMessage;
     use serde_json::json;
+
+    fn text_request() -> LanguageModelRequest {
+        LanguageModelRequest {
+            messages: vec![LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::Text("Hello".to_string())],
+                cache: false,
+                reasoning_details: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn into_google_requests_thought_summaries_and_thinking_level() {
+        let mut request = text_request();
+        request.thinking_allowed = true;
+        request.thinking_effort = Some("low".to_string());
+
+        let request = into_google(
+            request,
+            "gemini-3.5-flash".to_string(),
+            GoogleModelMode::Thinking {
+                budget_tokens: None,
+            },
+        )
+        .unwrap();
+
+        let thinking_config = request.generation_config.unwrap().thinking_config.unwrap();
+        assert_eq!(thinking_config.include_thoughts, Some(true));
+        assert_eq!(thinking_config.thinking_level, Some(ThinkingLevel::Low));
+
+        let serialized = serde_json::to_value(thinking_config).unwrap();
+        assert_eq!(serialized["thinkingLevel"], "LOW");
+        assert_eq!(serialized["includeThoughts"], true);
+    }
+
+    #[test]
+    fn into_google_turns_off_budget_thinking_when_supported() {
+        let mut request = text_request();
+        request.thinking_allowed = false;
+
+        let request = into_google(
+            request,
+            "gemini-2.5-flash".to_string(),
+            GoogleModelMode::Thinking {
+                budget_tokens: None,
+            },
+        )
+        .unwrap();
+
+        let thinking_config = request.generation_config.unwrap().thinking_config.unwrap();
+        assert_eq!(thinking_config.thinking_budget, Some(0));
+        assert_eq!(thinking_config.include_thoughts, None);
+    }
+
+    #[test]
+    fn into_google_uses_minimal_level_when_gemini_3_flash_thinking_is_off() {
+        let mut request = text_request();
+        request.thinking_allowed = false;
+
+        let request = into_google(
+            request,
+            "gemini-3.5-flash".to_string(),
+            GoogleModelMode::Thinking {
+                budget_tokens: None,
+            },
+        )
+        .unwrap();
+
+        let thinking_config = request.generation_config.unwrap().thinking_config.unwrap();
+        assert_eq!(thinking_config.thinking_level, Some(ThinkingLevel::Minimal));
+        assert_eq!(thinking_config.include_thoughts, None);
+    }
+
+    #[test]
+    fn into_google_replays_signed_thinking_as_thought_text_part() {
+        let request = LanguageModelRequest {
+            messages: vec![LanguageModelRequestMessage {
+                role: Role::Assistant,
+                content: vec![MessageContent::Thinking {
+                    text: "summary".to_string(),
+                    signature: Some("signature".to_string()),
+                }],
+                cache: false,
+                reasoning_details: None,
+            }],
+            ..Default::default()
+        };
+
+        let request = into_google(
+            request,
+            "gemini-3.5-flash".to_string(),
+            GoogleModelMode::Thinking {
+                budget_tokens: None,
+            },
+        )
+        .unwrap();
+
+        let Part::TextPart(text_part) = &request.contents[0].parts[0] else {
+            panic!("expected text part");
+        };
+        assert_eq!(text_part.text, "summary");
+        assert!(text_part.thought);
+        assert_eq!(text_part.thought_signature.as_deref(), Some("signature"));
+    }
+
+    #[test]
+    fn thought_text_part_deserializes_and_maps_to_thinking_event() {
+        let part: Part = serde_json::from_value(json!({
+            "text": "checking the constraints",
+            "thought": true,
+            "thoughtSignature": "thought-signature"
+        }))
+        .unwrap();
+
+        let mut mapper = GoogleEventMapper::new();
+        let response = GenerateContentResponse {
+            candidates: Some(vec![GenerateContentCandidate {
+                index: Some(0),
+                content: Content {
+                    parts: vec![part],
+                    role: GoogleRole::Model,
+                },
+                finish_reason: None,
+                finish_message: None,
+                safety_ratings: None,
+                citation_metadata: None,
+            }]),
+            prompt_feedback: None,
+            usage_metadata: None,
+        };
+
+        let events = mapper.map_event(response);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            Ok(LanguageModelCompletionEvent::Thinking { text, signature })
+                if text == "checking the constraints"
+                    && signature.as_deref() == Some("thought-signature")
+        ));
+    }
+
+    #[test]
+    fn signed_non_thought_text_part_preserves_signature() {
+        let part: Part = serde_json::from_value(json!({
+            "text": "visible text",
+            "thoughtSignature": "visible-signature"
+        }))
+        .unwrap();
+
+        let Part::TextPart(text_part) = part else {
+            panic!("expected text part");
+        };
+        assert_eq!(text_part.text, "visible text");
+        assert!(!text_part.thought);
+        assert_eq!(
+            text_part.thought_signature.as_deref(),
+            Some("visible-signature")
+        );
+    }
+
+    #[test]
+    fn signed_non_thought_text_part_maps_signature_carrier() {
+        let part: Part = serde_json::from_value(json!({
+            "text": "visible text",
+            "thoughtSignature": "visible-signature"
+        }))
+        .unwrap();
+
+        let mut mapper = GoogleEventMapper::new();
+        let response = GenerateContentResponse {
+            candidates: Some(vec![GenerateContentCandidate {
+                index: Some(0),
+                content: Content {
+                    parts: vec![part],
+                    role: GoogleRole::Model,
+                },
+                finish_reason: None,
+                finish_message: None,
+                safety_ratings: None,
+                citation_metadata: None,
+            }]),
+            prompt_feedback: None,
+            usage_metadata: None,
+        };
+
+        let events = mapper.map_event(response);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            Ok(LanguageModelCompletionEvent::Thinking { text, signature })
+                if text.is_empty() && signature.as_deref() == Some("visible-signature")
+        ));
+        assert!(matches!(
+            &events[1],
+            Ok(LanguageModelCompletionEvent::Text(text)) if text == "visible text"
+        ));
+    }
+
+    #[test]
+    fn safety_finish_reason_is_refusal() {
+        let mut mapper = GoogleEventMapper::new();
+        let response = GenerateContentResponse {
+            candidates: Some(vec![GenerateContentCandidate {
+                index: Some(0),
+                content: Content {
+                    parts: Vec::new(),
+                    role: GoogleRole::Model,
+                },
+                finish_reason: Some("SAFETY".to_string()),
+                finish_message: None,
+                safety_ratings: None,
+                citation_metadata: None,
+            }]),
+            prompt_feedback: None,
+            usage_metadata: None,
+        };
+
+        mapper.map_event(response);
+        assert_eq!(mapper.stop_reason, StopReason::Refusal);
+    }
+
+    #[test]
+    fn test_disabled_thinking_level_per_model() {
+        assert_eq!(
+            disabled_thinking_level("gemini-3.7-flash"),
+            Some(ThinkingLevel::Low)
+        );
+        assert_eq!(
+            disabled_thinking_level("gemini-3.1-pro-preview"),
+            Some(ThinkingLevel::Low)
+        );
+        assert_eq!(
+            disabled_thinking_level("gemini-3.6-flash"),
+            Some(ThinkingLevel::Minimal)
+        );
+        assert_eq!(disabled_thinking_level("gemini-2.5-flash"), None);
+    }
 
     #[test]
     fn test_function_call_with_signature_creates_tool_use_with_signature() {
@@ -470,6 +738,7 @@ mod tests {
                         function_call: FunctionCall {
                             name: "test_function".to_string(),
                             args: json!({"arg": "value"}),
+                            id: None,
                         },
                         thought_signature: Some("test_signature_123".to_string()),
                     })],
@@ -510,6 +779,7 @@ mod tests {
                         function_call: FunctionCall {
                             name: "test_function".to_string(),
                             args: json!({"arg": "value"}),
+                            id: None,
                         },
                         thought_signature: None,
                     })],
@@ -546,6 +816,7 @@ mod tests {
                         function_call: FunctionCall {
                             name: "test_function".to_string(),
                             args: json!({"arg": "value"}),
+                            id: None,
                         },
                         thought_signature: Some("".to_string()),
                     })],

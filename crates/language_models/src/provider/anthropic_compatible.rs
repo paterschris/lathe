@@ -317,7 +317,7 @@ impl AnthropicCompatibleLanguageModel {
         let http_client = self.http_client.clone();
         let provider_name = self.provider_name.clone();
 
-        let (api_key, api_url, _extra_headers) = self.state.read_with(cx, |state, _cx| {
+        let (api_key, api_url, extra_headers) = self.state.read_with(cx, |state, _cx| {
             let api_url = state.settings.api_url.clone();
             (
                 state.api_key_state.key(&api_url),
@@ -341,6 +341,7 @@ impl AnthropicCompatibleLanguageModel {
                 &api_key,
                 request,
                 beta_headers,
+                &extra_headers,
             );
 
             request

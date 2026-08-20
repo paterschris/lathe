@@ -45,19 +45,12 @@ fn open_for_project_path(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let project = workspace.project();
-    let git_store = project.read(cx).git_store();
-    if let Some((repo, repo_path)) = git_store
+    let git_store = workspace.project().read(cx).git_store().clone();
+    if git_store
         .read(cx)
         .repository_and_path_for_project_path(&project_path, cx)
+        .is_some()
     {
-        git_ui::file_history_view::FileHistoryView::open(
-            repo_path,
-            git_store.downgrade(),
-            repo.downgrade(),
-            workspace.weak_handle(),
-            window,
-            cx,
-        );
+        git_ui_core::open_file_history(workspace, &project_path, window, cx);
     }
 }

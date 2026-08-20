@@ -14,7 +14,7 @@ on:
 permissions: {}
 jobs:
   determine_bump_type:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
     runs-on: namespace-profile-2x4-ubuntu-2404
     permissions: {}
     steps:

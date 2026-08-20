@@ -6,11 +6,11 @@ use settings::RegisterSetting;
 use crate::provider::{
     anthropic, anthropic::AnthropicSettings, anthropic_compatible::AnthropicCompatibleSettings,
     bedrock, bedrock::AmazonBedrockSettings, cloud::ZedDotDevSettings, deepseek::DeepSeekSettings,
-    google::GoogleSettings, llama_cpp::LlamaCppSettings, lmstudio::LmStudioSettings,
+    google::GoogleSettings, llama_cpp::LlamaCppSettings, lmstudio::LmStudioSettings, mistral,
     mistral::MistralSettings, ollama::OllamaSettings, open_ai::OpenAiSettings,
-    open_ai_compatible::OpenAiCompatibleSettings, open_router::OpenRouterSettings,
-    opencode::OpenCodeSettings, resolve_custom_headers, vercel_ai_gateway::VercelAiGatewaySettings,
-    x_ai::XAiSettings,
+    open_ai_compatible::OpenAiCompatibleSettings, open_router, open_router::OpenRouterSettings,
+    opencode, opencode::OpenCodeSettings, resolve_custom_headers,
+    vercel_ai_gateway::VercelAiGatewaySettings, x_ai::XAiSettings,
 };
 
 #[derive(Debug, RegisterSetting)]
@@ -69,6 +69,11 @@ impl settings::Settings for AllLanguageModelSettings {
             anthropic: AnthropicSettings {
                 api_url: anthropic.api_url.unwrap(),
                 available_models: anthropic.available_models.unwrap_or_default(),
+                custom_headers: custom_headers_from(
+                    "Anthropic",
+                    anthropic.custom_headers,
+                    anthropic::RESERVED_HEADER_NAMES,
+                ),
             },
             anthropic_compatible: anthropic_compatible
                 .into_iter()
@@ -108,10 +113,12 @@ impl settings::Settings for AllLanguageModelSettings {
             deepseek: DeepSeekSettings {
                 api_url: deepseek.api_url.unwrap(),
                 available_models: deepseek.available_models.unwrap_or_default(),
+                custom_headers: custom_headers_from("DeepSeek", deepseek.custom_headers, &[]),
             },
             google: GoogleSettings {
                 api_url: google.api_url.unwrap(),
                 available_models: google.available_models.unwrap_or_default(),
+                custom_headers: custom_headers_from("Google AI", google.custom_headers, &[]),
             },
             llama_cpp: LlamaCppSettings {
                 api_url: llama_cpp.api_url.unwrap(),
@@ -123,27 +130,43 @@ impl settings::Settings for AllLanguageModelSettings {
             lmstudio: LmStudioSettings {
                 api_url: lmstudio.api_url.unwrap(),
                 available_models: lmstudio.available_models.unwrap_or_default(),
+                custom_headers: custom_headers_from("LM Studio", lmstudio.custom_headers, &[]),
             },
             mistral: MistralSettings {
                 api_url: mistral.api_url.unwrap(),
                 available_models: mistral.available_models.unwrap_or_default(),
+                custom_headers: custom_headers_from(
+                    "Mistral",
+                    mistral.custom_headers,
+                    mistral::RESERVED_HEADER_NAMES,
+                ),
             },
             ollama: OllamaSettings {
                 api_url: ollama.api_url.unwrap(),
                 auto_discover: ollama.auto_discover.unwrap_or(true),
                 available_models: ollama.available_models.unwrap_or_default(),
                 context_window: ollama.context_window,
+                custom_headers: custom_headers_from("Ollama", ollama.custom_headers, &[]),
             },
             opencode: OpenCodeSettings {
                 api_url: opencode.api_url.unwrap(),
                 available_models: opencode.available_models.unwrap_or_default(),
+                custom_headers: custom_headers_from(
+                    "OpenCode",
+                    opencode.custom_headers,
+                    opencode::RESERVED_HEADER_NAMES,
+                ),
                 show_zen_models: opencode.show_zen_models.unwrap_or(true),
                 show_go_models: opencode.show_go_models.unwrap_or(true),
-                show_free_models: opencode.show_free_models.unwrap_or(true),
             },
             open_router: OpenRouterSettings {
                 api_url: open_router.api_url.unwrap(),
                 available_models: open_router.available_models.unwrap_or_default(),
+                custom_headers: custom_headers_from(
+                    "OpenRouter",
+                    open_router.custom_headers,
+                    open_router::RESERVED_HEADER_NAMES,
+                ),
             },
             openai: OpenAiSettings {
                 api_url: openai.api_url.unwrap(),
@@ -153,11 +176,17 @@ impl settings::Settings for AllLanguageModelSettings {
             openai_compatible: openai_compatible
                 .into_iter()
                 .map(|(key, value)| {
+                    let provider_label = format!("OpenAI Compatible ({key})");
                     (
                         key,
                         OpenAiCompatibleSettings {
                             api_url: value.api_url,
                             available_models: value.available_models,
+                            custom_headers: custom_headers_from(
+                                &provider_label,
+                                value.custom_headers,
+                                &[],
+                            ),
                         },
                     )
                 })
@@ -165,10 +194,16 @@ impl settings::Settings for AllLanguageModelSettings {
             vercel_ai_gateway: VercelAiGatewaySettings {
                 api_url: vercel_ai_gateway.api_url.unwrap(),
                 available_models: vercel_ai_gateway.available_models.unwrap_or_default(),
+                custom_headers: custom_headers_from(
+                    "Vercel AI Gateway",
+                    vercel_ai_gateway.custom_headers,
+                    &[],
+                ),
             },
             x_ai: XAiSettings {
                 api_url: x_ai.api_url.unwrap(),
                 available_models: x_ai.available_models.unwrap_or_default(),
+                custom_headers: custom_headers_from("xAI", x_ai.custom_headers, &[]),
             },
             zed_dot_dev: ZedDotDevSettings {
                 available_models: zed_dot_dev.available_models.unwrap_or_default(),

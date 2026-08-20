@@ -91,7 +91,7 @@ impl DevContainerManifest {
         local_project_path: &Path,
     ) -> Result<Self, DevContainerError> {
         let config_path = local_project_path.join(local_config.config_path.clone());
-        log::debug!("parsing devcontainer json found in {:?}", &config_path);
+        log::debug!("parsing devcontainer json found in {config_path:?}");
         let devcontainer_contents = context.fs.load(&config_path).await.map_err(|e| {
             log::error!("Unable to read devcontainer contents: {e}");
             DevContainerError::DevContainerParseFailed
@@ -548,7 +548,7 @@ impl DevContainerManifest {
                     "No devcontainer-feature.json found in {:?}, no defaults to apply",
                     feature_json_path
                 );
-                log::error!("{}", &message);
+                log::error!("{message}");
                 return Err(DevContainerError::ResourceFetchFailed);
             }
 
@@ -834,18 +834,24 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${{PATH:-\3}}/g' /etc/profile || true
             push_unique_string(&mut security_opt, &opt);
         }
 
-        let mut entrypoint_script_lines = vec![
-            "echo Container started".to_string(),
-            "trap \"exit 0\" 15".to_string(),
-        ];
+        let entrypoint_script = if dev_container.override_command() {
+            let mut entrypoint_script_lines = vec![
+                "echo Container started".to_string(),
+                "trap \"exit 0\" 15".to_string(),
+            ];
 
-        for entrypoint in self.features.iter().filter_map(|f| f.entrypoint()) {
-            entrypoint_script_lines.push(entrypoint.clone());
-        }
-        entrypoint_script_lines.append(&mut vec![
-            "exec \"$@\"".to_string(),
-            "while sleep 1 & wait $!; do :; done".to_string(),
-        ]);
+            for entrypoint in self.features.iter().filter_map(|f| f.entrypoint()) {
+                entrypoint_script_lines.push(entrypoint.clone());
+            }
+            entrypoint_script_lines.append(&mut vec![
+                "exec \"$@\"".to_string(),
+                "while sleep 1 & wait $!; do :; done".to_string(),
+            ]);
+
+            Some(entrypoint_script_lines.join("\n").trim().to_string())
+        } else {
+            None
+        };
 
         let mut container_env = HashMap::new();
         for entry in &metadata_entries {
@@ -872,7 +878,7 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${{PATH:-\3}}/g' /etc/profile || true
             init,
             cap_add,
             security_opt,
-            entrypoint_script: entrypoint_script_lines.join("\n").trim().to_string(),
+            entrypoint_script,
         })
     }
 
@@ -1363,12 +1369,14 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${{PATH:-\3}}/g' /etc/profile || true
             })
             .collect();
 
-        let entrypoint = Some(vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            resources.entrypoint_script,
-            "-".to_string(),
-        ]);
+        let entrypoint = resources.entrypoint_script.map(|script| {
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                script,
+                "-".to_string(),
+            ]
+        });
 
         let cap_add = if resources.cap_add.is_empty() {
             None
@@ -2199,13 +2207,16 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${PATH:-\3}/g' /etc/profile || true
             command.arg(format!("{key}={value}"));
         }
 
-        command.arg("--entrypoint");
-        command.arg("/bin/sh");
-        command.arg(&build_resources.image_tag);
-        command.arg("-c");
-
-        command.arg(build_resources.entrypoint_script);
-        command.arg("-");
+        if let Some(entrypoint_script) = build_resources.entrypoint_script {
+            command.arg("--entrypoint");
+            command.arg("/bin/sh");
+            command.arg(&build_resources.image_tag);
+            command.arg("-c");
+            command.arg(entrypoint_script);
+            command.arg("-");
+        } else {
+            command.arg(&build_resources.image_tag);
+        }
 
         Ok(command)
     }
@@ -2606,7 +2617,7 @@ struct DockerBuildResources {
     init: bool,
     cap_add: Vec<String>,
     security_opt: Vec<String>,
-    entrypoint_script: String,
+    entrypoint_script: Option<String>,
 }
 
 #[derive(Debug)]
@@ -3460,7 +3471,7 @@ mod test {
             init: false,
             cap_add: vec!["SYS_PTRACE".to_string()],
             security_opt: vec!["seccomp=unconfined".to_string()],
-            entrypoint_script: "echo Container started\n    trap \"exit 0\" 15\n    exec \"$@\"\n    while sleep 1 & wait $!; do :; done".to_string(),
+            entrypoint_script: Some("echo Container started\n    trap \"exit 0\" 15\n    exec \"$@\"\n    while sleep 1 & wait $!; do :; done".to_string()),
         };
         let docker_run_command = devcontainer_manifest.create_docker_run_command(build_resources);
 
@@ -3648,13 +3659,16 @@ mod test {
                 < post_start_script.find("printf '%s'").unwrap(),
             "postStartCommand marker must be written only after the command succeeds"
         );
-        assert_eq!(docker_exec_commands[1]._inner_command.get_program(), "echo");
+        assert_eq!(
+            docker_exec_commands[1]._inner_command.get_program(),
+            "/bin/sh"
+        );
         assert_eq!(
             docker_exec_commands[1]
                 ._inner_command
                 .get_args()
                 .collect::<Vec<_>>(),
-            vec![OsStr::new("post-attach")]
+            vec![OsStr::new("-c"), OsStr::new("echo post-attach")]
         );
     }
 
@@ -4768,7 +4782,7 @@ ENV DOCKER_BUILDKIT=1
             Some(vec!["seccomp=unconfined".to_string()])
         );
         assert_eq!(app_service.privileged, Some(true));
-        assert!(app_service.entrypoint.is_some());
+        assert!(app_service.entrypoint.is_none());
 
         let labels = app_service.labels.as_ref().unwrap();
         assert_eq!(

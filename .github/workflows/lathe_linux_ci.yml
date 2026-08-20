@@ -1,5 +1,8 @@
 name: Lathe Linux CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]

@@ -1,5 +1,8 @@
 name: Release Lathe
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
@@ -396,7 +399,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Add target
-        run: rustup target add ${{ matrix.arch }}-pc-windows-msvc
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: rustup target add "$env:ARCH-pc-windows-msvc"
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -413,11 +418,14 @@ jobs:
         env:
           LATHE_UPDATE_URL: https://api.github.com/repos/paterschris/lathe/releases?per_page=30
           ZED_COMMIT_SHA: ${{ github.sha }}
-        run: ./script/build-fork-windows.ps1 -Architecture ${{ matrix.arch }}
+          ARCH: ${{ matrix.arch }}
+        run: ./script/build-fork-windows.ps1 -Architecture $env:ARCH
 
       - name: Package
         shell: pwsh
-        run: ./script/package-fork-windows.ps1 -Architecture ${{ matrix.arch }}
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: ./script/package-fork-windows.ps1 -Architecture $env:ARCH
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v5
@@ -430,15 +438,19 @@ jobs:
 
   create-release:
     needs: [build-macos, build-linux, build-windows, validate-macos]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
       - name: Determine version
         id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            version="${{ github.event.inputs.version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
           else
             version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           fi
@@ -465,8 +477,9 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          version="${{ steps.version.outputs.version }}"
+          version="$RELEASE_VERSION"
 
           # Tag scheme matches upstream zed-industries/zed's
           # script/determine-release-channel: non-stable channels get
@@ -531,8 +544,9 @@ jobs:
       - name: Update Homebrew cask
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          version="${{ steps.version.outputs.version }}"
+          version="$RELEASE_VERSION"
           channel=$(<crates/zed/RELEASE_CHANNEL)
 
           # The cask tracks stable only. Beta and friends reach users

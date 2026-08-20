@@ -18,7 +18,7 @@ permissions:
   contents: read
 jobs:
   fetch_extension_repos:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris') && (github.ref == 'refs/tags/extension-workflows' || github.ref == 'refs/heads/main')
+    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions') && (github.ref == 'refs/tags/extension-workflows' || github.ref == 'refs/heads/main')
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: checkout_zed_repo
@@ -125,8 +125,9 @@ jobs:
         private-key: ${{ secrets.ZED_ZIPPY_APP_PRIVATE_KEY }}
         owner: zed-extensions
         repositories: ${{ matrix.repo }}
-        permission-pull-requests: write
         permission-contents: write
+        permission-issues: write
+        permission-pull-requests: write
         permission-workflows: write
     - name: checkout_extension_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -176,10 +177,9 @@ jobs:
       run: |
         echo "sha_short=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
     - id: create-pr
-      name: extension_workflow_rollout::rollout_workflows_to_extension::create_pull_request
+      name: steps::create_pull_request
       uses: peter-evans/create-pull-request@98357b18bf14b5342f975ff684046ec3b2a07725
       with:
-        path: extension
         title: Update CI workflows to `${{ steps.short-sha.outputs.sha_short }}`
         body: |
           This PR updates the CI workflow files from the main Zed repository
@@ -194,6 +194,8 @@ jobs:
         delete-branch: true
         token: ${{ steps.generate-token.outputs.token }}
         sign-commits: true
+        assignees: ${{ inputs.filter-repos != '' && github.actor || '' }}
+        path: extension
     - name: extension_workflow_rollout::rollout_workflows_to_extension::enable_auto_merge
       run: |
         if [ -n "$PR_NUMBER" ]; then

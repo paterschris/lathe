@@ -510,7 +510,9 @@ message Envelope {
     RefreshDocumentLinks refresh_document_links = 475;
     RefreshFoldingRanges refresh_folding_ranges = 476;
     RefreshDocumentSymbols refresh_document_symbols = 477;
-    // current max: 479 (see the Lathe git_file_history pair above)
+    // 478 and 479 are taken by the Lathe git_file_history pair above.
+    BlameBufferAtRevision blame_buffer_at_revision = 480;
+    BlameBufferAtRevisionResponse blame_buffer_at_revision_response = 481; // current max
   }
 
   reserved 87 to 88;

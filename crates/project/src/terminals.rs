@@ -74,7 +74,11 @@ impl ActiveAwsProfile {
         // var blocks a `.env` file from re-introducing static keys, while
         // AWS SDKs treat empty credentials as unset and fall through to
         // AWS_PROFILE.
-        for key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"] {
+        for key in [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+        ] {
             env.insert(key.to_string(), String::new());
         }
         env.insert("AWS_PROFILE".to_string(), effective_profile);

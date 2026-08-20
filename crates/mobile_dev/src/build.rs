@@ -96,8 +96,11 @@ mod tests {
 
     #[test]
     fn local_debug_command_has_device_flag() {
-        let (program, args) =
-            build_command(BuildKind::LocalDebugRun, MobilePlatform::Android, Some("ABC123"));
+        let (program, args) = build_command(
+            BuildKind::LocalDebugRun,
+            MobilePlatform::Android,
+            Some("ABC123"),
+        );
         assert_eq!(program, "npx");
         assert!(args.iter().any(|a| a == "run:android"));
         assert!(args.iter().any(|a| a == "ABC123"));
@@ -105,7 +108,8 @@ mod tests {
 
     #[test]
     fn local_debug_command_without_serial_falls_back_to_interactive_picker() {
-        let (program, args) = build_command(BuildKind::LocalDebugRun, MobilePlatform::Android, None);
+        let (program, args) =
+            build_command(BuildKind::LocalDebugRun, MobilePlatform::Android, None);
         assert_eq!(program, "npx");
         // `expo run:android --device` (no serial) prompts the user to pick one.
         let device_idx = args.iter().position(|a| a == "--device").unwrap();
@@ -126,7 +130,10 @@ mod tests {
         assert_eq!(program, "npx");
         assert!(args.iter().any(|a| a == "run:ios"));
         let device_idx = args.iter().position(|a| a == "--device").unwrap();
-        assert_eq!(args.get(device_idx + 1).map(String::as_str), Some("ABCD-1234"));
+        assert_eq!(
+            args.get(device_idx + 1).map(String::as_str),
+            Some("ABCD-1234")
+        );
     }
 
     #[test]
@@ -141,7 +148,8 @@ mod tests {
 
     #[test]
     fn eas_production_command_shape() {
-        let (program, args) = build_command(BuildKind::EasProduction, MobilePlatform::Android, None);
+        let (program, args) =
+            build_command(BuildKind::EasProduction, MobilePlatform::Android, None);
         assert_eq!(program, "eas");
         assert!(args.iter().any(|a| a == "production"));
     }
@@ -153,7 +161,6 @@ mod tests {
         let platform_idx = args.iter().position(|a| a == "--platform").unwrap();
         assert_eq!(args.get(platform_idx + 1).map(String::as_str), Some("ios"));
     }
-
 
     #[test]
     fn build_kind_labels() {
@@ -173,5 +180,4 @@ mod tests {
                 .contains("iOS")
         );
     }
-
 }

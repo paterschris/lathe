@@ -30,9 +30,11 @@ use gpui::{
 };
 use project::Project;
 use serde::{Deserialize, Serialize};
-use task::{HideStrategy, RevealStrategy, RevealTarget, SaveStrategy, Shell, SpawnInTerminal, TaskId};
+use settings::{IntoGpui, RegisterSetting, Settings};
+use task::{
+    HideStrategy, RevealStrategy, RevealTarget, SaveStrategy, Shell, SpawnInTerminal, TaskId,
+};
 use terminal_view::TerminalView;
-use settings::{RegisterSetting, Settings};
 use ui::prelude::*;
 use ui::{
     Color, ContextMenu, CopyButton, Headline, HeadlineSize, IconName, IconPosition, Label,
@@ -76,7 +78,7 @@ impl Settings for MobileDevPanelSettings {
         Self {
             button: panel.button.unwrap(),
             dock: panel.dock.unwrap().into(),
-            default_width: panel.default_width.map(px).unwrap(),
+            default_width: panel.default_width.unwrap().into_gpui(),
         }
     }
 }
@@ -211,7 +213,9 @@ fn register_workspace_actions(
             with_panel(workspace, cx, |panel, cx| panel.boot_selected_simulator(cx));
         })
         .register_action(|workspace, _: &ShutdownSimulator, _, cx| {
-            with_panel(workspace, cx, |panel, cx| panel.shutdown_selected_simulator(cx));
+            with_panel(workspace, cx, |panel, cx| {
+                panel.shutdown_selected_simulator(cx)
+            });
         })
         .register_action(|workspace, _: &PodInstall, window, cx| {
             with_panel_in(workspace, window, cx, |panel, window, cx| {
@@ -301,7 +305,11 @@ fn build_compound_command(
         }
     }
     for command in commands {
-        let mut step = format!("cd {} && {}", shell_quote(&command.cwd.to_string_lossy()), shell_quote(&command.program));
+        let mut step = format!(
+            "cd {} && {}",
+            shell_quote(&command.cwd.to_string_lossy()),
+            shell_quote(&command.program)
+        );
         for arg in &command.args {
             step.push(' ');
             step.push_str(&shell_quote(arg));
@@ -319,7 +327,10 @@ fn android_export_prefix(toolchain: Option<&toolchain::ToolchainStatus>) -> Stri
     };
     let mut exports: Vec<String> = Vec::new();
     if let toolchain::ComponentStatus::Managed(home) = &status.jdk {
-        exports.push(format!("export JAVA_HOME={}", shell_quote(&home.to_string_lossy())));
+        exports.push(format!(
+            "export JAVA_HOME={}",
+            shell_quote(&home.to_string_lossy())
+        ));
     }
     if let toolchain::ComponentStatus::Managed(sdk) = &status.sdk {
         let sdk = sdk.to_string_lossy();
@@ -392,14 +403,6 @@ struct ToolchainInstallUiState {
     lines: Vec<SharedString>,
     _forwarder: Task<()>,
 }
-
-
-
-
-
-
-
-
 
 /// One interactive terminal tab: a PTY-backed process (Metro, a build, a
 /// script) rendered as a real terminal with input, scrollback, and colors.
@@ -932,7 +935,9 @@ impl MobileDevPanel {
         let platform = self.selected_platform();
         let run_commands: Vec<ResolvedCommand> = match platform {
             MobilePlatform::Ios => {
-                let udid = self.selected_apple_device().map(|device| device.udid.clone());
+                let udid = self
+                    .selected_apple_device()
+                    .map(|device| device.udid.clone());
                 let scheme = match project.kind {
                     ProjectKind::BareReactNative => self.selected_scheme.as_deref(),
                     ProjectKind::Expo => None,
@@ -961,10 +966,13 @@ impl MobileDevPanel {
         expo_device_name: Option<&str>,
     ) -> Vec<ResolvedCommand> {
         if project.kind == ProjectKind::BareReactNative {
-            let variant = self
-                .selected_variant
-                .clone()
-                .or_else(|| project.android_variants.first().cloned().map(SharedString::from));
+            let variant = self.selected_variant.clone().or_else(|| {
+                project
+                    .android_variants
+                    .first()
+                    .cloned()
+                    .map(SharedString::from)
+            });
             if let Some(variant) = variant
                 && let Some(application_id) = project.variant_application_id(&variant)
             {
@@ -1137,7 +1145,11 @@ impl MobileDevPanel {
             commands.push(commands::install_deps(&project));
         }
         commands.push(commands::metro(&project, localhost));
-        let title = if localhost { "Metro (localhost)" } else { "Metro" };
+        let title = if localhost {
+            "Metro (localhost)"
+        } else {
+            "Metro"
+        };
         self.run_in_terminal(title, commands, window, cx);
     }
 
@@ -1452,10 +1464,15 @@ impl MobileDevPanel {
                 platform: MobilePlatform::Android,
                 id: d.serial.clone(),
             })
-            .chain(self.apple_device_state.devices.iter().map(|d| SelectedDevice {
-                platform: MobilePlatform::Ios,
-                id: d.udid.clone(),
-            }))
+            .chain(
+                self.apple_device_state
+                    .devices
+                    .iter()
+                    .map(|d| SelectedDevice {
+                        platform: MobilePlatform::Ios,
+                        id: d.udid.clone(),
+                    }),
+            )
             .collect();
         if all.is_empty() {
             return;
@@ -1515,55 +1532,66 @@ impl MobileDevPanel {
                 Button::new("mobile-android-devices-trigger", trigger_label)
                     .style(ui::ButtonStyle::Filled)
                     .label_size(LabelSize::Small)
-                    .end_icon(ui::Icon::new(IconName::ChevronDown).size(ui::IconSize::XSmall).color(Color::Muted)),
+                    .end_icon(
+                        ui::Icon::new(IconName::ChevronDown)
+                            .size(ui::IconSize::XSmall)
+                            .color(Color::Muted),
+                    ),
             )
             .menu(move |window, cx| {
                 let panel = panel.clone();
                 let devices = devices.clone();
                 let avds = avds.clone();
                 let selected = selected.clone();
-                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                    if devices.is_empty() {
-                        menu = menu.label("No devices connected");
-                    }
-                    for device in &devices {
-                        let selection = SelectedDevice {
-                            platform: MobilePlatform::Android,
-                            id: device.serial.clone(),
-                        };
-                        let toggled = selected.as_ref() == Some(&selection);
-                        let panel = panel.clone();
-                        menu = menu.toggleable_entry(
-                            device.label(),
-                            toggled,
-                            IconPosition::Start,
+                Some(ContextMenu::build(
+                    window,
+                    cx,
+                    move |mut menu, _window, _cx| {
+                        if devices.is_empty() {
+                            menu = menu.label("No devices connected");
+                        }
+                        for device in &devices {
+                            let selection = SelectedDevice {
+                                platform: MobilePlatform::Android,
+                                id: device.serial.clone(),
+                            };
+                            let toggled = selected.as_ref() == Some(&selection);
+                            let panel = panel.clone();
+                            menu = menu.toggleable_entry(
+                                device.label(),
+                                toggled,
+                                IconPosition::Start,
+                                None,
+                                move |_window, cx| {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.select_device(selection.clone(), cx)
+                                    });
+                                },
+                            );
+                        }
+                        if !avds.is_empty() {
+                            menu = menu.separator().header("Emulators");
+                            for avd in &avds {
+                                let name = avd.clone();
+                                let panel = panel.clone();
+                                menu =
+                                    menu.entry(format!("Start {avd}"), None, move |_window, cx| {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.start_emulator(name.clone(), cx)
+                                        });
+                                    });
+                            }
+                        }
+                        menu = menu.separator().entry(
+                            "Create AVD (Pixel, API 35)",
                             None,
-                            move |_window, cx| {
-                                panel.update(cx, |panel, cx| {
-                                    panel.select_device(selection.clone(), cx)
-                                });
+                            move |window, cx| {
+                                panel.update(cx, |panel, cx| panel.create_avd(window, cx));
                             },
                         );
-                    }
-                    if !avds.is_empty() {
-                        menu = menu.separator().header("Emulators");
-                        for avd in &avds {
-                            let name = avd.clone();
-                            let panel = panel.clone();
-                            menu = menu.entry(format!("Start {avd}"), None, move |_window, cx| {
-                                panel.update(cx, |panel, cx| panel.start_emulator(name.clone(), cx));
-                            });
-                        }
-                    }
-                    menu = menu.separator().entry(
-                        "Create AVD (Pixel, API 35)",
-                        None,
-                        move |window, cx| {
-                            panel.update(cx, |panel, cx| panel.create_avd(window, cx));
-                        },
-                    );
-                    menu
-                }))
+                        menu
+                    },
+                ))
             });
         let mut column = v_flex().flex_1().gap_1().child(
             Label::new("Android")
@@ -1616,42 +1644,51 @@ impl MobileDevPanel {
                 Button::new("mobile-apple-devices-trigger", trigger_label)
                     .style(ui::ButtonStyle::Filled)
                     .label_size(LabelSize::Small)
-                    .end_icon(ui::Icon::new(IconName::ChevronDown).size(ui::IconSize::XSmall).color(Color::Muted)),
+                    .end_icon(
+                        ui::Icon::new(IconName::ChevronDown)
+                            .size(ui::IconSize::XSmall)
+                            .color(Color::Muted),
+                    ),
             )
             .menu(move |window, cx| {
                 let panel = panel.clone();
                 let devices = devices.clone();
                 let selected = selected.clone();
-                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                    if devices.is_empty() {
-                        menu = menu.label("No simulators or devices");
-                    }
-                    for device in &devices {
-                        let selection = SelectedDevice {
-                            platform: MobilePlatform::Ios,
-                            id: device.udid.clone(),
-                        };
-                        let toggled = selected.as_ref() == Some(&selection);
-                        let panel = panel.clone();
-                        menu = menu.toggleable_entry(
-                            device.label(),
-                            toggled,
-                            IconPosition::Start,
-                            None,
-                            move |_window, cx| {
-                                panel.update(cx, |panel, cx| {
-                                    panel.select_device(selection.clone(), cx)
-                                });
-                            },
-                        );
-                    }
-                    menu
-                }))
+                Some(ContextMenu::build(
+                    window,
+                    cx,
+                    move |mut menu, _window, _cx| {
+                        if devices.is_empty() {
+                            menu = menu.label("No simulators or devices");
+                        }
+                        for device in &devices {
+                            let selection = SelectedDevice {
+                                platform: MobilePlatform::Ios,
+                                id: device.udid.clone(),
+                            };
+                            let toggled = selected.as_ref() == Some(&selection);
+                            let panel = panel.clone();
+                            menu = menu.toggleable_entry(
+                                device.label(),
+                                toggled,
+                                IconPosition::Start,
+                                None,
+                                move |_window, cx| {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.select_device(selection.clone(), cx)
+                                    });
+                                },
+                            );
+                        }
+                        menu
+                    },
+                ))
             });
-        let mut column = v_flex()
-            .flex_1()
-            .gap_1()
-            .child(Label::new("iOS").size(LabelSize::XSmall).color(Color::Muted));
+        let mut column = v_flex().flex_1().gap_1().child(
+            Label::new("iOS")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        );
         if let Some(project) = self.mobile_project.as_ref()
             && project.kind == ProjectKind::BareReactNative
             && !project.ios_schemes.is_empty()
@@ -1768,7 +1805,6 @@ impl MobileDevPanel {
                 ),
         )
     }
-
 
     fn render_toolchain_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let border_color = cx.theme().colors().border;
@@ -1913,11 +1949,13 @@ impl MobileDevPanel {
             .child(div().flex_1());
 
         let Some(status) = self.apple_toolchain_status.as_ref() else {
-            return Some(section.child(header).child(
-                Label::new("Checking toolchain...")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            ));
+            return Some(
+                section.child(header).child(
+                    Label::new("Checking toolchain...")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            );
         };
 
         let installing = self
@@ -2044,7 +2082,9 @@ impl MobileDevPanel {
                     .style(ui::ButtonStyle::Filled)
                     .label_size(LabelSize::Small)
                     .tooltip(Tooltip::text("Start the Metro dev server in a terminal"))
-                    .on_click(cx.listener(|this, _, window, cx| this.start_metro(false, window, cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.start_metro(false, window, cx)),
+                    ),
             )
             .child(
                 Button::new("mobile-action-logs", "Logs")
@@ -2074,7 +2114,11 @@ impl MobileDevPanel {
             row = row.child(
                 Button::new(
                     "mobile-action-simulator",
-                    if booted { "Shut down simulator" } else { "Boot simulator" },
+                    if booted {
+                        "Shut down simulator"
+                    } else {
+                        "Boot simulator"
+                    },
                 )
                 .style(ui::ButtonStyle::Filled)
                 .label_size(LabelSize::Small)
@@ -2203,11 +2247,13 @@ impl MobileDevPanel {
                                     .unwrap_or_else(|| "(not set)".to_string()),
                             ))
                             .size(LabelSize::XSmall)
-                            .color(if project.android_package.is_some() {
-                                Color::Default
-                            } else {
-                                Color::Warning
-                            }),
+                            .color(
+                                if project.android_package.is_some() {
+                                    Color::Default
+                                } else {
+                                    Color::Warning
+                                },
+                            ),
                         ),
                 )
                 .child(
@@ -2226,11 +2272,13 @@ impl MobileDevPanel {
                                     .unwrap_or_else(|| "(not set)".to_string()),
                             ))
                             .size(LabelSize::XSmall)
-                            .color(if project.ios_bundle_identifier.is_some() {
-                                Color::Default
-                            } else {
-                                Color::Warning
-                            }),
+                            .color(
+                                if project.ios_bundle_identifier.is_some() {
+                                    Color::Default
+                                } else {
+                                    Color::Warning
+                                },
+                            ),
                         ),
                 ),
             None => v
@@ -2262,44 +2310,54 @@ impl MobileDevPanel {
         is_scheme: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let trigger_label = selected.clone().unwrap_or_else(|| SharedString::from("Select"));
+        let trigger_label = selected
+            .clone()
+            .unwrap_or_else(|| SharedString::from("Select"));
         let panel = cx.entity();
         let menu = PopoverMenu::new(id)
             .trigger(
                 Button::new(SharedString::from(format!("{id}-trigger")), trigger_label)
                     .style(ui::ButtonStyle::Filled)
                     .label_size(LabelSize::Small)
-                    .end_icon(ui::Icon::new(IconName::ChevronDown).size(ui::IconSize::XSmall).color(Color::Muted)),
+                    .end_icon(
+                        ui::Icon::new(IconName::ChevronDown)
+                            .size(ui::IconSize::XSmall)
+                            .color(Color::Muted),
+                    ),
             )
             .menu(move |window, cx| {
                 let panel = panel.clone();
                 let options = options.clone();
                 let selected = selected.clone();
-                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                    for option in &options {
-                        let toggled = selected.as_ref() == Some(option);
-                        let value = option.clone();
-                        let panel = panel.clone();
-                        menu = menu.toggleable_entry(
-                            option.clone(),
-                            toggled,
-                            IconPosition::Start,
-                            None,
-                            move |_window, cx| {
-                                let value = value.clone();
-                                panel.update(cx, |panel, cx| {
-                                    if is_scheme {
-                                        panel.selected_scheme = Some(value);
-                                    } else {
-                                        panel.selected_variant = Some(value);
-                                    }
-                                    cx.notify();
-                                });
-                            },
-                        );
-                    }
-                    menu
-                }))
+                Some(ContextMenu::build(
+                    window,
+                    cx,
+                    move |mut menu, _window, _cx| {
+                        for option in &options {
+                            let toggled = selected.as_ref() == Some(option);
+                            let value = option.clone();
+                            let panel = panel.clone();
+                            menu = menu.toggleable_entry(
+                                option.clone(),
+                                toggled,
+                                IconPosition::Start,
+                                None,
+                                move |_window, cx| {
+                                    let value = value.clone();
+                                    panel.update(cx, |panel, cx| {
+                                        if is_scheme {
+                                            panel.selected_scheme = Some(value);
+                                        } else {
+                                            panel.selected_variant = Some(value);
+                                        }
+                                        cx.notify();
+                                    });
+                                },
+                            );
+                        }
+                        menu
+                    },
+                ))
             });
         h_flex()
             .w_full()
@@ -2383,7 +2441,9 @@ impl MobileDevPanel {
                     .child(
                         ui::IconButton::new(("mobile-term-close", tab.id), IconName::Close)
                             .icon_size(ui::IconSize::XSmall)
-                            .on_click(cx.listener(move |this, _, _, cx| this.close_terminal(id, cx))),
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.close_terminal(id, cx)),
+                            ),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.active_terminal = index;
@@ -2402,8 +2462,6 @@ impl MobileDevPanel {
                 .child(div().w_full().h(px(320.)).occlude().child(view)),
         )
     }
-
-
 
     /// Run/start commands scraped from the project's README, so the panel
     /// suggests how to run this specific app. Hidden when the README yielded
@@ -2445,26 +2503,26 @@ impl MobileDevPanel {
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
-                .child(if project.readme_run_hints.len() > README_INLINE_HINT_LIMIT {
-                    // Long list: its own scrollable, occluded pane.
-                    div()
-                        .id("mobile-readme-scroll")
-                        .max_h(px(160.))
-                        .w_full()
-                        .overflow_y_scroll()
-                        .occlude()
-                        .child(rows)
-                        .into_any_element()
-                } else {
-                    // Short list: flow with the panel so hovering it doesn't
-                    // lock the panel's scroll (occlude would block a pane that
-                    // has nothing to scroll).
-                    rows.into_any_element()
-                }),
+                .child(
+                    if project.readme_run_hints.len() > README_INLINE_HINT_LIMIT {
+                        // Long list: its own scrollable, occluded pane.
+                        div()
+                            .id("mobile-readme-scroll")
+                            .max_h(px(160.))
+                            .w_full()
+                            .overflow_y_scroll()
+                            .occlude()
+                            .child(rows)
+                            .into_any_element()
+                    } else {
+                        // Short list: flow with the panel so hovering it doesn't
+                        // lock the panel's scroll (occlude would block a pane that
+                        // has nothing to scroll).
+                        rows.into_any_element()
+                    },
+                ),
         )
     }
-
-
 }
 
 impl Render for MobileDevPanel {
@@ -2491,8 +2549,7 @@ impl Render for MobileDevPanel {
                     .child(
                         Label::new(format!(
                             "{} device(s)",
-                            self.device_state.devices.len()
-                                + self.apple_device_state.devices.len()
+                            self.device_state.devices.len() + self.apple_device_state.devices.len()
                         ))
                         .size(LabelSize::Small)
                         .color(Color::Muted),
@@ -2562,7 +2619,9 @@ impl Panel for MobileDevPanel {
     }
 
     fn icon(&self, _: &Window, cx: &App) -> Option<IconName> {
-        Some(IconName::ToolHammer).filter(|_| MobileDevPanelSettings::get_global(cx).button)
+        MobileDevPanelSettings::get_global(cx)
+            .button
+            .then_some(IconName::ToolHammer)
     }
 
     fn icon_tooltip(&self, _: &Window, _: &App) -> Option<&'static str> {

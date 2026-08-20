@@ -2283,7 +2283,7 @@ impl OutlinePanel {
     ) -> Stateful<Div> {
         let item_id = ElementId::from(SharedString::from(format!(
             "{:?}|{:?}",
-            outline.range, &outline.text,
+            outline.range, outline.text,
         )));
 
         let label_element = outline::render_item(
@@ -2749,7 +2749,7 @@ impl OutlinePanel {
                     let active_multi_buffer = active_editor.read(cx).buffer().clone();
                     let new_entries = outline_panel.new_entries_for_fs_update.clone();
                     let repo_snapshots = outline_panel.project.update(cx, |project, cx| {
-                        project.git_store().read(cx).repo_snapshots(cx)
+                        project.git_store().read(cx).display_repo_snapshots(cx)
                     });
                     let git_store = outline_panel.project.read(cx).git_store().clone();
                     new_collapsed_entries = outline_panel.collapsed_entries.clone();
@@ -2773,10 +2773,7 @@ impl OutlinePanel {
                             let is_folded = active_editor.read(cx).is_buffer_folded(buffer_id, cx);
                             let status = git_store
                                 .read(cx)
-                                .repository_and_path_for_buffer_id(buffer_id, cx)
-                                .and_then(|(repo, path)| {
-                                    Some(repo.read(cx).status_for_path(&path)?.status)
-                                });
+                                .display_status_for_buffer_id(buffer_id, cx);
                             buffer_excerpts
                                 .entry(buffer_id)
                                 .or_insert_with(|| {
@@ -6885,6 +6882,12 @@ outline: struct OutlineEntryExcerpt
             project_search::init(cx);
             buffer_search::init(cx);
             super::init(cx);
+
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.project.worktree.file_scan_depth = Some(0);
+                });
+            });
         });
     }
 

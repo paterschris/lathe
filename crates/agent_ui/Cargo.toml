@@ -34,10 +34,9 @@ agent_servers.workspace = true
 agent_settings.workspace = true
 agent_skills.workspace = true
 ai_accounts.workspace = true
-async-channel.workspace = true
 ai_onboarding.workspace = true
 anyhow.workspace = true
-heapless.workspace = true
+async-channel.workspace = true
 audio = { workspace = true, optional = true }
 base64.workspace = true
 buffer_diff.workspace = true
@@ -57,14 +56,16 @@ feature_flags.workspace = true
 file_icons.workspace = true
 fs.workspace = true
 futures.workspace = true
-git.workspace = true
-git_ui.workspace = true
 fuzzy.workspace = true
+git.workspace = true
+git_ui_core.workspace = true
 gpui.workspace = true
 gpui_tokio.workspace = true
+heapless.workspace = true
 html_to_markdown.workspace = true
 http_client.workspace = true
 idna.workspace = true
+image.workspace = true
 indoc.workspace = true
 itertools.workspace = true
 jsonschema.workspace = true
@@ -81,6 +82,7 @@ ordered-float.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
 picker.workspace = true
+platform_title_bar.workspace = true
 postage.workspace = true
 project.workspace = true
 prompt_store.workspace = true
@@ -89,6 +91,7 @@ rand.workspace = true
 release_channel.workspace = true
 remote.workspace = true
 remote_connection.workspace = true
+reqwest_client = { workspace = true, optional = true }
 rope.workspace = true
 sandbox.workspace = true
 schemars.workspace = true
@@ -118,8 +121,6 @@ watch.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 zed_credentials_provider.workspace = true
-image.workspace = true
-reqwest_client = { workspace = true, optional = true }
 
 [dev-dependencies]
 acp_thread = { workspace = true, features = ["test-support"] }

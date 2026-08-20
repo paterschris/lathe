@@ -11,7 +11,7 @@ permissions:
   contents: read
 jobs:
   scheduled_compliance_check:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: steps::checkout_repo
@@ -52,7 +52,7 @@ jobs:
         path: compliance-report-${{ github.ref_name }}.md
         if-no-files-found: error
     - name: send_compliance_slack_notification
-      if: always()
+      if: ${{ always() }}
       run: |
         if [ "$COMPLIANCE_OUTCOME" == "success" ]; then
             STATUS="✅ Scheduled compliance check passed for $COMPLIANCE_TAG"

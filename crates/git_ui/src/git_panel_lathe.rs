@@ -591,10 +591,7 @@ impl super::GitPanel {
     /// branch is local-only; callers use this both for the "on remote" row
     /// indicator and to decide whether deleting on the remote is offered,
     /// so the two always agree.
-    fn explorer_remote_counterpart(
-        &self,
-        branch: &Branch,
-    ) -> Option<(SharedString, SharedString)> {
+    fn explorer_remote_counterpart(&self, branch: &Branch) -> Option<(SharedString, SharedString)> {
         if branch.is_remote() {
             return None;
         }
@@ -932,27 +929,30 @@ impl super::GitPanel {
                             .when(is_head, |label| label.color(Color::Accent)),
                     )
                     .child(div().flex_1())
-                    .when_some(remote_counterpart, |this, (remote_name, remote_branch_name)| {
-                        // Rendered in the indent gutter just left of the branch
-                        // icon, so rows keep the same alignment whether or not
-                        // the branch exists on a remote.
-                        this.child(
-                            h_flex()
-                                .id(("git-explorer-on-remote", entry_ix))
-                                .absolute()
-                                .left(indent - px(16.0))
-                                .top_0()
-                                .bottom_0()
-                                .tooltip(Tooltip::text(format!(
-                                    "On {remote_name}/{remote_branch_name}"
-                                )))
-                                .child(
-                                    Icon::new(IconName::Public)
-                                        .size(IconSize::XSmall)
-                                        .color(Color::Muted),
-                                ),
-                        )
-                    })
+                    .when_some(
+                        remote_counterpart,
+                        |this, (remote_name, remote_branch_name)| {
+                            // Rendered in the indent gutter just left of the branch
+                            // icon, so rows keep the same alignment whether or not
+                            // the branch exists on a remote.
+                            this.child(
+                                h_flex()
+                                    .id(("git-explorer-on-remote", entry_ix))
+                                    .absolute()
+                                    .left(indent - px(16.0))
+                                    .top_0()
+                                    .bottom_0()
+                                    .tooltip(Tooltip::text(format!(
+                                        "On {remote_name}/{remote_branch_name}"
+                                    )))
+                                    .child(
+                                        Icon::new(IconName::Public)
+                                            .size(IconSize::XSmall)
+                                            .color(Color::Muted),
+                                    ),
+                            )
+                        },
+                    )
                     .when_some(tracking_status, |this, status| {
                         this.child(render_tracking_chip(status))
                     })

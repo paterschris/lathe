@@ -2,18 +2,19 @@ use anyhow::{Context as _, Result};
 use collections::BTreeMap;
 use credentials_provider::CredentialsProvider;
 use futures::{FutureExt, StreamExt, future::BoxFuture};
+use google_ai::GenerateContentResponse;
 pub use google_ai::completion::{GoogleEventMapper, into_google};
-use google_ai::{GenerateContentResponse, GoogleModelMode};
 use gpui::{App, AppContext, AsyncApp, Context, Entity, SharedString, Task};
-use http_client::HttpClient;
+use http_client::{CustomHeaders, HttpClient};
 use language_model::{
     ApiKeyConfiguration, AuthenticateError, EnvVar, LanguageModelCompletionError,
     LanguageModelCompletionEvent, LanguageModelToolChoice, LanguageModelToolSchemaFormat,
 };
 use language_model::{
-    GOOGLE_PROVIDER_ID, GOOGLE_PROVIDER_NAME, IconOrSvg, LanguageModel, LanguageModelId,
-    LanguageModelName, LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
-    LanguageModelProviderState, LanguageModelRequest, ProviderSettingsView, RateLimiter,
+    GOOGLE_PROVIDER_ID, GOOGLE_PROVIDER_NAME, IconOrSvg, LanguageModel, LanguageModelEffortLevel,
+    LanguageModelId, LanguageModelName, LanguageModelProvider, LanguageModelProviderId,
+    LanguageModelProviderName, LanguageModelProviderState, LanguageModelRequest,
+    ProviderSettingsView, RateLimiter,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,7 @@ const PROVIDER_NAME: LanguageModelProviderName = GOOGLE_PROVIDER_NAME;
 pub struct GoogleSettings {
     pub api_url: String,
     pub available_models: Vec<AvailableModel>,
+    pub custom_headers: CustomHeaders,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -253,9 +255,12 @@ impl GoogleLanguageModel {
     > {
         let http_client = self.http_client.clone();
 
-        let (api_key, api_url) = self.state.read_with(cx, |state, cx| {
+        let (api_key, api_url, extra_headers) = self.state.read_with(cx, |state, cx| {
             let api_url = GoogleLanguageModelProvider::api_url(cx);
-            (state.api_key_state.key(&api_url), api_url)
+            let extra_headers = GoogleLanguageModelProvider::settings(cx)
+                .custom_headers
+                .clone();
+            (state.api_key_state.key(&api_url), api_url, extra_headers)
         });
 
         async move {
@@ -265,6 +270,7 @@ impl GoogleLanguageModel {
                 &api_url,
                 &api_key,
                 request,
+                &extra_headers,
             );
             request.await.context("failed to stream completion")
         }
@@ -298,7 +304,20 @@ impl LanguageModel for GoogleLanguageModel {
     }
 
     fn supports_thinking(&self) -> bool {
-        matches!(self.model.mode(), GoogleModelMode::Thinking { .. })
+        self.model.supports_thinking()
+    }
+
+    fn supported_effort_levels(&self) -> Vec<LanguageModelEffortLevel> {
+        let default_level = self.model.default_thinking_level();
+        self.model
+            .supported_thinking_levels()
+            .iter()
+            .map(|level| LanguageModelEffortLevel {
+                name: level.name().into(),
+                value: level.value().into(),
+                is_default: Some(*level) == default_level,
+            })
+            .collect()
     }
 
     fn supports_tool_choice(&self, choice: LanguageModelToolChoice) -> bool {

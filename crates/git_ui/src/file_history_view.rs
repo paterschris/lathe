@@ -278,7 +278,7 @@ impl FileHistoryView {
         cx: &mut App,
     ) -> AnyElement {
         CommitAvatar::new(sha, author_email, self.remote.as_ref())
-            .size(rems_from_px(20.))
+            .size(rems_from_px(20.0_f32))
             .render(window, cx)
     }
 
@@ -326,7 +326,7 @@ impl FileHistoryView {
                     .gap_2()
                     .child(
                         div()
-                            .w(rems_from_px(52.))
+                            .w(rems_from_px(52.0_f32))
                             .flex_none()
                             .child(Chip::new(pr_number)),
                     )
@@ -404,7 +404,7 @@ impl Render for FileHistoryView {
             .bg(cx.theme().colors().editor_background)
             .child(
                 h_flex()
-                    .h(rems_from_px(41.))
+                    .h(rems_from_px(41.0_f32))
                     .pl_3()
                     .pr_2()
                     .justify_between()

@@ -337,8 +337,8 @@ pub fn track_devices(
 /// dropping the receiver kills the child via `kill_on_drop`.
 pub fn log_stream(udid: &str, process_hint: Option<&str>) -> impl Stream<Item = Result<String>> {
     let udid = udid.to_owned();
-    let predicate = process_hint
-        .map(|hint| format!("process CONTAINS[c] \"{}\"", hint.replace('"', "")));
+    let predicate =
+        process_hint.map(|hint| format!("process CONTAINS[c] \"{}\"", hint.replace('"', "")));
     let (tx, rx) = channel::unbounded::<Result<String>>();
     smol::spawn(async move {
         let mut cmd = new_command("xcrun");
@@ -742,7 +742,11 @@ mod tests {
 
     #[test]
     fn parse_physical_devices_tolerates_empty_result() {
-        assert!(parse_physical_devices(r#"{"result": {}}"#).unwrap().is_empty());
+        assert!(
+            parse_physical_devices(r#"{"result": {}}"#)
+                .unwrap()
+                .is_empty()
+        );
         assert!(parse_physical_devices(r#"{}"#).unwrap().is_empty());
     }
 

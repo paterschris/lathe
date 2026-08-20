@@ -111,7 +111,8 @@ impl AwsProfileSelector {
                 let session = match active.as_ref().and_then(|state| state.profile.clone()) {
                     Some(profile) => {
                         let config_file = active.and_then(|state| state.config_file);
-                        cx.background_spawn(probe_session(profile, config_file)).await
+                        cx.background_spawn(probe_session(profile, config_file))
+                            .await
                     }
                     None => SessionStatus::Unknown,
                 };
@@ -181,7 +182,9 @@ impl AwsProfileSelector {
             },
             cx,
         );
-        if state.v2_compat && let Some(profile) = profile.as_ref() {
+        if state.v2_compat
+            && let Some(profile) = profile.as_ref()
+        {
             self.write_wrapper(profile.to_string(), cx);
         }
         self.session = SessionStatus::Unknown;
@@ -212,7 +215,9 @@ impl AwsProfileSelector {
 
     fn toggle_v2_compat(&mut self, cx: &mut Context<Self>) {
         let state = self.update_state(|state| state.v2_compat = !state.v2_compat, cx);
-        if state.v2_compat && let Some(profile) = state.profile {
+        if state.v2_compat
+            && let Some(profile) = state.profile
+        {
             self.write_wrapper(profile, cx);
         }
         cx.notify();
@@ -512,21 +517,21 @@ impl Render for AwsProfileSelector {
                         menu = menu.separator();
                         if can_login {
                             let selector = selector.clone();
-                            menu = menu.entry("Log In (opens browser)", None, move |_window, cx| {
-                                selector
-                                    .update(cx, |selector, cx| selector.login(cx))
-                                    .ok();
-                            });
+                            menu =
+                                menu.entry("Log In (opens browser)", None, move |_window, cx| {
+                                    selector.update(cx, |selector, cx| selector.login(cx)).ok();
+                                });
                         }
                         {
                             let selector = selector.clone();
-                            menu = menu.entry("New SSO Profile (wizard)", None, move |window, cx| {
-                                selector
-                                    .update(cx, |selector, cx| {
-                                        selector.open_sso_wizard(window, cx);
-                                    })
-                                    .ok();
-                            });
+                            menu =
+                                menu.entry("New SSO Profile (wizard)", None, move |window, cx| {
+                                    selector
+                                        .update(cx, |selector, cx| {
+                                            selector.open_sso_wizard(window, cx);
+                                        })
+                                        .ok();
+                                });
                         }
                         {
                             let selector = selector.clone();

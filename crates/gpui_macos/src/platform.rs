@@ -7,9 +7,10 @@ use anyhow::{Context as _, anyhow};
 use block::ConcreteBlock;
 use cocoa::{
     appkit::{
-        NSApplication, NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular,
-        NSControl as _, NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSOpenPanel,
-        NSSavePanel, NSVisualEffectState, NSVisualEffectView, NSWindow,
+        NSAppearanceNameVibrantDark, NSAppearanceNameVibrantLight, NSApplication,
+        NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular, NSControl as _,
+        NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSOpenPanel, NSSavePanel,
+        NSVisualEffectState, NSVisualEffectView, NSWindow,
     },
     base::{BOOL, NO, YES, id, nil, selector},
     foundation::{
@@ -545,7 +546,7 @@ impl Platform for MacPlatform {
         }
     }
 
-    fn restart(&self, binary_path: Option<PathBuf>) {
+    fn restart(&self, binary_path: Option<PathBuf>, arguments: Vec<std::ffi::OsString>) {
         use std::os::unix::process::CommandExt as _;
 
         let app_pid = std::process::id().to_string();
@@ -565,7 +566,13 @@ impl Platform for MacPlatform {
             while kill -0 $0 2> /dev/null; do
                 sleep 0.1
             done
-            open "$1"
+            app_path="$1"
+            shift
+            if (($# > 0)); then
+                open "$app_path" --args "$@"
+            else
+                open "$app_path"
+            fi
         "#;
 
         #[allow(
@@ -577,6 +584,7 @@ impl Platform for MacPlatform {
             .arg(script)
             .arg(app_pid)
             .arg(app_path)
+            .args(arguments)
             .process_group(0)
             .spawn();
 
@@ -683,6 +691,29 @@ impl Platform for MacPlatform {
             let app = NSApplication::sharedApplication(nil);
             let appearance: id = msg_send![app, effectiveAppearance];
             crate::window_appearance::window_appearance_from_native(appearance)
+        }
+    }
+
+    fn set_window_appearance(&self, appearance: Option<WindowAppearance>) {
+        unsafe {
+            let app: id = msg_send![APP_CLASS, sharedApplication];
+            // `None` clears the override by setting a nil appearance, so the app
+            // falls back to tracking the system-wide light/dark setting.
+            let ns_appearance: id = match appearance {
+                None => nil,
+                Some(appearance) => {
+                    let name: id = match appearance {
+                        WindowAppearance::Light => crate::window_appearance::NSAppearanceNameAqua,
+                        WindowAppearance::Dark => {
+                            crate::window_appearance::NSAppearanceNameDarkAqua
+                        }
+                        WindowAppearance::VibrantLight => NSAppearanceNameVibrantLight,
+                        WindowAppearance::VibrantDark => NSAppearanceNameVibrantDark,
+                    };
+                    msg_send![class!(NSAppearance), appearanceNamed: name]
+                }
+            };
+            let _: () = msg_send![app, setAppearance: ns_appearance];
         }
     }
 

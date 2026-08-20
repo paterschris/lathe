@@ -357,7 +357,11 @@ credential_process = aws configure export-credentials --profile s3-test --format
         assert_eq!(
             profiles
                 .iter()
-                .map(|profile| (profile.name.as_ref(), profile.sso, profile.chained_to.as_deref()))
+                .map(|profile| (
+                    profile.name.as_ref(),
+                    profile.sso,
+                    profile.chained_to.as_deref()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("default", false, None),

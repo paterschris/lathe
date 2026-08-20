@@ -1,6 +1,5 @@
 use gpui::Pixels;
-use settings::{RegisterSetting, Settings};
-use ui::px;
+use settings::{IntoGpui, RegisterSetting, Settings};
 use workspace::dock::DockPosition;
 
 #[derive(Debug, RegisterSetting)]
@@ -16,7 +15,7 @@ impl Settings for PullRequestPanelSettings {
         Self {
             button: panel.button.unwrap(),
             dock: panel.dock.unwrap().into(),
-            default_width: panel.default_width.map(px).unwrap(),
+            default_width: panel.default_width.unwrap().into_gpui(),
         }
     }
 }

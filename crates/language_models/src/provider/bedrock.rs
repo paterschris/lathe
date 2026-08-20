@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow};
+use async_lock::OnceCell;
 use aws_config::stalled_stream_protection::StalledStreamProtectionConfig;
 use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
@@ -56,7 +57,6 @@ use settings::{
     BedrockAvailableModel as AvailableModel, BedrockMantleAvailableModel as MantleAvailableModel,
     Settings, SettingsStore,
 };
-use smol::lock::OnceCell;
 use std::sync::LazyLock;
 use std::time::SystemTime;
 use strum::{EnumIter, IntoEnumIterator, IntoStaticStr};
@@ -806,8 +806,17 @@ impl BedrockModel {
             return futures::future::ready(Err(BedrockError::Other(anyhow!("App state dropped"))))
                 .boxed();
         };
+        let extra_headers = self.state.read_with(cx, |_, cx| {
+            AllLanguageModelSettings::get_global(cx)
+                .bedrock
+                .custom_headers
+                .clone()
+        });
 
-        let task = Tokio::spawn(cx, bedrock::stream_completion(runtime_client, request));
+        let task = Tokio::spawn(
+            cx,
+            bedrock::stream_completion(runtime_client, request, extra_headers),
+        );
         async move { task.await.map_err(|e| BedrockError::Other(e.into()))? }.boxed()
     }
 }
@@ -872,11 +881,21 @@ impl LanguageModel for BedrockModel {
                     is_default: true,
                 },
                 language_model::LanguageModelEffortLevel {
+                    name: "XHigh".into(),
+                    value: "xhigh".into(),
+                    is_default: false,
+                },
+                language_model::LanguageModelEffortLevel {
                     name: "Max".into(),
                     value: "max".into(),
                     is_default: false,
                 },
             ]
+            .into_iter()
+            .filter(|effort_level| {
+                effort_level.value != "xhigh" || self.model.supports_xhigh_adaptive_thinking()
+            })
+            .collect()
         } else {
             Vec::new()
         }
@@ -1251,7 +1270,7 @@ where
             provider: provider_name.to_owned(),
             status_code: response.status(),
             body,
-            headers: response.headers().clone(),
+            headers: Box::new(response.headers().clone()),
         })
     }
 }

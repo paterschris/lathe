@@ -164,6 +164,10 @@ impl LanguageModelProvider for OpenAiLanguageModelProvider {
         Some(self.create_language_model(open_ai::Model::default_fast()))
     }
 
+    fn recommended_models(&self, _cx: &App) -> Vec<Arc<dyn LanguageModel>> {
+        vec![self.create_language_model(open_ai::Model::FivePointSixSol)]
+    }
+
     fn provided_models(&self, cx: &App) -> Vec<Arc<dyn LanguageModel>> {
         let mut models = BTreeMap::default();
 
@@ -186,7 +190,7 @@ impl LanguageModelProvider for OpenAiLanguageModelProvider {
                     max_completion_tokens: model.max_completion_tokens,
                     reasoning_effort: model.reasoning_effort,
                     supports_chat_completions: model.capabilities.chat_completions,
-                    supports_images: false,
+                    supports_images: model.capabilities.images,
                 },
             );
         }
@@ -366,9 +370,12 @@ impl OpenAiLanguageModel {
     {
         let http_client = self.http_client.clone();
 
-        let (api_key, api_url) = self.state.read_with(cx, |state, cx| {
+        let (api_key, api_url, extra_headers) = self.state.read_with(cx, |state, cx| {
             let api_url = OpenAiLanguageModelProvider::api_url(cx);
-            (state.api_key_state.key(&api_url), api_url)
+            let extra_headers = OpenAiLanguageModelProvider::settings(cx)
+                .custom_headers
+                .clone();
+            (state.api_key_state.key(&api_url), api_url, extra_headers)
         });
 
         let future = self.request_limiter.stream(async move {
@@ -382,6 +389,7 @@ impl OpenAiLanguageModel {
                 &api_url,
                 &api_key,
                 request,
+                &extra_headers,
             );
             let response = request.await?;
             Ok(response)
@@ -398,9 +406,12 @@ impl OpenAiLanguageModel {
     {
         let http_client = self.http_client.clone();
 
-        let (api_key, api_url) = self.state.read_with(cx, |state, cx| {
+        let (api_key, api_url, extra_headers) = self.state.read_with(cx, |state, cx| {
             let api_url = OpenAiLanguageModelProvider::api_url(cx);
-            (state.api_key_state.key(&api_url), api_url)
+            let extra_headers = OpenAiLanguageModelProvider::settings(cx)
+                .custom_headers
+                .clone();
+            (state.api_key_state.key(&api_url), api_url, extra_headers)
         });
 
         let provider = PROVIDER_NAME;
@@ -414,7 +425,7 @@ impl OpenAiLanguageModel {
                 &api_url,
                 &api_key,
                 request,
-                vec![],
+                &extra_headers,
             );
             let response = request.await?;
             Ok(response)
@@ -611,6 +622,9 @@ impl LanguageModel for OpenAiLanguageModel {
             LanguageModelCompletionError,
         >,
     > {
+        if !self.model.supports_priority() {
+            request.speed = None;
+        }
         if self.model.uses_responses_api() {
             normalize_open_ai_response_thinking_effort(&mut request, &self.model);
             let request = match into_open_ai_response(

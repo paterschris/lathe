@@ -70,6 +70,11 @@ actions!(
         StageFile,
         /// Unstages the current file.
         UnstageFile,
+        // per-section
+        /// Stages every entry in the section containing the selected entry.
+        StageSection,
+        /// Unstages every entry in the section containing the selected entry.
+        UnstageSection,
         // repo-wide
         /// Stages all changes in the repository.
         StageAll,
@@ -79,6 +84,10 @@ actions!(
         StashAll,
         /// Stashes the currently selected file's changes.
         StashFile,
+        /// Stashes tracked changes in the repository, leaving untracked files in place.
+        StashTracked,
+        /// Stashes staged changes in the repository, leaving unstaged changes in place.
+        StashStaged,
         /// Pops the most recent stash.
         StashPop,
         /// Apply the most recent stash.
@@ -256,7 +265,7 @@ impl Oid {
         git2::Oid::from_bytes(self.as_bytes()).expect("Oid bytes are a valid SHA")
     }
 
-    pub(crate) fn is_zero(&self) -> bool {
+    pub fn is_zero(&self) -> bool {
         self.as_bytes().iter().all(|byte| *byte == 0)
     }
 

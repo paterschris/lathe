@@ -27,7 +27,7 @@ use project::{
 };
 use settings::Settings;
 use std::fmt::Write;
-use std::{ops::Range, rc::Rc, usize};
+use std::{ops::Range, rc::Rc};
 use theme_settings::ThemeSettings;
 use ui::{ContextMenu, Divider, PopoverMenu, SplitButton, Tooltip, prelude::*};
 use util::ResultExt;

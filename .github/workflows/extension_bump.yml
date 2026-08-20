@@ -32,7 +32,7 @@ permissions:
   contents: read
 jobs:
   check_version_changed:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: steps::checkout_repo
@@ -71,7 +71,7 @@ jobs:
     needs:
     - check_version_changed
     if: |-
-      (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris') &&
+      (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions') &&
       (inputs.force-bump == true || needs.check_version_changed.outputs.version_changed == 'false')
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
@@ -84,6 +84,7 @@ jobs:
         owner: ${{ github.repository_owner }}
         repositories: ${{ github.event.repository.name }}
         permission-contents: write
+        permission-issues: write
         permission-pull-requests: write
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -143,7 +144,7 @@ jobs:
         OLD_VERSION: ${{ needs.check_version_changed.outputs.current_version }}
         BUMP_TYPE: ${{ inputs.bump-type }}
         WORKING_DIR: ${{ inputs.working-directory }}
-    - name: extension_bump::create_pull_request
+    - name: steps::create_pull_request
       uses: peter-evans/create-pull-request@98357b18bf14b5342f975ff684046ec3b2a07725
       with:
         title: ${{ steps.bump-version.outputs.title }}
@@ -151,6 +152,7 @@ jobs:
         commit-message: ${{ steps.bump-version.outputs.title }}
         branch: ${{ steps.bump-version.outputs.branch_name }}
         committer: zed-zippy[bot] <234243425+zed-zippy[bot]@users.noreply.github.com>
+        author: zed-zippy[bot] <234243425+zed-zippy[bot]@users.noreply.github.com>
         base: main
         delete-branch: true
         token: ${{ steps.generate-token.outputs.token }}
@@ -164,7 +166,7 @@ jobs:
   create_version_label:
     needs:
     - check_version_changed
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris') && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check_version_changed.outputs.version_changed == 'true'
+    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions') && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check_version_changed.outputs.version_changed == 'true'
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - id: generate-token
@@ -217,7 +219,7 @@ jobs:
     needs:
     - check_version_changed
     - create_version_label
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions' || github.repository_owner == 'paterschris')
+    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - id: generate-token

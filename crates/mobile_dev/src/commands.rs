@@ -131,7 +131,11 @@ pub fn bundle_install(project: &MobileProject) -> ResolvedCommand {
 /// project pins a Ruby version so Bundler runs under that Ruby (rbenv reads the
 /// project's `.ruby-version`). Without a pin, `bundle` runs directly. Bundler
 /// walks up from `ios/` to find a root Gemfile.
-fn bundle_command(project: &MobileProject, label: &str, bundle_args: Vec<String>) -> ResolvedCommand {
+fn bundle_command(
+    project: &MobileProject,
+    label: &str,
+    bundle_args: Vec<String>,
+) -> ResolvedCommand {
     let ios = project.root.join("ios");
     if project.ruby_version.is_some() {
         let mut args = vec!["exec".to_string(), "bundle".to_string()];
@@ -288,7 +292,11 @@ pub fn run_ios(
 ) -> ResolvedCommand {
     match project.kind {
         ProjectKind::Expo => {
-            let mut args = vec!["expo".to_string(), "run:ios".to_string(), "--device".to_string()];
+            let mut args = vec![
+                "expo".to_string(),
+                "run:ios".to_string(),
+                "--device".to_string(),
+            ];
             if let Some(udid) = device_udid {
                 args.push(udid.to_string());
             }
@@ -462,7 +470,10 @@ mod tests {
         assert!(command.args.iter().any(|a| a == "react-native"));
         assert!(command.args.iter().any(|a| a == "--scheme=TommysStaging"));
         let udid_idx = command.args.iter().position(|a| a == "--udid").unwrap();
-        assert_eq!(command.args.get(udid_idx + 1).map(String::as_str), Some("SIM-UDID"));
+        assert_eq!(
+            command.args.get(udid_idx + 1).map(String::as_str),
+            Some("SIM-UDID")
+        );
     }
 
     #[test]
@@ -480,7 +491,12 @@ mod tests {
             None,
             None,
         );
-        assert!(command.args.iter().any(|a| a == "--mode=tommysStagingDebug"));
+        assert!(
+            command
+                .args
+                .iter()
+                .any(|a| a == "--mode=tommysStagingDebug")
+        );
         assert!(command.wants_android_env);
     }
 
@@ -493,7 +509,10 @@ mod tests {
             Some("Lathe_Pixel_API35"),
         );
         let idx = command.args.iter().position(|a| a == "--deviceId").unwrap();
-        assert_eq!(command.args.get(idx + 1).map(String::as_str), Some("emulator-5554"));
+        assert_eq!(
+            command.args.get(idx + 1).map(String::as_str),
+            Some("emulator-5554")
+        );
     }
 
     #[test]
@@ -546,7 +565,10 @@ mod tests {
         project.ruby_version = Some("3.3.4".to_string());
         let command = pod_install(&project);
         assert!(command.program.ends_with("rbenv"));
-        assert_eq!(command.args, vec!["exec", "bundle", "exec", "pod", "install"]);
+        assert_eq!(
+            command.args,
+            vec!["exec", "bundle", "exec", "pod", "install"]
+        );
     }
 
     #[test]

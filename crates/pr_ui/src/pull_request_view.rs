@@ -1826,8 +1826,15 @@ async fn build_buffer_diff(
     // registry so syntax highlighting is available for the deleted side, then
     // `set_base_text` populates that base buffer from `old_text` and computes and
     // applies the diff snapshot in one step.
-    let diff =
-        cx.new(|cx| BufferDiff::new(&buffer.text, language, Some(language_registry.clone()), cx));
+    let diff = cx.new(|cx| {
+        BufferDiff::new(
+            &buffer.text,
+            language,
+            Some(language_registry.clone()),
+            buffer_diff::DiffBaseKind::Custom,
+            cx,
+        )
+    });
 
     let base_text = old_text.map(|old_text| Arc::<str>::from(old_text.as_str()));
     diff.update(cx, |diff, cx| {

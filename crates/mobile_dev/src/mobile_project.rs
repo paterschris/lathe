@@ -460,10 +460,11 @@ fn parse_product_flavors(gradle: &str) -> Vec<String> {
 
 fn is_gradle_identifier(token: &str) -> bool {
     !token.is_empty()
+        && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && token
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && token.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
 }
 
 fn detect_flavor_application_ids(root: &Path) -> BTreeMap<String, String> {
@@ -841,7 +842,11 @@ mod tests {
             "package.json",
             r#"{"name": "app", "dependencies": {"react-native": "0.85.0"}}"#,
         );
-        write(tmp.path(), "Gemfile", "source 'https://rubygems.org'\ngem 'cocoapods'\n");
+        write(
+            tmp.path(),
+            "Gemfile",
+            "source 'https://rubygems.org'\ngem 'cocoapods'\n",
+        );
         write(
             tmp.path(),
             "Gemfile.lock",
@@ -945,14 +950,19 @@ mod tests {
             "com.tommycarwash.tommysexpress.staging".to_string(),
         )]);
         assert_eq!(
-            project.variant_application_id("tommysStagingDebug").as_deref(),
+            project
+                .variant_application_id("tommysStagingDebug")
+                .as_deref(),
             Some("com.tommycarwash.tommysexpress.staging")
         );
     }
 
     #[test]
     fn splits_scheme_and_variant_into_args() {
-        assert_eq!(split_variant_config("TommysStaging"), vec!["tommys", "staging"]);
+        assert_eq!(
+            split_variant_config("TommysStaging"),
+            vec!["tommys", "staging"]
+        );
         assert_eq!(
             split_variant_config("tommysStagingDebug"),
             vec!["tommys", "staging"]

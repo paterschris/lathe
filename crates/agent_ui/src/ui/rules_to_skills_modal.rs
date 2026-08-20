@@ -81,7 +81,7 @@ impl Render for RulesToSkillsModal {
                     .layer(ui::ElevationIndex::ModalSurface)
                     .key_binding(
                         KeyBinding::for_action(&menu::Confirm, cx)
-                            .map(|kb| kb.size(rems_from_px(12.))),
+                            .map(|kb| kb.size(rems_from_px(12.0_f32))),
                     )
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.dismiss(cx);

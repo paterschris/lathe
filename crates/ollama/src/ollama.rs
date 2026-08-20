@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 
 use futures::{AsyncBufReadExt, AsyncReadExt, StreamExt, io::BufReader, stream::BoxStream};
-use http_client::{AsyncBody, HttpClient, HttpRequestExt, Method, Request as HttpRequest};
+use http_client::{
+    AsyncBody, CustomHeaders, HttpClient, HttpRequestExt, Method, Request as HttpRequest,
+    RequestBuilderExt,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use settings::KeepAlive;
@@ -293,6 +296,7 @@ pub async fn stream_chat_completion(
     api_url: &str,
     api_key: Option<&str>,
     request: ChatRequest,
+    extra_headers: &CustomHeaders,
 ) -> Result<BoxStream<'static, Result<ChatResponseDelta>>> {
     let uri = format!("{api_url}/api/chat");
     let request = HttpRequest::builder()
@@ -302,6 +306,7 @@ pub async fn stream_chat_completion(
         .when_some(api_key, |builder, api_key| {
             builder.header("Authorization", format!("Bearer {api_key}"))
         })
+        .extra_headers(extra_headers)
         .body(AsyncBody::from(serde_json::to_string(&request)?))?;
 
     let mut response = client.send(request).await?;
@@ -330,6 +335,7 @@ pub async fn get_models(
     client: &dyn HttpClient,
     api_url: &str,
     api_key: Option<&str>,
+    extra_headers: &CustomHeaders,
 ) -> Result<Vec<LocalModelListing>> {
     let uri = format!("{api_url}/api/tags");
     let request = HttpRequest::builder()
@@ -339,6 +345,7 @@ pub async fn get_models(
         .when_some(api_key, |builder, api_key| {
             builder.header("Authorization", format!("Bearer {api_key}"))
         })
+        .extra_headers(extra_headers)
         .body(AsyncBody::default())?;
 
     let mut response = client.send(request).await?;
@@ -363,6 +370,7 @@ pub async fn show_model(
     api_url: &str,
     api_key: Option<&str>,
     model: &str,
+    extra_headers: &CustomHeaders,
 ) -> Result<ModelShow> {
     let uri = format!("{api_url}/api/show");
     let request = HttpRequest::builder()
@@ -372,6 +380,7 @@ pub async fn show_model(
         .when_some(api_key, |builder, api_key| {
             builder.header("Authorization", format!("Bearer {api_key}"))
         })
+        .extra_headers(extra_headers)
         .body(AsyncBody::from(
             serde_json::json!({ "model": model }).to_string(),
         ))?;

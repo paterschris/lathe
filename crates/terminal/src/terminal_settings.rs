@@ -2,7 +2,7 @@ use alacritty_terminal::vte::ansi::{
     CursorShape as AlacCursorShape, CursorStyle as AlacCursorStyle,
 };
 use collections::HashMap;
-use gpui::{FontFallbacks, FontFeatures, FontWeight, Pixels, px};
+use gpui::{FontFallbacks, FontFeatures, FontWeight, Pixels};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +41,7 @@ pub struct TerminalSettings {
     pub open_links_in_mouse_mode: bool,
     pub button: bool,
     pub dock: TerminalDockPosition,
+    pub starts_open: bool,
     pub flexible: bool,
     pub default_width: Pixels,
     pub default_height: Pixels,
@@ -114,8 +115,9 @@ impl settings::Settings for TerminalSettings {
             open_links_in_mouse_mode: user_content.open_links_in_mouse_mode.unwrap(),
             button: user_content.button.unwrap(),
             dock: user_content.dock.unwrap(),
-            default_width: px(user_content.default_width.unwrap()),
-            default_height: px(user_content.default_height.unwrap()),
+            starts_open: user_content.starts_open.unwrap(),
+            default_width: user_content.default_width.unwrap().into_gpui(),
+            default_height: user_content.default_height.unwrap().into_gpui(),
             flexible: user_content.flexible.unwrap(),
             detect_venv: project_content.detect_venv.unwrap(),
             scroll_multiplier: user_content.scroll_multiplier.unwrap(),

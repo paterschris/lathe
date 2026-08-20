@@ -300,7 +300,7 @@
     ] @function.method.chain_1))
 
 (new_expression
-  constructor: (identifier) @type)
+  constructor: (identifier) @type.class)
 
 (nested_type_identifier
   module: (identifier) @type)

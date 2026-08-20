@@ -47,6 +47,7 @@ emojis.workspace = true
 feature_flags.workspace = true
 file_icons.workspace = true
 futures.workspace = true
+futures-lite.workspace = true
 fuzzy.workspace = true
 fs.workspace = true
 git.workspace = true
