@@ -8,6 +8,25 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 Set-Location (Join-Path $PSScriptRoot '..')
 
+# A path safe to place, unquoted, on a command line that ISCC will parse itself.
+# Quotes cannot survive that trip (see the sign-hook comment below), so a path
+# containing spaces has to be reduced to its 8.3 short form.
+function Get-UnquotedPath {
+    Param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ($Path -notmatch ' ') { return $Path }
+    $shortPath = $null
+    try {
+        $shortPath = (New-Object -ComObject Scripting.FileSystemObject).GetFile($Path).ShortPath
+    } catch {
+        $shortPath = $null
+    }
+    if ([string]::IsNullOrWhiteSpace($shortPath) -or $shortPath -match ' ') {
+        throw "Cannot hand '$Path' to the Inno Setup sign hook: it contains spaces and 8.3 short names are unavailable on this volume. Build from a path without spaces, or point TEMP at one."
+    }
+    return $shortPath
+}
+
 # --- Architecture and target ---
 # See build-fork-windows.ps1: RuntimeInformation::OSArchitecture lies
 # about the OS arch under Windows PowerShell 5.1's .NET Framework.
@@ -186,18 +205,53 @@ try {
         # uninstaller) by shelling out to this command with $f replaced by the
         # file to sign. Only register it when signing is configured, so an
         # unconfigured build doesn't spawn a PowerShell per file just to warn.
+        $signLog = $null
         if ($env:LATHE_SIGN_ENDPOINT -and $env:LATHE_SIGN_ACCOUNT -and $env:LATHE_SIGN_PROFILE) {
             $signScript = (Resolve-Path "$PSScriptRoot/sign-windows.ps1").Path
             # Prefer pwsh: this script already ran the sign helper once under
             # whichever host invoked it, and PowerShell 5.1 resolves
             # CurrentUser modules from a different directory, so mixing hosts
-            # would install TrustedSigning a second time mid-compile.
-            $signHost = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+            # would install TrustedSigning a second time mid-compile. Resolve it
+            # to a full path so the shim below does not depend on ISCC's PATH.
+            $signHostCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+            if (-not $signHostCommand) { $signHostCommand = Get-Command powershell.exe }
+            $signHostPath = $signHostCommand.Source
+
+            # ISCC is a Delphi program, so it does not decode the
+            # backslash-escaped quotes PowerShell emits when handing a native
+            # executable an argument that contains quotes. A quoted path inside
+            # /sDefaultsign= therefore arrives mangled and pwsh exits 64 without
+            # ever running the script, which is silent because the hook's own
+            # output never reaches ISCC's console. Keep the quoting inside a cmd
+            # shim so the value ISCC has to parse is two unquoted tokens: the
+            # shim path and $f.
+            $signLog = Join-Path $tempDir 'sign-shim.log'
+            $signShim = Join-Path $tempDir 'sign-shim.cmd'
+            $shimBody = @"
+@echo off
+"$signHostPath" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$signScript" %* >> "$signLog" 2>&1
+exit /b %ERRORLEVEL%
+"@
+            Set-Content -LiteralPath $signShim -Value $shimBody -Encoding ASCII
+
             $isccArgs += '/DLatheSignTool=1'
-            $isccArgs += "/sDefaultsign=$signHost -NoProfile -ExecutionPolicy Bypass -File `"$signScript`" `$f"
+            $isccArgs += "/sDefaultsign=$(Get-UnquotedPath $signShim) `$f"
         }
 
-        & $iscc @isccArgs $issPath
+        try {
+            & $iscc @isccArgs $issPath
+        }
+        catch {
+            # ISCC reports a hook failure as nothing but an exit code, so the
+            # shim's captured output is the only description of what went wrong.
+            if ($signLog -and (Test-Path -LiteralPath $signLog)) {
+                Write-Output ""
+                Write-Output "--- Sign hook log ---"
+                Get-Content -LiteralPath $signLog | Write-Output
+                Write-Output "--- End sign hook log ---"
+            }
+            throw
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "ISCC.exe failed with exit code $LASTEXITCODE"
         }
