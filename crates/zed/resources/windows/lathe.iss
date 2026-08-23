@@ -98,6 +98,15 @@ UninstallDisplayIcon={app}\share\lathe.ico
 UninstallDisplayName={#LatheDisplayName}
 WizardImageStretch=no
 
+; Registered by script/package-fork-windows.ps1 (as /sDefaultsign) only when
+; Azure Artifact Signing is configured, so an unsigned local build still
+; compiles. SignedUninstaller covers unins000.exe, which is generated here
+; rather than staged, and so can't be signed ahead of time.
+#ifdef LatheSignTool
+SignTool=Defaultsign
+SignedUninstaller=yes
+#endif
+
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 

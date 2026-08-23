@@ -375,6 +375,12 @@ jobs:
 
   build-windows:
     continue-on-error: ${{ matrix.arch == 'aarch64' }}
+    permissions:
+      contents: read
+      # Required for the OIDC federated credential that azure/login exchanges
+      # for an Azure token; without it there is no long-lived client secret to
+      # fall back on and signing is skipped.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -421,11 +427,45 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: ./script/build-fork-windows.ps1 -Architecture $env:ARCH
 
+      # Signing config lives in repository variables rather than secrets: an
+      # endpoint, account name and profile name are not credentials, and
+      # `vars` is usable in `if:` conditions where `secrets` is awkward. When
+      # LATHE_SIGN_ACCOUNT is unset the whole signing path is skipped and the
+      # release ships unsigned, exactly as it did before signing was wired up.
+      - name: Azure login for Artifact Signing
+        if: vars.LATHE_SIGN_ACCOUNT != ''
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Package
         shell: pwsh
         env:
           ARCH: ${{ matrix.arch }}
+          LATHE_SIGN_ENDPOINT: ${{ vars.LATHE_SIGN_ENDPOINT }}
+          LATHE_SIGN_ACCOUNT: ${{ vars.LATHE_SIGN_ACCOUNT }}
+          LATHE_SIGN_PROFILE: ${{ vars.LATHE_SIGN_PROFILE }}
+          # Only demand a signature once signing is configured, so adding the
+          # variables can never leave a release silently unsigned, and not
+          # having them yet can never block one.
+          LATHE_REQUIRE_SIGNING: ${{ vars.LATHE_SIGN_ACCOUNT != '' && '1' || '' }}
         run: ./script/package-fork-windows.ps1 -Architecture $env:ARCH
+
+      - name: Verify Windows signatures
+        if: vars.LATHE_SIGN_ACCOUNT != ''
+        shell: pwsh
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          $failed = $false
+          foreach ($file in Get-ChildItem "target/release/Lathe-*-$env:ARCH-windows-setup.exe") {
+              $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+              Write-Output "$($file.Name): $($signature.Status) - $($signature.SignerCertificate.Subject)"
+              if ($signature.Status -ne 'Valid') { $failed = $true }
+          }
+          if ($failed) { throw "One or more Windows artifacts are not validly signed" }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v5

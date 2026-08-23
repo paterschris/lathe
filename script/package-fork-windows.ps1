@@ -124,6 +124,15 @@ try {
         Copy-Item 'assets/licenses.md' "$appDir/licenses.md" -Force
     }
 
+    # --- Code signing ---
+    # Sign before archiving so the zip and the installer both carry signed
+    # binaries. Only the two Lathe executables are signed; conpty.dll,
+    # OpenConsole.exe and amd_ags_x64.dll already ship signed by Microsoft
+    # and AMD, and re-signing them would strip those signatures.
+    Write-Output ""
+    Write-Output "--- Code signing ---"
+    & "$PSScriptRoot/sign-windows.ps1" "$appDir/libexec/lathe-editor.exe" "$appDir/bin/lathe.exe"
+
     # --- Archive ---
     $outDir = 'target/release'
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
@@ -164,13 +173,31 @@ try {
         Write-Output "  Compiler: $iscc"
         $outAbs = (Resolve-Path $outDir).Path
         $issPath = (Resolve-Path 'crates/zed/resources/windows/lathe.iss').Path
-        & $iscc /Qp `
-            "/DLatheChannel=$channel" `
-            "/DLatheVersion=$version" `
-            "/DLatheArch=$Architecture" `
-            "/DStageDir=$appDir" `
-            "/DOutputDir=$outAbs" `
-            $issPath
+        $isccArgs = @(
+            '/Qp',
+            "/DLatheChannel=$channel",
+            "/DLatheVersion=$version",
+            "/DLatheArch=$Architecture",
+            "/DStageDir=$appDir",
+            "/DOutputDir=$outAbs"
+        )
+
+        # Inno signs the installer (and, via SignedUninstaller, the extracted
+        # uninstaller) by shelling out to this command with $f replaced by the
+        # file to sign. Only register it when signing is configured, so an
+        # unconfigured build doesn't spawn a PowerShell per file just to warn.
+        if ($env:LATHE_SIGN_ENDPOINT -and $env:LATHE_SIGN_ACCOUNT -and $env:LATHE_SIGN_PROFILE) {
+            $signScript = (Resolve-Path "$PSScriptRoot/sign-windows.ps1").Path
+            # Prefer pwsh: this script already ran the sign helper once under
+            # whichever host invoked it, and PowerShell 5.1 resolves
+            # CurrentUser modules from a different directory, so mixing hosts
+            # would install TrustedSigning a second time mid-compile.
+            $signHost = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+            $isccArgs += '/DLatheSignTool=1'
+            $isccArgs += "/sDefaultsign=$signHost -NoProfile -ExecutionPolicy Bypass -File `"$signScript`" `$f"
+        }
+
+        & $iscc @isccArgs $issPath
         if ($LASTEXITCODE -ne 0) {
             throw "ISCC.exe failed with exit code $LASTEXITCODE"
         }
