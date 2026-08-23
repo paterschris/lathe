@@ -173,6 +173,7 @@ async fn load_pull_requests(
         reviewer_is_me: false,
         author_is_me: false,
         limit: Some(50),
+        page: None,
     };
     // Cloning the parsed remote requires reconstruction since the struct
     // doesn't derive Clone — its two Arc<str> fields are cheap to clone.
@@ -329,9 +330,7 @@ impl PickerDelegate for PullRequestPickerDelegate {
             ),
             PickerStatus::AuthExpired { host } => {
                 let host_for_action = host.to_string();
-                let display = git::git_host_credentials::GitHostKind::from_host(host)
-                    .map(|kind| kind.display_name())
-                    .unwrap_or("the git host");
+                let display = crate::pull_request_view::host_display_name(cx, host);
                 Some(
                     ListItem::new(ix)
                         .inset(true)

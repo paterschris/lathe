@@ -14,7 +14,7 @@ use util::ResultExt as _;
 
 use git::{
     BuildCommitPermalinkParams, BuildPermalinkParams, DiffCommentSide, GitHostAuth,
-    GitHostingProvider, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
+    GitHostAuthKind, GitHostingProvider, NewPullRequest, PullRequestChecks, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
     PullRequestListFilter, PullRequestMergeMethod, PullRequestReviewComment,
     PullRequestReviewVerdict, PullRequestReviewer, PullRequestState, PullRequestSummary, RemoteUrl,
 };
@@ -136,10 +136,8 @@ impl Github {
         commit: &str,
         client: &Arc<dyn HttpClient>,
     ) -> Result<Option<User>> {
-        let Some(host) = self.base_url.host_str() else {
-            bail!("failed to get host from github base url");
-        };
-        let url = format!("https://api.{host}/repos/{repo_owner}/{repo}/commits/{commit}");
+        let api = self.api_base()?;
+        let url = format!("{api}/repos/{repo_owner}/{repo}/commits/{commit}");
 
         let mut request = Request::get(&url)
             .header("Content-Type", "application/json")
@@ -175,6 +173,10 @@ impl Github {
 
 #[async_trait]
 impl GitHostingProvider for Github {
+    fn auth_kind(&self) -> Option<GitHostAuthKind> {
+        Some(GitHostAuthKind::GitHub)
+    }
+
     fn name(&self) -> String {
         self.name.clone()
     }
@@ -307,6 +309,14 @@ impl GitHostingProvider for Github {
         Ok(avatar_url)
     }
 
+    async fn fetch_authenticated_user(
+        &self,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        self.fetch_authenticated_login(&auth, &http_client).await
+    }
+
     async fn list_pull_requests(
         &self,
         remote: &ParsedGitRemote,
@@ -314,10 +324,7 @@ impl GitHostingProvider for Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<Vec<PullRequestSummary>> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         // Resolving "review requested from me" needs the caller's own login, so
         // fetch it once up front and match it against each PR's requested
         // reviewers below.
@@ -347,10 +354,17 @@ impl GitHostingProvider for Github {
             per_page as usize
         };
         let mut raw: Vec<GithubPullRequest> = Vec::new();
-        let mut page = 1u32;
+        // A deep scan filters client-side over a wide window, so its results do
+        // not line up with any one page of the host's response; only a plain
+        // listing honours the caller's page.
+        let mut page = if deep_scan {
+            1
+        } else {
+            filter.page.unwrap_or(1).max(1)
+        };
         loop {
             let url = format!(
-                "https://api.{host}/repos/{owner}/{repo}/pulls?state={state}&per_page={per_page}&page={page}&sort=updated&direction=desc",
+                "{api}/repos/{owner}/{repo}/pulls?state={state}&per_page={per_page}&page={page}&sort=updated&direction=desc",
                 owner = remote.owner,
                 repo = remote.repo,
             );
@@ -418,6 +432,66 @@ impl GitHostingProvider for Github {
         Ok(summaries)
     }
 
+    async fn create_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        request: NewPullRequest,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<PullRequestSummary> {
+        let api = self.api_base()?;
+        let url = format!(
+            "{api}/repos/{owner}/{repo}/pulls",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let body = serde_json::json!({
+            "title": request.title.to_string(),
+            "body": request.body.to_string(),
+            "head": request.source_branch.to_string(),
+            "base": request.target_branch.to_string(),
+            "draft": request.is_draft,
+        });
+        let http_request = github_request(
+            GithubMethod::Post,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            Some(serde_json::to_vec(&body)?),
+        )?;
+        let bytes =
+            github_send(&http_client, http_request, "creating GitHub pull request").await?;
+        let created: GithubPullRequest =
+            serde_json::from_slice(&bytes).context("parsing created GitHub pull request")?;
+        let state = created.pull_request_state();
+        created.into_summary(state)
+    }
+
+    async fn default_branch(
+        &self,
+        remote: &ParsedGitRemote,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        let api = self.api_base()?;
+        let url = format!(
+            "{api}/repos/{owner}/{repo}",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            None,
+        )?;
+        let bytes = github_send(&http_client, request, "fetching GitHub repository").await?;
+        let repository: GithubRepository =
+            serde_json::from_slice(&bytes).context("parsing GitHub repository")?;
+        Ok(repository.default_branch.map(SharedString::from))
+    }
+
     async fn get_pull_request(
         &self,
         remote: &ParsedGitRemote,
@@ -425,12 +499,9 @@ impl GitHostingProvider for Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<PullRequestDetail> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}",
+            "{api}/repos/{owner}/{repo}/pulls/{number}",
             owner = remote.owner,
             repo = remote.repo,
         );
@@ -473,7 +544,7 @@ impl GitHostingProvider for Github {
         // compare endpoint reports `behind_by` = commits on base not reachable
         // from head. A failure just leaves the indicator unset.
         let compare_url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/compare/{base}...{head}",
+            "{api}/repos/{owner}/{repo}/compare/{base}...{head}",
             owner = remote.owner,
             repo = remote.repo,
             base = detail.target_branch,
@@ -494,6 +565,14 @@ impl GitHostingProvider for Github {
         }
         .await
         .log_err();
+        // Best-effort: a repository with no CI, or a token that cannot read
+        // checks, leaves this unset and the header says so rather than showing
+        // a false failure.
+        detail.checks = self
+            .fetch_checks(remote, &detail.head_sha.clone(), &auth, &http_client)
+            .await
+            .log_err()
+            .flatten();
         Ok(detail)
     }
 
@@ -504,12 +583,9 @@ impl GitHostingProvider for Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<Vec<PullRequestReviewer>> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}",
+            "{api}/repos/{owner}/{repo}/pulls/{number}",
             owner = remote.owner,
             repo = remote.repo,
         );
@@ -566,12 +642,9 @@ impl GitHostingProvider for Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<String> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}",
+            "{api}/repos/{owner}/{repo}/pulls/{number}",
             owner = remote.owner,
             repo = remote.repo,
         );
@@ -594,15 +667,12 @@ impl GitHostingProvider for Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<String> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         // The `raw` media type returns the file bytes directly rather than the
         // JSON envelope. `path` is already repo-relative with `/` separators,
         // which is exactly what the contents API expects.
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/contents/{path}?ref={revision}",
+            "{api}/repos/{owner}/{repo}/contents/{path}?ref={revision}",
             owner = remote.owner,
             repo = remote.repo,
         );
@@ -624,12 +694,9 @@ impl GitHostingProvider for Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<Vec<PullRequestReviewComment>> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/comments?per_page=100",
+            "{api}/repos/{owner}/{repo}/pulls/{number}/comments?per_page=100",
             owner = remote.owner,
             repo = remote.repo,
         );
@@ -656,12 +723,9 @@ impl GitHostingProvider for Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<()> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/merge",
+            "{api}/repos/{owner}/{repo}/pulls/{number}/merge",
             owner = remote.owner,
             repo = remote.repo,
         );
@@ -691,12 +755,9 @@ impl GitHostingProvider for Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<()> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/reviews",
+            "{api}/repos/{owner}/{repo}/pulls/{number}/reviews",
             owner = remote.owner,
             repo = remote.repo,
         );
@@ -743,12 +804,9 @@ impl GitHostingProvider for Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<()> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/comments/{in_reply_to}/replies",
+            "{api}/repos/{owner}/{repo}/pulls/{number}/comments/{in_reply_to}/replies",
             owner = remote.owner,
             repo = remote.repo,
         );
@@ -776,12 +834,9 @@ impl GitHostingProvider for Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<()> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/comments",
+            "{api}/repos/{owner}/{repo}/pulls/{number}/comments",
             owner = remote.owner,
             repo = remote.repo,
         );

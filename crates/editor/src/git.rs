@@ -1257,7 +1257,22 @@ impl Editor {
             .display_snapshot
             .display_point_to_point(DisplayPoint::new(display_row, 0), Bias::Left);
         let anchor = snapshot.buffer_snapshot().anchor_before(point);
-        cx.emit(EditorEvent::AddPrCommentRequested { anchor });
+        // A deleted line lives only in the diff's base text, so it has no row in
+        // the buffer the anchor points into. Report that separately, along with
+        // its row in the base, so a review comment can anchor to the old side.
+        let row_info = snapshot
+            .display_snapshot
+            .row_infos(display_row)
+            .next()
+            .unwrap_or_default();
+        let is_deleted = row_info
+            .diff_status
+            .is_some_and(|status| status.kind == buffer_diff::DiffHunkStatusKind::Deleted);
+        cx.emit(EditorEvent::AddPrCommentRequested {
+            anchor,
+            is_deleted,
+            base_row: is_deleted.then_some(row_info.buffer_row).flatten(),
+        });
     }
 
     pub(super) fn start_diff_review_drag(

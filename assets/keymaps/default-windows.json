@@ -694,6 +694,7 @@
       "ctrl-shift-p": "command_palette::Toggle",
       "ctrl-shift-m": "diagnostics::Deploy",
       "ctrl-shift-e": "project_panel::ToggleFocus",
+      "ctrl-shift-alt-p": "pull_request_panel::ToggleFocus",
       "ctrl-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "ctrl-shift-d": "debug_panel::ToggleFocus",
@@ -1010,6 +1011,20 @@
     "use_key_equivalents": true,
     "bindings": {
       "space": "project_panel::Open",
+    },
+  },
+  {
+    "context": "PullRequestPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "ctrl-home": "menu::SelectFirst",
+      "ctrl-end": "menu::SelectLast",
+      "enter": "menu::Confirm",
+      "ctrl-enter": "menu::SecondaryConfirm",
+      "ctrl-r": "pull_request_panel::Refresh",
+      "ctrl-shift-o": "pull_request_panel::OpenSelectedInBrowser",
     },
   },
   {

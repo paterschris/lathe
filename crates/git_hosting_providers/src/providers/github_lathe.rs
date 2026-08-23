@@ -1,6 +1,21 @@
 use super::*;
 
 impl Github {
+    /// Base URL for REST API calls, which differs between deployments:
+    /// github.com serves its API from the dedicated `api.github.com` host, while
+    /// GitHub Enterprise Server serves it from `/api/v3` on the instance itself.
+    pub(super) fn api_base(&self) -> Result<String> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("GitHub base URL has no host")?;
+        Ok(if host == "github.com" {
+            "https://api.github.com".to_string()
+        } else {
+            format!("https://{host}/api/v3")
+        })
+    }
+
     /// Fetch the login of the user the supplied credential authenticates as, so
     /// the PR list can be filtered down to review requests addressed to them.
     pub(super) async fn fetch_authenticated_login(
@@ -8,11 +23,8 @@ impl Github {
         auth: &Option<GitHostAuth>,
         http_client: &Arc<dyn HttpClient>,
     ) -> Result<Option<SharedString>> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
-        let url = format!("https://api.{host}/user");
+        let api = self.api_base()?;
+        let url = format!("{api}/user");
         let request = github_request(
             GithubMethod::Get,
             &url,
@@ -30,6 +42,85 @@ impl Github {
     /// PR, so the detail view can reflect what they've already done. Returns
     /// `Ok(None)` when they have no approving or blocking review; the caller logs
     /// and ignores any error, leaving the buttons in their default state.
+    /// CI results for a commit, combining the two systems GitHub exposes:
+    /// modern check runs (GitHub Actions and most apps) and the legacy commit
+    /// status API that older integrations still write to. A repository can use
+    /// either or both, so both are counted.
+    pub(super) async fn fetch_checks(
+        &self,
+        remote: &ParsedGitRemote,
+        sha: &str,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<Option<PullRequestChecks>> {
+        let api = self.api_base()?;
+        let mut checks = PullRequestChecks {
+            succeeded: 0,
+            failed: 0,
+            pending: 0,
+            neutral: 0,
+        };
+
+        let check_runs_url = format!(
+            "{api}/repos/{owner}/{repo}/commits/{sha}/check-runs?per_page=100",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &check_runs_url,
+            "application/vnd.github+json",
+            auth,
+            None,
+        )?;
+        let bytes = github_send(http_client, request, "fetching GitHub check runs").await?;
+        let response: GithubCheckRuns =
+            serde_json::from_slice(&bytes).context("parsing GitHub check runs")?;
+        for run in response.check_runs {
+            // A run only has a conclusion once it finishes; until then it is
+            // still in flight regardless of what the conclusion field says.
+            if run.status != "completed" {
+                checks.pending += 1;
+                continue;
+            }
+            match run.conclusion.as_deref() {
+                Some("success") => checks.succeeded += 1,
+                Some("failure") | Some("timed_out") | Some("startup_failure") => {
+                    checks.failed += 1
+                }
+                // `action_required` is a human gate, not a failure, but it is
+                // not a pass either.
+                _ => checks.neutral += 1,
+            }
+        }
+
+        let status_url = format!(
+            "{api}/repos/{owner}/{repo}/commits/{sha}/status",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &status_url,
+            "application/vnd.github+json",
+            auth,
+            None,
+        )?;
+        let bytes = github_send(http_client, request, "fetching GitHub commit status").await?;
+        let response: GithubCombinedStatus =
+            serde_json::from_slice(&bytes).context("parsing GitHub commit status")?;
+        for status in response.statuses {
+            match status.state.as_str() {
+                "success" => checks.succeeded += 1,
+                "failure" | "error" => checks.failed += 1,
+                "pending" => checks.pending += 1,
+                _ => checks.neutral += 1,
+            }
+        }
+
+        Ok((!checks.is_empty()).then_some(checks))
+    }
+
     /// Fetch all submitted reviews on a PR. Used to derive both the viewer's own
     /// verdict (list tint) and the full reviewer list (detail panel). Paginated to
     /// 100, which comfortably covers a PR's reviewers.
@@ -40,12 +131,9 @@ impl Github {
         auth: &Option<GitHostAuth>,
         http_client: &Arc<dyn HttpClient>,
     ) -> Result<Vec<GithubReview>> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100",
+            "{api}/repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100",
             owner = remote.owner,
             repo = remote.repo,
         );
@@ -68,10 +156,7 @@ impl Github {
         auth: Option<GitHostAuth>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<()> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
+        let api = self.api_base()?;
         let login = self
             .fetch_authenticated_login(&auth, &http_client)
             .await?
@@ -84,7 +169,7 @@ impl Github {
         // GitHub has no "un-review" endpoint; retracting a verdict is done by
         // dismissing the review, which requires a message.
         let url = format!(
-            "https://api.{host}/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/dismissals",
+            "{api}/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/dismissals",
             owner = remote.owner,
             repo = remote.repo,
         );
@@ -421,6 +506,7 @@ impl GithubPullRequest {
             // Filled in by `get_pull_request` from a separate reviews request.
             viewer_review: None,
             reviewers: Vec::new(),
+            checks: None,
         })
     }
 }
@@ -705,6 +791,7 @@ mod tests {
             reviewer_is_me: true,
             author_is_me: false,
             limit: Some(50),
+            page: None,
         };
         let summaries = futures::executor::block_on(Github::public_instance().list_pull_requests(
             &remote,
@@ -757,6 +844,7 @@ mod tests {
             reviewer_is_me: false,
             author_is_me: true,
             limit: Some(50),
+            page: None,
         };
         let summaries = futures::executor::block_on(Github::public_instance().list_pull_requests(
             &remote,
@@ -792,6 +880,7 @@ mod tests {
             reviewer_is_me: false,
             author_is_me: true,
             limit: Some(50),
+            page: None,
         };
         let error = futures::executor::block_on(Github::public_instance().list_pull_requests(
             &remote,
@@ -905,4 +994,36 @@ mod tests {
         assert_eq!(reviewers[0].login.to_string(), "octocat");
         assert!(!reviewers[0].is_me);
     }
+}
+
+#[derive(Deserialize)]
+pub(super) struct GithubCheckRuns {
+    #[serde(default)]
+    check_runs: Vec<GithubCheckRun>,
+}
+
+#[derive(Deserialize)]
+struct GithubCheckRun {
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct GithubCombinedStatus {
+    #[serde(default)]
+    statuses: Vec<GithubCommitStatus>,
+}
+
+#[derive(Deserialize)]
+struct GithubCommitStatus {
+    #[serde(default)]
+    state: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct GithubRepository {
+    #[serde(default)]
+    pub(super) default_branch: Option<String>,
 }

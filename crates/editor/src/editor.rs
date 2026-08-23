@@ -11917,6 +11917,14 @@ pub enum EditorEvent {
     /// diff row. `anchor` is the multibuffer anchor at the start of that row.
     AddPrCommentRequested {
         anchor: Anchor,
+        /// True when the clicked row is a deleted line, which exists only in the
+        /// diff's base text. Such a row anchors a comment to the *old* side of
+        /// the diff, and `base_row` carries its row in that base text; the
+        /// anchor alone cannot express it, because deleted lines occupy no row
+        /// in the buffer the anchor points into.
+        is_deleted: bool,
+        /// Row within the diff base text for a deleted row, `None` otherwise.
+        base_row: Option<u32>,
     },
     InputIgnored {
         text: Arc<str>,

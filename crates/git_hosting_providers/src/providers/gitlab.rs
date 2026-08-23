@@ -12,8 +12,11 @@ use url::Url;
 use urlencoding::encode;
 
 use git::{
-    BuildCommitPermalinkParams, BuildPermalinkParams, GitHostingProvider, ParsedGitRemote,
-    PullRequest, RemoteUrl,
+    BuildCommitPermalinkParams, BuildPermalinkParams, DiffCommentSide, GitHostAuth,
+    GitHostAuthKind, GitHostingProvider, ParsedGitRemote, PullRequest, PullRequestAuthError,
+    NewPullRequest, PullRequestChecks, PullRequestDetail, PullRequestListFilter, PullRequestMergeMethod,
+    PullRequestReviewComment, PullRequestReviewVerdict, PullRequestReviewer, PullRequestState,
+    PullRequestSummary, RemoteUrl,
 };
 
 fn merge_request_number_regex() -> &'static Regex {
@@ -26,7 +29,14 @@ fn merge_request_number_regex() -> &'static Regex {
     &MERGE_REQUEST_NUMBER_REGEX
 }
 
+use util::ResultExt as _;
+
 use crate::get_host_from_git_remote_url;
+
+#[path = "gitlab_lathe.rs"]
+mod lathe;
+
+use lathe::*;
 
 #[derive(Debug, Deserialize)]
 struct CommitDetails {
@@ -148,6 +158,587 @@ impl Gitlab {
 
 #[async_trait]
 impl GitHostingProvider for Gitlab {
+    fn auth_kind(&self) -> Option<GitHostAuthKind> {
+        Some(GitHostAuthKind::GitLab)
+    }
+
+    async fn fetch_authenticated_user(
+        &self,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        self.fetch_authenticated_username(&auth, &http_client).await
+    }
+
+    async fn list_pull_requests(
+        &self,
+        remote: &ParsedGitRemote,
+        filter: PullRequestListFilter,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestSummary>> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        let limit = filter.limit.unwrap_or(50);
+
+        // GitLab filters "mine" server-side by username, unlike the other
+        // providers, so no wide client-side scan is needed.
+        let username = if filter.reviewer_is_me || filter.author_is_me {
+            Some(
+                self.fetch_authenticated_username(&auth, &http_client)
+                    .await?
+                    .context("could not determine the authenticated GitLab user")?,
+            )
+        } else {
+            None
+        };
+
+        let mut query = vec![
+            format!("per_page={}", limit.clamp(1, 100)),
+            format!("page={}", filter.page.unwrap_or(1).max(1)),
+            "order_by=updated_at".to_string(),
+            "sort=desc".to_string(),
+        ];
+        // GitLab's `state` takes a single value, so a multi-state request has to
+        // fetch everything and filter below.
+        if let Some(states) = &filter.states
+            && states.len() == 1
+        {
+            let state = match states[0] {
+                PullRequestState::Open => "opened",
+                PullRequestState::Closed => "closed",
+                PullRequestState::Merged => "merged",
+            };
+            query.push(format!("state={state}"));
+        }
+        if let Some(username) = &username {
+            if filter.reviewer_is_me {
+                query.push(format!("reviewer_username={}", encode(username)));
+            }
+            if filter.author_is_me {
+                query.push(format!("author_username={}", encode(username)));
+            }
+        }
+        let url = format!(
+            "{api}/projects/{project}/merge_requests?{}",
+            query.join("&")
+        );
+        let request = gitlab_request(GitlabMethod::Get, &url, &auth, None)?;
+        let bytes = gitlab_send(
+            &http_client,
+            request,
+            &self.api_host(),
+            "listing GitLab merge requests",
+        )
+        .await?;
+        let raw: Vec<GitlabMergeRequest> =
+            serde_json::from_slice(&bytes).context("parsing GitLab merge request list")?;
+
+        let mut summaries = Vec::new();
+        for merge_request in raw {
+            let state = merge_request.pull_request_state();
+            if let Some(states) = &filter.states
+                && !states.contains(&state)
+            {
+                continue;
+            }
+            if let Some(author) = &filter.author
+                && !merge_request
+                    .author_login()
+                    .to_lowercase()
+                    .contains(&author.to_lowercase())
+            {
+                continue;
+            }
+            summaries.push(merge_request.into_summary(state)?);
+            if summaries.len() as u32 >= limit {
+                break;
+            }
+        }
+        Ok(summaries)
+    }
+
+    async fn create_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        request: NewPullRequest,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<PullRequestSummary> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        // GitLab marks a draft by title prefix rather than a flag.
+        let title = if request.is_draft && !request.title.starts_with("Draft:") {
+            format!("Draft: {}", request.title)
+        } else {
+            request.title.to_string()
+        };
+        let body = serde_json::json!({
+            "title": title,
+            "description": request.body.to_string(),
+            "source_branch": request.source_branch.to_string(),
+            "target_branch": request.target_branch.to_string(),
+        });
+        let url = format!("{api}/projects/{project}/merge_requests");
+        let http_request = gitlab_request(
+            GitlabMethod::Post,
+            &url,
+            &auth,
+            Some(serde_json::to_vec(&body)?),
+        )?;
+        let bytes = gitlab_send(
+            &http_client,
+            http_request,
+            &self.api_host(),
+            "creating GitLab merge request",
+        )
+        .await?;
+        let created: GitlabMergeRequest =
+            serde_json::from_slice(&bytes).context("parsing created GitLab merge request")?;
+        let state = created.pull_request_state();
+        created.into_summary(state)
+    }
+
+    async fn default_branch(
+        &self,
+        remote: &ParsedGitRemote,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        let url = format!("{api}/projects/{project}");
+        let request = gitlab_request(GitlabMethod::Get, &url, &auth, None)?;
+        let bytes = gitlab_send(
+            &http_client,
+            request,
+            &self.api_host(),
+            "fetching GitLab project",
+        )
+        .await?;
+        let project: GitlabProject =
+            serde_json::from_slice(&bytes).context("parsing GitLab project")?;
+        Ok(project.default_branch.map(SharedString::from))
+    }
+
+    async fn get_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<PullRequestDetail> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        let url = format!("{api}/projects/{project}/merge_requests/{number}");
+        let request = gitlab_request(GitlabMethod::Get, &url, &auth, None)?;
+        let bytes = gitlab_send(
+            &http_client,
+            request,
+            &self.api_host(),
+            "fetching GitLab merge request",
+        )
+        .await?;
+        let merge_request: GitlabMergeRequest =
+            serde_json::from_slice(&bytes).context("parsing GitLab merge request")?;
+        let mut detail = merge_request.into_detail()?;
+
+        // Best-effort enrichment, each independently allowed to fail so a
+        // restricted token still renders the header.
+        if let Some(reviewers) = self
+            .fetch_reviewers(remote, number, &auth, &http_client)
+            .await
+            .log_err()
+        {
+            detail.viewer_review = reviewers
+                .iter()
+                .find(|reviewer| reviewer.is_me)
+                .and_then(|reviewer| reviewer.verdict);
+            detail.reviewers = reviewers;
+        }
+        detail.checks = self
+            .fetch_checks(remote, number, &auth, &http_client)
+            .await
+            .log_err()
+            .flatten();
+        Ok(detail)
+    }
+
+    async fn get_pull_request_diff(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<String> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        // GitLab exposes no whole-patch download, so collect the per-file diffs
+        // and reassemble the unified diff the view expects.
+        let url = format!("{api}/projects/{project}/merge_requests/{number}/diffs");
+        let files: Vec<GitlabDiffFile> = gitlab_get_paginated(
+            &http_client,
+            &url,
+            &auth,
+            &self.api_host(),
+            "fetching GitLab merge request diff",
+            1000,
+        )
+        .await?;
+        Ok(gitlab_unified_diff(&files))
+    }
+
+    async fn get_file_content(
+        &self,
+        remote: &ParsedGitRemote,
+        path: &str,
+        revision: &str,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<String> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        let encoded_path = encode(path);
+        let url = format!(
+            "{api}/projects/{project}/repository/files/{encoded_path}/raw?ref={}",
+            encode(revision)
+        );
+        let request = gitlab_request(GitlabMethod::Get, &url, &auth, None)?;
+        let bytes = gitlab_send(
+            &http_client,
+            request,
+            &self.api_host(),
+            "fetching GitLab file content",
+        )
+        .await?;
+        String::from_utf8(bytes).context("GitLab file content was not valid UTF-8")
+    }
+
+    async fn get_pull_request_comments(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestReviewComment>> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        let url = format!("{api}/projects/{project}/merge_requests/{number}/discussions");
+        let discussions: Vec<GitlabDiscussion> = gitlab_get_paginated(
+            &http_client,
+            &url,
+            &auth,
+            &self.api_host(),
+            "fetching GitLab merge request discussions",
+            500,
+        )
+        .await?;
+
+        let mut comments = Vec::new();
+        for discussion in discussions {
+            // The first non-system note roots the thread and carries the diff
+            // position; later notes are replies to it.
+            let mut root_id: Option<u64> = None;
+            for note in discussion.notes {
+                // System notes are GitLab's own activity entries ("changed the
+                // description"), not review feedback.
+                if note.system {
+                    continue;
+                }
+                let position = note.position.as_ref();
+                let path = position
+                    .and_then(|position| {
+                        position.new_path.clone().or_else(|| position.old_path.clone())
+                    })
+                    .unwrap_or_default();
+                // Only positioned notes anchor to the diff; an unpositioned one
+                // is a general MR comment, which the view renders at file top.
+                let line = position.and_then(|position| position.new_line.or(position.old_line));
+                comments.push(PullRequestReviewComment {
+                    id: note.id,
+                    author_login: note
+                        .author
+                        .as_ref()
+                        .map(|user| SharedString::from(user.username.clone()))
+                        .unwrap_or_default(),
+                    body: note.body.into(),
+                    path: path.into(),
+                    line,
+                    parent_id: root_id,
+                    is_resolved: root_id.is_none() && note.resolved,
+                    created_at: note.created_at.into(),
+                    url: self
+                        .base_url
+                        .join(&format!(
+                            "{}/{}/-/merge_requests/{number}#note_{}",
+                            remote.owner, remote.repo, note.id
+                        ))
+                        .unwrap_or_else(|_| self.base_url.clone()),
+                });
+                root_id.get_or_insert(note.id);
+            }
+        }
+        Ok(comments)
+    }
+
+    async fn merge_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        method: PullRequestMergeMethod,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        // GitLab expresses merge strategy through project settings and a squash
+        // flag rather than a per-request method. Rebase is a distinct endpoint
+        // that only rebases, so it is rejected rather than silently merging.
+        let body = match method {
+            PullRequestMergeMethod::Merge => serde_json::json!({ "squash": false }),
+            PullRequestMergeMethod::Squash => serde_json::json!({ "squash": true }),
+            PullRequestMergeMethod::Rebase => {
+                bail!(
+                    "GitLab does not support rebase-merging from the API; \
+                     set the project's merge method to fast-forward instead"
+                )
+            }
+        };
+        let url = format!("{api}/projects/{project}/merge_requests/{number}/merge");
+        let request = gitlab_request(
+            GitlabMethod::Put,
+            &url,
+            &auth,
+            Some(serde_json::to_vec(&body)?),
+        )?;
+        gitlab_send(
+            &http_client,
+            request,
+            &self.api_host(),
+            "merging GitLab merge request",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn submit_review(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        verdict: PullRequestReviewVerdict,
+        body: Option<SharedString>,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        // Leave the summary comment first so it lands whichever verdict follows.
+        if let Some(body) = body.filter(|body| !body.is_empty()) {
+            let url = format!("{api}/projects/{project}/merge_requests/{number}/notes");
+            let payload = serde_json::json!({ "body": body.to_string() });
+            let request = gitlab_request(
+                GitlabMethod::Post,
+                &url,
+                &auth,
+                Some(serde_json::to_vec(&payload)?),
+            )?;
+            gitlab_send(
+                &http_client,
+                request,
+                &self.api_host(),
+                "posting GitLab merge request note",
+            )
+            .await?;
+        }
+
+        match verdict {
+            PullRequestReviewVerdict::Approve => {
+                let url = format!("{api}/projects/{project}/merge_requests/{number}/approve");
+                let request = gitlab_request(GitlabMethod::Post, &url, &auth, None)?;
+                gitlab_send(
+                    &http_client,
+                    request,
+                    &self.api_host(),
+                    "approving GitLab merge request",
+                )
+                .await?;
+            }
+            // GitLab models blocking review as unresolved threads plus a removed
+            // approval, not as a review verdict. Withdrawing any approval is the
+            // closest faithful action; the note above carries the reasoning.
+            PullRequestReviewVerdict::RequestChanges => {
+                let url = format!("{api}/projects/{project}/merge_requests/{number}/unapprove");
+                let request = gitlab_request(GitlabMethod::Post, &url, &auth, None)?;
+                gitlab_send(
+                    &http_client,
+                    request,
+                    &self.api_host(),
+                    "withdrawing approval on GitLab merge request",
+                )
+                .await?;
+            }
+            // A comment-only review is exactly the note posted above.
+            PullRequestReviewVerdict::Comment => {}
+        }
+        Ok(())
+    }
+
+    async fn remove_review(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        verdict: PullRequestReviewVerdict,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        // Only an approval can be retracted; the other verdicts leave no state
+        // on GitLab to remove.
+        if verdict != PullRequestReviewVerdict::Approve {
+            return Ok(());
+        }
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        let url = format!("{api}/projects/{project}/merge_requests/{number}/unapprove");
+        let request = gitlab_request(GitlabMethod::Post, &url, &auth, None)?;
+        gitlab_send(
+            &http_client,
+            request,
+            &self.api_host(),
+            "removing approval on GitLab merge request",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn post_review_comment(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        in_reply_to: u64,
+        body: SharedString,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        // Replies address the discussion, not the note, and a comment only
+        // carries its note id. Re-read the discussions and find the one holding
+        // that note: one extra request, but stateless and always correct, where
+        // caching the mapping would go stale the moment the thread changes.
+        let discussion_id = self
+            .find_discussion_for_note(remote, number, in_reply_to, &auth, &http_client)
+            .await?;
+        let url = format!(
+            "{api}/projects/{project}/merge_requests/{number}/discussions/{discussion_id}/notes"
+        );
+        let payload = serde_json::json!({ "body": body.to_string() });
+        let request = gitlab_request(
+            GitlabMethod::Post,
+            &url,
+            &auth,
+            Some(serde_json::to_vec(&payload)?),
+        )?;
+        gitlab_send(
+            &http_client,
+            request,
+            &self.api_host(),
+            "replying to GitLab discussion",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn create_review_comment(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        _commit_id: SharedString,
+        path: SharedString,
+        line: u32,
+        side: DiffCommentSide,
+        body: SharedString,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        // A positioned note needs the three shas that bound the diff, which only
+        // the merge request itself reports.
+        let url = format!("{api}/projects/{project}/merge_requests/{number}");
+        let request = gitlab_request(GitlabMethod::Get, &url, &auth, None)?;
+        let bytes = gitlab_send(
+            &http_client,
+            request,
+            &self.api_host(),
+            "fetching GitLab merge request",
+        )
+        .await?;
+        let merge_request: GitlabMergeRequest =
+            serde_json::from_slice(&bytes).context("parsing GitLab merge request")?;
+        let diff_refs = merge_request
+            .diff_refs
+            .clone()
+            .context("GitLab merge request did not report diff refs")?;
+
+        let mut position = serde_json::json!({
+            "position_type": "text",
+            "base_sha": diff_refs.base_sha.clone().unwrap_or_default(),
+            "head_sha": diff_refs.head_sha.clone().unwrap_or_default(),
+            "start_sha": diff_refs.start_sha.clone().unwrap_or_default(),
+            "new_path": path.to_string(),
+            "old_path": path.to_string(),
+        });
+        match side {
+            DiffCommentSide::Right => position["new_line"] = serde_json::json!(line),
+            DiffCommentSide::Left => position["old_line"] = serde_json::json!(line),
+        }
+        let payload = serde_json::json!({
+            "body": body.to_string(),
+            "position": position,
+        });
+        let url = format!("{api}/projects/{project}/merge_requests/{number}/discussions");
+        let request = gitlab_request(
+            GitlabMethod::Post,
+            &url,
+            &auth,
+            Some(serde_json::to_vec(&payload)?),
+        )?;
+        gitlab_send(
+            &http_client,
+            request,
+            &self.api_host(),
+            "creating GitLab review comment",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn pull_request_review_state(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<PullRequestReviewVerdict>> {
+        Ok(self
+            .fetch_reviewers(remote, number, &auth, &http_client)
+            .await?
+            .into_iter()
+            .find(|reviewer| reviewer.is_me)
+            .and_then(|reviewer| reviewer.verdict))
+    }
+
+    async fn pull_request_reviewers(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<PullRequestReviewer>> {
+        self.fetch_reviewers(remote, number, &auth, &http_client)
+            .await
+    }
+
     fn name(&self) -> String {
         self.name.clone()
     }

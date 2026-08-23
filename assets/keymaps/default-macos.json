@@ -754,6 +754,7 @@
       "cmd-shift-p": "command_palette::Toggle",
       "cmd-shift-m": "diagnostics::Deploy",
       "cmd-shift-e": "project_panel::ToggleFocus",
+      "ctrl-shift-alt-p": "pull_request_panel::ToggleFocus",
       "cmd-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "cmd-shift-d": "debug_panel::ToggleFocus",
@@ -1074,6 +1075,20 @@
       "delete": "variable_list::RemoveWatch",
       "backspace": "variable_list::RemoveWatch",
       "alt-enter": "variable_list::AddWatch",
+    },
+  },
+  {
+    "context": "PullRequestPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "cmd-up": "menu::SelectFirst",
+      "cmd-down": "menu::SelectLast",
+      "enter": "menu::Confirm",
+      "cmd-enter": "menu::SecondaryConfirm",
+      "cmd-r": "pull_request_panel::Refresh",
+      "cmd-shift-o": "pull_request_panel::OpenSelectedInBrowser",
     },
   },
   {

@@ -9,6 +9,8 @@ Zed has built-in Git support that lets you manage version control without leavin
 
 For operations that Zed doesn't support natively, you can use the integrated terminal.
 
+To review, open, and merge pull requests against GitHub, GitLab, or Bitbucket, see [Pull Requests](./pull-requests.md).
+
 ## Repository Activation
 
 When a project is rooted at a git repository, or at a subdirectory of one, all repositories in it are active immediately.

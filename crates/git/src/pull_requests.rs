@@ -33,6 +33,20 @@ pub struct PullRequestSummary {
     pub is_draft: bool,
 }
 
+/// Everything needed to open a new pull request on a host.
+#[derive(Debug, Clone)]
+pub struct NewPullRequest {
+    pub title: SharedString,
+    pub body: SharedString,
+    /// Branch carrying the changes.
+    pub source_branch: SharedString,
+    /// Branch the changes are proposed against.
+    pub target_branch: SharedString,
+    /// Open as a draft. Hosts that have no draft concept ignore this rather than
+    /// failing the call.
+    pub is_draft: bool,
+}
+
 /// Filter applied when listing pull requests from a host.
 #[derive(Debug, Clone, Default)]
 pub struct PullRequestListFilter {
@@ -54,8 +68,17 @@ pub struct PullRequestListFilter {
     /// determined, mirroring `reviewer_is_me`. Combines with `reviewer_is_me`
     /// as an intersection when both are set.
     pub author_is_me: bool,
-    /// Cap on returned PRs. `None` = whatever the provider's default is.
+    /// Cap on returned PRs. `None` = whatever the provider's default is. When
+    /// `page` is set this is the page size.
     pub limit: Option<u32>,
+    /// 1-based page of results to fetch, for callers that page through a long
+    /// list rather than taking a fixed prefix of it. `None` is the first page.
+    ///
+    /// Only meaningful for a plain listing: the "mine" filters below resolve the
+    /// authenticated user client-side over a wide scan, so their result set does
+    /// not correspond to any single page of the host's response and providers
+    /// ignore this field for them.
+    pub page: Option<u32>,
 }
 
 /// The full picture of a pull request — enough for a PR detail view to render
@@ -104,6 +127,59 @@ pub struct PullRequestDetail {
     /// requested reviewer who has not submitted a review yet (pending). Best-effort:
     /// providers populate it where the host exposes it and leave it empty on failure.
     pub reviewers: Vec<PullRequestReviewer>,
+    /// CI results for the head commit. Best-effort: providers resolve it with an
+    /// extra request and leave it `None` when the host reports nothing or the
+    /// call fails, which the header renders as "no checks" rather than as a
+    /// failure.
+    pub checks: Option<PullRequestChecks>,
+}
+
+/// Roll-up of a pull request's CI results, as reported by the host for the head
+/// commit. Reviewing without knowing whether the build is green means leaving
+/// the editor to find out, so the detail view surfaces this alongside the
+/// merge state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestChecks {
+    pub succeeded: u32,
+    pub failed: u32,
+    pub pending: u32,
+    /// Checks the host reports as neither passing nor failing (skipped,
+    /// cancelled, neutral). Counted separately so they cannot masquerade as
+    /// either a pass or a failure.
+    pub neutral: u32,
+}
+
+impl PullRequestChecks {
+    pub fn total(&self) -> u32 {
+        self.succeeded + self.failed + self.pending + self.neutral
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+
+    /// The single state that best describes the run as a whole. A failure
+    /// dominates anything else, and a pending check outranks success so a
+    /// half-finished run never reads as green.
+    pub fn overall(&self) -> CheckState {
+        if self.failed > 0 {
+            CheckState::Failed
+        } else if self.pending > 0 {
+            CheckState::Pending
+        } else if self.succeeded > 0 {
+            CheckState::Succeeded
+        } else {
+            CheckState::Neutral
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Succeeded,
+    Failed,
+    Pending,
+    Neutral,
 }
 
 /// A reviewer on a pull request and their latest review state.
@@ -160,6 +236,57 @@ pub struct PullRequestReviewComment {
     pub is_resolved: bool,
     pub created_at: SharedString,
     pub url: Url,
+}
+
+/// The authentication protocol a git host speaks, and therefore which connect
+/// flow the UI offers and which [`GitHostAuth`] shape its credential produces.
+///
+/// Deliberately separate from the host itself: one kind covers the vendor's
+/// public instance *and* every enterprise or self-hosted deployment of the same
+/// product, so `github.acme.com` authenticates the same way `github.com` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitHostAuthKind {
+    GitHub,
+    GitLab,
+    Bitbucket,
+}
+
+impl GitHostAuthKind {
+    /// Product name, used in menu entries and connect-modal copy.
+    pub fn product_name(self) -> &'static str {
+        match self {
+            GitHostAuthKind::GitHub => "GitHub",
+            GitHostAuthKind::GitLab => "GitLab",
+            GitHostAuthKind::Bitbucket => "Bitbucket",
+        }
+    }
+
+    /// The hostname of the vendor's public instance. A host that differs from
+    /// this is an enterprise or self-hosted deployment, which matters because
+    /// the GitHub device flow is registered against `github.com` only and such
+    /// hosts must authenticate with a personal access token instead.
+    pub fn public_host(self) -> &'static str {
+        match self {
+            GitHostAuthKind::GitHub => "github.com",
+            GitHostAuthKind::GitLab => "gitlab.com",
+            GitHostAuthKind::Bitbucket => "bitbucket.org",
+        }
+    }
+
+    /// Whether this kind stores a username alongside the secret. Token-based
+    /// hosts do not, so their connect modal shows a single field.
+    pub fn needs_username(self) -> bool {
+        matches!(self, GitHostAuthKind::Bitbucket)
+    }
+
+    /// Builds the API auth value for a stored `(username, secret)` credential.
+    /// GitHub and GitLab use bearer tokens; Bitbucket uses HTTP Basic.
+    pub fn auth(self, username: String, secret: String) -> GitHostAuth {
+        match self {
+            GitHostAuthKind::GitHub | GitHostAuthKind::GitLab => GitHostAuth::Bearer(secret),
+            GitHostAuthKind::Bitbucket => GitHostAuth::Basic { username, secret },
+        }
+    }
 }
 
 /// Authentication material for a hosting provider's REST API.

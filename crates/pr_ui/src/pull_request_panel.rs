@@ -1,6 +1,7 @@
 use crate::pull_request_panel_settings::PullRequestPanelSettings;
 use crate::pull_request_view::PullRequestView;
 use anyhow::{Context as _, Result};
+use fs::Fs;
 use git::{
     GitHostAuth, GitHostingProvider, GitHostingProviderRegistry, ParsedGitRemote,
     PullRequestListFilter, PullRequestReviewVerdict, PullRequestReviewer, PullRequestState,
@@ -8,9 +9,9 @@ use git::{
 };
 use gpui::http_client::HttpClient;
 use gpui::{
-    Action, AppContext as _, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable,
-    MouseButton, SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, actions,
-    uniform_list,
+    Action, AppContext as _, AsyncWindowContext, ClipboardItem, Entity, EventEmitter, FocusHandle,
+    Focusable, ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle,
+    WeakEntity, actions, uniform_list,
 };
 use project::{
     Project,
@@ -19,7 +20,7 @@ use project::{
 use settings::Settings;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
+use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*, right_click_menu};
 use util::ResultExt as _;
 use workspace::{
     Workspace,
@@ -31,11 +32,24 @@ actions!(
     [
         /// Toggles focus on the pull request panel.
         ToggleFocus,
+        /// Reloads the pull request list from the host.
+        Refresh,
+        /// Opens the selected pull request on the hosting provider's website.
+        OpenSelectedInBrowser,
+        /// Checks out the selected pull request's source branch locally.
+        CheckoutSelectedBranch,
+        /// Opens a dialog for creating a new pull request from the current branch.
+        CreatePullRequest,
     ]
 );
 
 const PR_PANEL_KEY: &str = "PullRequestPanel";
 const ROW_HEIGHT_REMS: f32 = 2.4;
+
+/// How many pull requests one page of results holds. The panel loads a page at a
+/// time and appends more on demand, so a busy repository is paged through rather
+/// than silently truncated at a fixed cap.
+const PAGE_SIZE: u32 = 50;
 
 pub fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
@@ -49,12 +63,48 @@ enum LoadState {
     Loading,
     Loaded(LoadedPullRequests),
     NoHost(SharedString),
-    Failed(SharedString),
+    Failed(FailureMessage),
     /// A pull-request call returned HTTP 401; the stored credential for `host`
     /// is expired or invalid, so the user is offered a targeted reconnect.
     AuthExpired {
         host: SharedString,
     },
+}
+
+/// A load failure split into a one-line summary the user can act on and the
+/// underlying error text, which is kept behind a disclosure rather than rendered
+/// as the primary message. Raw `anyhow` chains are useful for a bug report and
+/// actively unhelpful as headline copy.
+#[derive(Clone)]
+struct FailureMessage {
+    summary: SharedString,
+    detail: SharedString,
+}
+
+impl FailureMessage {
+    fn from_error(error: &anyhow::Error) -> FailureMessage {
+        let detail: SharedString = format!("{error:#}").into();
+        let lowercase = detail.to_lowercase();
+        // Map the failures users actually hit onto copy that says what to do.
+        // Everything else keeps a neutral summary with the detail available
+        // underneath.
+        let summary: SharedString = if lowercase.contains("rate limit") {
+            "The host's API rate limit was reached. Try again shortly.".into()
+        } else if lowercase.contains("403") || lowercase.contains("forbidden") {
+            "Your account cannot read pull requests in this repository.".into()
+        } else if lowercase.contains("404") || lowercase.contains("not found") {
+            "The repository was not found on the host. Check the remote URL.".into()
+        } else if lowercase.contains("dns")
+            || lowercase.contains("connect")
+            || lowercase.contains("timed out")
+            || lowercase.contains("timeout")
+        {
+            "Could not reach the host. Check your network connection.".into()
+        } else {
+            "Could not load pull requests from the host.".into()
+        };
+        FailureMessage { summary, detail }
+    }
 }
 
 /// The two partitions the panel renders. `authored` holds PRs opened by the
@@ -66,6 +116,9 @@ enum LoadState {
 struct LoadedPullRequests {
     authored: Vec<PullRequestSummary>,
     others: Vec<PullRequestSummary>,
+    /// True when the host returned a full page for `others`, so there may be
+    /// more results behind it and a "Load more" row is worth offering.
+    may_have_more: bool,
 }
 
 impl LoadedPullRequests {
@@ -97,6 +150,23 @@ impl LoadedPullRequests {
 enum PanelRow {
     Header(SharedString),
     PullRequest(PullRequestSummary),
+    /// Trailing row that fetches the next page when activated.
+    LoadMore,
+}
+
+impl PanelRow {
+    /// Whether the keyboard cursor can land on this row. Headers are labels and
+    /// are skipped when moving through the list.
+    fn is_selectable(&self) -> bool {
+        !matches!(self, PanelRow::Header(_))
+    }
+
+    fn pull_request(&self) -> Option<&PullRequestSummary> {
+        match self {
+            PanelRow::PullRequest(summary) => Some(summary),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -127,24 +197,79 @@ impl StateFilter {
     }
 }
 
+/// How the list is ordered. The host returns rows in its own order, which is
+/// only ever "recently updated"; sorting client-side keeps every option cheap
+/// because the whole loaded page is already in memory.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortOrder {
+    RecentlyUpdated,
+    Newest,
+    Oldest,
+    Title,
+}
+
+impl SortOrder {
+    const ALL: [SortOrder; 4] = [
+        SortOrder::RecentlyUpdated,
+        SortOrder::Newest,
+        SortOrder::Oldest,
+        SortOrder::Title,
+    ];
+
+    fn label(&self) -> &'static str {
+        match self {
+            SortOrder::RecentlyUpdated => "Recently updated",
+            SortOrder::Newest => "Newest",
+            SortOrder::Oldest => "Oldest",
+            SortOrder::Title => "Title",
+        }
+    }
+
+    fn apply(&self, summaries: &mut [PullRequestSummary]) {
+        match self {
+            // The host already returns updated-descending; keep that order so
+            // the default costs nothing and matches the host's own list.
+            SortOrder::RecentlyUpdated => {}
+            SortOrder::Newest => summaries.sort_by_key(|summary| std::cmp::Reverse(summary.number)),
+            SortOrder::Oldest => summaries.sort_by_key(|summary| summary.number),
+            SortOrder::Title => {
+                summaries.sort_by_key(|summary| summary.title.to_lowercase());
+            }
+        }
+    }
+}
+
 pub struct PullRequestPanel {
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
+    fs: Arc<dyn Fs>,
     focus_handle: FocusHandle,
     state: LoadState,
     host_context: Option<(Arc<dyn GitHostingProvider + Send + Sync>, ParsedGitRemote)>,
     scroll_handle: UniformListScrollHandle,
     filter: StateFilter,
+    sort: SortOrder,
     /// When set, restrict the list to PRs the connected account is a requested
     /// reviewer of. Combines with `filter` (the state selection).
     reviewing: bool,
-    /// PR number most recently opened from this panel; highlighted in the list.
-    selected_pr: Option<u32>,
+    /// The flattened list the panel renders, rebuilt whenever the loaded set
+    /// changes. Held in state rather than computed in `render` so the keyboard
+    /// cursor has a stable set of indices to move through.
+    rows: Vec<PanelRow>,
+    /// Index into `rows` of the keyboard cursor.
+    selected_index: Option<usize>,
+    /// PR number most recently opened from this panel; marked in the list so the
+    /// row matching the visible tab stays identifiable after the cursor moves.
+    opened_pr: Option<u32>,
+    /// Highest page fetched so far. "Load more" asks for the next one.
+    loaded_pages: u32,
+    loading_more: bool,
     _load_task: Option<Task<()>>,
-    /// Cached reviewer lists per PR number, filled in lazily in the background
-    /// after the list loads. Drives both the per-row reviewer roll-up and the
-    /// viewer's own tint (derived from the `is_me` reviewer's verdict).
-    reviewers: HashMap<u32, Vec<PullRequestReviewer>>,
+    /// Cached reviewer lists, keyed by PR number and validated against the
+    /// `updated_at` the list reported. Surviving a refresh is the point: without
+    /// it every reload re-fetches one request per PR, which is the panel's
+    /// heaviest source of API traffic.
+    reviewers: HashMap<u32, (SharedString, Vec<PullRequestReviewer>)>,
     _enrich_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -165,6 +290,7 @@ impl PullRequestPanel {
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let project = workspace.project().clone();
+        let fs = project.read(cx).fs().clone();
         let git_store = project.read(cx).git_store().clone();
         let workspace_weak = workspace.weak_handle();
         cx.new(|cx| {
@@ -185,13 +311,19 @@ impl PullRequestPanel {
             let mut this = Self {
                 workspace: workspace_weak,
                 project,
+                fs,
                 focus_handle,
                 state: LoadState::Idle,
                 host_context: None,
                 scroll_handle: UniformListScrollHandle::default(),
                 filter: StateFilter::Open,
+                sort: SortOrder::RecentlyUpdated,
                 reviewing: false,
-                selected_pr: None,
+                rows: Vec::new(),
+                selected_index: None,
+                opened_pr: None,
+                loaded_pages: 0,
+                loading_more: false,
                 _load_task: None,
                 reviewers: HashMap::new(),
                 _enrich_task: None,
@@ -234,13 +366,17 @@ impl PullRequestPanel {
 
     fn kick_off_refresh(&mut self, cx: &mut Context<Self>) {
         self.state = LoadState::Loading;
+        self.loaded_pages = 0;
+        self.loading_more = false;
+        self.rows.clear();
+        self.selected_index = None;
         cx.notify();
         let project = self.project.clone();
         let http_client = cx.http_client();
         let filter = self.filter;
         let reviewing = self.reviewing;
         let task = cx.spawn(async move |this, cx| {
-            let result = load_pull_requests(project, filter, reviewing, http_client, cx).await;
+            let result = load_pull_requests(project, filter, reviewing, 1, http_client, cx).await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(LoadOutcome::Loaded {
@@ -249,12 +385,15 @@ impl PullRequestPanel {
                         loaded,
                     }) => {
                         this.host_context = Some((provider, remote));
+                        this.loaded_pages = 1;
                         this.state = LoadState::Loaded(loaded);
+                        this.rebuild_rows();
                         this.start_review_enrichment(cx);
                     }
                     Ok(LoadOutcome::NoHost(reason)) => {
                         this.host_context = None;
                         this.state = LoadState::NoHost(reason);
+                        this.rebuild_rows();
                     }
                     Err(error) => {
                         this.host_context = None;
@@ -262,8 +401,9 @@ impl PullRequestPanel {
                             Some(auth_error) => LoadState::AuthExpired {
                                 host: auth_error.host.clone(),
                             },
-                            None => LoadState::Failed(format!("{error}").into()),
+                            None => LoadState::Failed(FailureMessage::from_error(&error)),
                         };
+                        this.rebuild_rows();
                     }
                 }
                 cx.notify();
@@ -273,19 +413,156 @@ impl PullRequestPanel {
         self._load_task = Some(task);
     }
 
-    /// After the list loads, fetch each PR's own review verdict in the background
-    /// (bounded concurrency) so already-reviewed rows can be tinted. One request
-    /// per PR, cached; the task is replaced (cancelled) on the next load.
+    /// Fetches the page after the last one loaded and appends it. Only the
+    /// unauthored partition grows: the "Created by you" section is a separate,
+    /// already-complete query.
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        if self.loading_more || !matches!(self.state, LoadState::Loaded(_)) {
+            return;
+        }
+        self.loading_more = true;
+        cx.notify();
+        let project = self.project.clone();
+        let http_client = cx.http_client();
+        let filter = self.filter;
+        let reviewing = self.reviewing;
+        let next_page = self.loaded_pages + 1;
+        let task = cx.spawn(async move |this, cx| {
+            let result =
+                load_pull_requests(project, filter, reviewing, next_page, http_client, cx).await;
+            this.update(cx, |this, cx| {
+                this.loading_more = false;
+                match result {
+                    Ok(LoadOutcome::Loaded { loaded, .. }) => {
+                        this.loaded_pages = next_page;
+                        if let LoadState::Loaded(existing) = &mut this.state {
+                            // The authored partition is re-queried whole on every
+                            // page, so keep the copy already displayed and only
+                            // extend the paged partition. Filter by number to
+                            // stay idempotent if the host repeats a row across
+                            // page boundaries.
+                            let seen: HashSet<u32> = existing
+                                .authored
+                                .iter()
+                                .chain(existing.others.iter())
+                                .map(|summary| summary.number)
+                                .collect();
+                            existing.others.extend(
+                                loaded
+                                    .others
+                                    .into_iter()
+                                    .filter(|summary| !seen.contains(&summary.number)),
+                            );
+                            existing.may_have_more = loaded.may_have_more;
+                        }
+                        this.rebuild_rows();
+                        this.start_review_enrichment(cx);
+                    }
+                    Ok(LoadOutcome::NoHost(_)) => {}
+                    Err(error) => {
+                        // A failed "load more" keeps the rows already on screen;
+                        // replacing them with an error would lose the user's place.
+                        this.surface_error("Could not load more pull requests", &error, cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self._load_task = Some(task);
+    }
+
+    /// Rebuilds the flattened row list from the current load state, applying the
+    /// active sort. Keeps the keyboard cursor on the same pull request where it
+    /// can, so a refresh does not throw away the user's place.
+    fn rebuild_rows(&mut self) {
+        let previously_selected = self
+            .selected_index
+            .and_then(|ix| self.rows.get(ix))
+            .and_then(|row| row.pull_request())
+            .map(|summary| summary.number);
+
+        let mut rows = Vec::new();
+        if let LoadState::Loaded(loaded) = &self.state {
+            let mut others = loaded.others.clone();
+            let mut authored = loaded.authored.clone();
+            self.sort.apply(&mut others);
+            self.sort.apply(&mut authored);
+
+            if !authored.is_empty() && !others.is_empty() {
+                rows.push(PanelRow::Header("Other pull requests".into()));
+            }
+            rows.extend(others.into_iter().map(PanelRow::PullRequest));
+            if loaded.may_have_more {
+                rows.push(PanelRow::LoadMore);
+            }
+            if !authored.is_empty() {
+                rows.push(PanelRow::Header("Created by you".into()));
+                rows.extend(authored.into_iter().map(PanelRow::PullRequest));
+            }
+        }
+        self.rows = rows;
+
+        self.selected_index = previously_selected
+            .and_then(|number| {
+                self.rows.iter().position(|row| {
+                    row.pull_request()
+                        .is_some_and(|summary| summary.number == number)
+                })
+            })
+            .or_else(|| {
+                self.selected_index
+                    .filter(|_| !self.rows.is_empty())
+                    .map(|ix| ix.min(self.rows.len().saturating_sub(1)))
+            });
+    }
+
+    fn surface_error(&self, action: &str, error: &anyhow::Error, cx: &mut Context<Self>) {
+        let message: SharedString = format!("{action}: {error:#}").into();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                let toast = notifications::status_toast::StatusToast::new(
+                    message.clone(),
+                    cx,
+                    |this, _cx| this.dismiss_button(true),
+                );
+                workspace.toggle_status_toast(toast, cx);
+            })
+            .ok();
+    }
+
+    /// After a load, fetch each PR's reviewers in the background so rows can be
+    /// tinted and rolled up. Only PRs whose cached entry is missing or stale
+    /// (the host reported a newer `updated_at`) are fetched, so an ordinary
+    /// refresh of an unchanged list costs no requests at all.
     fn start_review_enrichment(&mut self, cx: &mut Context<Self>) {
-        self.reviewers.clear();
         let LoadState::Loaded(loaded) = &self.state else {
             return;
         };
-        let numbers = loaded.numbers();
+        let mut freshness: HashMap<u32, SharedString> = HashMap::new();
+        for summary in loaded.authored.iter().chain(loaded.others.iter()) {
+            freshness.insert(summary.number, summary.updated_at.clone());
+        }
+        // Drop cache entries for PRs no longer in the list so the map cannot
+        // grow without bound as the user pages and refilters.
+        self.reviewers
+            .retain(|number, _| freshness.contains_key(number));
+
+        let stale: Vec<u32> = loaded
+            .numbers()
+            .into_iter()
+            .filter(|number| match self.reviewers.get(number) {
+                Some((cached_at, _)) => freshness
+                    .get(number)
+                    .is_some_and(|current| current != cached_at),
+                None => true,
+            })
+            .collect();
+
         let Some((provider, remote)) = self.host_context.as_ref() else {
             return;
         };
-        if numbers.is_empty() {
+        if stale.is_empty() {
             return;
         }
         let provider = provider.clone();
@@ -305,7 +582,7 @@ impl PullRequestPanel {
             };
             // Process in small chunks so a large list doesn't fire dozens of
             // simultaneous requests at the host.
-            for chunk in numbers.chunks(5) {
+            for chunk in stale.chunks(5) {
                 let results = futures::future::join_all(chunk.iter().map(|&number| {
                     let provider = provider.clone();
                     let remote = ParsedGitRemote {
@@ -326,7 +603,11 @@ impl PullRequestPanel {
                 let alive = this
                     .update(cx, |this, cx| {
                         for (number, reviewers) in results {
-                            this.reviewers.insert(number, reviewers);
+                            let updated_at = freshness
+                                .get(&number)
+                                .cloned()
+                                .unwrap_or_else(|| SharedString::from(""));
+                            this.reviewers.insert(number, (updated_at, reviewers));
                         }
                         cx.notify();
                     })
@@ -338,16 +619,79 @@ impl PullRequestPanel {
         }));
     }
 
+    fn reviewers_for(&self, number: u32) -> Option<&Vec<PullRequestReviewer>> {
+        self.reviewers.get(&number).map(|(_, reviewers)| reviewers)
+    }
+
     /// The connected account's own latest verdict on a PR, derived from the
     /// cached reviewer list (the `is_me` entry). `None` while reviewers are
     /// still loading, when the viewer has not reviewed, or when the host does
     /// not report reviewers.
     fn my_verdict(&self, number: u32) -> Option<PullRequestReviewVerdict> {
-        self.reviewers
-            .get(&number)?
+        self.reviewers_for(number)?
             .iter()
             .find(|reviewer| reviewer.is_me)
             .and_then(|reviewer| reviewer.verdict)
+    }
+}
+
+/// Keyboard navigation and the per-row actions the context menu exposes.
+impl PullRequestPanel {
+    /// Moves the cursor by `delta` rows, skipping section headers. Stops at the
+    /// ends rather than wrapping, matching the other list panels.
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let start = match self.selected_index {
+            Some(index) => index as isize + delta,
+            // With no cursor yet, entering from the top selects the first row
+            // and entering from the bottom selects the last.
+            None if delta > 0 => 0,
+            None => self.rows.len() as isize - 1,
+        };
+        let mut index = start;
+        while index >= 0 && (index as usize) < self.rows.len() {
+            if self.rows[index as usize].is_selectable() {
+                self.select_index(index as usize, cx);
+                return;
+            }
+            index += delta.signum();
+        }
+    }
+
+    fn select_first(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self.rows.iter().position(PanelRow::is_selectable) {
+            self.select_index(index, cx);
+        }
+    }
+
+    fn select_last(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self.rows.iter().rposition(PanelRow::is_selectable) {
+            self.select_index(index, cx);
+        }
+    }
+
+    fn select_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.selected_index = Some(index);
+        self.scroll_handle
+            .scroll_to_item(index, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    fn selected_summary(&self) -> Option<&PullRequestSummary> {
+        self.rows.get(self.selected_index?)?.pull_request()
+    }
+
+    fn confirm_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.rows.get(self.selected_index.unwrap_or(usize::MAX)) {
+            Some(PanelRow::PullRequest(summary)) => {
+                let summary = summary.clone();
+                self.open_pull_request(summary, window, cx);
+            }
+            Some(PanelRow::LoadMore) => self.load_more(cx),
+            _ => {}
+        }
     }
 
     fn open_pull_request(
@@ -368,7 +712,13 @@ impl PullRequestPanel {
             repo: remote.repo.clone(),
         };
         let number = summary.number;
-        self.selected_pr = Some(number);
+        self.opened_pr = Some(number);
+        if let Some(index) = self.rows.iter().position(|row| {
+            row.pull_request()
+                .is_some_and(|candidate| candidate.number == number)
+        }) {
+            self.selected_index = Some(index);
+        }
         cx.notify();
         let workspace = self.workspace.clone();
         workspace
@@ -381,6 +731,169 @@ impl PullRequestPanel {
             .ok();
     }
 
+    /// Checks out the pull request's source branch in the active repository.
+    ///
+    /// Runs `git switch`, which creates a local tracking branch when exactly one
+    /// remote has the branch. A branch that has never been fetched fails here,
+    /// and the host's error is surfaced verbatim because it names the fix.
+    fn checkout_branch(&mut self, branch: SharedString, cx: &mut Context<Self>) {
+        let Some(repository) = self
+            .project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .active_repository()
+        else {
+            return;
+        };
+        let receiver = repository.update(cx, |repository, _| {
+            repository.change_branch(branch.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = receiver.await;
+            this.update(cx, |this, cx| match result {
+                Ok(Ok(())) => {
+                    let message: SharedString = format!("Checked out {branch}").into();
+                    this.workspace
+                        .update(cx, |workspace, cx| {
+                            let toast = notifications::status_toast::StatusToast::new(
+                                message.clone(),
+                                cx,
+                                |this, _cx| this.dismiss_button(true),
+                            );
+                            workspace.toggle_status_toast(toast, cx);
+                        })
+                        .ok();
+                }
+                Ok(Err(error)) => {
+                    this.surface_error(&format!("Could not check out {branch}"), &error, cx)
+                }
+                Err(error) => this.surface_error(
+                    &format!("Could not check out {branch}"),
+                    &anyhow::anyhow!(error),
+                    cx,
+                ),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn on_select_next(&mut self, _: &menu::SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(1, cx);
+    }
+
+    fn on_select_previous(
+        &mut self,
+        _: &menu::SelectPrevious,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_selection(-1, cx);
+    }
+
+    fn on_select_first(&mut self, _: &menu::SelectFirst, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_first(cx);
+    }
+
+    fn on_select_last(&mut self, _: &menu::SelectLast, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_last(cx);
+    }
+
+    fn on_confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_selection(window, cx);
+    }
+
+    /// Secondary confirm (cmd-enter) opens on the host's website instead of in a
+    /// Lathe tab, mirroring cmd-click on a row.
+    fn on_secondary_confirm(
+        &mut self,
+        _: &menu::SecondaryConfirm,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(summary) = self.selected_summary() {
+            cx.open_url(summary.url.as_str());
+        }
+    }
+
+    fn on_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
+        self.kick_off_refresh(cx);
+    }
+
+    fn on_open_selected_in_browser(
+        &mut self,
+        _: &OpenSelectedInBrowser,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(summary) = self.selected_summary() {
+            cx.open_url(summary.url.as_str());
+        }
+    }
+
+    fn on_checkout_selected_branch(
+        &mut self,
+        _: &CheckoutSelectedBranch,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(branch) = self
+            .selected_summary()
+            .map(|summary| summary.source_branch.clone())
+        {
+            self.checkout_branch(branch, cx);
+        }
+    }
+
+}
+
+/// The per-row context menu. Every entry works on the row that was clicked
+/// rather than the keyboard cursor, so right-clicking a row the cursor is not on
+/// does what it looks like it does.
+fn row_context_menu(
+    summary: &PullRequestSummary,
+    panel: WeakEntity<PullRequestPanel>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<ContextMenu> {
+    let url = summary.url.to_string();
+    let branch = summary.source_branch.clone();
+    let number = summary.number;
+    let title = summary.title.clone();
+    ContextMenu::build(window, cx, move |menu, _window, _cx| {
+        let open_url = url.clone();
+        let copy_url = url.clone();
+        let copy_branch = branch.clone();
+        let checkout = branch.clone();
+        let copy_title = format!("#{number} {title}");
+        let panel_for_checkout = panel;
+        menu.entry("Open on Host Website", None, move |_window, cx| {
+            cx.open_url(&open_url);
+        })
+        .separator()
+        .entry("Copy Link", None, move |_window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_url.clone()));
+        })
+        .entry("Copy Title", None, move |_window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_title.clone()));
+        })
+        .entry("Copy Branch Name", None, move |_window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_branch.to_string()));
+        })
+        .separator()
+        .entry("Check Out Branch", None, move |_window, cx| {
+            panel_for_checkout
+                .update(cx, |panel, cx| {
+                    panel.checkout_branch(checkout.clone(), cx);
+                })
+                .ok();
+        })
+    })
+}
+
+/// Rendering.
+impl PullRequestPanel {
     fn render_header(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = match &self.state {
             LoadState::Loaded(loaded) => loaded.total(),
@@ -415,6 +928,20 @@ impl PullRequestPanel {
                     .gap_0p5()
                     .child(self.render_filter_picker(cx))
                     .child(
+                        IconButton::new("pr-panel-create", IconName::Plus)
+                            .icon_size(IconSize::Small)
+                            .tooltip(move |_window, cx| {
+                                Tooltip::for_action(
+                                    "New Pull Request",
+                                    &CreatePullRequest,
+                                    cx,
+                                )
+                            })
+                            .on_click(cx.listener(|_, _, _window, cx| {
+                                cx.dispatch_action(&CreatePullRequest);
+                            })),
+                    )
+                    .child(
                         IconButton::new(
                             "pr-panel-refresh",
                             if loading {
@@ -425,7 +952,9 @@ impl PullRequestPanel {
                         )
                         .icon_size(IconSize::Small)
                         .disabled(loading)
-                        .tooltip(Tooltip::text("Refresh pull requests"))
+                        .tooltip(move |_window, cx| {
+                            Tooltip::for_action("Refresh Pull Requests", &Refresh, cx)
+                        })
                         .on_click(cx.listener(|this, _, _window, cx| {
                             this.kick_off_refresh(cx);
                         })),
@@ -435,6 +964,7 @@ impl PullRequestPanel {
 
     fn render_filter_picker(&self, cx: &Context<Self>) -> impl IntoElement {
         let current = self.filter;
+        let sort = self.sort;
         let reviewing = self.reviewing;
         let weak_self = cx.entity().downgrade();
         let trigger_label: SharedString = if reviewing {
@@ -484,13 +1014,14 @@ impl PullRequestPanel {
                     // Reviewer scope is an independent toggle layered on top of the
                     // state selection above, so it sits below a separator rather
                     // than in the mutually-exclusive state group.
+                    let weak_for_reviewing = weak_self.clone();
                     menu = menu.separator().toggleable_entry(
                         "My open reviews",
                         reviewing,
                         ui::IconPosition::End,
                         None,
                         move |_window, cx| {
-                            weak_self
+                            weak_for_reviewing
                                 .update(cx, |this, cx| {
                                     this.reviewing = !this.reviewing;
                                     this.kick_off_refresh(cx);
@@ -498,6 +1029,29 @@ impl PullRequestPanel {
                                 .ok();
                         },
                     );
+                    // Sort is a third independent axis; reordering is client-side
+                    // over the already-loaded rows, so it never refetches.
+                    menu = menu.separator().header("Sort by");
+                    for order in SortOrder::ALL {
+                        let weak_self = weak_self.clone();
+                        menu = menu.toggleable_entry(
+                            order.label(),
+                            order == sort,
+                            ui::IconPosition::End,
+                            None,
+                            move |_window, cx| {
+                                weak_self
+                                    .update(cx, |this, cx| {
+                                        if this.sort != order {
+                                            this.sort = order;
+                                            this.rebuild_rows();
+                                            cx.notify();
+                                        }
+                                    })
+                                    .ok();
+                            },
+                        );
+                    }
                     menu
                 }))
             })
@@ -507,8 +1061,8 @@ impl PullRequestPanel {
         &self,
         ix: usize,
         summary: PullRequestSummary,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let title = summary.title.clone();
         let number = summary.number;
         let author = summary.author_login.clone();
@@ -521,16 +1075,19 @@ impl PullRequestPanel {
             PullRequestState::Closed => Color::Error,
         };
 
-        let is_selected = self.selected_pr == Some(number);
+        let is_open_in_tab = self.opened_pr == Some(number);
+        let is_selected = self.selected_index == Some(ix);
+        let summary_for_menu = summary.clone();
+        let summary_for_click = summary;
 
-        h_flex()
+        let row = h_flex()
             .id(("pr-row", ix))
             .h(rems(ROW_HEIGHT_REMS))
             .w_full()
             .px_2()
             .gap_2()
             .border_l_2()
-            .border_color(if is_selected {
+            .border_color(if is_open_in_tab {
                 cx.theme().colors().border_focused
             } else {
                 gpui::transparent_black()
@@ -550,12 +1107,15 @@ impl PullRequestPanel {
                 this.bg(cx.theme().colors().element_selected)
             })
             .hover(|this| this.bg(cx.theme().colors().element_hover))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.open_pull_request(summary.clone(), window, cx);
-                }),
-            )
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                // Cmd/ctrl-click and middle-click open on the host's website,
+                // matching how links behave everywhere else.
+                if event.modifiers().secondary() || event.is_middle_click() {
+                    cx.open_url(summary_for_click.url.as_str());
+                } else {
+                    this.open_pull_request(summary_for_click.clone(), window, cx);
+                }
+            }))
             .child(
                 Icon::new(IconName::PullRequest)
                     .size(IconSize::Small)
@@ -615,7 +1175,39 @@ impl PullRequestPanel {
             )
             .when_some(self.render_reviewer_rollup(number, cx), |this, rollup| {
                 this.child(rollup)
+            });
+
+        let panel = cx.entity().downgrade();
+        right_click_menu(("pr-row-menu", ix))
+            .trigger(move |_, _, _| row)
+            .menu(move |window, cx| {
+                row_context_menu(&summary_for_menu, panel.clone(), window, cx)
             })
+            .into_any_element()
+    }
+
+    /// The trailing row that fetches the next page.
+    fn render_load_more(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let is_selected = self.selected_index == Some(ix);
+        let loading = self.loading_more;
+        h_flex()
+            .id(("pr-load-more", ix))
+            .h(rems(ROW_HEIGHT_REMS))
+            .w_full()
+            .px_2()
+            .gap_2()
+            .justify_center()
+            .when(is_selected, |this| {
+                this.bg(cx.theme().colors().element_selected)
+            })
+            .hover(|this| this.bg(cx.theme().colors().element_hover))
+            .on_click(cx.listener(|this, _, _window, cx| this.load_more(cx)))
+            .child(
+                Label::new(if loading { "Loading…" } else { "Load more" })
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .into_any_element()
     }
 
     /// A compact reviewer summary for a PR list row: up to `MAX_ROLLUP_DOTS`
@@ -624,7 +1216,7 @@ impl PullRequestPanel {
     /// `None` when reviewers are still loading or the host reports none.
     fn render_reviewer_rollup(&self, number: u32, cx: &Context<Self>) -> Option<AnyElement> {
         const MAX_ROLLUP_DOTS: usize = 3;
-        let reviewers = self.reviewers.get(&number)?;
+        let reviewers = self.reviewers_for(number)?;
         if reviewers.is_empty() {
             return None;
         }
@@ -678,6 +1270,34 @@ impl PullRequestPanel {
                 .into_any_element(),
         )
     }
+
+    /// A centered message with an optional secondary line, used for every state
+    /// that has no rows to show.
+    fn render_message(
+        title: impl Into<SharedString>,
+        title_color: Color,
+        detail: Option<SharedString>,
+    ) -> Div {
+        v_flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .p_4()
+            .child(
+                Label::new(title.into())
+                    .size(LabelSize::Small)
+                    .color(title_color),
+            )
+            .when_some(detail, |this, detail| {
+                this.child(
+                    Label::new(detail)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted)
+                        .truncate(),
+                )
+            })
+    }
 }
 
 /// A section header row inside the flattened PR list. Occupies a full uniform
@@ -716,6 +1336,7 @@ async fn load_pull_requests(
     project: Entity<Project>,
     filter: StateFilter,
     reviewing: bool,
+    page: u32,
     http_client: Arc<dyn HttpClient>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<LoadOutcome> {
@@ -755,12 +1376,13 @@ async fn load_pull_requests(
         } => (candidates, registry),
         CandidateResolution::NoActiveRepo => {
             return Ok(LoadOutcome::NoHost(
-                "No active repository in this workspace.".into(),
+                "Open a folder that is a git repository to see its pull requests.".into(),
             ));
         }
         CandidateResolution::NoRemote => {
             return Ok(LoadOutcome::NoHost(
-                "Active repository has no origin/upstream remote.".into(),
+                "This repository has no origin or upstream remote, so there is no host to query."
+                    .into(),
             ));
         }
     };
@@ -789,24 +1411,35 @@ async fn load_pull_requests(
         };
         if auth.is_none() {
             if connect_hint.is_none() {
-                connect_hint =
-                    Some(format!("Connect {} to view pull requests.", provider.name()).into());
+                connect_hint = Some(
+                    format!(
+                        "Connect {} from the account menu to see this repository's pull requests.",
+                        provider.name()
+                    )
+                    .into(),
+                );
             }
             continue;
         }
-        let filter = PullRequestListFilter {
+        let list_filter = PullRequestListFilter {
             states: filter.states(),
             author: None,
             reviewer_is_me: reviewing,
             author_is_me: false,
-            limit: Some(50),
+            limit: Some(PAGE_SIZE),
+            page: Some(page),
         };
         let remote_for_call = ParsedGitRemote {
             owner: parsed.owner.clone(),
             repo: parsed.repo.clone(),
         };
         let summaries = provider
-            .list_pull_requests(&remote_for_call, filter, auth.clone(), http_client.clone())
+            .list_pull_requests(
+                &remote_for_call,
+                list_filter,
+                auth.clone(),
+                http_client.clone(),
+            )
             .await
             .with_context(|| {
                 format!("listing pull requests for {}/{}", parsed.owner, parsed.repo)
@@ -825,16 +1458,20 @@ async fn load_pull_requests(
             return Ok(LoadOutcome::NoHost(hint));
         }
         return Ok(LoadOutcome::NoHost(
-            "Remote URL does not match any known hosting provider.".into(),
+            "This repository's remote does not match any known hosting provider.".into(),
         ));
     };
+
+    // A full page back means the host may have more behind it.
+    let may_have_more = last_summaries.len() as u32 >= PAGE_SIZE;
 
     // With an account connected, also fetch the viewer's own PRs so the panel
     // can surface them in a "Created by you" section. Skipped in review mode,
     // where the list is already scoped to review requests (which exclude your
-    // own PRs). A failure here (for example a host that cannot resolve the
-    // authenticated user) leaves the section empty rather than failing the load.
-    let authored = if reviewing {
+    // own PRs), and on later pages, where the section is already populated.
+    // A failure here (for example a host that cannot resolve the authenticated
+    // user) leaves the section empty rather than failing the load.
+    let authored = if reviewing || page > 1 {
         Vec::new()
     } else if let Some(auth) = chosen_auth {
         let authored_filter = PullRequestListFilter {
@@ -842,7 +1479,8 @@ async fn load_pull_requests(
             author: None,
             reviewer_is_me: false,
             author_is_me: true,
-            limit: Some(50),
+            limit: Some(PAGE_SIZE),
+            page: None,
         };
         let remote_for_authored = ParsedGitRemote {
             owner: remote.owner.clone(),
@@ -877,7 +1515,11 @@ async fn load_pull_requests(
     Ok(LoadOutcome::Loaded {
         provider,
         remote,
-        loaded: LoadedPullRequests { authored, others },
+        loaded: LoadedPullRequests {
+            authored,
+            others,
+            may_have_more,
+        },
     })
 }
 
@@ -895,73 +1537,46 @@ impl Render for PullRequestPanel {
         let header = self.render_header(window, cx).into_any_element();
 
         let body = match self.state.clone() {
-            LoadState::Idle | LoadState::Loading => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(
-                    Label::new("Loading…")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .into_any_element(),
+            LoadState::Idle | LoadState::Loading => {
+                Self::render_message("Loading pull requests…", Color::Muted, None).into_any_element()
+            }
             LoadState::Loaded(loaded) => {
-                let LoadedPullRequests { authored, others } = loaded;
-                if authored.is_empty() && others.is_empty() {
+                if loaded.is_empty() {
                     let queried = self
                         .host_context
                         .as_ref()
                         .map(|(_, remote)| format!("{}/{}", remote.owner, remote.repo));
                     let empty_message = if self.reviewing {
-                        "You have no open pull requests to review"
+                        "No pull requests are waiting on your review"
                     } else {
-                        "No open pull requests"
+                        match self.filter {
+                            StateFilter::Open => "No open pull requests",
+                            StateFilter::Closed => "No closed pull requests",
+                            StateFilter::Merged => "No merged pull requests",
+                            StateFilter::All => "No pull requests",
+                        }
                     };
-                    v_flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .gap_1()
-                        .child(
-                            Label::new(empty_message)
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .when_some(queried, |this, q| {
-                            this.child(
-                                Label::new(format!("(queried {q})"))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                        })
-                        .into_any_element()
+                    Self::render_message(
+                        empty_message,
+                        Color::Muted,
+                        queried.map(|repo| format!("in {repo}").into()),
+                    )
+                    .into_any_element()
                 } else {
-                    // Flatten into a single list so headers and rows scroll
-                    // together. The "Created by you" section only appears when
-                    // the viewer has authored PRs; otherwise the list is
-                    // unsectioned, matching the pre-section behavior.
-                    let mut panel_rows: Vec<PanelRow> = Vec::new();
-                    if !authored.is_empty() && !others.is_empty() {
-                        panel_rows.push(PanelRow::Header("Other pull requests".into()));
-                    }
-                    panel_rows.extend(others.into_iter().map(PanelRow::PullRequest));
-                    if !authored.is_empty() {
-                        panel_rows.push(PanelRow::Header("Created by you".into()));
-                        panel_rows.extend(authored.into_iter().map(PanelRow::PullRequest));
-                    }
-                    let count = panel_rows.len();
+                    let rows = self.rows.clone();
                     uniform_list(
                         "pull-request-panel-rows",
-                        count,
+                        rows.len(),
                         cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                             range
-                                .filter_map(|ix| match panel_rows.get(ix)? {
+                                .filter_map(|ix| match rows.get(ix)? {
                                     PanelRow::Header(label) => Some(
                                         render_section_header(label.clone()).into_any_element(),
                                     ),
-                                    PanelRow::PullRequest(summary) => Some(
-                                        this.render_row(ix, summary.clone(), cx).into_any_element(),
-                                    ),
+                                    PanelRow::PullRequest(summary) => {
+                                        Some(this.render_row(ix, summary.clone(), cx))
+                                    }
+                                    PanelRow::LoadMore => Some(this.render_load_more(ix, cx)),
                                 })
                                 .collect()
                         }),
@@ -971,79 +1586,56 @@ impl Render for PullRequestPanel {
                     .into_any_element()
                 }
             }
-            LoadState::NoHost(reason) => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .child(
-                    Label::new("No connected host")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .child(
-                    Label::new(reason)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                )
-                .into_any_element(),
-            LoadState::Failed(reason) => v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .child(
-                    Label::new("Failed to load pull requests")
-                        .size(LabelSize::Small)
-                        .color(Color::Error),
-                )
-                .child(
-                    Label::new(reason)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                )
-                .into_any_element(),
+            LoadState::NoHost(reason) => {
+                Self::render_message("No connected host", Color::Muted, Some(reason))
+                    .into_any_element()
+            }
+            LoadState::Failed(failure) => Self::render_message(
+                failure.summary.clone(),
+                Color::Error,
+                Some(failure.detail),
+            )
+            .child(
+                Button::new("pull-request-panel-retry", "Try Again")
+                    .on_click(cx.listener(|this, _, _window, cx| this.kick_off_refresh(cx))),
+            )
+            .into_any_element(),
             LoadState::AuthExpired { host } => {
                 let host_for_action = host.to_string();
-                let display = git::git_host_credentials::GitHostKind::from_host(&host)
-                    .map(|kind| kind.display_name())
-                    .unwrap_or("the git host");
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .child(
-                        Label::new("Connection expired")
-                            .size(LabelSize::Small)
-                            .color(Color::Error),
-                    )
-                    .child(
-                        Label::new(format!(
-                            "Your {display} sign-in is no longer valid. Reconnect to continue."
-                        ))
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                    )
-                    .child(
-                        Button::new("pull-request-panel-reconnect", "Reconnect").on_click(
-                            cx.listener(move |_, _, window, cx| {
-                                window.dispatch_action(
-                                    Box::new(zed_actions::ConnectGitHost {
-                                        host: host_for_action.clone(),
-                                    }),
-                                    cx,
-                                );
-                            }),
-                        ),
-                    )
-                    .into_any_element()
+                let display = crate::pull_request_view::host_display_name(cx, &host);
+                Self::render_message(
+                    "Connection expired",
+                    Color::Error,
+                    Some(
+                        format!("Your {display} sign-in is no longer valid. Reconnect to continue.")
+                            .into(),
+                    ),
+                )
+                .child(
+                    Button::new("pull-request-panel-reconnect", "Reconnect").on_click(
+                        cx.listener(move |_, _, _window, cx| {
+                            cx.dispatch_action(&zed_actions::ConnectGitHost {
+                                host: host_for_action.clone(),
+                            });
+                        }),
+                    ),
+                )
+                .into_any_element()
             }
         };
 
         v_flex()
             .key_context("PullRequestPanel")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::on_select_next))
+            .on_action(cx.listener(Self::on_select_previous))
+            .on_action(cx.listener(Self::on_select_first))
+            .on_action(cx.listener(Self::on_select_last))
+            .on_action(cx.listener(Self::on_confirm))
+            .on_action(cx.listener(Self::on_secondary_confirm))
+            .on_action(cx.listener(Self::on_refresh))
+            .on_action(cx.listener(Self::on_open_selected_in_browser))
+            .on_action(cx.listener(Self::on_checkout_selected_branch))
             .size_full()
             .bg(panel_bg)
             .child(header)
@@ -1068,7 +1660,11 @@ impl Panel for PullRequestPanel {
         matches!(position, DockPosition::Left | DockPosition::Right)
     }
 
-    fn set_position(&mut self, _: DockPosition, _: &mut Window, _: &mut Context<Self>) {}
+    fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
+        settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
+            settings.pull_request_panel.get_or_insert_default().dock = Some(position.into());
+        });
+    }
 
     fn default_size(&self, _: &Window, cx: &App) -> Pixels {
         PullRequestPanelSettings::get_global(cx).default_width

@@ -14230,6 +14230,7 @@ dependencies = [
  "buffer_diff",
  "collections",
  "editor",
+ "fs",
  "futures 0.3.32",
  "git",
  "git_hosting_providers",

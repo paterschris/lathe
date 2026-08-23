@@ -39,6 +39,72 @@ impl Bitbucket {
     /// Fetch the UUID of the user the supplied credential authenticates as, so
     /// the PR list can be filtered to reviews assigned to them. Requires the
     /// credential to carry the `account` scope.
+    /// The display name of the account a credential authenticates as, for
+    /// labelling the connected account in menus. Separate from
+    /// [`Self::fetch_authenticated_uuid`], which resolves the opaque uuid the
+    /// PR-filtering endpoints match on.
+    /// CI results for a commit, from Bitbucket's build-status API. Pipelines and
+    /// third-party CI both publish here, so one call covers both.
+    pub(super) async fn fetch_checks(
+        &self,
+        remote: &ParsedGitRemote,
+        sha: &str,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<Option<PullRequestChecks>> {
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let url = format!("{api_base}/commit/{sha}/statuses?pagelen=100");
+        let statuses: Vec<BitbucketBuildStatus> = bitbucket_get_paginated(
+            http_client,
+            url,
+            auth,
+            "fetching Bitbucket build statuses",
+            200,
+        )
+        .await?;
+        let mut checks = PullRequestChecks {
+            succeeded: 0,
+            failed: 0,
+            pending: 0,
+            neutral: 0,
+        };
+        for status in statuses {
+            match status.state.as_deref() {
+                Some("SUCCESSFUL") => checks.succeeded += 1,
+                Some("FAILED") => checks.failed += 1,
+                Some("INPROGRESS") => checks.pending += 1,
+                // `STOPPED` is a cancelled build: not a pass, not a failure.
+                _ => checks.neutral += 1,
+            }
+        }
+        Ok((!checks.is_empty()).then_some(checks))
+    }
+
+    pub(super) async fn fetch_authenticated_login(
+        &self,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("Bitbucket base URL has no host")?;
+        let url = format!("https://api.{host}/2.0/user");
+        let request = bitbucket_request(BitbucketMethod::Get, &url, auth, None)?;
+        let bytes = bitbucket_send(
+            http_client,
+            request,
+            "fetching authenticated Bitbucket user",
+        )
+        .await?;
+        let user: AuthenticatedBitbucketUser =
+            serde_json::from_slice(&bytes).context("parsing authenticated Bitbucket user")?;
+        Ok(user
+            .nickname
+            .or(user.display_name)
+            .map(SharedString::from))
+    }
+
     pub(super) async fn fetch_authenticated_uuid(
         &self,
         auth: &Option<GitHostAuth>,
@@ -243,6 +309,10 @@ pub(super) struct BitbucketCommitId {}
 struct AuthenticatedBitbucketUser {
     #[serde(default)]
     uuid: Option<String>,
+    #[serde(default)]
+    nickname: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -541,6 +611,7 @@ impl BitbucketPullRequest {
             // authenticated account's uuid is known.
             viewer_review: None,
             reviewers: Vec::new(),
+            checks: None,
         })
     }
 }
@@ -837,4 +908,22 @@ mod tests {
         assert_eq!(mapped.line, None);
         assert_eq!(mapped.url.as_str(), "https://bitbucket.org/");
     }
+}
+
+#[derive(Deserialize)]
+pub(super) struct BitbucketBuildStatus {
+    #[serde(default)]
+    state: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct BitbucketRepository {
+    #[serde(default)]
+    pub(super) mainbranch: Option<BitbucketBranchName>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct BitbucketBranchName {
+    #[serde(default)]
+    pub(super) name: Option<String>,
 }

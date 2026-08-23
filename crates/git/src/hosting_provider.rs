@@ -151,6 +151,31 @@ pub trait GitHostingProvider {
         Ok(None)
     }
 
+    /// The authentication protocol this provider speaks for pull-request
+    /// operations, or `None` when Lathe has no connect flow for it.
+    ///
+    /// Providers carry their own `base_url`, so returning `Some` here is what
+    /// makes an enterprise or self-hosted instance connectable rather than only
+    /// the vendor's public host.
+    fn auth_kind(&self) -> Option<GitHostAuthKind> {
+        None
+    }
+
+    /// The login of the account a credential authenticates as on this host,
+    /// used to label the connected account in menus. `None` when the host cannot
+    /// report it.
+    ///
+    /// Providers resolve this against their own `base_url`, so an enterprise
+    /// instance reports the account on that instance rather than on the vendor's
+    /// public host.
+    async fn fetch_authenticated_user(
+        &self,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        Ok(None)
+    }
+
     /// List pull requests on the host for the given remote. The default
     /// implementation returns an empty list — providers that support the
     /// concept (GitHub, GitLab, Bitbucket, etc.) override it with the relevant
@@ -164,6 +189,30 @@ pub trait GitHostingProvider {
         _http_client: Arc<dyn HttpClient>,
     ) -> Result<Vec<PullRequestSummary>> {
         Ok(Vec::new())
+    }
+
+    /// Open a new pull request, returning a summary of what was created so the
+    /// caller can navigate straight to it.
+    async fn create_pull_request(
+        &self,
+        _remote: &ParsedGitRemote,
+        _request: NewPullRequest,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<PullRequestSummary> {
+        anyhow::bail!("creating pull requests is not supported by this hosting provider")
+    }
+
+    /// The repository's default branch, used to prefill the target of a new pull
+    /// request. `None` when the host cannot report it, in which case the caller
+    /// falls back to its own guess rather than blocking.
+    async fn default_branch(
+        &self,
+        _remote: &ParsedGitRemote,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        Ok(None)
     }
 
     /// Fetch the full detail for a single pull request by number. Default

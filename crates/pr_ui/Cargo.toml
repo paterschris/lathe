@@ -17,6 +17,7 @@ anyhow.workspace = true
 buffer_diff.workspace = true
 collections.workspace = true
 editor.workspace = true
+fs.workspace = true
 futures.workspace = true
 git.workspace = true
 git_hosting_providers.workspace = true

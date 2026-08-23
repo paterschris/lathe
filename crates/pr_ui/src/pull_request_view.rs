@@ -113,6 +113,9 @@ pub struct PullRequestView {
 struct NewComment {
     path: String,
     line: u32,
+    /// Which side of the diff `line` numbers into: RIGHT for added and context
+    /// lines, LEFT for deleted ones.
+    side: DiffCommentSide,
     block_id: Option<CustomBlockId>,
 }
 
@@ -206,7 +209,7 @@ impl PullRequestView {
                 match result {
                     Ok(()) => surface_toast(&workspace, label, cx),
                     Err(error) => {
-                        surface_toast(&workspace, action_error_message("Review", &error), cx);
+                        surface_toast(&workspace, action_error_message("Review", &error, cx), cx);
                     }
                 }
                 this.refresh(cx);
@@ -253,7 +256,7 @@ impl PullRequestView {
                 match result {
                     Ok(()) => surface_toast(&workspace, label, cx),
                     Err(error) => {
-                        surface_toast(&workspace, action_error_message("Review", &error), cx);
+                        surface_toast(&workspace, action_error_message("Review", &error, cx), cx);
                     }
                 }
                 this.refresh(cx);
@@ -301,7 +304,7 @@ impl PullRequestView {
                         cx,
                     ),
                     Err(error) => {
-                        surface_toast(&workspace, action_error_message("Merge", &error), cx)
+                        surface_toast(&workspace, action_error_message("Merge", &error, cx), cx)
                     }
                 }
                 this.refresh(cx);
@@ -390,7 +393,7 @@ impl PullRequestView {
                         this.refresh(cx);
                     }
                     Err(error) => {
-                        surface_toast(&workspace, action_error_message("Reply", &error), cx)
+                        surface_toast(&workspace, action_error_message("Reply", &error, cx), cx)
                     }
                 }
                 cx.notify();
@@ -407,14 +410,31 @@ impl PullRequestView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let EditorEvent::AddPrCommentRequested { anchor } = event {
-            self.start_new_comment(*anchor, window, cx);
+        if let EditorEvent::AddPrCommentRequested {
+            anchor,
+            is_deleted,
+            base_row,
+        } = event
+        {
+            self.start_new_comment(*anchor, *is_deleted, *base_row, window, cx);
         }
     }
 
-    /// Resolve a diff-editor gutter anchor back to (file path, new-file line) and
-    /// open an inline composer block there for a new RIGHT-side review comment.
-    fn start_new_comment(&mut self, anchor: Anchor, window: &mut Window, cx: &mut Context<Self>) {
+    /// Resolve a diff-editor gutter anchor back to a (file path, side, line) and
+    /// open an inline composer block there for a new review comment.
+    ///
+    /// A clicked row is either post-image (added or context), which anchors to
+    /// the RIGHT side at its new-file line, or a deleted line, which exists only
+    /// in the diff's base text and anchors to the LEFT side at its old-file
+    /// line. `base_row` carries the row within that base text for the latter.
+    fn start_new_comment(
+        &mut self,
+        anchor: Anchor,
+        is_deleted: bool,
+        base_row: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(multibuffer) = self.diff_multibuffer.clone() else {
             return;
         };
@@ -433,24 +453,37 @@ impl PullRequestView {
             return;
         };
         let path = map.path.clone();
-        // Only RIGHT-side (new-file) lines are supported for now. Full-content
-        // buffers map row R to new-file line R+1; patch buffers carry an explicit
-        // line->row map that we reverse. A row with no new-file line (a pure
-        // deletion) cannot anchor a RIGHT-side comment yet.
-        let line = if map.full_content {
-            row + 1
+        // A deleted line resolves against the base text and its old-file line
+        // numbering; everything else against the buffer and the new-file
+        // numbering. In both cases a full-content buffer holds the whole file,
+        // so row R is line R+1, while a patch-reconstructed one carries only the
+        // hunk lines and needs its explicit map reversed.
+        let (side, source_row, line_map) = if is_deleted {
+            let Some(base_row) = base_row else {
+                surface_toast(
+                    &self.workspace,
+                    "Could not work out which line this comment belongs to.".into(),
+                    cx,
+                );
+                return;
+            };
+            (DiffCommentSide::Left, base_row, &map.old_line_to_row)
         } else {
-            match map
-                .line_to_row
+            (DiffCommentSide::Right, row, &map.line_to_row)
+        };
+        let line = if map.full_content {
+            source_row + 1
+        } else {
+            match line_map
                 .iter()
-                .find(|entry| *entry.1 == row)
+                .find(|entry| *entry.1 == source_row)
                 .map(|entry| *entry.0)
             {
                 Some(line) => line,
                 None => {
                     surface_toast(
                         &self.workspace,
-                        "Inline comments can only be added on added or context lines.".into(),
+                        "Could not work out which line this comment belongs to.".into(),
                         cx,
                     );
                     return;
@@ -494,6 +527,7 @@ impl PullRequestView {
         self.new_comment = Some(NewComment {
             path,
             line,
+            side,
             block_id,
         });
         cx.notify();
@@ -520,7 +554,11 @@ impl PullRequestView {
         let Some(new_comment) = self.new_comment.as_ref() else {
             return;
         };
-        let (path, line) = (new_comment.path.clone(), new_comment.line);
+        let (path, line, side) = (
+            new_comment.path.clone(),
+            new_comment.line,
+            new_comment.side,
+        );
         let Some(editor) = self.new_comment_editor.clone() else {
             return;
         };
@@ -556,7 +594,7 @@ impl PullRequestView {
                     commit_id,
                     path.into(),
                     line,
-                    DiffCommentSide::Right,
+                    side,
                     body.into(),
                     auth,
                     http_client,
@@ -571,7 +609,7 @@ impl PullRequestView {
                         this.refresh(cx);
                     }
                     Err(error) => {
-                        surface_toast(&workspace, action_error_message("Comment", &error), cx)
+                        surface_toast(&workspace, action_error_message("Comment", &error, cx), cx)
                     }
                 }
                 cx.notify();
@@ -727,6 +765,10 @@ struct ParsedDiffHunk {
     /// from the `@@ -a,b +c,d @@` header. Used to map review-comment line
     /// numbers onto rows in the reconstructed buffer.
     new_start: u32,
+    /// 1-indexed start line of this hunk in the old (pre-image) file, from the
+    /// same header. Needed to anchor comments on deleted lines, which exist only
+    /// on the old side.
+    old_start: u32,
     lines: Vec<ParsedDiffLine>,
 }
 
@@ -748,7 +790,12 @@ fn parse_unified_diff(text: &str) -> Vec<ParsedDiffFile> {
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            if let Some(file) = current_file.take() {
+            if let Some(mut file) = current_file.take() {
+                // Flush the hunk still being accumulated, or the last hunk of
+                // every file but the final one is dropped.
+                if let Some(hunk) = current_hunk.take() {
+                    file.hunks.push(hunk);
+                }
                 files.push(file);
             }
             current_hunk = None;
@@ -778,6 +825,7 @@ fn parse_unified_diff(text: &str) -> Vec<ParsedDiffFile> {
             }
             current_hunk = Some(ParsedDiffHunk {
                 new_start: parse_hunk_new_start(line).unwrap_or(1),
+                old_start: parse_hunk_old_start(line).unwrap_or(1),
                 lines: Vec::new(),
             });
         } else if let Some(hunk) = current_hunk.as_mut() {
@@ -793,10 +841,13 @@ fn parse_unified_diff(text: &str) -> Vec<ParsedDiffFile> {
         }
     }
 
-    if let (Some(mut file), Some(hunk)) = (current_file.take(), current_hunk.take()) {
-        file.hunks.push(hunk);
-        files.push(file);
-    } else if let Some(file) = current_file.take() {
+    // Both takes have to happen before the match, so keep them separate: a
+    // tuple pattern would consume `current_file` even when there is no trailing
+    // hunk, dropping a final file that has none (a binary or rename-only entry).
+    if let Some(mut file) = current_file.take() {
+        if let Some(hunk) = current_hunk.take() {
+            file.hunks.push(hunk);
+        }
         files.push(file);
     }
 
@@ -810,19 +861,29 @@ fn parse_hunk_new_start(header: &str) -> Option<u32> {
     number.parse::<u32>().ok()
 }
 
+/// Extracts the old-file start line from a `@@ -a,b +c,d @@` hunk header.
+fn parse_hunk_old_start(header: &str) -> Option<u32> {
+    let after_minus = header.split('-').nth(1)?;
+    let number = after_minus.split(|ch: char| ch == ',' || ch == ' ').next()?;
+    number.parse::<u32>().ok()
+}
+
 const FILE_NAMESPACE_SORT_PREFIX: u64 = 0;
 
 /// Rebuilds approximate base/head text for a file from its parsed hunks. A
 /// unified patch only carries the changed regions plus a few context lines, so
 /// the resulting buffers contain those regions (like a unified diff view on the
 /// web) rather than the whole file. `None` base text means the file is new.
-fn reconstruct_file_texts(file: &ParsedDiffFile) -> (Option<String>, String, HashMap<u32, u32>) {
+fn reconstruct_file_texts(file: &ParsedDiffFile) -> ReconstructedFile {
     let mut old_text = String::new();
     let mut new_text = String::new();
     let mut line_to_row: HashMap<u32, u32> = HashMap::default();
+    let mut old_line_to_row: HashMap<u32, u32> = HashMap::default();
     let mut row: u32 = 0;
+    let mut old_row: u32 = 0;
     for hunk in &file.hunks {
         let mut new_line = hunk.new_start;
+        let mut old_line = hunk.old_start;
         for line in &hunk.lines {
             match line {
                 ParsedDiffLine::Context(text) => {
@@ -831,12 +892,18 @@ fn reconstruct_file_texts(file: &ParsedDiffFile) -> (Option<String>, String, Has
                     new_text.push_str(text);
                     new_text.push('\n');
                     line_to_row.insert(new_line, row);
+                    old_line_to_row.insert(old_line, old_row);
                     new_line += 1;
+                    old_line += 1;
                     row += 1;
+                    old_row += 1;
                 }
                 ParsedDiffLine::Deletion(text) => {
                     old_text.push_str(text);
                     old_text.push('\n');
+                    old_line_to_row.insert(old_line, old_row);
+                    old_line += 1;
+                    old_row += 1;
                 }
                 ParsedDiffLine::Addition(text) => {
                     new_text.push_str(text);
@@ -848,12 +915,29 @@ fn reconstruct_file_texts(file: &ParsedDiffFile) -> (Option<String>, String, Has
             }
         }
     }
-    let old_text = if old_text.is_empty() {
+    let base_text = if old_text.is_empty() {
         None
     } else {
         Some(old_text)
     };
-    (old_text, new_text, line_to_row)
+    ReconstructedFile {
+        base_text,
+        head_text: new_text,
+        line_to_row,
+        old_line_to_row,
+    }
+}
+
+/// The buffers and line maps rebuilt from one file's unified patch.
+struct ReconstructedFile {
+    /// Pre-image text, or `None` when the file is new in this pull request.
+    base_text: Option<String>,
+    head_text: String,
+    /// New-file line (1-indexed) -> row in `head_text` (0-indexed).
+    line_to_row: HashMap<u32, u32>,
+    /// Old-file line (1-indexed) -> row in `base_text` (0-indexed). Lets a
+    /// comment on a deleted line resolve back to its old-side line number.
+    old_line_to_row: HashMap<u32, u32>,
 }
 
 /// Everything needed to fetch full file content while building the diff, so that
@@ -988,7 +1072,12 @@ async fn add_patch_file(
     language_registry: &Arc<LanguageRegistry>,
     cx: &mut AsyncApp,
 ) -> Result<Option<DiffFileMap>> {
-    let (old_text, new_text, line_to_row) = reconstruct_file_texts(file);
+    let ReconstructedFile {
+        base_text: old_text,
+        head_text: new_text,
+        line_to_row,
+        old_line_to_row,
+    } = reconstruct_file_texts(file);
     if new_text.is_empty() && old_text.is_none() {
         return Ok(None);
     }
@@ -1022,6 +1111,7 @@ async fn add_patch_file(
         path: file.path.clone(),
         buffer,
         line_to_row,
+        old_line_to_row,
         full_content: false,
     }))
 }
@@ -1106,6 +1196,7 @@ async fn add_changed_file_full(
         path: file.path.clone(),
         buffer,
         line_to_row: HashMap::default(),
+        old_line_to_row: HashMap::default(),
         full_content: true,
     }))
 }
@@ -1165,6 +1256,7 @@ async fn add_unchanged_file(
         path: path.to_string(),
         buffer,
         line_to_row: HashMap::default(),
+        old_line_to_row: HashMap::default(),
         full_content: true,
     }))
 }
@@ -1230,6 +1322,11 @@ struct DiffFileMap {
     /// New-file line (1-indexed) -> buffer row (0-indexed). Only populated for
     /// patch-reconstructed files; full-content files map line N to row N-1.
     line_to_row: HashMap<u32, u32>,
+    /// Old-file line (1-indexed) -> row in the diff's base text (0-indexed).
+    /// Only populated for patch-reconstructed files; full-content files hold the
+    /// whole base, so line N is row N-1 there too. Used to anchor comments on
+    /// deleted lines, which have no row in `buffer`.
+    old_line_to_row: HashMap<u32, u32>,
     /// True when `buffer` holds the file's full content (so any line anchors),
     /// false when it is reconstructed from the patch (only hunk lines exist).
     full_content: bool,
@@ -1887,7 +1984,18 @@ impl File for PrDiffFile {
     }
 
     fn to_proto(&self, _: &App) -> language::proto::File {
-        unimplemented!("pull-request diff files are display-only")
+        // Pull-request diff buffers are display-only and never shared over
+        // collab, so this is not expected to be reached. Describe the synthetic
+        // file rather than panicking: a future caller getting an inert,
+        // historic-looking file is recoverable, and a crash is not.
+        language::proto::File {
+            worktree_id: self.worktree_id.to_proto(),
+            entry_id: None,
+            path: self.path.as_unix_str().to_owned(),
+            mtime: None,
+            is_deleted: false,
+            is_historic: true,
+        }
     }
 
     fn is_private(&self) -> bool {
@@ -1911,12 +2019,20 @@ fn clone_remote(remote: &ParsedGitRemote) -> ParsedGitRemote {
 /// clear reconnect instruction instead of a raw error string. The action's
 /// surface (panel / picker) is where the reconnect button lives, so the toast
 /// points there rather than carrying its own button.
-fn action_error_message(action: &str, error: &anyhow::Error) -> SharedString {
+/// Human-readable name for a host in error copy and reconnect prompts. Resolves
+/// through the provider registry so enterprise instances get their configured
+/// name, and falls back to the bare hostname, which is still more useful to the
+/// reader than a generic placeholder.
+pub(crate) fn host_display_name(cx: &App, host: &str) -> SharedString {
+    git::git_host_credentials::GitHost::resolve(cx, host)
+        .map(|resolved| SharedString::from(resolved.display_name().to_string()))
+        .unwrap_or_else(|| SharedString::from(host.to_string()))
+}
+
+fn action_error_message(action: &str, error: &anyhow::Error, cx: &App) -> SharedString {
     match error.downcast_ref::<git::PullRequestAuthError>() {
         Some(auth_error) => {
-            let display = git::git_host_credentials::GitHostKind::from_host(&auth_error.host)
-                .map(|kind| kind.display_name())
-                .unwrap_or("the git host");
+            let display = host_display_name(cx, &auth_error.host);
             format!(
                 "{action} failed: your {display} sign-in has expired. \
                  Reconnect from the pull request panel."
@@ -2015,9 +2131,7 @@ impl Render for PullRequestView {
             && self.detail.is_none()
         {
             let host_for_action = host.to_string();
-            let display = git::git_host_credentials::GitHostKind::from_host(&host)
-                .map(|kind| kind.display_name())
-                .unwrap_or("the git host");
+            let display = host_display_name(cx, &host);
             return v_flex()
                 .size_full()
                 .p_4()
@@ -2098,6 +2212,50 @@ impl Render for PullRequestView {
     }
 }
 
+/// A one-glance CI summary for the PR header: an icon coloured by the worst
+/// state present, plus a count. `None` when the host reported no checks at all,
+/// which must not be drawn as a failure.
+fn render_checks_chip(detail: &PullRequestDetail) -> Option<impl IntoElement> {
+    let checks = detail.checks.as_ref()?;
+    let (icon, color, label) = match checks.overall() {
+        git::CheckState::Succeeded => (
+            IconName::Check,
+            Color::Success,
+            format!("{} passed", checks.succeeded),
+        ),
+        git::CheckState::Failed => (
+            IconName::XCircle,
+            Color::Error,
+            format!("{} failed", checks.failed),
+        ),
+        git::CheckState::Pending => (
+            IconName::ArrowCircle,
+            Color::Warning,
+            format!("{} running", checks.pending),
+        ),
+        git::CheckState::Neutral => (
+            IconName::Dash,
+            Color::Muted,
+            format!("{} checks", checks.total()),
+        ),
+    };
+    // The headline count covers only the dominant state, so spell out the full
+    // breakdown in the tooltip.
+    let tooltip = format!(
+        "{} passed, {} failed, {} running, {} other",
+        checks.succeeded, checks.failed, checks.pending, checks.neutral
+    );
+    Some(
+        h_flex()
+            .id("pr-checks-chip")
+            .gap_1()
+            .items_center()
+            .child(Icon::new(icon).size(IconSize::XSmall).color(color))
+            .child(Label::new(label).color(color).size(LabelSize::Small))
+            .tooltip(ui::Tooltip::text(tooltip)),
+    )
+}
+
 impl PullRequestView {
     fn render_header(
         &self,
@@ -2152,7 +2310,8 @@ impl PullRequestView {
                     .child(Label::new(state_label).color(state_color))
                     .when_some(mergeable_label, |this, (label, color)| {
                         this.child(Label::new(label).color(color).size(LabelSize::Small))
-                    }),
+                    })
+                    .children(render_checks_chip(detail)),
             )
             .child(
                 h_flex()
@@ -2537,7 +2696,276 @@ impl PullRequestView {
 
 #[cfg(test)]
 mod tests {
-    use super::iso_calendar_date;
+    use super::{
+        ParsedDiffLine, iso_calendar_date, parse_hunk_new_start, parse_hunk_old_start,
+        parse_unified_diff, reconstruct_file_texts,
+    };
+
+    /// Renders a parsed hunk back into marker-prefixed lines, so assertions read
+    /// like the diff they came from.
+    fn rendered(lines: &[ParsedDiffLine]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| match line {
+                ParsedDiffLine::Context(text) => format!(" {text}"),
+                ParsedDiffLine::Addition(text) => format!("+{text}"),
+                ParsedDiffLine::Deletion(text) => format!("-{text}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parses_a_single_file_with_one_hunk() {
+        let diff = concat!(
+            "diff --git a/src/main.rs b/src/main.rs\n",
+            "index 1234567..89abcde 100644\n",
+            "--- a/src/main.rs\n",
+            "+++ b/src/main.rs\n",
+            "@@ -1,3 +1,4 @@\n",
+            " fn main() {\n",
+            "-    println!(\"old\");\n",
+            "+    println!(\"new\");\n",
+            "+    println!(\"extra\");\n",
+            " }\n",
+        );
+        let files = parse_unified_diff(diff);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/main.rs");
+        assert_eq!(files[0].hunks.len(), 1);
+        assert_eq!(files[0].hunks[0].new_start, 1);
+        assert_eq!(
+            rendered(&files[0].hunks[0].lines),
+            vec![
+                " fn main() {",
+                "-    println!(\"old\");",
+                "+    println!(\"new\");",
+                "+    println!(\"extra\");",
+                " }",
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_multiple_files_and_hunks() {
+        let diff = concat!(
+            "diff --git a/a.txt b/a.txt\n",
+            "--- a/a.txt\n",
+            "+++ b/a.txt\n",
+            "@@ -1,1 +1,1 @@\n",
+            "-one\n",
+            "+ONE\n",
+            "@@ -10,2 +10,2 @@\n",
+            " ten\n",
+            "-eleven\n",
+            "+ELEVEN\n",
+            "diff --git a/b.txt b/b.txt\n",
+            "--- a/b.txt\n",
+            "+++ b/b.txt\n",
+            "@@ -5,1 +5,2 @@\n",
+            " five\n",
+            "+six\n",
+        );
+        let files = parse_unified_diff(diff);
+        assert_eq!(
+            files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+        assert_eq!(files[0].hunks.len(), 2);
+        assert_eq!(files[0].hunks[0].new_start, 1);
+        assert_eq!(files[0].hunks[1].new_start, 10);
+        assert_eq!(files[1].hunks.len(), 1);
+        assert_eq!(files[1].hunks[0].new_start, 5);
+    }
+
+    #[test]
+    fn parses_added_and_deleted_files() {
+        let diff = concat!(
+            "diff --git a/added.txt b/added.txt\n",
+            "new file mode 100644\n",
+            "--- /dev/null\n",
+            "+++ b/added.txt\n",
+            "@@ -0,0 +1,2 @@\n",
+            "+first\n",
+            "+second\n",
+            "diff --git a/gone.txt b/gone.txt\n",
+            "deleted file mode 100644\n",
+            "--- a/gone.txt\n",
+            "+++ /dev/null\n",
+            "@@ -1,1 +0,0 @@\n",
+            "-bye\n",
+        );
+        let files = parse_unified_diff(diff);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "added.txt");
+        // A deletion has no `+++ b/` line, so the `/dev/null` marker stands in
+        // as the path and the file still appears in the list.
+        assert_eq!(files[1].path, "/dev/null");
+        assert_eq!(rendered(&files[1].hunks[0].lines), vec!["-bye"]);
+    }
+
+    #[test]
+    fn drops_no_newline_markers_and_tolerates_binary_files() {
+        let diff = concat!(
+            "diff --git a/bin.dat b/bin.dat\n",
+            "Binary files a/bin.dat and b/bin.dat differ\n",
+            "diff --git a/t.txt b/t.txt\n",
+            "--- a/t.txt\n",
+            "+++ b/t.txt\n",
+            "@@ -1,1 +1,1 @@\n",
+            "-old\n",
+            "\\ No newline at end of file\n",
+            "+new\n",
+        );
+        let files = parse_unified_diff(diff);
+        assert_eq!(files.len(), 2);
+        // The binary file is kept as an entry with no hunks rather than dropped,
+        // so the file list still reflects everything the PR touches.
+        assert_eq!(files[0].hunks.len(), 0);
+        assert_eq!(rendered(&files[1].hunks[0].lines), vec!["-old", "+new"]);
+    }
+
+    #[test]
+    fn keeps_a_trailing_file_that_has_no_hunks() {
+        let diff = concat!(
+            "diff --git a/t.txt b/t.txt\n",
+            "--- a/t.txt\n",
+            "+++ b/t.txt\n",
+            "@@ -1,1 +1,1 @@\n",
+            "-old\n",
+            "+new\n",
+            "diff --git a/bin.dat b/bin.dat\n",
+            "Binary files a/bin.dat and b/bin.dat differ\n",
+        );
+        let files = parse_unified_diff(diff);
+        // The binary entry closes the diff with no hunk pending; it must still
+        // survive the final flush.
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].hunks.len(), 1);
+        assert_eq!(files[1].hunks.len(), 0);
+    }
+
+    #[test]
+    fn parse_unified_diff_handles_empty_input() {
+        assert!(parse_unified_diff("").is_empty());
+    }
+
+    #[test]
+    fn parses_hunk_headers() {
+        assert_eq!(parse_hunk_new_start("@@ -1,3 +1,4 @@"), Some(1));
+        assert_eq!(parse_hunk_new_start("@@ -10,2 +25,7 @@ fn context()"), Some(25));
+        // A single-line hunk omits the count.
+        assert_eq!(parse_hunk_new_start("@@ -1 +1 @@"), Some(1));
+        assert_eq!(parse_hunk_new_start("not a hunk header"), None);
+    }
+
+    #[test]
+    fn reconstructs_base_and_head_text_from_a_patch() {
+        let diff = concat!(
+            "diff --git a/f.txt b/f.txt\n",
+            "--- a/f.txt\n",
+            "+++ b/f.txt\n",
+            "@@ -1,3 +1,3 @@\n",
+            " keep\n",
+            "-drop\n",
+            "+add\n",
+            " tail\n",
+        );
+        let files = parse_unified_diff(diff);
+        let rebuilt = reconstruct_file_texts(&files[0]);
+        let (base, head, line_to_row) = (
+            rebuilt.base_text.clone(),
+            rebuilt.head_text.clone(),
+            rebuilt.line_to_row.clone(),
+        );
+
+        assert_eq!(base.as_deref(), Some("keep\ndrop\ntail\n"));
+        assert_eq!(head, "keep\nadd\ntail\n");
+        // New-file lines 1..=3 map onto consecutive rows of the reconstructed
+        // buffer; deletions occupy no row on the new side.
+        assert_eq!(line_to_row.get(&1), Some(&0));
+        assert_eq!(line_to_row.get(&2), Some(&1));
+        assert_eq!(line_to_row.get(&3), Some(&2));
+    }
+
+    #[test]
+    fn reconstructed_line_map_respects_hunk_offsets() {
+        let diff = concat!(
+            "diff --git a/f.txt b/f.txt\n",
+            "--- a/f.txt\n",
+            "+++ b/f.txt\n",
+            "@@ -1,1 +1,1 @@\n",
+            " top\n",
+            "@@ -50,2 +50,2 @@\n",
+            " fifty\n",
+            "+fiftyone\n",
+        );
+        let files = parse_unified_diff(diff);
+        let rebuilt = reconstruct_file_texts(&files[0]);
+        let (head, line_to_row) = (rebuilt.head_text.clone(), rebuilt.line_to_row.clone());
+
+        // Only the hunks' own lines exist in the buffer, so rows stay dense even
+        // though the file lines they represent are far apart.
+        assert_eq!(head, "top\nfifty\nfiftyone\n");
+        assert_eq!(line_to_row.get(&1), Some(&0));
+        assert_eq!(line_to_row.get(&50), Some(&1));
+        assert_eq!(line_to_row.get(&51), Some(&2));
+        assert_eq!(line_to_row.get(&2), None);
+    }
+
+    #[test]
+    fn reconstruction_maps_old_side_lines_for_deletions() {
+        let diff = concat!(
+            "diff --git a/f.txt b/f.txt\n",
+            "--- a/f.txt\n",
+            "+++ b/f.txt\n",
+            "@@ -10,3 +20,3 @@\n",
+            " keep\n",
+            "-gone\n",
+            "+added\n",
+            " tail\n",
+        );
+        let files = parse_unified_diff(diff);
+        assert_eq!(files[0].hunks[0].old_start, 10);
+        assert_eq!(files[0].hunks[0].new_start, 20);
+        let rebuilt = reconstruct_file_texts(&files[0]);
+
+        // Old side: lines 10, 11, 12 are keep/gone/tail, consecutive in the base.
+        assert_eq!(rebuilt.old_line_to_row.get(&10), Some(&0));
+        assert_eq!(rebuilt.old_line_to_row.get(&11), Some(&1));
+        assert_eq!(rebuilt.old_line_to_row.get(&12), Some(&2));
+        // New side skips the deletion and numbers from the hunk's own start.
+        assert_eq!(rebuilt.line_to_row.get(&20), Some(&0));
+        assert_eq!(rebuilt.line_to_row.get(&21), Some(&1));
+        assert_eq!(rebuilt.line_to_row.get(&22), Some(&2));
+        // A deleted line has no row on the new side at all.
+        assert_eq!(rebuilt.head_text, "keep\nadded\ntail\n");
+        assert_eq!(rebuilt.base_text.as_deref(), Some("keep\ngone\ntail\n"));
+    }
+
+    #[test]
+    fn parses_old_side_hunk_headers() {
+        assert_eq!(parse_hunk_old_start("@@ -1,3 +1,4 @@"), Some(1));
+        assert_eq!(parse_hunk_old_start("@@ -42,2 +25,7 @@ fn context()"), Some(42));
+        assert_eq!(parse_hunk_old_start("@@ -7 +7 @@"), Some(7));
+        assert_eq!(parse_hunk_old_start("not a hunk header"), None);
+    }
+
+    #[test]
+    fn reconstructing_an_added_file_reports_no_base_text() {
+        let diff = concat!(
+            "diff --git a/new.txt b/new.txt\n",
+            "--- /dev/null\n",
+            "+++ b/new.txt\n",
+            "@@ -0,0 +1,2 @@\n",
+            "+one\n",
+            "+two\n",
+        );
+        let files = parse_unified_diff(diff);
+        let rebuilt = reconstruct_file_texts(&files[0]);
+        let (base, head) = (rebuilt.base_text.clone(), rebuilt.head_text.clone());
+        assert_eq!(base, None);
+        assert_eq!(head, "one\ntwo\n");
+    }
 
     #[test]
     fn iso_calendar_date_extracts_date_portion() {

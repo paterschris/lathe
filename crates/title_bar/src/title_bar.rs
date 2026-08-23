@@ -1259,9 +1259,20 @@ impl TitleBar {
         let active_account_id = self.client.active_account_id();
         let workspace = self.workspace.clone();
 
-        let github_connected = git::git_host_credentials::connected_username(cx, "github.com");
-        let bitbucket_connected =
-            git::git_host_credentials::connected_username(cx, "bitbucket.org");
+        // Every host the provider registry can authenticate against, so
+        // enterprise and self-hosted instances get menu entries too.
+        let git_host_entries: Vec<lathe_git_integrations::GitHostMenuEntry> =
+            git::git_host_credentials::connectable_hosts(cx)
+                .into_iter()
+                .map(|host| lathe_git_integrations::GitHostMenuEntry {
+                    connected_login: git::git_host_credentials::connected_username(
+                        cx,
+                        host.host(),
+                    ),
+                    host: host.host().to_string(),
+                    display_name: host.display_name().to_string(),
+                })
+                .collect();
 
         let bound_account_id = workspace
             .upgrade()
@@ -1330,8 +1341,14 @@ impl TitleBar {
                 let workspace = workspace.clone();
                 let display_login = display_login.clone();
                 let display_account_id = display_account_id.clone();
-                let github_connected = github_connected.clone();
-                let bitbucket_connected = bitbucket_connected.clone();
+                let git_host_entries = git_host_entries
+                    .iter()
+                    .map(|entry| lathe_git_integrations::GitHostMenuEntry {
+                        host: entry.host.clone(),
+                        display_name: entry.display_name.clone(),
+                        connected_login: entry.connected_login.clone(),
+                    })
+                    .collect::<Vec<_>>();
 
                 let ai_enabled = !project::DisableAiSettings::get_global(cx).disable_ai;
                 let current_layout = AgentSettings::get_layout(cx);
@@ -1499,11 +1516,7 @@ impl TitleBar {
                     .separator()
                     .header("Git Integrations")
                     .map(|this| {
-                        lathe_git_integrations::append_git_integrations(
-                            this,
-                            github_connected,
-                            bitbucket_connected,
-                        )
+                        lathe_git_integrations::append_git_integrations(this, git_host_entries)
                     })
                 })
                 .into()

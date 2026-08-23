@@ -17,7 +17,7 @@ use util::ResultExt as _;
 
 use git::{
     BuildCommitPermalinkParams, BuildPermalinkParams, DiffCommentSide, GitHostAuth,
-    GitHostingProvider, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
+    GitHostAuthKind, GitHostingProvider, NewPullRequest, PullRequestChecks, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
     PullRequestListFilter, PullRequestMergeMethod, PullRequestReviewComment,
     PullRequestReviewVerdict, PullRequestReviewer, PullRequestState, PullRequestSummary, RemoteUrl,
 };
@@ -169,6 +169,14 @@ impl Bitbucket {
 
 #[async_trait]
 impl GitHostingProvider for Bitbucket {
+    fn auth_kind(&self) -> Option<GitHostAuthKind> {
+        // Cloud only. Bitbucket Data Center / Server exposes a different REST
+        // API (`/rest/api/1.0`) that the calls below do not speak, so offering
+        // to connect a self-hosted instance would advertise support that does
+        // not exist.
+        (self.base_url.host_str() == Some("bitbucket.org")).then_some(GitHostAuthKind::Bitbucket)
+    }
+
     fn name(&self) -> String {
         self.name.clone()
     }
@@ -333,6 +341,14 @@ impl GitHostingProvider for Bitbucket {
         Ok(avatar_url)
     }
 
+    async fn fetch_authenticated_user(
+        &self,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        self.fetch_authenticated_login(&auth, &http_client).await
+    }
+
     async fn list_pull_requests(
         &self,
         remote: &ParsedGitRemote,
@@ -381,13 +397,20 @@ impl GitHostingProvider for Bitbucket {
         } else {
             String::new()
         };
+        // A "mine" filter scans a wide window and filters client-side, so its
+        // results do not line up with any one page of the host's response; only
+        // a plain listing honours the caller's page.
+        let page_query = match filter.page.filter(|_| scan_cap == limit as usize) {
+            Some(page) => format!("&page={}", page.max(1)),
+            None => String::new(),
+        };
         let first_url = if filter.reviewer_is_me {
             format!(
-                "{api_base}/pullrequests?{state_query}{author_query}&pagelen=50&sort=-updated_on&fields=%2Bvalues.participants"
+                "{api_base}/pullrequests?{state_query}{author_query}{page_query}&pagelen=50&sort=-updated_on&fields=%2Bvalues.participants"
             )
         } else {
             format!(
-                "{api_base}/pullrequests?{state_query}{author_query}&pagelen=50&sort=-updated_on"
+                "{api_base}/pullrequests?{state_query}{author_query}{page_query}&pagelen=50&sort=-updated_on"
             )
         };
         let mut raw: Vec<BitbucketPullRequest> = bitbucket_get_paginated(
@@ -482,6 +505,65 @@ impl GitHostingProvider for Bitbucket {
         Ok(summaries)
     }
 
+    async fn create_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        request: NewPullRequest,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<PullRequestSummary> {
+        if self.is_self_hosted() {
+            bail!("pull request operations are only supported on Bitbucket Cloud");
+        }
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let url = format!("{api_base}/pullrequests");
+        // Bitbucket Cloud has no draft concept, so `is_draft` is dropped rather
+        // than failing the call; the created PR is simply open.
+        let body = serde_json::json!({
+            "title": request.title.to_string(),
+            "description": request.body.to_string(),
+            "source": { "branch": { "name": request.source_branch.to_string() } },
+            "destination": { "branch": { "name": request.target_branch.to_string() } },
+        });
+        let http_request = bitbucket_request(
+            BitbucketMethod::Post,
+            &url,
+            &auth,
+            Some(serde_json::to_vec(&body)?),
+        )?;
+        let bytes = bitbucket_send(
+            &http_client,
+            http_request,
+            "creating Bitbucket pull request",
+        )
+        .await?;
+        let created: BitbucketPullRequest =
+            serde_json::from_slice(&bytes).context("parsing created Bitbucket pull request")?;
+        let state = created.pull_request_state();
+        created.into_summary(state)
+    }
+
+    async fn default_branch(
+        &self,
+        remote: &ParsedGitRemote,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<SharedString>> {
+        if self.is_self_hosted() {
+            return Ok(None);
+        }
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let request = bitbucket_request(BitbucketMethod::Get, &api_base, &auth, None)?;
+        let bytes =
+            bitbucket_send(&http_client, request, "fetching Bitbucket repository").await?;
+        let repository: BitbucketRepository =
+            serde_json::from_slice(&bytes).context("parsing Bitbucket repository")?;
+        Ok(repository
+            .mainbranch
+            .and_then(|branch| branch.name)
+            .map(SharedString::from))
+    }
+
     async fn get_pull_request(
         &self,
         remote: &ParsedGitRemote,
@@ -547,6 +629,13 @@ impl GitHostingProvider for Bitbucket {
         .await
         .log_err()
         .map(|commits| commits.len() as u32);
+        // Best-effort: a repository with no CI publishing build statuses leaves
+        // this unset, and the header says so rather than showing a false failure.
+        detail.checks = self
+            .fetch_checks(remote, &detail.head_sha.clone(), &auth, &http_client)
+            .await
+            .log_err()
+            .flatten();
         Ok(detail)
     }
 
@@ -1187,6 +1276,7 @@ mod tests {
             reviewer_is_me: false,
             author_is_me: true,
             limit: Some(50),
+            page: None,
         };
         let summaries =
             futures::executor::block_on(Bitbucket::public_instance().list_pull_requests(
@@ -1257,6 +1347,7 @@ mod tests {
             reviewer_is_me: true,
             author_is_me: false,
             limit: Some(50),
+            page: None,
         };
         let summaries =
             futures::executor::block_on(Bitbucket::public_instance().list_pull_requests(
