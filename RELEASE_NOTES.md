@@ -2,6 +2,73 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v0.236.31-beta — 2026-08-25
+
+An upstream sync, bringing Lathe up to date with 78 commits from Zed. The pull request panel and Windows code signing shipped in v0.236.30-beta and are unchanged here.
+
+### Security
+
+- Updated Wasmtime's WASI implementation to fix a filesystem sandbox escape. This affects extensions, which run in that sandbox.
+- Disabled one-time code autofill in Lathe's text inputs.
+
+### Editor
+
+- Fixed `fold_at_level` folding a function's arguments instead of its body.
+- Oversized LSP hover contents are truncated before display rather than overflowing.
+- The gutter repaints immediately when bookmarks change.
+- Format-on-save no longer runs against read-only files.
+- Overlapping range-formatting results are deduplicated properly.
+- `lsp_results_location` is now respected for go-to-declaration and go-to-type-definition.
+- Added a configurable debounce timeout for inline completions.
+
+### Git
+
+- Fixed a crash when selecting collapsed sections in the git panel.
+- Added an action to toggle the diff base.
+- Added Tangled as a git hosting provider.
+- Recursive blaming no longer emits useless toasts.
+- Fixed global gitignore matching outside the worktree root.
+
+### Markdown
+
+- Improved preview typography and inline code rendering.
+- Restored fallback language highlighting for untagged code blocks.
+
+### Debugger
+
+- Continue Program and Continue Thread are now separate actions.
+- Python's locator passes through `env` variables from the task template.
+
+### AI
+
+- Added Gemini 3.5 Flash-Lite and removed deprecated Gemini models.
+- Added the Baseten provider.
+- Copilot Chat supports data-resident GitHub Enterprise.
+- Provider rejection details are preserved instead of discarded, and transport errors now include the host.
+- Failed agent connections can be reloaded from the panel.
+- The most recently selected agent persists correctly.
+
+### Platform
+
+- **Linux**: demand-driven Wayland render loop, prewarmed font match caches, several X11 fixes, and GLib is no longer bundled in release archives.
+- **Windows**: support for Restart Manager shutdown.
+- **macOS**: fixed session restore when a window is closed with the X button.
+
+### Workspace
+
+- Recent navigation history persists across sessions.
+- The terminal panel registers before serialized terminals are restored.
+- Terminals no longer steal focus from an open modal.
+- Undoing a rename removes directories the rename created.
+- Added a Clear button to the settings search field.
+
+### Known issues
+
+- The pull request panel's GitLab and GitHub Enterprise support has not been exercised against a live host.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**. The dialog names Christopher Paterson as the publisher rather than reporting an unknown one.
+
+---
+
 ## v0.236.17-beta — 2026-06-16
 
 GitKraken-parity push for the Git panel, plus a worktree-aware debug scenario fix.

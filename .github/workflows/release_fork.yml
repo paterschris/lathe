@@ -569,15 +569,41 @@ jobs:
             prerelease_flag="--prerelease"
           fi
 
+          # RELEASE_NOTES.md is a cumulative changelog, most recent first, so
+          # publish only this release's own `## <tag>` section rather than the
+          # whole file. `--generate-notes` is a poor substitute here: this fork
+          # lands work as direct commits rather than PRs, so GitHub has nothing
+          # to summarise and emits a bare compare link.
+          notes_body="$(mktemp)"
+          awk -v prefix="## ${tag}" '
+            index($0, prefix) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' RELEASE_NOTES.md > "$notes_body"
+
+          notes_args=()
+          if [ -s "$notes_body" ]; then
+            notes_args=(--notes-file "$notes_body")
+          else
+            # Forgetting to add a section is the likely mistake, and silently
+            # shipping an empty body hides it. Warn rather than fail, so a
+            # missing section cannot strand artifacts that already built.
+            echo "::warning::RELEASE_NOTES.md has no '## ${tag}' section; falling back to generated notes"
+            notes_args=(--generate-notes)
+          fi
+
           if gh release view "$tag" 2>/dev/null; then
             gh release upload "$tag" release-files/* --clobber
+            if [ -s "$notes_body" ]; then
+              gh release edit "$tag" --notes-file "$notes_body"
+            fi
             if [ -n "$prerelease_flag" ]; then
               gh release edit "$tag" --prerelease
             fi
           else
             gh release create "$tag" release-files/* \
               --title "Lathe ${tag}" \
-              --generate-notes \
+              "${notes_args[@]}" \
               $prerelease_flag
           fi
 
