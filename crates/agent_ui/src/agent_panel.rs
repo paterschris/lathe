@@ -998,6 +998,7 @@ pub struct AgentPanel {
     _project_subscription: Subscription,
     zoomed: bool,
     pending_serialization: Option<Task<Result<()>>>,
+    persist_selected_agent_task: Task<()>,
     new_user_onboarding: Entity<AgentPanelOnboarding>,
     new_user_onboarding_upsell_dismissed: AtomicBool,
     selected_agent: Agent,
@@ -1335,6 +1336,7 @@ impl AgentPanel {
             focus_handle: cx.focus_handle(),
             context_server_registry,
             draft_thread: None,
+            persist_selected_agent_task: Task::ready(()),
             retained_threads: HashMap::default(),
             terminals: HashMap::default(),
             new_thread_menu_handle: PopoverMenuHandle::default(),
@@ -1710,13 +1712,12 @@ impl AgentPanel {
             self.serialize(cx);
         }
 
-        cx.background_spawn({
+        self.persist_selected_agent_task = cx.background_spawn({
             let kvp = KeyValueStore::global(cx);
             async move {
                 write_global_last_used_agent(kvp, agent).await;
             }
-        })
-        .detach();
+        });
     }
 
     /// Sets the panel's selected agent without opening the panel or focusing
@@ -4937,6 +4938,17 @@ impl AgentPanel {
                         }
                         if supports_logout {
                             menu = menu.action("Log Out", Box::new(LogoutAgent))
+                        }
+
+                        if let Some(conversation_view) = conversation_view.as_ref() {
+                            menu = menu.entry("Reload Agent", None, {
+                                let conversation_view = conversation_view.clone();
+                                move |window, cx| {
+                                    conversation_view.update(cx, |conversation_view, cx| {
+                                        conversation_view.retry_connection(window, cx);
+                                    });
+                                }
+                            });
                         }
 
                         menu
@@ -8651,7 +8663,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
+    #[gpui::test(iterations = 25)]
     async fn test_select_agent_action_updates_visible_draft(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());

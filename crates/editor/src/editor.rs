@@ -2077,7 +2077,12 @@ impl Editor {
                         }
                     }
 
-                    project::Event::EntryRenamed(transaction, project_path, abs_path) => {
+                    project::Event::EntryRenamed {
+                        transaction,
+                        new_project_path,
+                        new_abs_path,
+                        ..
+                    } => {
                         let Some(workspace) = editor.workspace() else {
                             return;
                         };
@@ -2096,8 +2101,8 @@ impl Editor {
                                         p.update(cx, |pane, _| {
                                             pane.nav_history_mut().rename_item(
                                                 entity_id,
-                                                project_path.clone(),
-                                                abs_path.clone().into(),
+                                                new_project_path.clone(),
+                                                new_abs_path.clone().into(),
                                             );
                                         })
                                     });
@@ -2168,6 +2173,12 @@ impl Editor {
                         editor.refresh_inline_values(cx);
                     }
                     _ => {}
+                },
+            ));
+            project_subscriptions.push(cx.observe(
+                &project.read(cx).bookmark_store(),
+                |_, _, cx| {
+                    cx.notify();
                 },
             ));
             let git_store = project.read(cx).git_store().clone();
@@ -8220,8 +8231,11 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        if self.read_only(cx) {
+            return Task::ready(Ok(()));
+        }
         let buffer = self.buffer.clone();
-        let (buffers, target) = match target {
+        let (mut buffers, target) = match target {
             FormatTarget::Buffers(buffers) => (buffers, LspFormatTarget::Buffers),
             FormatTarget::Ranges(selection_ranges) => {
                 let multi_buffer = buffer.read(cx);
@@ -8246,6 +8260,8 @@ impl Editor {
                 (buffers, LspFormatTarget::Ranges(buffer_id_to_ranges))
             }
         };
+
+        buffers.retain(|buffer| !buffer.read(cx).read_only());
 
         let transaction_id_prev = buffer.read(cx).last_transaction_id(cx);
         let selections_prev = transaction_id_prev
@@ -9813,6 +9829,10 @@ impl Editor {
             multi_buffer::Event::FileHandleChanged => {
                 cx.emit(EditorEvent::TitleChanged);
                 cx.emit(EditorEvent::FileHandleChanged);
+            }
+            multi_buffer::Event::CapabilityChanged => {
+                cx.emit(EditorEvent::CapabilityChanged);
+                cx.notify();
             }
             multi_buffer::Event::Reloaded | multi_buffer::Event::BufferDiffChanged => {
                 cx.emit(EditorEvent::TitleChanged)
@@ -11970,6 +11990,7 @@ pub enum EditorEvent {
     Blurred,
     DirtyChanged,
     Saved,
+    CapabilityChanged,
     TitleChanged,
     FileHandleChanged,
     SelectionsChanged {

@@ -8,6 +8,7 @@ mod github;
 mod github_device_flow;
 mod gitlab;
 mod sourcehut;
+mod tangled;
 
 pub use azure::*;
 pub use bitbucket::*;
@@ -19,3 +20,4 @@ pub use github::*;
 pub use github_device_flow::*;
 pub use gitlab::*;
 pub use sourcehut::*;
+pub use tangled::*;

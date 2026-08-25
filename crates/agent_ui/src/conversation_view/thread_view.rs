@@ -1650,11 +1650,9 @@ impl ThreadView {
                         .into()
                     }),
                 ),
-                ThreadError::RequestFailed => (
-                    "request_failed",
-                    None,
-                    "Request could not be completed after multiple attempts.".into(),
-                ),
+                ThreadError::ProviderRejection { message } => {
+                    ("provider_rejection", None, message.clone())
+                }
                 ThreadError::MaxOutputTokens => (
                     "max_output_tokens",
                     None,
@@ -10660,15 +10658,9 @@ impl ThreadView {
 
                 self.render_error_callout("Permission Denied", message, false, false, cx)
             }
-            ThreadError::RequestFailed => self.render_error_callout(
-                "Request Failed",
-                "The request could not be completed after multiple attempts. \
-                Try again in a moment."
-                    .into(),
-                true,
-                false,
-                cx,
-            ),
+            ThreadError::ProviderRejection { message } => {
+                self.render_error_callout("Request Failed", message.clone(), true, false, cx)
+            }
             ThreadError::MaxOutputTokens => self.render_error_callout(
                 "Output Limit Reached",
                 "The model stopped because it reached its maximum output length. \
