@@ -73,6 +73,23 @@ pub fn get_host_from_git_remote_url(remote_url: &str) -> Result<String> {
     .context("URL has no host")
 }
 
+/// Scheme, host, and port of `base_url`, which is what a REST API path has to be
+/// appended to. Rebuilding an API URL from `host_str()` alone silently drops a
+/// non-default port and forces HTTPS, so an enterprise or self-hosted instance
+/// reachable on `:8443`, or served over plain HTTP internally, ends up with an
+/// API base pointing at an address it is not listening on.
+///
+/// `None` when the URL has no host, leaving the caller to name the provider in
+/// the resulting error.
+pub(crate) fn api_origin(base_url: &Url) -> Option<String> {
+    let scheme = base_url.scheme();
+    let host = base_url.host_str()?;
+    Some(match base_url.port() {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::get_host_from_git_remote_url;

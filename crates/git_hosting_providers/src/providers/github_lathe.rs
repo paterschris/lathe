@@ -5,14 +5,11 @@ impl Github {
     /// github.com serves its API from the dedicated `api.github.com` host, while
     /// GitHub Enterprise Server serves it from `/api/v3` on the instance itself.
     pub(super) fn api_base(&self) -> Result<String> {
-        let host = self
-            .base_url
-            .host_str()
-            .context("GitHub base URL has no host")?;
-        Ok(if host == "github.com" {
+        let origin = crate::api_origin(&self.base_url).context("GitHub base URL has no host")?;
+        Ok(if self.base_url.host_str() == Some("github.com") {
             "https://api.github.com".to_string()
         } else {
-            format!("https://{host}/api/v3")
+            format!("{origin}/api/v3")
         })
     }
 
@@ -994,6 +991,83 @@ mod tests {
         assert_eq!(reviewers[0].login.to_string(), "octocat");
         assert!(!reviewers[0].is_me);
     }
+
+    #[test]
+    fn test_api_base_uses_the_dedicated_api_host_for_github_dot_com() {
+        let github = Github::public_instance();
+
+        assert_eq!(github.api_base().unwrap(), "https://api.github.com");
+    }
+
+    #[test]
+    fn test_api_base_uses_the_instance_itself_for_enterprise() {
+        let github = Github::new(
+            "GitHub Enterprise",
+            Url::parse("https://github.acme.com").unwrap(),
+        );
+
+        assert_eq!(github.api_base().unwrap(), "https://github.acme.com/api/v3");
+    }
+
+    #[test]
+    fn test_api_base_treats_the_api_subdomain_of_another_host_as_enterprise() {
+        let github = Github::new(
+            "Lookalike",
+            Url::parse("https://api.github.com.evil.test").unwrap(),
+        );
+
+        assert_eq!(
+            github.api_base().unwrap(),
+            "https://api.github.com.evil.test/api/v3"
+        );
+    }
+
+    #[test]
+    fn test_api_base_errors_when_the_base_url_has_no_host() {
+        let github = Github::new("Hostless", Url::parse("mailto:nobody@example.com").unwrap());
+
+        let message = github
+            .api_base()
+            .expect_err("a URL without a host has no API base")
+            .to_string();
+        assert_eq!(message, "GitHub base URL has no host");
+    }
+
+    // An Enterprise instance is only reachable at the scheme and port it is
+    // actually served on, so both have to survive into the API base.
+    #[test]
+    fn test_api_base_keeps_a_non_default_port() {
+        let github = Github::new(
+            "GitHub Enterprise",
+            Url::parse("https://github.acme.com:8443").unwrap(),
+        );
+
+        assert_eq!(
+            github.api_base().unwrap(),
+            "https://github.acme.com:8443/api/v3"
+        );
+    }
+
+    #[test]
+    fn test_api_base_keeps_a_plain_http_scheme() {
+        let github = Github::new(
+            "GitHub Enterprise",
+            Url::parse("http://github.internal").unwrap(),
+        );
+
+        assert_eq!(github.api_base().unwrap(), "http://github.internal/api/v3");
+    }
+
+    // github.com always serves its API from the dedicated host over HTTPS, so
+    // the public instance keeps that fixed base regardless of the URL it was
+    // built from.
+    #[test]
+    fn test_api_base_ignores_scheme_and_port_for_github_dot_com() {
+        let github = Github::new("GitHub", Url::parse("http://github.com:8080").unwrap());
+
+        assert_eq!(github.api_base().unwrap(), "https://api.github.com");
+    }
+
 }
 
 #[derive(Deserialize)]

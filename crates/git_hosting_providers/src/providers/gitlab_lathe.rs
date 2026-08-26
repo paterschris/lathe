@@ -9,8 +9,8 @@ use super::*;
 /// GitLab's REST API lives under `/api/v4` on the instance itself, for both
 /// gitlab.com and self-managed deployments, so one shape covers every host.
 pub(super) fn gitlab_api_base(base_url: &Url) -> Result<String> {
-    let host = base_url.host_str().context("GitLab base URL has no host")?;
-    Ok(format!("https://{host}/api/v4"))
+    let origin = crate::api_origin(base_url).context("GitLab base URL has no host")?;
+    Ok(format!("{origin}/api/v4"))
 }
 
 /// GitLab addresses a repository by a single URL-encoded `owner/repo` path.
@@ -574,4 +574,84 @@ pub(super) struct GitlabNotePosition {
 pub(super) struct GitlabProject {
     #[serde(default)]
     pub(super) default_branch: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn test_api_base_uses_api_v4_on_gitlab_dot_com() {
+        let gitlab = Gitlab::public_instance();
+
+        assert_eq!(gitlab.api_base().unwrap(), "https://gitlab.com/api/v4");
+    }
+
+    // Unlike GitHub, GitLab serves its API from the instance itself on every
+    // deployment, so self-managed hosts take the same shape as gitlab.com with
+    // no special case.
+    #[test]
+    fn test_api_base_uses_the_same_shape_for_a_self_managed_host() {
+        let gitlab = Gitlab::new(
+            "GitLab Self-Managed",
+            Url::parse("https://gitlab.acme.com").unwrap(),
+        );
+
+        assert_eq!(gitlab.api_base().unwrap(), "https://gitlab.acme.com/api/v4");
+    }
+
+    // A self-managed instance is only reachable at the scheme and port it is
+    // actually served on, so both have to survive into the API base.
+    #[test]
+    fn test_api_base_keeps_a_non_default_port() {
+        let gitlab = Gitlab::new(
+            "GitLab Self-Managed",
+            Url::parse("https://gitlab.acme.com:8443").unwrap(),
+        );
+
+        assert_eq!(
+            gitlab.api_base().unwrap(),
+            "https://gitlab.acme.com:8443/api/v4"
+        );
+    }
+
+    #[test]
+    fn test_api_base_keeps_a_plain_http_scheme() {
+        let gitlab = Gitlab::new(
+            "GitLab Self-Managed",
+            Url::parse("http://gitlab.internal").unwrap(),
+        );
+
+        assert_eq!(gitlab.api_base().unwrap(), "http://gitlab.internal/api/v4");
+    }
+
+    #[test]
+    fn test_api_base_errors_when_the_base_url_has_no_host() {
+        let message = gitlab_api_base(&Url::parse("mailto:nobody@example.com").unwrap())
+            .expect_err("a URL without a host has no API base")
+            .to_string();
+
+        assert_eq!(message, "GitLab base URL has no host");
+    }
+
+    #[test]
+    fn test_api_host_reports_the_configured_host() {
+        let gitlab = Gitlab::new(
+            "GitLab Self-Managed",
+            Url::parse("https://gitlab.acme.com").unwrap(),
+        );
+
+        assert_eq!(gitlab.api_host(), "gitlab.acme.com");
+    }
+
+    // `api_host` only labels errors and telemetry, so it degrades to the public
+    // host instead of failing the way `api_base` does.
+    #[test]
+    fn test_api_host_falls_back_to_the_public_host_when_the_url_has_no_host() {
+        let gitlab = Gitlab::new("Hostless", Url::parse("mailto:nobody@example.com").unwrap());
+
+        assert_eq!(gitlab.api_host(), "gitlab.com");
+    }
 }
