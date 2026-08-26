@@ -2,6 +2,36 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v0.236.33-beta — 2026-08-26
+
+Completes the write side of the pull request panel. Until now it could open, review, comment on and merge a pull request, but every path that did not end in a merge was missing: it listed closed pull requests while offering no way to close one, and showed reviewers with no way to request one.
+
+### Added
+
+- **Request reviewers** from the pull request view, through a searchable multi-select list of the accounts the host will accept. People are listed by name where the host reports one, with their handle underneath. Bitbucket and GitLab report real names; GitHub's collaborator listing does not, so it shows logins.
+- **Close, decline and reopen** pull requests, using each host's own wording. Bitbucket calls it declining.
+- **Convert to draft** and **Mark ready for review**, on hosts that model drafts.
+
+### Improved
+
+- Draft pull requests are now clearly marked. Draft previously rendered in the faintest grey available, in both the list and the detail header, and greyed out the row icon as well, which made a draft the least noticeable entry in a list of pull requests. It is now an amber badge in both places, shown alongside the state rather than replacing it, since a pull request is both open and draft.
+
+### Fixed
+
+- Creating a Bitbucket pull request as a draft ignored the draft option and always produced an ordinary pull request.
+
+### Notes for reviewers on Bitbucket
+
+Requesting a review reads the pull request first and merges into its existing reviewer list, because Bitbucket's update replaces that list wholesale. Adding someone will not displace reviewers already assigned.
+
+### Known issues
+
+- Draft transitions, reopening, and everything on GitHub and GitLab have not been exercised against a live host. Declining and requesting reviewers have been, on Bitbucket.
+- The New Pull Request dialog's branch fields are still free text rather than pickers.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v0.236.32-beta — 2026-08-26
 
 A fix release for the pull request panel shipped in v0.236.30-beta. Two of these were dead on arrival and only surfaced once the panel was used against a real repository.
