@@ -2872,11 +2872,8 @@ mod tests {
         );
         let files = parse_unified_diff(diff);
         let rebuilt = reconstruct_file_texts(&files[0]);
-        let (base, head, line_to_row) = (
-            rebuilt.base_text.clone(),
-            rebuilt.head_text.clone(),
-            rebuilt.line_to_row.clone(),
-        );
+        let (base, head, line_to_row) =
+            (rebuilt.base_text, rebuilt.head_text, rebuilt.line_to_row);
 
         assert_eq!(base.as_deref(), Some("keep\ndrop\ntail\n"));
         assert_eq!(head, "keep\nadd\ntail\n");
@@ -2901,7 +2898,7 @@ mod tests {
         );
         let files = parse_unified_diff(diff);
         let rebuilt = reconstruct_file_texts(&files[0]);
-        let (head, line_to_row) = (rebuilt.head_text.clone(), rebuilt.line_to_row.clone());
+        let (head, line_to_row) = (rebuilt.head_text, rebuilt.line_to_row);
 
         // Only the hunks' own lines exist in the buffer, so rows stay dense even
         // though the file lines they represent are far apart.
@@ -2962,7 +2959,7 @@ mod tests {
         );
         let files = parse_unified_diff(diff);
         let rebuilt = reconstruct_file_texts(&files[0]);
-        let (base, head) = (rebuilt.base_text.clone(), rebuilt.head_text.clone());
+        let (base, head) = (rebuilt.base_text, rebuilt.head_text);
         assert_eq!(base, None);
         assert_eq!(head, "one\ntwo\n");
     }
