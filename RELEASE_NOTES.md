@@ -2,6 +2,29 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v0.236.32-beta — 2026-08-26
+
+A fix release for the pull request panel shipped in v0.236.30-beta. Two of these were dead on arrival and only surfaced once the panel was used against a real repository.
+
+### Fixed
+
+- The panel's **New pull request** and **Reconnect** buttons did nothing when clicked. Both dispatched through the app rather than the window, which re-enters the active window's update from inside that same update; the failure was swallowed and left only a log line. Reconnect had been broken since the panel was rewritten and is reachable only with an expired credential, which is why it went unnoticed.
+- API base URLs for self-hosted hosts discarded the scheme and port of the configured base URL. A GitHub Enterprise instance on a non-default port, or a self-managed GitLab reachable only over plain HTTP internally, addressed an endpoint nothing was listening on. Both now preserve scheme, host and port.
+
+### Improved
+
+- Inline review comments show a calendar date instead of the host's raw ISO-8601 timestamp.
+- The pull request header reads `3 files, +25` rather than `3 file(s), +25 -0`.
+- A reviewer who commented without a verdict gets a distinct icon, instead of a dash that read as stray punctuation and was indistinguishable from a reviewer who had not looked yet.
+
+### Known issues
+
+- Creating a pull request from the panel has not been exercised against a live host.
+- The New Pull Request dialog's branch fields are free text rather than pickers.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v0.236.31-beta — 2026-08-25
 
 An upstream sync, bringing Lathe up to date with 78 commits from Zed. The pull request panel and Windows code signing shipped in v0.236.30-beta and are unchanged here.
