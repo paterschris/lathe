@@ -1564,8 +1564,10 @@ fn render_reviewer_chip(reviewer: &PullRequestReviewer) -> impl IntoElement {
     let (icon, color) = match reviewer.verdict {
         Some(PullRequestReviewVerdict::Approve) => (IconName::Check, Color::Success),
         Some(PullRequestReviewVerdict::RequestChanges) => (IconName::Close, Color::Error),
-        // Comment-only and not-yet-reviewed both read as "no verdict yet".
-        Some(PullRequestReviewVerdict::Comment) | None => (IconName::Dash, Color::Muted),
+        // Someone who commented has engaged, which a dash does not convey and
+        // cannot be told apart from a reviewer who has not looked yet.
+        Some(PullRequestReviewVerdict::Comment) => (IconName::Chat, Color::Info),
+        None => (IconName::Dash, Color::Muted),
     };
     h_flex()
         .gap_1()
@@ -1769,9 +1771,15 @@ fn render_comment_thread(
                             )
                         })
                         .child(
-                            Label::new(comment.created_at.clone())
-                                .color(Color::Muted)
-                                .size(LabelSize::Small),
+                            // Hosts return a full ISO-8601 timestamp; show the
+                            // calendar date, matching the PR header, rather than
+                            // a raw machine string in the middle of a thread.
+                            Label::new(
+                                iso_calendar_date(&comment.created_at)
+                                    .unwrap_or_else(|| comment.created_at.clone()),
+                            )
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
                         ),
                 )
                 .child(MarkdownElement::new(markdown.clone(), style.clone()))
@@ -2359,7 +2367,23 @@ impl PullRequestView {
                                 detail.deletions,
                             )
                         };
-                        Label::new(format!("{files} file(s), +{additions} -{deletions}"))
+                        let mut stats = format!(
+                            "{files} {}",
+                            if files == 1 { "file" } else { "files" }
+                        );
+                        // Omit a zero side entirely: "+25" says what "+25 -0"
+                        // says, without implying a deletion count was measured
+                        // and found empty.
+                        if additions > 0 {
+                            stats.push_str(&format!(", +{additions}"));
+                        }
+                        if deletions > 0 {
+                            stats.push_str(&format!(
+                                "{} -{deletions}",
+                                if additions > 0 { "" } else { "," }
+                            ));
+                        }
+                        Label::new(stats)
                             .color(Color::Muted)
                             .size(LabelSize::Small)
                     })

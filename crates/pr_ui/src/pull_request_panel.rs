@@ -937,8 +937,13 @@ impl PullRequestPanel {
                                     cx,
                                 )
                             })
-                            .on_click(cx.listener(|_, _, _window, cx| {
-                                cx.dispatch_action(&CreatePullRequest);
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                // Dispatch through the window rather than the
+                                // app: `App::dispatch_action` re-enters the
+                                // active window's update from inside that same
+                                // update, which fails and is then swallowed by
+                                // a log_err, so the click silently does nothing.
+                                window.dispatch_action(Box::new(CreatePullRequest), cx);
                             })),
                     )
                     .child(
@@ -1613,10 +1618,13 @@ impl Render for PullRequestPanel {
                 )
                 .child(
                     Button::new("pull-request-panel-reconnect", "Reconnect").on_click(
-                        cx.listener(move |_, _, _window, cx| {
-                            cx.dispatch_action(&zed_actions::ConnectGitHost {
-                                host: host_for_action.clone(),
-                            });
+                        cx.listener(move |_, _, window, cx| {
+                            window.dispatch_action(
+                                Box::new(zed_actions::ConnectGitHost {
+                                    host: host_for_action.clone(),
+                                }),
+                                cx,
+                            );
                         }),
                     ),
                 )
