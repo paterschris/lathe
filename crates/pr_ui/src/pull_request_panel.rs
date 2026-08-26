@@ -1074,8 +1074,8 @@ impl PullRequestPanel {
         let branch = summary.source_branch.clone();
         let is_draft = summary.is_draft;
         let state_color = match summary.state {
-            PullRequestState::Open if !is_draft => Color::Success,
-            PullRequestState::Open => Color::Muted,
+            PullRequestState::Open if is_draft => Color::Warning,
+            PullRequestState::Open => Color::Success,
             PullRequestState::Merged => Color::Accent,
             PullRequestState::Closed => Color::Error,
         };
@@ -1151,10 +1151,19 @@ impl PullRequestPanel {
                                     .truncate(),
                             )
                             .when(is_draft, |this| {
+                                let warning = Color::Warning.color(cx);
                                 this.child(
-                                    Label::new("draft")
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted),
+                                    h_flex()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(warning.opacity(0.5))
+                                        .bg(warning.opacity(0.12))
+                                        .child(
+                                            Label::new("Draft")
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Warning),
+                                        ),
                                 )
                             })
                             .when(self.reviewing, |this| {

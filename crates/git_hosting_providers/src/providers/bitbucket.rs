@@ -17,7 +17,8 @@ use util::ResultExt as _;
 
 use git::{
     BuildCommitPermalinkParams, BuildPermalinkParams, DiffCommentSide, GitHostAuth,
-    GitHostAuthKind, GitHostingProvider, NewPullRequest, PullRequestChecks, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
+    GitHostAuthKind, GitHostingProvider, NewPullRequest, PullRequestChecks,
+    ReviewerCandidate, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
     PullRequestListFilter, PullRequestMergeMethod, PullRequestReviewComment,
     PullRequestReviewVerdict, PullRequestReviewer, PullRequestState, PullRequestSummary, RemoteUrl,
 };
@@ -517,13 +518,12 @@ impl GitHostingProvider for Bitbucket {
         }
         let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
         let url = format!("{api_base}/pullrequests");
-        // Bitbucket Cloud has no draft concept, so `is_draft` is dropped rather
-        // than failing the call; the created PR is simply open.
         let body = serde_json::json!({
             "title": request.title.to_string(),
             "description": request.body.to_string(),
             "source": { "branch": { "name": request.source_branch.to_string() } },
             "destination": { "branch": { "name": request.target_branch.to_string() } },
+            "draft": request.is_draft,
         });
         let http_request = bitbucket_request(
             BitbucketMethod::Post,
@@ -770,6 +770,157 @@ impl GitHostingProvider for Bitbucket {
                 Ok(comment)
             })
             .collect()
+    }
+
+    fn supports_draft_pull_requests(&self) -> bool {
+        // Cloud reports a `draft` flag on the pull request resource; Server is
+        // excluded from every operation here anyway.
+        !self.is_self_hosted()
+    }
+
+    fn close_verb(&self) -> &'static str {
+        "Decline"
+    }
+
+    async fn set_pull_request_draft(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        draft: bool,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        if self.is_self_hosted() {
+            bail!("pull request operations are only supported on Bitbucket Cloud");
+        }
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let url = format!("{api_base}/pullrequests/{number}");
+        // The PUT replaces the fields it is given, and rejects a body without a
+        // title, so carry the current one through unchanged.
+        let request = bitbucket_request(BitbucketMethod::Get, &url, &auth, None)?;
+        let bytes =
+            bitbucket_send(&http_client, request, "fetching Bitbucket pull request").await?;
+        let existing: BitbucketPullRequest =
+            serde_json::from_slice(&bytes).context("parsing Bitbucket pull request")?;
+        let payload = serde_json::json!({ "title": existing.title, "draft": draft });
+        let request = bitbucket_request(
+            BitbucketMethod::Put,
+            &url,
+            &auth,
+            Some(serde_json::to_vec(&payload)?),
+        )?;
+        bitbucket_send(
+            &http_client,
+            request,
+            "updating Bitbucket pull request draft state",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn close_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        if self.is_self_hosted() {
+            bail!("pull request operations are only supported on Bitbucket Cloud");
+        }
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let url = format!("{api_base}/pullrequests/{number}/decline");
+        let request = bitbucket_request(BitbucketMethod::Post, &url, &auth, None)?;
+        bitbucket_send(&http_client, request, "declining Bitbucket pull request").await?;
+        Ok(())
+    }
+
+    async fn reopen_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        if self.is_self_hosted() {
+            bail!("pull request operations are only supported on Bitbucket Cloud");
+        }
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let url = format!("{api_base}/pullrequests/{number}/reopen");
+        let request = bitbucket_request(BitbucketMethod::Post, &url, &auth, None)?;
+        bitbucket_send(&http_client, request, "reopening Bitbucket pull request").await?;
+        Ok(())
+    }
+
+    async fn list_reviewer_candidates(
+        &self,
+        remote: &ParsedGitRemote,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<ReviewerCandidate>> {
+        if self.is_self_hosted() {
+            return Ok(Vec::new());
+        }
+        self.fetch_workspace_candidates(remote, &auth, &http_client)
+            .await
+    }
+
+    async fn request_reviewers(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        reviewers: Vec<SharedString>,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        if self.is_self_hosted() {
+            bail!("pull request operations are only supported on Bitbucket Cloud");
+        }
+        let uuids = self
+            .resolve_reviewer_uuids(remote, &reviewers, &auth, &http_client)
+            .await?;
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        let api_base = bitbucket_cloud_api_base(&self.base_url, remote)?;
+        let url = format!("{api_base}/pullrequests/{number}");
+
+        // Bitbucket's PUT replaces the reviewer list wholesale and requires the
+        // title alongside it, so read the current state first and merge into it.
+        // Requesting a review must never silently drop the reviewers already on
+        // the pull request, or rename it.
+        let request = bitbucket_request(BitbucketMethod::Get, &url, &auth, None)?;
+        let bytes =
+            bitbucket_send(&http_client, request, "fetching Bitbucket pull request").await?;
+        let existing: BitbucketPullRequest =
+            serde_json::from_slice(&bytes).context("parsing Bitbucket pull request")?;
+
+        let mut merged: Vec<String> = existing.reviewer_uuids();
+        for uuid in uuids {
+            if !merged.contains(&uuid) {
+                merged.push(uuid);
+            }
+        }
+        let payload = serde_json::json!({
+            "title": existing.title,
+            "reviewers": merged
+                .iter()
+                .map(|uuid| serde_json::json!({ "uuid": uuid }))
+                .collect::<Vec<_>>(),
+        });
+        let request = bitbucket_request(
+            BitbucketMethod::Put,
+            &url,
+            &auth,
+            Some(serde_json::to_vec(&payload)?),
+        )?;
+        bitbucket_send(
+            &http_client,
+            request,
+            "requesting reviewers on Bitbucket pull request",
+        )
+        .await?;
+        Ok(())
     }
 
     async fn merge_pull_request(

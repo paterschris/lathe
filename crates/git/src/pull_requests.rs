@@ -182,6 +182,37 @@ pub enum CheckState {
     Neutral,
 }
 
+/// An account the host will accept as a reviewer on this repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewerCandidate {
+    /// What [`crate::GitHostingProvider::request_reviewers`] expects back for
+    /// this account. Hosts disagree on what identifies a user: Bitbucket wants
+    /// an opaque uuid, GitHub a login, GitLab a username. Callers pass this
+    /// through untouched rather than trying to guess.
+    pub handle: SharedString,
+    /// The host's handle for the account, shown as secondary text.
+    pub login: SharedString,
+    /// Human-readable name, where the host reports one. GitHub's collaborator
+    /// listing does not, so it is `None` there.
+    pub display_name: Option<SharedString>,
+}
+
+impl ReviewerCandidate {
+    /// Name to lead with: the full name when known, else the handle.
+    pub fn primary_label(&self) -> SharedString {
+        self.display_name.clone().unwrap_or_else(|| self.login.clone())
+    }
+
+    /// Text a fuzzy match should run against, so typing either a name or a
+    /// handle finds the person.
+    pub fn match_text(&self) -> String {
+        match &self.display_name {
+            Some(name) => format!("{name} {}", self.login),
+            None => self.login.to_string(),
+        }
+    }
+}
+
 /// A reviewer on a pull request and their latest review state.
 #[derive(Debug, Clone)]
 pub struct PullRequestReviewer {

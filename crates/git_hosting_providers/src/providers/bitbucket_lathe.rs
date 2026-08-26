@@ -43,6 +43,117 @@ impl Bitbucket {
     /// labelling the connected account in menus. Separate from
     /// [`Self::fetch_authenticated_uuid`], which resolves the opaque uuid the
     /// PR-filtering endpoints match on.
+    /// Workspace members offered as reviewer choices. Bitbucket reports both a
+    /// display name and a nickname, so the picker can lead with the real name.
+    pub(super) async fn fetch_workspace_candidates(
+        &self,
+        remote: &ParsedGitRemote,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<Vec<ReviewerCandidate>> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("Bitbucket base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/2.0/workspaces/{workspace}/members?pagelen=100",
+            workspace = remote.owner,
+        );
+        let members: Vec<BitbucketMember> = bitbucket_get_paginated(
+            http_client,
+            url,
+            auth,
+            "listing Bitbucket workspace members",
+            500,
+        )
+        .await?;
+        let mut candidates: Vec<ReviewerCandidate> = members
+            .into_iter()
+            .filter_map(|member| {
+                let user = member.user?;
+                let login = user
+                    .nickname
+                    .clone()
+                    .or_else(|| user.display_name.clone())
+                    .unwrap_or_else(|| user.uuid.clone());
+                Some(ReviewerCandidate {
+                    // Bitbucket addresses accounts by uuid, so hand that back
+                    // rather than a name that would need re-resolving.
+                    handle: user.uuid.into(),
+                    login: login.into(),
+                    display_name: user.display_name.map(Into::into),
+                })
+            })
+            .collect();
+        candidates.sort_by_key(|candidate| candidate.primary_label().to_lowercase());
+        Ok(candidates)
+    }
+
+    /// Resolves reviewer logins to Bitbucket account uuids.
+    ///
+    /// Bitbucket addresses accounts by uuid, not by the nickname a user would
+    /// type, and its user lookup endpoint is restricted for privacy. Workspace
+    /// membership is the reliable path: list the members and match on nickname,
+    /// display name, or a uuid pasted verbatim.
+    pub(super) async fn resolve_reviewer_uuids(
+        &self,
+        remote: &ParsedGitRemote,
+        reviewers: &[SharedString],
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<Vec<String>> {
+        let host = self
+            .base_url
+            .host_str()
+            .context("Bitbucket base URL has no host")?;
+        let url = format!(
+            "https://api.{host}/2.0/workspaces/{workspace}/members?pagelen=100",
+            workspace = remote.owner,
+        );
+        let members: Vec<BitbucketMember> = bitbucket_get_paginated(
+            http_client,
+            url,
+            auth,
+            "listing Bitbucket workspace members",
+            500,
+        )
+        .await?;
+
+        let mut resolved = Vec::new();
+        for reviewer in reviewers {
+            let wanted = reviewer.trim();
+            if wanted.is_empty() {
+                continue;
+            }
+            // A uuid pasted directly needs no lookup, which also gives users an
+            // escape hatch when a display name is ambiguous.
+            if wanted.starts_with('{') && wanted.ends_with('}') {
+                resolved.push(wanted.to_string());
+                continue;
+            }
+            let matched = members.iter().find_map(|member| {
+                let user = member.user.as_ref()?;
+                let nickname_matches = user
+                    .nickname
+                    .as_deref()
+                    .is_some_and(|nickname| nickname.eq_ignore_ascii_case(wanted));
+                let display_matches = user
+                    .display_name
+                    .as_deref()
+                    .is_some_and(|display| display.eq_ignore_ascii_case(wanted));
+                (nickname_matches || display_matches).then(|| user.uuid.clone())
+            });
+            match matched {
+                Some(uuid) => resolved.push(uuid),
+                None => bail!(
+                    "no member of the {} workspace matches '{wanted}'",
+                    remote.owner
+                ),
+            }
+        }
+        Ok(resolved)
+    }
+
     /// CI results for a commit, from Bitbucket's build-status API. Pipelines and
     /// third-party CI both publish here, so one call covers both.
     pub(super) async fn fetch_checks(
@@ -161,6 +272,7 @@ impl Bitbucket {
 pub(super) enum BitbucketMethod {
     Get,
     Post,
+    Put,
     Delete,
 }
 
@@ -199,6 +311,7 @@ pub(super) fn bitbucket_request(
     let builder = match method {
         BitbucketMethod::Get => Request::get(url),
         BitbucketMethod::Post => Request::post(url),
+        BitbucketMethod::Put => Request::put(url),
         BitbucketMethod::Delete => Request::delete(url),
     };
     let mut builder = builder
@@ -394,7 +507,7 @@ struct BitbucketContent {
 #[derive(Deserialize)]
 pub(super) struct BitbucketPullRequest {
     pub(super) id: u32,
-    title: String,
+    pub(super) title: String,
     state: String,
     #[serde(default)]
     pub(super) author: Option<BitbucketAccount>,
@@ -484,6 +597,26 @@ impl BitbucketPullRequest {
                     .as_deref()
                     .is_some_and(|role| role.eq_ignore_ascii_case("REVIEWER"))
             })
+    }
+
+    /// Uuids of the accounts currently in the REVIEWER role, so a reviewer
+    /// update can extend the list rather than replace it.
+    pub(super) fn reviewer_uuids(&self) -> Vec<String> {
+        self.participants
+            .iter()
+            .filter(|participant| {
+                participant
+                    .role
+                    .as_deref()
+                    .is_some_and(|role| role.eq_ignore_ascii_case("REVIEWER"))
+            })
+            .filter_map(|participant| {
+                participant
+                    .user
+                    .as_ref()
+                    .and_then(|user| user.uuid.clone())
+            })
+            .collect()
     }
 
     /// All reviewers (participants with the REVIEWER role) and their verdicts, in
@@ -926,4 +1059,19 @@ pub(super) struct BitbucketRepository {
 pub(super) struct BitbucketBranchName {
     #[serde(default)]
     pub(super) name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct BitbucketMember {
+    #[serde(default)]
+    pub(super) user: Option<BitbucketMemberUser>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct BitbucketMemberUser {
+    pub(super) uuid: String,
+    #[serde(default)]
+    pub(super) nickname: Option<String>,
+    #[serde(default)]
+    pub(super) display_name: Option<String>,
 }

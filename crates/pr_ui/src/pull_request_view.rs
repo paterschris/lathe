@@ -267,6 +267,137 @@ impl PullRequestView {
         self._action_task = Some(task);
     }
 
+    /// Closes the pull request without merging. The host's own verb is used in
+    /// the toast, since Bitbucket calls this declining.
+    fn close_pull_request(&mut self, cx: &mut Context<Self>) {
+        let verb = self.provider.close_verb();
+        self.run_state_action(
+            format!("{verb}d pull request").into(),
+            "Close",
+            move |provider, remote, number, auth, http_client| {
+                Box::pin(async move {
+                    provider
+                        .close_pull_request(&remote, number, auth, http_client)
+                        .await
+                })
+            },
+            cx,
+        );
+    }
+
+    fn reopen_pull_request(&mut self, cx: &mut Context<Self>) {
+        self.run_state_action(
+            "Reopened pull request".into(),
+            "Reopen",
+            move |provider, remote, number, auth, http_client| {
+                Box::pin(async move {
+                    provider
+                        .reopen_pull_request(&remote, number, auth, http_client)
+                        .await
+                })
+            },
+            cx,
+        );
+    }
+
+    fn set_draft(&mut self, draft: bool, cx: &mut Context<Self>) {
+        let label: SharedString = if draft {
+            "Converted to draft".into()
+        } else {
+            "Marked ready for review".into()
+        };
+        self.run_state_action(
+            label,
+            "Draft update",
+            move |provider, remote, number, auth, http_client| {
+                Box::pin(async move {
+                    provider
+                        .set_pull_request_draft(&remote, number, draft, auth, http_client)
+                        .await
+                })
+            },
+            cx,
+        );
+    }
+
+    pub fn request_reviewers(&mut self, reviewers: Vec<SharedString>, cx: &mut Context<Self>) {
+        if reviewers.is_empty() {
+            return;
+        }
+        self.run_state_action(
+            "Requested review".into(),
+            "Request review",
+            move |provider, remote, number, auth, http_client| {
+                Box::pin(async move {
+                    provider
+                        .request_reviewers(&remote, number, reviewers, auth, http_client)
+                        .await
+                })
+            },
+            cx,
+        );
+    }
+
+    /// Shared plumbing for the actions that change a pull request's state:
+    /// resolve auth, call the host, toast the outcome, then reload so the header
+    /// reflects what actually happened rather than what was requested.
+    fn run_state_action<F>(
+        &mut self,
+        success: SharedString,
+        action_label: &'static str,
+        call: F,
+        cx: &mut Context<Self>,
+    ) where
+        F: FnOnce(
+                Arc<dyn GitHostingProvider + Send + Sync>,
+                ParsedGitRemote,
+                u32,
+                Option<GitHostAuth>,
+                Arc<dyn HttpClient>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+            + Send
+            + 'static,
+    {
+        if self.in_flight_action {
+            return;
+        }
+        let provider = self.provider.clone();
+        let host = provider.base_url().host_str().map(|host| host.to_string());
+        let remote = clone_remote(&self.remote);
+        let number = self.number;
+        let http_client = cx.http_client();
+        let workspace = self.workspace.clone();
+        self.in_flight_action = true;
+        cx.notify();
+        let task = cx.spawn(async move |this, cx| {
+            let auth = match host.as_deref() {
+                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            let result = call(provider, remote, number, auth, http_client).await;
+            this.update(cx, |this, cx| {
+                this.in_flight_action = false;
+                match result {
+                    Ok(()) => {
+                        surface_toast(&workspace, success.clone(), cx);
+                        this.refresh(cx);
+                    }
+                    Err(error) => surface_toast(
+                        &workspace,
+                        action_error_message(action_label, &error, cx),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self._action_task = Some(task);
+    }
+
     fn merge(&mut self, method: PullRequestMergeMethod, cx: &mut Context<Self>) {
         if self.in_flight_action {
             return;
@@ -2220,6 +2351,31 @@ impl Render for PullRequestView {
     }
 }
 
+/// A prominent "Draft" badge. Draft means do not merge this yet, so it is drawn
+/// as a bordered warning chip rather than a word in the same muted grey used for
+/// incidental metadata.
+fn render_draft_badge(cx: &App) -> impl IntoElement {
+    let warning = Color::Warning.color(cx);
+    h_flex()
+        .px_1p5()
+        .py_0p5()
+        .gap_1()
+        .rounded_md()
+        .border_1()
+        .border_color(warning.opacity(0.5))
+        .bg(warning.opacity(0.12))
+        .child(
+            Icon::new(IconName::Pencil)
+                .size(IconSize::XSmall)
+                .color(Color::Warning),
+        )
+        .child(
+            Label::new("Draft")
+                .size(LabelSize::Small)
+                .color(Color::Warning),
+        )
+}
+
 /// A one-glance CI summary for the PR header: an icon coloured by the worst
 /// state present, plus a count. `None` when the host reported no checks at all,
 /// which must not be drawn as a failure.
@@ -2272,14 +2428,15 @@ impl PullRequestView {
         description: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Draft is called out separately below rather than replacing the state
+        // word: a pull request is *both* open and draft, and collapsing the two
+        // hid the more important half behind the palette's faintest colour.
         let state_label = match detail.state {
-            PullRequestState::Open if detail.is_draft => "draft",
             PullRequestState::Open => "open",
             PullRequestState::Merged => "merged",
             PullRequestState::Closed => "closed",
         };
         let state_color = match detail.state {
-            PullRequestState::Open if detail.is_draft => Color::Muted,
             PullRequestState::Open => Color::Success,
             PullRequestState::Merged => Color::Accent,
             PullRequestState::Closed => Color::Error,
@@ -2297,6 +2454,9 @@ impl PullRequestView {
         // rights; the host still enforces permission and surfaces a rejection on
         // click for anyone who lacks them.
         let merge_enabled = actions_enabled && detail.is_mergeable != Some(false);
+        let is_open = matches!(detail.state, PullRequestState::Open);
+        let supports_drafts = self.provider.supports_draft_pull_requests();
+        let close_verb = self.provider.close_verb();
         let viewer_approved = detail.viewer_review == Some(PullRequestReviewVerdict::Approve);
         let viewer_requested_changes =
             detail.viewer_review == Some(PullRequestReviewVerdict::RequestChanges);
@@ -2319,6 +2479,7 @@ impl PullRequestView {
                     .when_some(mergeable_label, |this, (label, color)| {
                         this.child(Label::new(label).color(color).size(LabelSize::Small))
                     })
+                    .when(detail.is_draft, |this| this.child(render_draft_badge(cx)))
                     .children(render_checks_chip(detail)),
             )
             .child(
@@ -2580,11 +2741,80 @@ impl PullRequestView {
                                 this.merge(PullRequestMergeMethod::Squash, cx);
                             })),
                     )
+                    // Draft controls only where the host models drafts at all.
+                    .when(supports_drafts && is_open, |this| {
+                        if detail.is_draft {
+                            this.child(
+                                Button::new("pr-ready", "Ready for review")
+                                    .style(ButtonStyle::Tinted(TintColor::Warning))
+                                    .disabled(!actions_enabled)
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.set_draft(false, cx);
+                                    })),
+                            )
+                        } else {
+                            this.child(
+                                Button::new("pr-to-draft", "Convert to draft")
+                                    .disabled(!actions_enabled)
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.set_draft(true, cx);
+                                    })),
+                            )
+                        }
+                    })
+                    .child(
+                        Button::new("pr-add-reviewer", "Add reviewer")
+                            .disabled(!actions_enabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_add_reviewer(window, cx);
+                            })),
+                    )
+                    // Closing is destructive and irreversible on some hosts, so
+                    // it sits apart from the merge actions and is tinted as such.
+                    .when(is_open, |this| {
+                        this.child(
+                            Button::new("pr-close", close_verb)
+                                .style(ButtonStyle::Tinted(TintColor::Error))
+                                .disabled(!actions_enabled)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.close_pull_request(cx);
+                                })),
+                        )
+                    })
+                    .when(
+                        matches!(detail.state, PullRequestState::Closed) && !in_flight,
+                        |this| {
+                            this.child(
+                                Button::new("pr-reopen", "Reopen").on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        this.reopen_pull_request(cx);
+                                    },
+                                )),
+                            )
+                        },
+                    )
                     .when(in_flight, |this| {
                         this.child(Label::new("…").color(Color::Muted).size(LabelSize::Small))
                     }),
             )
             .into_any_element()
+    }
+
+    /// Opens the reviewer picker, which lists the people the host will accept
+    /// rather than making the user recall an exact handle.
+    fn start_add_reviewer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let provider = self.provider.clone();
+        let remote = clone_remote(&self.remote);
+        let view = cx.entity().downgrade();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, |window, cx| {
+                    crate::reviewer_picker::ReviewerPicker::new(
+                        provider, remote, view, window, cx,
+                    )
+                });
+            })
+            .ok();
     }
 
     fn render_body(&self, window: &Window, cx: &App) -> AnyElement {

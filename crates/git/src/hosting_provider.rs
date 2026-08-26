@@ -266,6 +266,83 @@ pub trait GitHostingProvider {
         anyhow::bail!("fetching file content is not supported by this hosting provider")
     }
 
+    /// Whether this host models draft pull requests at all.
+    ///
+    /// Bitbucket Cloud does not, so the UI hides the promote-to-ready control
+    /// rather than offering an action that can only ever fail.
+    fn supports_draft_pull_requests(&self) -> bool {
+        false
+    }
+
+    /// The host's own word for closing a pull request without merging.
+    /// Bitbucket calls it declining, and matching the host's vocabulary matters
+    /// when the button is destructive.
+    fn close_verb(&self) -> &'static str {
+        "Close"
+    }
+
+    /// Close a pull request without merging it.
+    async fn close_pull_request(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        anyhow::bail!("closing pull requests is not supported by this hosting provider")
+    }
+
+    /// Reopen a previously closed pull request.
+    async fn reopen_pull_request(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        anyhow::bail!("reopening pull requests is not supported by this hosting provider")
+    }
+
+    /// Accounts the host will accept as reviewers on this repository, for
+    /// offering a choice rather than making the user recall a handle. Hosts
+    /// that cannot enumerate them return an empty list, and the UI falls back
+    /// to free text.
+    async fn list_reviewer_candidates(
+        &self,
+        _remote: &ParsedGitRemote,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<ReviewerCandidate>> {
+        Ok(Vec::new())
+    }
+
+    /// Request review from the named accounts, in addition to any already
+    /// requested. `reviewers` are the logins a user would type; providers that
+    /// address accounts by an opaque id resolve them internally.
+    async fn request_reviewers(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _reviewers: Vec<SharedString>,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        anyhow::bail!("requesting reviewers is not supported by this hosting provider")
+    }
+
+    /// Move a pull request between draft and ready-for-review. Only meaningful
+    /// where [`Self::supports_draft_pull_requests`] is true.
+    async fn set_pull_request_draft(
+        &self,
+        _remote: &ParsedGitRemote,
+        _number: u32,
+        _draft: bool,
+        _auth: Option<GitHostAuth>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        anyhow::bail!("draft pull requests are not supported by this hosting provider")
+    }
+
     /// Combine the pull request into its target branch using the host's API.
     async fn merge_pull_request(
         &self,

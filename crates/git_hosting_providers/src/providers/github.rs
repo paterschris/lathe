@@ -14,7 +14,8 @@ use util::ResultExt as _;
 
 use git::{
     BuildCommitPermalinkParams, BuildPermalinkParams, DiffCommentSide, GitHostAuth,
-    GitHostAuthKind, GitHostingProvider, NewPullRequest, PullRequestChecks, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
+    GitHostAuthKind, GitHostingProvider, NewPullRequest, PullRequestChecks,
+    ReviewerCandidate, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
     PullRequestListFilter, PullRequestMergeMethod, PullRequestReviewComment,
     PullRequestReviewVerdict, PullRequestReviewer, PullRequestState, PullRequestSummary, RemoteUrl,
 };
@@ -713,6 +714,134 @@ impl GitHostingProvider for Github {
         raw.into_iter()
             .map(GithubReviewComment::into_comment)
             .collect()
+    }
+
+    fn supports_draft_pull_requests(&self) -> bool {
+        true
+    }
+
+    async fn close_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        self.set_pull_request_state(remote, number, "closed", &auth, &http_client)
+            .await
+    }
+
+    async fn reopen_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        self.set_pull_request_state(remote, number, "open", &auth, &http_client)
+            .await
+    }
+
+    async fn list_reviewer_candidates(
+        &self,
+        remote: &ParsedGitRemote,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<ReviewerCandidate>> {
+        let api = self.api_base()?;
+        let url = format!(
+            "{api}/repos/{owner}/{repo}/collaborators?per_page=100",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            None,
+        )?;
+        let bytes = github_send(&http_client, request, "listing GitHub collaborators").await?;
+        let collaborators: Vec<GithubUserRef> =
+            serde_json::from_slice(&bytes).context("parsing GitHub collaborators")?;
+        let mut candidates: Vec<ReviewerCandidate> = collaborators
+            .into_iter()
+            .map(|user| ReviewerCandidate {
+                // GitHub's reviewer-request endpoint takes logins directly.
+                handle: user.login.clone().into(),
+                login: user.login.into(),
+                // The collaborators listing does not include real names, and
+                // fetching one per account would mean a request per member just
+                // to open a picker.
+                display_name: None,
+            })
+            .collect();
+        candidates.sort_by_key(|candidate| candidate.login.to_lowercase());
+        Ok(candidates)
+    }
+
+    async fn request_reviewers(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        reviewers: Vec<SharedString>,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let logins: Vec<String> = reviewers
+            .iter()
+            .map(|reviewer| reviewer.trim().to_string())
+            .filter(|reviewer| !reviewer.is_empty())
+            .collect();
+        if logins.is_empty() {
+            return Ok(());
+        }
+        let api = self.api_base()?;
+        let url = format!(
+            "{api}/repos/{owner}/{repo}/pulls/{number}/requested_reviewers",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        // GitHub adds to the existing request list rather than replacing it, so
+        // no read-modify-write is needed here.
+        let body = serde_json::json!({ "reviewers": logins });
+        let request = github_request(
+            GithubMethod::Post,
+            &url,
+            "application/vnd.github+json",
+            &auth,
+            Some(serde_json::to_vec(&body)?),
+        )?;
+        github_send(&http_client, request, "requesting GitHub reviewers").await?;
+        Ok(())
+    }
+
+    async fn set_pull_request_draft(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        draft: bool,
+        auth: Option<GitHostAuth>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        // GitHub's REST API cannot move a pull request between draft and ready;
+        // only these GraphQL mutations can.
+        let node_id = self
+            .fetch_pull_request_node_id(remote, number, &auth, &http_client)
+            .await?;
+        let (query, context) = if draft {
+            (
+                "mutation($id:ID!){convertPullRequestToDraft(input:{pullRequestId:$id}){clientMutationId}}",
+                "converting GitHub pull request to draft",
+            )
+        } else {
+            (
+                "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){clientMutationId}}",
+                "marking GitHub pull request ready for review",
+            )
+        };
+        self.run_graphql_mutation(query, &node_id, &auth, &http_client, context)
+            .await
     }
 
     async fn merge_pull_request(

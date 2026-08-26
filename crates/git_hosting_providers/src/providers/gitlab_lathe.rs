@@ -243,6 +243,69 @@ impl Gitlab {
         Ok(reviewers)
     }
 
+    /// Sets a merge request's `state_event`, which is how GitLab models both
+    /// closing and reopening.
+    pub(super) async fn set_merge_request_state_event(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        state_event: &str,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let api = self.api_base()?;
+        let project = gitlab_project_id(remote);
+        let url = format!("{api}/projects/{project}/merge_requests/{number}");
+        let payload = serde_json::json!({ "state_event": state_event });
+        let request = gitlab_request(
+            GitlabMethod::Put,
+            &url,
+            auth,
+            Some(serde_json::to_vec(&payload)?),
+        )?;
+        gitlab_send(
+            http_client,
+            request,
+            &self.api_host(),
+            "updating GitLab merge request state",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Resolves reviewer usernames to GitLab account ids.
+    pub(super) async fn resolve_reviewer_ids(
+        &self,
+        reviewers: &[SharedString],
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<Vec<u64>> {
+        let api = self.api_base()?;
+        let mut ids = Vec::new();
+        for reviewer in reviewers {
+            let wanted = reviewer.trim();
+            if wanted.is_empty() {
+                continue;
+            }
+            let url = format!("{api}/users?username={}", encode(wanted));
+            let request = gitlab_request(GitlabMethod::Get, &url, auth, None)?;
+            let bytes = gitlab_send(
+                http_client,
+                request,
+                &self.api_host(),
+                "looking up GitLab user",
+            )
+            .await?;
+            let users: Vec<GitlabUser> =
+                serde_json::from_slice(&bytes).context("parsing GitLab user lookup")?;
+            match users.into_iter().find_map(|user| user.id) {
+                Some(id) => ids.push(id),
+                None => bail!("no GitLab user named '{wanted}'"),
+            }
+        }
+        Ok(ids)
+    }
+
     /// The id of the discussion containing `note_id`. GitLab replies target a
     /// discussion rather than a note, and the review-comment type only carries
     /// note ids, so the mapping is resolved on demand.
@@ -318,6 +381,10 @@ impl Gitlab {
 #[derive(Debug, Deserialize)]
 pub(super) struct GitlabUser {
     pub(super) username: String,
+    /// Numeric account id. GitLab's write endpoints address reviewers by id,
+    /// never by username.
+    #[serde(default)]
+    pub(super) id: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -385,7 +452,24 @@ pub(super) struct GitlabDiffRefs {
     pub(super) start_sha: Option<String>,
 }
 
+/// Strips GitLab's `Draft:` / `WIP:` title prefix, which is how it encodes
+/// draft state, so a title can be round-tripped without stacking prefixes.
+pub(super) fn strip_draft_prefix(title: &str) -> &str {
+    let trimmed = title.trim_start();
+    for prefix in ["Draft:", "draft:", "WIP:", "wip:"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest.trim_start();
+        }
+    }
+    trimmed
+}
+
 impl GitlabMergeRequest {
+    /// Ids of the accounts currently assigned as reviewers.
+    pub(super) fn reviewer_ids(&self) -> Vec<u64> {
+        self.reviewers.iter().filter_map(|user| user.id).collect()
+    }
+
     pub(super) fn pull_request_state(&self) -> PullRequestState {
         match self.state.as_str() {
             "merged" => PullRequestState::Merged,
@@ -654,4 +738,40 @@ mod tests {
 
         assert_eq!(gitlab.api_host(), "gitlab.com");
     }
+}
+
+#[cfg(test)]
+mod draft_prefix_tests {
+    use super::strip_draft_prefix;
+
+    #[test]
+    fn strips_every_prefix_gitlab_recognises() {
+        assert_eq!(strip_draft_prefix("Draft: Add metrics"), "Add metrics");
+        assert_eq!(strip_draft_prefix("draft: Add metrics"), "Add metrics");
+        assert_eq!(strip_draft_prefix("WIP: Add metrics"), "Add metrics");
+        assert_eq!(strip_draft_prefix("wip: Add metrics"), "Add metrics");
+    }
+
+    #[test]
+    fn leaves_an_ordinary_title_alone() {
+        assert_eq!(strip_draft_prefix("Add metrics"), "Add metrics");
+        // A title merely mentioning drafts is not itself a draft marker.
+        assert_eq!(
+            strip_draft_prefix("Rework the draft: handling"),
+            "Rework the draft: handling"
+        );
+    }
+
+    #[test]
+    fn stripping_is_idempotent_so_prefixes_cannot_stack() {
+        let once = strip_draft_prefix("Draft: Add metrics");
+        assert_eq!(strip_draft_prefix(once), once);
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct GitlabMember {
+    pub(super) username: String,
+    #[serde(default)]
+    pub(super) name: Option<String>,
 }

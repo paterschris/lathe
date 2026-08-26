@@ -39,6 +39,107 @@ impl Github {
     /// PR, so the detail view can reflect what they've already done. Returns
     /// `Ok(None)` when they have no approving or blocking review; the caller logs
     /// and ignores any error, leaving the buttons in their default state.
+    /// Sets a pull request's `state`, which is how GitHub models both closing
+    /// and reopening.
+    pub(super) async fn set_pull_request_state(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        state: &str,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<()> {
+        let api = self.api_base()?;
+        let url = format!(
+            "{api}/repos/{owner}/{repo}/pulls/{number}",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let body = serde_json::json!({ "state": state });
+        let request = github_request(
+            GithubMethod::Patch,
+            &url,
+            "application/vnd.github+json",
+            auth,
+            Some(serde_json::to_vec(&body)?),
+        )?;
+        github_send(http_client, request, "updating GitHub pull request state").await?;
+        Ok(())
+    }
+
+    /// GraphQL endpoint for this deployment. github.com serves it from
+    /// `api.github.com/graphql`; Enterprise Server serves it from `/api/graphql`
+    /// on the instance, which is a different path from the `/api/v3` REST base.
+    pub(super) fn graphql_url(&self) -> Result<String> {
+        let origin = crate::api_origin(&self.base_url).context("GitHub base URL has no host")?;
+        Ok(if self.base_url.host_str() == Some("github.com") {
+            "https://api.github.com/graphql".to_string()
+        } else {
+            format!("{origin}/api/graphql")
+        })
+    }
+
+    /// The pull request's GraphQL node id, which mutations address it by.
+    pub(super) async fn fetch_pull_request_node_id(
+        &self,
+        remote: &ParsedGitRemote,
+        number: u32,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<String> {
+        let api = self.api_base()?;
+        let url = format!(
+            "{api}/repos/{owner}/{repo}/pulls/{number}",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github+json",
+            auth,
+            None,
+        )?;
+        let bytes = github_send(http_client, request, "fetching GitHub pull request").await?;
+        let pull_request: GithubNodeId =
+            serde_json::from_slice(&bytes).context("parsing GitHub pull request node id")?;
+        pull_request
+            .node_id
+            .context("GitHub pull request did not report a node id")
+    }
+
+    /// Runs a GraphQL mutation. Draft transitions have no REST equivalent, so
+    /// this is the only path for them.
+    pub(super) async fn run_graphql_mutation(
+        &self,
+        query: &str,
+        node_id: &str,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+        context: &str,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "id": node_id },
+        });
+        let request = github_request(
+            GithubMethod::Post,
+            &self.graphql_url()?,
+            "application/json",
+            auth,
+            Some(serde_json::to_vec(&body)?),
+        )?;
+        let bytes = github_send(http_client, request, context).await?;
+        // GraphQL answers 200 even when the mutation fails, so the errors array
+        // is the only signal that anything went wrong.
+        let response: GithubGraphqlResponse =
+            serde_json::from_slice(&bytes).context("parsing GitHub GraphQL response")?;
+        if let Some(error) = response.errors.first() {
+            bail!("{context} failed: {}", error.message);
+        }
+        Ok(())
+    }
+
     /// CI results for a commit, combining the two systems GitHub exposes:
     /// modern check runs (GitHub Actions and most apps) and the legacy commit
     /// status API that older integrations still write to. A repository can use
@@ -296,6 +397,7 @@ pub(super) enum GithubMethod {
     Get,
     Post,
     Put,
+    Patch,
 }
 
 /// Builds the `Authorization` header value for a GitHub API request. Falls back
@@ -325,6 +427,7 @@ pub(super) fn github_request(
         GithubMethod::Get => Request::get(url),
         GithubMethod::Post => Request::post(url),
         GithubMethod::Put => Request::put(url),
+        GithubMethod::Patch => Request::patch(url),
     };
     let mut builder = builder
         .header("Accept", accept)
@@ -1100,4 +1203,22 @@ struct GithubCommitStatus {
 pub(super) struct GithubRepository {
     #[serde(default)]
     pub(super) default_branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct GithubNodeId {
+    #[serde(default)]
+    pub(super) node_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct GithubGraphqlResponse {
+    #[serde(default)]
+    pub(super) errors: Vec<GithubGraphqlError>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct GithubGraphqlError {
+    #[serde(default)]
+    pub(super) message: String,
 }
