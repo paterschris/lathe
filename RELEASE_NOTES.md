@@ -2,6 +2,32 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v0.236.34-beta — 2026-08-27
+
+Fixes a data-loss class of bug that only shows up when two Lathe channels run at the same time, and finishes the pull request panel's separation between reviewing someone's work and acting on your own.
+
+### Fixed
+
+- **Running two channels side by side no longer breaks the running one.** Every channel shared one Node.js installation and npm cache under `node/`, and every launch reset it. Starting Beta therefore deleted the packages that an already-running Stable was executing from, and vice versa. Language servers and agent servers spawned before the wipe kept running against paths that no longer existed. Codex showed this as a total loss of tools: it could still talk, but every tool call failed to spawn its `codex-code-mode-host` sidecar, and it reported the workspace as unavailable. Each channel now gets its own `node/<channel>` directory.
+- Creating a Bitbucket pull request as a draft ignored the draft option and produced an ordinary pull request.
+
+### Improved
+
+- **Author-only actions move out of the button row on pull requests you did not open.** Merge, Squash & merge, the draft toggle, and Decline / Close are collected under a **More** menu, so a destructive action is no longer one stray click away from **Approve**. They remain fully available, and the host still decides whether you are permitted to use them. Lathe resolves authorship from the account you connected; when the token cannot report an identity, the buttons stay in the row rather than being demoted for someone who may well be the author.
+
+### Upgrade note
+
+- The first launch after updating re-downloads the npm packages for your language servers and agent servers, because they now live under a per-channel directory. The old `node/` directory is left in place on purpose rather than cleaned up, since removing it would be the same cross-channel wipe one last time against a build that has not updated yet. Once every channel on the machine is on 0.236.34 or later, it is safe to delete by hand: `~/Library/Application Support/Zed/node/cache` and `~/Library/Application Support/Zed/node/node-v*` on macOS.
+
+### Known issues
+
+- The channel fix is verified by build and static analysis only. It has not been exercised by running two updated channels concurrently.
+- The pull request overflow menu has not been exercised against a live host, and neither had the reviewer, draft and close work shipped in v0.236.33-beta. Declining and requesting reviewers on Bitbucket remain the only live-tested write paths.
+- The New Pull Request dialog's branch fields are still free text rather than pickers.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v0.236.33-beta — 2026-08-26
 
 Completes the write side of the pull request panel. Until now it could open, review, comment on and merge a pull request, but every path that did not end in a merge was missing: it listed closed pull requests while offering no way to close one, and showed reviewers with no way to request one.
