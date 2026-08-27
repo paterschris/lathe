@@ -633,7 +633,7 @@ impl ManagedNodeRuntime {
 
         let version = Self::VERSION;
         let folder_name = format!("node-{version}-{os}-{arch}");
-        let node_containing_dir = paths::data_dir().join("node");
+        let node_containing_dir = paths::node_dir().clone();
         let node_dir = node_containing_dir.join(folder_name);
         let node_binary = node_dir.join(Self::NODE_PATH);
         let npm_file = node_dir.join(Self::NPM_PATH);
@@ -678,7 +678,7 @@ impl ManagedNodeRuntime {
 
         if !valid {
             _ = fs::remove_dir_all(&node_containing_dir).await;
-            fs::create_dir(&node_containing_dir)
+            fs::create_dir_all(&node_containing_dir)
                 .await
                 .context("error creating node containing dir")?;
 
@@ -881,8 +881,8 @@ impl SystemNodeRuntime {
             )
         }
 
-        let scratch_dir = paths::data_dir().join("node");
-        fs::create_dir(&scratch_dir).await.ok();
+        let scratch_dir = paths::node_dir().clone();
+        fs::create_dir_all(&scratch_dir).await.ok();
         _ = fs::remove_dir_all(scratch_dir.join("cache")).await;
         fs::create_dir(scratch_dir.join("cache")).await.ok();
 

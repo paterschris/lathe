@@ -296,6 +296,12 @@ fn main() {
         }
     }
 
+    // Concurrently running builds of different channels must not share one
+    // Node.js install and npm cache: each launch resets them, which would delete
+    // packages the other build's running language servers and agent servers are
+    // executing from.
+    paths::set_node_dir_namespace(release_channel::RELEASE_CHANNEL.dev_name());
+
     let file_errors = init_paths();
     if !file_errors.is_empty() {
         files_not_created_on_launch(file_errors);

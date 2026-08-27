@@ -118,6 +118,64 @@ pub fn set_custom_data_dir(dir: &str) -> &'static PathBuf {
     })
 }
 
+/// The release-channel namespace applied to [`node_dir`], set only by
+/// [`set_node_dir_namespace`].
+static NODE_DIR_NAMESPACE: OnceLock<String> = OnceLock::new();
+
+/// The resolved Node.js scratch directory, cached after the first call.
+static NODE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The namespace [`node_dir`] falls back to when [`set_node_dir_namespace`] was
+/// never called, such as in tests and standalone CLI tools.
+const DEFAULT_NODE_DIR_NAMESPACE: &str = "stable";
+
+/// Namespaces [`node_dir`] for the running build so that builds from different
+/// release channels never share one Node.js installation and npm cache.
+///
+/// Both are reset from scratch every time a build starts, so sharing them lets
+/// the launch of one channel delete packages that another channel's already
+/// running language servers and agent servers are executing from.
+///
+/// Only the first call takes effect. Characters that are not safe in a single
+/// path component are replaced.
+///
+/// # Panics
+///
+/// Panics if called after [`node_dir`] has been initialized.
+pub fn set_node_dir_namespace(namespace: &str) {
+    if NODE_DIR.get().is_some() {
+        panic!("set_node_dir_namespace called after node_dir was initialized");
+    }
+    NODE_DIR_NAMESPACE.get_or_init(|| {
+        let sanitized: String = namespace
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        if sanitized.is_empty() {
+            DEFAULT_NODE_DIR_NAMESPACE.to_string()
+        } else {
+            sanitized
+        }
+    });
+}
+
+/// Returns the directory holding the Node.js installation and npm cache used by
+/// the running build, namespaced by [`set_node_dir_namespace`].
+pub fn node_dir() -> &'static PathBuf {
+    NODE_DIR.get_or_init(|| {
+        let namespace = NODE_DIR_NAMESPACE
+            .get()
+            .map_or(DEFAULT_NODE_DIR_NAMESPACE, String::as_str);
+        data_dir().join("node").join(namespace)
+    })
+}
+
 /// Returns the path to the configuration directory used by Zed.
 pub fn config_dir() -> &'static PathBuf {
     CONFIG_DIR.get_or_init(|| {
