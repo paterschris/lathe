@@ -27,7 +27,8 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use ui::{
-    Button, ButtonCommon, ButtonStyle, Clickable, Disclosure, Divider, TintColor, prelude::*,
+    Button, ButtonCommon, ButtonStyle, Clickable, ContextMenu, ContextMenuEntry, Disclosure,
+    Divider, PopoverMenu, TintColor, prelude::*,
 };
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
@@ -2457,6 +2458,10 @@ impl PullRequestView {
         let is_open = matches!(detail.state, PullRequestState::Open);
         let supports_drafts = self.provider.supports_draft_pull_requests();
         let close_verb = self.provider.close_verb();
+        // Only demote the author-only actions when the host positively says this
+        // is someone else's pull request. An unresolved viewer (unauthenticated,
+        // or a host that never reported it) keeps the buttons where they were.
+        let viewer_owns = detail.viewer_is_author != Some(false);
         let viewer_approved = detail.viewer_review == Some(PullRequestReviewVerdict::Approve);
         let viewer_requested_changes =
             detail.viewer_review == Some(PullRequestReviewVerdict::RequestChanges);
@@ -2726,60 +2731,82 @@ impl PullRequestView {
                         )),
                     )
                     .child(
-                        Button::new("pr-merge", "Merge")
-                            .style(ButtonStyle::Tinted(TintColor::Accent))
-                            .disabled(!merge_enabled)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.merge(PullRequestMergeMethod::Merge, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("pr-squash", "Squash & merge")
-                            .style(ButtonStyle::Tinted(TintColor::Accent))
-                            .disabled(!merge_enabled)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.merge(PullRequestMergeMethod::Squash, cx);
-                            })),
-                    )
-                    // Draft controls only where the host models drafts at all.
-                    .when(supports_drafts && is_open, |this| {
-                        if detail.is_draft {
-                            this.child(
-                                Button::new("pr-ready", "Ready for review")
-                                    .style(ButtonStyle::Tinted(TintColor::Warning))
-                                    .disabled(!actions_enabled)
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.set_draft(false, cx);
-                                    })),
-                            )
-                        } else {
-                            this.child(
-                                Button::new("pr-to-draft", "Convert to draft")
-                                    .disabled(!actions_enabled)
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.set_draft(true, cx);
-                                    })),
-                            )
-                        }
-                    })
-                    .child(
                         Button::new("pr-add-reviewer", "Add reviewer")
                             .disabled(!actions_enabled)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.start_add_reviewer(window, cx);
                             })),
                     )
-                    // Closing is destructive and irreversible on some hosts, so
-                    // it sits apart from the merge actions and is tinted as such.
-                    .when(is_open, |this| {
-                        this.child(
-                            Button::new("pr-close", close_verb)
-                                .style(ButtonStyle::Tinted(TintColor::Error))
-                                .disabled(!actions_enabled)
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.close_pull_request(cx);
-                                })),
-                        )
+                    // Merging, closing and flipping draft state belong to whoever
+                    // opened the pull request. A reviewer can still reach them,
+                    // but from behind a menu, so that landing or declining
+                    // someone else's work takes a deliberate second click rather
+                    // than one stray one next to Approve.
+                    .map(|this| {
+                        if viewer_owns {
+                            this.child(
+                                Button::new("pr-merge", "Merge")
+                                    .style(ButtonStyle::Tinted(TintColor::Accent))
+                                    .disabled(!merge_enabled)
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.merge(PullRequestMergeMethod::Merge, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("pr-squash", "Squash & merge")
+                                    .style(ButtonStyle::Tinted(TintColor::Accent))
+                                    .disabled(!merge_enabled)
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.merge(PullRequestMergeMethod::Squash, cx);
+                                    })),
+                            )
+                            // Draft controls only where the host models drafts at all.
+                            .when(supports_drafts && is_open, |this| {
+                                if detail.is_draft {
+                                    this.child(
+                                        Button::new("pr-ready", "Ready for review")
+                                            .style(ButtonStyle::Tinted(TintColor::Warning))
+                                            .disabled(!actions_enabled)
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.set_draft(false, cx);
+                                            })),
+                                    )
+                                } else {
+                                    this.child(
+                                        Button::new("pr-to-draft", "Convert to draft")
+                                            .disabled(!actions_enabled)
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.set_draft(true, cx);
+                                            })),
+                                    )
+                                }
+                            })
+                            // Closing is destructive and irreversible on some hosts,
+                            // so it sits apart from the merge actions and is tinted
+                            // as such.
+                            .when(is_open, |this| {
+                                this.child(
+                                    Button::new("pr-close", close_verb)
+                                        .style(ButtonStyle::Tinted(TintColor::Error))
+                                        .disabled(!actions_enabled)
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.close_pull_request(cx);
+                                        })),
+                                )
+                            })
+                        } else {
+                            // Nothing in the menu applies once the PR has landed
+                            // or been closed, so it is dropped rather than shown
+                            // with every entry dead.
+                            this.when(is_open, |this| {
+                                this.child(self.render_author_actions_menu(
+                                    detail,
+                                    merge_enabled,
+                                    actions_enabled,
+                                    cx,
+                                ))
+                            })
+                        }
                     })
                     .when(
                         matches!(detail.state, PullRequestState::Closed) && !in_flight,
@@ -2798,6 +2825,100 @@ impl PullRequestView {
                     }),
             )
             .into_any_element()
+    }
+
+    /// The merge / draft / close actions, collapsed into a single menu for a
+    /// viewer who did not open the pull request. Entries that are unavailable
+    /// are shown disabled rather than omitted, so the menu's shape does not
+    /// change depending on mergeability.
+    fn render_author_actions_menu(
+        &self,
+        detail: &PullRequestDetail,
+        merge_enabled: bool,
+        actions_enabled: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let supports_drafts = self.provider.supports_draft_pull_requests();
+        let close_verb = self.provider.close_verb();
+        let is_open = matches!(detail.state, PullRequestState::Open);
+        let is_draft = detail.is_draft;
+
+        PopoverMenu::new("pr-author-actions")
+            .trigger(
+                Button::new("pr-author-actions-trigger", "More")
+                    .end_icon(
+                        Icon::new(IconName::ChevronDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .tooltip(ui::Tooltip::text("Merge, draft and close actions")),
+            )
+            .menu(move |window, cx| {
+                let view = view.clone();
+                Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                    let mut menu = menu
+                        .item(
+                            ContextMenuEntry::new("Merge")
+                                .disabled(!merge_enabled)
+                                .handler({
+                                    let view = view.clone();
+                                    move |_window, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.merge(PullRequestMergeMethod::Merge, cx);
+                                        })
+                                        .ok();
+                                    }
+                                }),
+                        )
+                        .item(
+                            ContextMenuEntry::new("Squash & merge")
+                                .disabled(!merge_enabled)
+                                .handler({
+                                    let view = view.clone();
+                                    move |_window, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.merge(PullRequestMergeMethod::Squash, cx);
+                                        })
+                                        .ok();
+                                    }
+                                }),
+                        );
+                    if supports_drafts && is_open {
+                        let label = if is_draft {
+                            "Mark ready for review"
+                        } else {
+                            "Convert to draft"
+                        };
+                        menu = menu.separator().item(
+                            ContextMenuEntry::new(label)
+                                .disabled(!actions_enabled)
+                                .handler({
+                                    let view = view.clone();
+                                    move |_window, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.set_draft(!is_draft, cx);
+                                        })
+                                        .ok();
+                                    }
+                                }),
+                        );
+                    }
+                    if is_open {
+                        menu = menu.separator().item(
+                            ContextMenuEntry::new(close_verb)
+                                .disabled(!actions_enabled)
+                                .handler(move |_window, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.close_pull_request(cx);
+                                    })
+                                    .ok();
+                                }),
+                        );
+                    }
+                    menu
+                }))
+            })
     }
 
     /// Opens the reviewer picker, which lists the people the host will accept

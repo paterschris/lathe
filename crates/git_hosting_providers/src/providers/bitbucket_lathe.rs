@@ -575,6 +575,16 @@ impl BitbucketPullRequest {
         participant_verdict(participant)
     }
 
+    /// Whether the authenticated user opened this PR, matched by account uuid.
+    /// Display names are not unique on Bitbucket and `author_login` carries the
+    /// display name, so the uuid is the only sound comparison here.
+    pub(super) fn is_author(&self, viewer_uuid: &str) -> bool {
+        self.author
+            .as_ref()
+            .and_then(|author| author.uuid.as_deref())
+            == Some(viewer_uuid)
+    }
+
     /// Whether the authenticated user (matched by account uuid) is a designated
     /// reviewer on this PR, whether or not they have already approved or
     /// requested changes. Reviewers added via a default-reviewer group are
@@ -745,6 +755,8 @@ impl BitbucketPullRequest {
             viewer_review: None,
             reviewers: Vec::new(),
             checks: None,
+            // Filled in by `get_pull_request` once the viewer is resolved.
+            viewer_is_author: None,
         })
     }
 }

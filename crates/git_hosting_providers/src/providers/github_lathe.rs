@@ -607,6 +607,8 @@ impl GithubPullRequest {
             viewer_review: None,
             reviewers: Vec::new(),
             checks: None,
+            // Filled in by `get_pull_request` once the viewer is resolved.
+            viewer_is_author: None,
         })
     }
 }

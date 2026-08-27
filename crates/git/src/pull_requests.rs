@@ -132,6 +132,11 @@ pub struct PullRequestDetail {
     /// call fails, which the header renders as "no checks" rather than as a
     /// failure.
     pub checks: Option<PullRequestChecks>,
+    /// Whether the authenticated user opened this pull request. `None` when the
+    /// viewer's identity could not be resolved, which the detail view treats the
+    /// same as `Some(true)`: demoting the author-only actions for someone who
+    /// might well be the author is worse than leaving them where they were.
+    pub viewer_is_author: Option<bool>,
 }
 
 /// Roll-up of a pull request's CI results, as reported by the host for the head

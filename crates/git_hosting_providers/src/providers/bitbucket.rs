@@ -593,9 +593,11 @@ impl GitHostingProvider for Bitbucket {
             .as_deref()
             .and_then(|uuid| pr.viewer_review(uuid));
         let reviewers = pr.reviewers(viewer_uuid.as_deref());
+        let viewer_is_author = viewer_uuid.as_deref().map(|uuid| pr.is_author(uuid));
         let mut detail = pr.into_detail()?;
         detail.viewer_review = viewer_review;
         detail.reviewers = reviewers;
+        detail.viewer_is_author = viewer_is_author;
         // The PR object carries no commit count, so fetch the commits and count
         // them. This is best-effort: a failure leaves `commits` unset rather than
         // failing the whole PR load. `max_items` bounds the walk for very large
@@ -1621,5 +1623,89 @@ mod tests {
         assert_eq!(reviewers.len(), 1);
         assert_eq!(reviewers[0].login.to_string(), "Me");
         assert!(!reviewers[0].is_me);
+    }
+
+    /// Ownership drives whether the detail view keeps merge/close in the open or
+    /// tucks them behind a menu, and Bitbucket only distinguishes accounts by
+    /// uuid: two people can share a display name.
+    #[test]
+    fn test_bitbucket_detail_resolves_viewer_as_author() {
+        let detail = bitbucket_detail_for_author_uuid("{viewer}");
+        assert_eq!(detail.viewer_is_author, Some(true));
+    }
+
+    #[test]
+    fn test_bitbucket_detail_resolves_viewer_as_non_author() {
+        let detail = bitbucket_detail_for_author_uuid("{someone-else}");
+        assert_eq!(detail.viewer_is_author, Some(false));
+    }
+
+    /// Without a resolvable viewer the flag stays unknown rather than claiming
+    /// the PR belongs to someone else.
+    #[test]
+    fn test_bitbucket_detail_leaves_authorship_unknown_without_auth() {
+        let client: Arc<dyn HttpClient> =
+            http_client::FakeHttpClient::create(|request| async move {
+                let path = request.uri().path();
+                let (status, body) = if path == "/2.0/user" {
+                    (401, r#"{"error":{"message":"bad credentials"}}"#)
+                } else if path.ends_with("/pullrequests/7") {
+                    (200, BITBUCKET_DETAIL_FIXTURE)
+                } else {
+                    (200, r#"{"values":[]}"#)
+                };
+                Ok(http_client::Response::builder()
+                    .status(status)
+                    .body(body.into())
+                    .unwrap())
+            });
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let detail = futures::executor::block_on(
+            Bitbucket::public_instance().get_pull_request(&remote, 7, None, client),
+        )
+        .unwrap();
+        assert_eq!(detail.viewer_is_author, None);
+    }
+
+    const BITBUCKET_DETAIL_FIXTURE: &str = r#"{"id":7,"title":"Ownership","state":"OPEN",
+        "author":{"display_name":"Author","uuid":"AUTHOR_UUID"},
+        "source":{"branch":{"name":"feature"},"commit":{"hash":"a1"}},
+        "destination":{"branch":{"name":"main"},"commit":{"hash":"b1"}},
+        "links":{"html":{"href":"https://bitbucket.org/owner/repo/pull-requests/7"}},
+        "participants":[]}"#;
+
+    fn bitbucket_detail_for_author_uuid(author_uuid: &'static str) -> PullRequestDetail {
+        let client: Arc<dyn HttpClient> =
+            http_client::FakeHttpClient::create(move |request| async move {
+                let path = request.uri().path();
+                let body = if path == "/2.0/user" {
+                    r#"{"uuid":"{viewer}"}"#.to_string()
+                } else if path.ends_with("/pullrequests/7") {
+                    BITBUCKET_DETAIL_FIXTURE.replace("AUTHOR_UUID", author_uuid)
+                } else {
+                    r#"{"values":[]}"#.to_string()
+                };
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(body.into())
+                    .unwrap())
+            });
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        futures::executor::block_on(Bitbucket::public_instance().get_pull_request(
+            &remote,
+            7,
+            Some(GitHostAuth::Basic {
+                username: "user".into(),
+                secret: "secret".into(),
+            }),
+            client,
+        ))
+        .unwrap()
     }
 }

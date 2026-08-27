@@ -28,8 +28,6 @@ Some behaviour differs by host, because the hosts themselves differ:
 - **GitLab merge strategy is a project setting**, not a per-merge choice, so the
   rebase option is unavailable and reports as such rather than quietly doing
   something else.
-- **Bitbucket Cloud has no draft pull requests**, so the "Create as draft" option
-  is ignored there.
 - **Bitbucket Data Center (self-hosted) is not supported.** It exposes a
   different REST API from Bitbucket Cloud, and Lathe does not speak it. It is
   not offered as a connectable host rather than failing halfway through.
@@ -144,6 +142,14 @@ fetches the file's full content so the line exists to anchor to.
 The header buttons submit **Approve**, **Request changes**, or **Comment**, and
 merge with a merge commit, squash, or rebase. Approve and Request changes act as
 toggles: clicking the verdict you have already submitted retracts it.
+
+On a pull request you did not open, the actions that belong to its author are
+collected under a **More** menu instead of sitting in the button row: **Merge**,
+**Squash & merge**, the draft toggle, and **Decline** / **Close**. They still
+work, and the host still decides whether you are permitted to use them; the menu
+only keeps them from being one stray click away from **Approve**. Lathe resolves
+authorship from the account you connected, so when it cannot tell who you are
+(an unauthenticated or heavily scoped token) the buttons stay in the row.
 
 ## Creating a pull request
 

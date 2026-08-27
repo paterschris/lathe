@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
 # Lathe
 
 A customized code editor forked from [Zed](https://zed.dev), focused on mobile development workflows, deeper git tooling, in-editor code review, and theme customization.

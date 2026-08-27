@@ -342,6 +342,15 @@ impl GitHostingProvider for Gitlab {
         let merge_request: GitlabMergeRequest =
             serde_json::from_slice(&bytes).context("parsing GitLab merge request")?;
         let mut detail = merge_request.into_detail()?;
+        // `author_login` is the GitLab username, so this compares like with like.
+        // Best-effort: an unauthenticated token leaves it `None` and the header
+        // falls back to its author-agnostic layout.
+        detail.viewer_is_author = self
+            .fetch_authenticated_username(&auth, &http_client)
+            .await
+            .log_err()
+            .flatten()
+            .map(|username| username == detail.author_login);
 
         // Best-effort enrichment, each independently allowed to fail so a
         // restricted token still renders the header.

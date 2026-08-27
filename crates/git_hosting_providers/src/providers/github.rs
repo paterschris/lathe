@@ -522,6 +522,17 @@ impl GitHostingProvider for Github {
             .map(|user| SharedString::from(user.login.clone()))
             .collect();
         let mut detail = pr.into_detail()?;
+        // Resolved once and used for both "is this my PR" and "which reviewer is
+        // me". Best-effort: an unauthenticated or restricted token leaves it
+        // `None` and the header falls back to its author-agnostic layout.
+        let viewer_login = self
+            .fetch_authenticated_login(&auth, &http_client)
+            .await
+            .log_err()
+            .flatten();
+        detail.viewer_is_author = viewer_login
+            .as_deref()
+            .map(|login| login.eq_ignore_ascii_case(&detail.author_login));
         // Reviews are best-effort: on failure the detail still renders, just
         // without verdict/reviewers. One reviews fetch feeds both.
         if let Some(reviews) = self
@@ -529,11 +540,6 @@ impl GitHostingProvider for Github {
             .await
             .log_err()
         {
-            let viewer_login = self
-                .fetch_authenticated_login(&auth, &http_client)
-                .await
-                .log_err()
-                .flatten();
             let reviewers = build_github_reviewers(&reviews, &requested, viewer_login.as_deref());
             detail.viewer_review = reviewers
                 .iter()
@@ -1357,5 +1363,75 @@ mod tests {
             url.as_str(),
             "https://avatars.githubusercontent.com/u/e?email=12345%2Boctocat%40users.noreply.github.com&s=128"
         );
+    }
+
+    /// GitHub logins are case-insensitive, so a viewer who typed "Octocat" into
+    /// their credential must still match an `octocat`-authored pull request.
+    #[test]
+    fn test_github_detail_resolves_viewer_as_author_ignoring_case() {
+        let detail = github_detail_for_author_login("octocat", Some("OCTOCAT"));
+        assert_eq!(detail.viewer_is_author, Some(true));
+    }
+
+    #[test]
+    fn test_github_detail_resolves_viewer_as_non_author() {
+        let detail = github_detail_for_author_login("octocat", Some("someone-else"));
+        assert_eq!(detail.viewer_is_author, Some(false));
+    }
+
+    /// A token that cannot read `/user` leaves authorship unknown rather than
+    /// asserting the pull request belongs to someone else.
+    #[test]
+    fn test_github_detail_leaves_authorship_unknown_when_viewer_unresolved() {
+        let detail = github_detail_for_author_login("octocat", None);
+        assert_eq!(detail.viewer_is_author, None);
+    }
+
+    /// Drives `get_pull_request` against a fake host. `viewer_login` of `None`
+    /// makes `/user` fail the way a scopeless token does.
+    fn github_detail_for_author_login(
+        author_login: &'static str,
+        viewer_login: Option<&'static str>,
+    ) -> PullRequestDetail {
+        let client: Arc<dyn HttpClient> =
+            http_client::FakeHttpClient::create(move |request| async move {
+                let path = request.uri().path();
+                let (status, body) = if path == "/user" {
+                    match viewer_login {
+                        Some(login) => (200, format!(r#"{{"login":"{login}"}}"#)),
+                        None => (403, r#"{"message":"forbidden"}"#.to_string()),
+                    }
+                } else if path == "/repos/owner/repo/pulls/7" {
+                    (
+                        200,
+                        format!(
+                            r#"{{"number":7,"title":"Ownership","state":"open",
+                            "user":{{"login":"{author_login}"}},
+                            "head":{{"ref":"feature","sha":"a1"}},
+                            "base":{{"ref":"main","sha":"b1"}},
+                            "html_url":"https://github.com/owner/repo/pull/7",
+                            "created_at":"2026-01-01T00:00:00Z",
+                            "updated_at":"2026-01-02T00:00:00Z"}}"#
+                        ),
+                    )
+                } else {
+                    (200, "[]".to_string())
+                };
+                Ok(http_client::Response::builder()
+                    .status(status)
+                    .body(body.into())
+                    .unwrap())
+            });
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        futures::executor::block_on(Github::public_instance().get_pull_request(
+            &remote,
+            7,
+            Some(GitHostAuth::Bearer("token".into())),
+            client,
+        ))
+        .unwrap()
     }
 }
