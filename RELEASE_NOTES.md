@@ -2,6 +2,29 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v0.236.35-beta - 2026-09-01
+
+Finding references no longer takes you out of the file you are reading.
+
+### Added
+
+- **Peek view for LSP results.** Find All References, Go to Definition, Declaration, Implementation and Type Definition now open a panel below the cursor line instead of a new tab: a preview of the selected location beside the list of locations, grouped by file. Arrow keys move through the list and the preview follows; Enter or a double click goes to a location and closes the peek; Escape or clicking back into the code dismisses it. Cmd-click opens it too, since going to a definition is the case where being sent to another tab is least wanted. Alt-cmd-click still splits the pane.
+- **The divider between the two panes can be dragged**, and where you leave it is remembered by later peeks and across restarts.
+
+### Changed
+
+- `lsp_results_location` defaults to `peek` rather than `multi_buffer`. Set it back to `multi_buffer` for the previous behaviour, or `picker` for the filterable list.
+- In `peek`, a single result is shown in the peek rather than opened directly, which is the point of the mode. `multi_buffer` and `picker` still go straight to it.
+
+### Known issues
+
+- The list renders every result rather than only the visible ones. Find All References on a symbol with thousands of hits is expected to be slow.
+- Testing was on macOS, in ordinary single-file editors, without Vim mode. The peek in a multibuffer (project search results, diffs), under Vim mode, in a split, and on Linux and Windows is unexercised.
+- The peek paints above everything else in the editor. If it covers a hover popover or a context menu, that is why.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v0.236.34-beta — 2026-08-27
 
 Fixes a data-loss class of bug that only shows up when two Lathe channels run at the same time, and finishes the pull request panel's separation between reviewing someone's work and acting on your own.
