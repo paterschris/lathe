@@ -1,7 +1,8 @@
 use crate::{
-    Anchor, Editor, EditorSettings, EditorSnapshot, FindAllReferences, GoToDefinitionSplit,
-    GoToTypeDefinition, GoToTypeDefinitionSplit, GotoDefinitionKind, HighlightKey, Navigated,
-    PointForPosition, SelectPhase, editor_settings::GoToDefinitionFallback, scroll::ScrollAmount,
+    Anchor, Editor, EditorSettings, EditorSnapshot, FindAllReferences, GoToDefinition,
+    GoToDefinitionSplit, GoToTypeDefinition, GoToTypeDefinitionSplit, GotoDefinitionKind,
+    HighlightKey, Navigated, OpenResultsIn, PointForPosition, SelectPhase,
+    editor_settings::GoToDefinitionFallback, scroll::ScrollAmount,
 };
 use gpui::{
     App, AsyncWindowContext, Context, Entity, Focusable, HighlightStyle, Modifiers, Pixels, Task,
@@ -207,6 +208,9 @@ impl Editor {
         cx: &mut Context<Editor>,
     ) {
         let focus_handle = self.focus_handle(cx);
+        if self.peek_hovered_link(point, modifiers, window, cx) {
+            return;
+        }
         let reveal_task = self.cmd_click_reveal_task(point, modifiers, window, cx);
         cx.spawn_in(window, async move |_, cx| {
             let definition_revealed = reveal_task.await.log_err().unwrap_or(Navigated::No);
@@ -248,6 +252,58 @@ impl Editor {
         } else {
             false
         }
+    }
+
+    /// When LSP results are shown in a peek, a cmd-click shows its target inline
+    /// instead of navigating to it, so the click does not take the user out of
+    /// the file they are reading. Handing off to the navigation action rather
+    /// than reusing the already-resolved hover links costs a second LSP request,
+    /// but keeps the peek's plumbing in one place: the action handler.
+    ///
+    /// Alt-cmd-click is left alone. Splitting the pane is a navigation by
+    /// definition, so there is nothing for a peek to do there.
+    ///
+    /// Returns whether the click was handled.
+    fn peek_hovered_link(
+        &mut self,
+        point: PointForPosition,
+        modifiers: Modifiers,
+        window: &mut Window,
+        cx: &mut Context<Editor>,
+    ) -> bool {
+        if EditorSettings::get_global(cx).lsp_results_location != OpenResultsIn::Peek
+            || Self::is_alt_pressed(&modifiers, cx)
+            || point.as_valid().is_none()
+        {
+            return false;
+        }
+
+        self.hide_hovered_link(cx);
+        // The navigation actions read the cursor, so move it under the click
+        // first, as the uncached cmd-click path does.
+        self.select(
+            SelectPhase::Begin {
+                position: point.next_valid,
+                add: false,
+                click_count: 1,
+            },
+            window,
+            cx,
+        );
+        self.select(SelectPhase::End, window, cx);
+
+        // Deferred: this runs inside an update of the editor, and the peek reads
+        // the editor back when the action reaches it.
+        let focus_handle = self.focus_handle(cx);
+        let type_definition = modifiers.shift;
+        window.defer(cx, move |window, cx| {
+            if type_definition {
+                focus_handle.dispatch_action(&GoToTypeDefinition::default(), window, cx);
+            } else {
+                focus_handle.dispatch_action(&GoToDefinition::default(), window, cx);
+            }
+        });
+        true
     }
 
     fn cmd_click_reveal_task(

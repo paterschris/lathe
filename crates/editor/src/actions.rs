@@ -953,7 +953,8 @@ actions!(
 #[serde(deny_unknown_fields)]
 pub struct GoToDefinition {
     /// Where to show the definitions. Falls back to the `lsp_results_location`
-    /// setting when omitted. A single result is always opened directly.
+    /// setting when omitted. A single result is opened directly, except in
+    /// `peek`, which shows it inline like any other result.
     #[serde(default)]
     pub open_results_in: Option<OpenResultsIn>,
 }
@@ -964,7 +965,8 @@ pub struct GoToDefinition {
 #[serde(deny_unknown_fields)]
 pub struct GoToDeclaration {
     /// Where to show the declarations. Falls back to the `lsp_results_location`
-    /// setting when omitted. A single result is always opened directly.
+    /// setting when omitted. A single result is opened directly, except in
+    /// `peek`, which shows it inline like any other result.
     #[serde(default)]
     pub open_results_in: Option<OpenResultsIn>,
 }
@@ -975,7 +977,8 @@ pub struct GoToDeclaration {
 #[serde(deny_unknown_fields)]
 pub struct GoToImplementation {
     /// Where to show the implementations. Falls back to the `lsp_results_location`
-    /// setting when omitted. A single result is always opened directly.
+    /// setting when omitted. A single result is opened directly, except in
+    /// `peek`, which shows it inline like any other result.
     #[serde(default)]
     pub open_results_in: Option<OpenResultsIn>,
 }
@@ -986,7 +989,8 @@ pub struct GoToImplementation {
 #[serde(deny_unknown_fields)]
 pub struct GoToTypeDefinition {
     /// Where to show the definitions. Falls back to the `lsp_results_location`
-    /// setting when omitted. A single result is always opened directly.
+    /// setting when omitted. A single result is opened directly, except in
+    /// `peek`, which shows it inline like any other result.
     #[serde(default)]
     pub open_results_in: Option<OpenResultsIn>,
 }
@@ -999,7 +1003,8 @@ pub struct FindAllReferences {
     #[serde(default = "default_true")]
     pub always_open_multibuffer: bool,
     /// Where to show the references. Falls back to the `lsp_results_location`
-    /// setting when omitted. A single result is always opened directly.
+    /// setting when omitted. A single result is opened directly, except in
+    /// `peek`, which shows it inline like any other result.
     #[serde(default)]
     pub open_results_in: Option<OpenResultsIn>,
 }

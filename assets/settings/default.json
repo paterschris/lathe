@@ -419,13 +419,16 @@
   //    offscreen: `preserve`
   "go_to_definition_scroll_strategy": "center",
   // Where to show LSP results that can contain multiple locations
-  // (Go to Definition, Go to Implementation, Find All References). A single
-  // result always opens directly. Individual actions can override this with
-  // their `open_results_in` argument.
+  // (Go to Definition, Go to Implementation, Find All References). Individual
+  // actions can override this with their `open_results_in` argument.
   //
-  // 1. Open the results in a multibuffer: `multi_buffer` (default)
+  // 1. Open the results in a multibuffer: `multi_buffer`
   // 2. Open the results in a filterable picker: `picker`
-  "lsp_results_location": "multi_buffer",
+  // 3. Open the results in an inline peek view below the cursor line: `peek` (default)
+  //
+  // In `multi_buffer` and `picker` a single result opens directly; `peek` shows
+  // it inline like any other result, and also handles cmd-click.
+  "lsp_results_location": "peek",
   // Which level to use to filter out diagnostics displayed in the editor.
   //
   // Affects the editor rendering only, and does not interrupt

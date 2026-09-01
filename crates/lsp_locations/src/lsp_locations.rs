@@ -26,6 +26,8 @@ use workspace::item::ItemSettings;
 use workspace::notifications::NotificationId;
 use workspace::{ModalView, Toast, Workspace};
 
+mod lsp_peek_view;
+
 pub fn init(cx: &mut App) {
     cx.observe_new(register).detach();
 }
@@ -108,9 +110,9 @@ fn register(editor: &mut Editor, _window: Option<&mut Window>, cx: &mut Context<
         .detach();
 }
 
-/// Either opens the picker for the editor, or propagates the action so the
-/// editor's built-in (multibuffer) handler runs. A `None` argument falls back to
-/// the `lsp_results_location` setting.
+/// Opens the picker or the inline peek view for the editor, or propagates the
+/// action so the editor's built-in (multibuffer) handler runs. A `None` argument
+/// falls back to the `lsp_results_location` setting.
 fn handle_nav_action(
     open_results_in: Option<OpenResultsIn>,
     kind: LspPickerKind,
@@ -120,18 +122,20 @@ fn handle_nav_action(
 ) {
     let open_results_in =
         open_results_in.unwrap_or_else(|| EditorSettings::get_global(cx).lsp_results_location);
-    if open_results_in != OpenResultsIn::Picker {
-        cx.propagate();
-        return;
+    match open_results_in {
+        OpenResultsIn::MultiBuffer => cx.propagate(),
+        OpenResultsIn::Picker => {
+            LspLocationsPicker::open_for_editor(kind, editor.clone(), window, cx)
+        }
+        OpenResultsIn::Peek => lsp_peek_view::open_for_editor(kind, editor.clone(), window, cx),
     }
-    LspLocationsPicker::open_for_editor(kind, editor.clone(), window, cx);
 }
 
 /// Runs the LSP query for `kind` and returns the raw locations. Returns `None`
 /// (and reports any error) when there is nothing to query, so the caller stops
 /// without an empty-results toast. Deduplication and dropping fileless results
 /// happen later in [`build_location_matches`].
-async fn run_picker_query(
+pub(crate) async fn run_picker_query(
     kind: LspPickerKind,
     editor: &WeakEntity<Editor>,
     workspace: &WeakEntity<Workspace>,
@@ -155,7 +159,7 @@ async fn run_picker_query(
 }
 
 /// Runs the query for `kind` and builds the displayable, deduped matches.
-async fn run_picker_matches(
+pub(crate) async fn run_picker_matches(
     kind: LspPickerKind,
     editor: &WeakEntity<Editor>,
     workspace: &WeakEntity<Workspace>,
@@ -168,7 +172,7 @@ async fn run_picker_matches(
         .ok()
 }
 
-fn show_no_results_toast(
+pub(crate) fn show_no_results_toast(
     workspace: &WeakEntity<Workspace>,
     kind: LspPickerKind,
     cx: &mut AsyncWindowContext,
@@ -210,7 +214,7 @@ impl LspPickerKind {
 
     /// Message shown when the query produces no results, so the command does not
     /// appear to silently do nothing.
-    fn empty_message(self) -> &'static str {
+    pub(crate) fn empty_message(self) -> &'static str {
         match self {
             LspPickerKind::References => "No references found",
             LspPickerKind::Definition => "No definitions found",
@@ -220,9 +224,26 @@ impl LspPickerKind {
         }
     }
 
+    /// Singular/plural noun for a result of this kind, for summary text like
+    /// "3 references in 2 files".
+    pub(crate) fn result_noun(self, count: usize) -> &'static str {
+        match (self, count) {
+            (LspPickerKind::References, 1) => "reference",
+            (LspPickerKind::References, _) => "references",
+            (LspPickerKind::Definition, 1) => "definition",
+            (LspPickerKind::Definition, _) => "definitions",
+            (LspPickerKind::Declaration, 1) => "declaration",
+            (LspPickerKind::Declaration, _) => "declarations",
+            (LspPickerKind::Implementation, 1) => "implementation",
+            (LspPickerKind::Implementation, _) => "implementations",
+            (LspPickerKind::TypeDefinition, 1) => "type definition",
+            (LspPickerKind::TypeDefinition, _) => "type definitions",
+        }
+    }
+
     /// Runs the query for this kind against the active editor, returning the raw
     /// locations to populate the picker.
-    fn run_query(
+    pub(crate) fn run_query(
         self,
         editor: &mut Editor,
         project: &Entity<Project>,
@@ -244,6 +265,77 @@ impl LspPickerKind {
             }
         }
     }
+}
+
+/// What a caller wants done with a lone result.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SingleResult {
+    /// Navigate straight to it, so the user is not made to confirm the only
+    /// option there is.
+    OpenDirectly,
+    /// Show it like any other result. The peek uses this: its whole purpose is
+    /// to keep the user where they are, which a jump would defeat.
+    Show,
+}
+
+/// Runs the query for `kind` and returns the matches to display, along with the
+/// kind that actually produced them (an empty definitions query falls back to
+/// references when the `go_to_definition_fallback` setting calls for it,
+/// matching [`Editor::go_to_definition`]).
+///
+/// Returns `None` when there is nothing left for the caller to display: the
+/// query failed, produced no results (a toast is shown), or produced a lone
+/// result that `single_result` asked to open directly.
+pub(crate) async fn resolve_matches(
+    kind: LspPickerKind,
+    editor: &WeakEntity<Editor>,
+    workspace: &WeakEntity<Workspace>,
+    project: &Entity<Project>,
+    single_result: SingleResult,
+    cx: &mut AsyncWindowContext,
+) -> Option<(LspPickerKind, Vec<LocationMatch>)> {
+    // The kind the user invoked, kept for user-facing messages even if the query
+    // below falls back to references.
+    let invoked_kind = kind;
+    let mut kind = kind;
+    let fallback = cx
+        .update(|_, cx| EditorSettings::get_global(cx).go_to_definition_fallback)
+        .ok()?;
+
+    // Count on the built matches (not raw locations): they are deduped by range
+    // and exclude fileless results, so a single distinct result jumps directly
+    // and a fileless-only result reports "no results" instead of opening empty.
+    let mut matches = run_picker_matches(kind, editor, workspace, project, cx).await?;
+
+    if matches.is_empty()
+        && kind == LspPickerKind::Definition
+        && fallback == GoToDefinitionFallback::FindAllReferences
+    {
+        kind = LspPickerKind::References;
+        matches = run_picker_matches(kind, editor, workspace, project, cx).await?;
+    }
+
+    if matches.is_empty() {
+        show_no_results_toast(workspace, invoked_kind, cx);
+        return None;
+    }
+
+    if matches.len() == 1 && single_result == SingleResult::OpenDirectly {
+        if let Some(location_match) = matches.into_iter().next() {
+            let location = Location {
+                buffer: location_match.buffer,
+                range: location_match.anchor_range,
+            };
+            if let Ok(task) = editor.update_in(cx, |editor, window, cx| {
+                editor.open_location(location, false, window, cx)
+            }) {
+                task.await.log_err();
+            }
+        }
+        return None;
+    }
+
+    Some((kind, matches))
 }
 
 pub struct LspLocationsPicker {
@@ -270,9 +362,7 @@ impl LspLocationsPicker {
     }
 
     /// Opens the picker for `kind`: runs a fresh LSP query and shows the
-    /// results. An empty definitions query falls back to references when the
-    /// `go_to_definition_fallback` setting calls for it, matching
-    /// [`Editor::go_to_definition`].
+    /// results.
     fn open(
         kind: LspPickerKind,
         editor: Entity<Editor>,
@@ -281,56 +371,20 @@ impl LspLocationsPicker {
         cx: &mut Context<Workspace>,
     ) {
         let project = workspace.project().clone();
-        let fallback = EditorSettings::get_global(cx).go_to_definition_fallback;
         let editor = editor.downgrade();
         cx.spawn_in(window, async move |workspace, cx| {
-            // The kind the user invoked, kept for user-facing messages even if
-            // the query below falls back to references.
-            let invoked_kind = kind;
-            let mut kind = kind;
-
-            // Count on the built matches (not raw locations): they are deduped by
-            // range and exclude fileless results, so a single distinct result
-            // jumps directly and a fileless-only result reports "no results"
-            // instead of opening a blank picker.
-            let Some(mut matches) =
-                run_picker_matches(kind, &editor, &workspace, &project, cx).await
+            let Some((kind, matches)) = resolve_matches(
+                kind,
+                &editor,
+                &workspace,
+                &project,
+                SingleResult::OpenDirectly,
+                cx,
+            )
+            .await
             else {
                 return;
             };
-
-            if matches.is_empty()
-                && kind == LspPickerKind::Definition
-                && fallback == GoToDefinitionFallback::FindAllReferences
-            {
-                kind = LspPickerKind::References;
-                let Some(references) =
-                    run_picker_matches(kind, &editor, &workspace, &project, cx).await
-                else {
-                    return;
-                };
-                matches = references;
-            }
-
-            if matches.is_empty() {
-                show_no_results_toast(&workspace, invoked_kind, cx);
-                return;
-            }
-
-            if matches.len() == 1 {
-                if let Some(location_match) = matches.into_iter().next() {
-                    let location = Location {
-                        buffer: location_match.buffer,
-                        range: location_match.anchor_range,
-                    };
-                    if let Ok(task) = editor.update_in(cx, |editor, window, cx| {
-                        editor.open_location(location, false, window, cx)
-                    }) {
-                        task.await.log_err();
-                    }
-                }
-                return;
-            }
 
             workspace
                 .update_in(cx, |workspace, window, cx| {
@@ -380,23 +434,52 @@ impl Render for LspLocationsPicker {
     }
 }
 
-struct LocationMatch {
-    path: ProjectPath,
-    buffer: Entity<Buffer>,
-    anchor_range: Range<Anchor>,
-    range: Range<usize>,
-    display_text: String,
-    syntax_highlights: Vec<(Range<usize>, HighlightId)>,
-    match_range: Range<usize>,
-    line_number: u32,
+pub(crate) struct LocationMatch {
+    pub(crate) path: ProjectPath,
+    pub(crate) buffer: Entity<Buffer>,
+    pub(crate) anchor_range: Range<Anchor>,
+    pub(crate) range: Range<usize>,
+    pub(crate) display_text: String,
+    pub(crate) syntax_highlights: Vec<(Range<usize>, HighlightId)>,
+    pub(crate) match_range: Range<usize>,
+    pub(crate) line_number: u32,
 }
 
 /// A row in the grouped display list: a non-selectable file header, a match, or
 /// a separator between file groups. `selected_index` indexes into this list.
-enum Entry {
+pub(crate) enum Entry {
     Header(ProjectPath),
     Match(usize),
     Separator,
+}
+
+/// Builds the grouped display list from `match_indices` (indices into
+/// `all_matches`, already in file-grouped positional order): one header per
+/// file, its matches, and a separator before every group after the first.
+/// Also returns the largest line number in the list, used to size the line
+/// number column.
+pub(crate) fn group_entries(
+    all_matches: &[LocationMatch],
+    match_indices: &[usize],
+) -> (Vec<Entry>, u32) {
+    let mut entries = Vec::with_capacity(match_indices.len());
+    let mut last_path: Option<&ProjectPath> = None;
+    let mut max_line_number = 0;
+    for &match_index in match_indices {
+        let Some(location_match) = all_matches.get(match_index) else {
+            continue;
+        };
+        if last_path != Some(&location_match.path) {
+            if last_path.is_some() {
+                entries.push(Entry::Separator);
+            }
+            entries.push(Entry::Header(location_match.path.clone()));
+            last_path = Some(&location_match.path);
+        }
+        max_line_number = max_line_number.max(location_match.line_number);
+        entries.push(Entry::Match(match_index));
+    }
+    (entries, max_line_number)
 }
 
 struct LspLocationsDelegate {
@@ -454,21 +537,7 @@ impl LspLocationsDelegate {
     /// one header per file, its matches, and a separator before every group
     /// after the first. Selection snaps to the first selectable row.
     fn rebuild_entries(&mut self) {
-        let mut entries = Vec::with_capacity(self.matches.len());
-        let mut last_path: Option<&ProjectPath> = None;
-        let mut max_line_number = 0;
-        for &match_index in &self.matches {
-            let location_match = &self.all_matches[match_index];
-            if last_path != Some(&location_match.path) {
-                if last_path.is_some() {
-                    entries.push(Entry::Separator);
-                }
-                entries.push(Entry::Header(location_match.path.clone()));
-                last_path = Some(&location_match.path);
-            }
-            max_line_number = max_line_number.max(location_match.line_number);
-            entries.push(Entry::Match(match_index));
-        }
+        let (entries, max_line_number) = group_entries(&self.all_matches, &self.matches);
         self.entries = entries;
         self.max_line_number = max_line_number;
         self.selected_index = self.first_selectable_index().unwrap_or(0);
@@ -507,7 +576,7 @@ impl LspLocationsDelegate {
     }
 }
 
-fn build_location_matches(locations: &[Location], cx: &App) -> Vec<LocationMatch> {
+pub(crate) fn build_location_matches(locations: &[Location], cx: &App) -> Vec<LocationMatch> {
     use gpui::EntityId;
     let mut snapshots: HashMap<EntityId, language::BufferSnapshot> = HashMap::default();
     let mut matches = Vec::with_capacity(locations.len());
@@ -692,52 +761,7 @@ impl PickerDelegate for LspLocationsDelegate {
                     .child(Divider::horizontal())
                     .into_any_element(),
             ),
-            Entry::Header(path) => {
-                let path_style = self.project.read(cx).path_style(cx);
-                let file_name = path
-                    .path
-                    .file_name()
-                    .map(|name| name.to_string())
-                    .unwrap_or_default();
-                let directory = path
-                    .path
-                    .parent()
-                    .map(|parent| parent.display(path_style))
-                    .map(SharedString::new)
-                    .unwrap_or_default();
-                let file_icon = ItemSettings::get_global(cx)
-                    .file_icons
-                    .then(|| FileIcons::get_icon(path.path.as_std_path(), cx))
-                    .flatten()
-                    .map(|icon| {
-                        Icon::from_path(icon)
-                            .color(Color::Muted)
-                            .size(IconSize::Small)
-                    });
-                Some(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .px(DynamicSpacing::Base06.rems(cx))
-                        .py_1()
-                        .gap_1p5()
-                        .children(file_icon)
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(Label::new(file_name).size(LabelSize::Small))
-                                .when(!directory.is_empty(), |this| {
-                                    this.child(
-                                        Label::new(directory)
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted)
-                                            .truncate_start(),
-                                    )
-                                }),
-                        )
-                        .into_any_element(),
-                )
-            }
+            Entry::Header(path) => Some(render_file_header(path, &self.project, cx)),
             Entry::Match(match_index) => {
                 let location_match = self.all_matches.get(*match_index)?;
                 Some(
@@ -745,33 +769,7 @@ impl PickerDelegate for LspLocationsDelegate {
                         .spacing(ListItemSpacing::Sparse)
                         .inset(true)
                         .toggle_state(selected)
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .gap_2p5()
-                                .text_sm()
-                                .child(
-                                    h_flex()
-                                        .w(rems(
-                                            (self.max_line_number.max(1).ilog10() + 1) as f32 * 0.5,
-                                        ))
-                                        .justify_end()
-                                        .child(
-                                            Label::new(location_match.line_number.to_string())
-                                                .color(Color::Custom(
-                                                    cx.theme().colors().text_muted.opacity(0.5),
-                                                )),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(render_matched_line(location_match, cx)),
-                                ),
-                        )
+                        .child(render_location_row(location_match, self.max_line_number, cx))
                         .into_any_element(),
                 )
             }
@@ -779,10 +777,92 @@ impl PickerDelegate for LspLocationsDelegate {
     }
 }
 
+/// A file group's header row: icon, file name, and the containing directory.
+pub(crate) fn render_file_header(
+    path: &ProjectPath,
+    project: &Entity<Project>,
+    cx: &App,
+) -> AnyElement {
+    let path_style = project.read(cx).path_style(cx);
+    let file_name = path
+        .path
+        .file_name()
+        .map(|name| name.to_string())
+        .unwrap_or_default();
+    let directory = path
+        .path
+        .parent()
+        .map(|parent| parent.display(path_style))
+        .map(SharedString::new)
+        .unwrap_or_default();
+    let file_icon = ItemSettings::get_global(cx)
+        .file_icons
+        .then(|| FileIcons::get_icon(path.path.as_std_path(), cx))
+        .flatten()
+        .map(|icon| {
+            Icon::from_path(icon)
+                .color(Color::Muted)
+                .size(IconSize::Small)
+        });
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .px(DynamicSpacing::Base06.rems(cx))
+        .py_1()
+        .gap_1p5()
+        .children(file_icon)
+        .child(
+            h_flex()
+                .gap_1()
+                .child(Label::new(file_name).size(LabelSize::Small))
+                .when(!directory.is_empty(), |this| {
+                    this.child(
+                        Label::new(directory)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .truncate_start(),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
+/// A single location row: a right-aligned line number followed by the matched
+/// line. `max_line_number` sizes the line number column so the lines align.
+pub(crate) fn render_location_row(
+    location_match: &LocationMatch,
+    max_line_number: u32,
+    cx: &App,
+) -> AnyElement {
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .gap_2p5()
+        .text_sm()
+        .child(
+            h_flex()
+                .w(rems((max_line_number.max(1).ilog10() + 1) as f32 * 0.5))
+                .justify_end()
+                .child(
+                    Label::new(location_match.line_number.to_string()).color(Color::Custom(
+                        cx.theme().colors().text_muted.opacity(0.5),
+                    )),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(render_matched_line(location_match, cx)),
+        )
+        .into_any_element()
+}
+
 /// Renders the precomputed displayed line, resolving the stored syntax highlight
 /// ids against the current theme and overlaying the match with a highlighted
 /// background and bold weight.
-fn render_matched_line(location_match: &LocationMatch, cx: &App) -> StyledText {
+pub(crate) fn render_matched_line(location_match: &LocationMatch, cx: &App) -> StyledText {
     let settings = ThemeSettings::get_global(cx);
     let text_style = TextStyle {
         color: cx.theme().colors().text,

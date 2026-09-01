@@ -189,11 +189,14 @@ pub struct EditorSettingsContent {
     pub go_to_definition_fallback: Option<GoToDefinitionFallback>,
 
     /// Where to show LSP results that can contain multiple locations
-    /// (Go to Definition, Go to Implementation, Find All References). A single
-    /// result always opens directly. Individual actions can override this with
-    /// their `open_results_in` argument.
+    /// (Go to Definition, Go to Implementation, Find All References).
+    /// Individual actions can override this with their `open_results_in`
+    /// argument.
     ///
-    /// Default: multi_buffer
+    /// In `multi_buffer` and `picker` a single result opens directly; `peek`
+    /// shows it inline like any other result, and also handles cmd-click.
+    ///
+    /// Default: peek
     pub lsp_results_location: Option<OpenResultsIn>,
 
     /// How to scroll the target into view when navigating to a definition or reference
@@ -890,10 +893,13 @@ pub enum GoToDefinitionFallback {
 #[serde(rename_all = "snake_case")]
 pub enum OpenResultsIn {
     /// Open the results in a multibuffer.
-    #[default]
     MultiBuffer,
     /// Open the results in a filterable picker.
     Picker,
+    /// Open the results in a peek view: an inline panel below the cursor line
+    /// showing the locations next to a preview of the selected one.
+    #[default]
+    Peek,
 }
 
 /// How to scroll the target into view when navigating to a definition or reference.
