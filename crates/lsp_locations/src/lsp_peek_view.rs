@@ -15,9 +15,9 @@ use editor::scroll::Autoscroll;
 use editor::{Editor, EditorSettings, RowHighlightOptions};
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, DragMoveEvent, Element, Entity,
-    FocusHandle, Focusable, Global, GlobalElementId, InspectorElementId, LayoutId, MouseButton,
-    MouseUpEvent, Pixels, ScrollHandle, Subscription, WeakEntity, Window, canvas, div, prelude::*,
-    px,
+    FocusHandle, Focusable, Global, GlobalElementId, InspectorElementId, LayoutId, ListAlignment,
+    ListState, MouseButton, MouseUpEvent, Pixels, Subscription, WeakEntity, Window, canvas, div,
+    list, prelude::*, px,
 };
 use language::Capability;
 use multi_buffer::MultiBuffer;
@@ -356,7 +356,9 @@ struct PeekView {
     max_line_number: u32,
     preview_editor: Entity<Editor>,
     focus_handle: FocusHandle,
-    list_scroll_handle: ScrollHandle,
+    /// Virtualized: a symbol with thousands of references would otherwise lay
+    /// out every row on every frame.
+    list_state: ListState,
     /// Share of the peek's width given to the list. Adjusted by dragging the
     /// divider, and shared with later peeks through [`ListWidthFraction`].
     list_width_fraction: f32,
@@ -377,6 +379,7 @@ impl PeekView {
     ) -> Self {
         let match_indices = (0..matches.len()).collect::<Vec<_>>();
         let (entries, max_line_number) = group_entries(&matches, &match_indices);
+        let entry_count = entries.len();
 
         let preview_editor = cx.new(|cx| {
             // Narrowed per buffer as excerpts are set; the peek never writes.
@@ -424,7 +427,7 @@ impl PeekView {
             max_line_number,
             preview_editor,
             focus_handle,
-            list_scroll_handle: ScrollHandle::new(),
+            list_state: ListState::new(entry_count, ListAlignment::Top, px(400.)),
             list_width_fraction: list_width_fraction(cx),
             body_bounds: Bounds::default(),
             _dismiss_on_focus_out: dismiss_on_focus_out,
@@ -476,7 +479,7 @@ impl PeekView {
     /// (or hit a different row).
     fn select_and_scroll(&mut self, index: usize, cx: &mut Context<Self>) {
         self.select(index, cx);
-        self.list_scroll_handle.scroll_to_item(index);
+        self.list_state.scroll_to_reveal_item(index);
     }
 
     /// Moves the selection to the next selectable row in `direction`, wrapping
@@ -726,49 +729,52 @@ impl PeekView {
             )
     }
 
-    fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let entries = self
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| match entry {
-                Entry::Separator => div()
-                    .py(DynamicSpacing::Base04.rems(cx))
-                    .child(Divider::horizontal())
-                    .into_any_element(),
-                Entry::Header(path) => render_file_header(path, &self.project, cx),
-                Entry::Match(match_index) => {
-                    let Some(location_match) = self.matches.get(*match_index) else {
-                        return div().into_any_element();
-                    };
-                    ListItem::new(index)
-                        .spacing(ListItemSpacing::Sparse)
-                        .inset(true)
-                        .toggle_state(index == self.selected_index)
-                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                            // Single click previews, double click jumps, so the
-                            // list can be browsed with the mouse without the
-                            // peek closing under the pointer.
-                            this.focus_handle.focus(window, cx);
-                            this.select(index, cx);
-                            if event.click_count() > 1 {
-                                this.open_selected(false, window, cx);
-                            }
-                        }))
-                        .child(render_location_row(location_match, self.max_line_number, cx))
-                        .into_any_element()
-                }
-            })
-            .collect::<Vec<_>>();
+    /// Renders one row of the list. Called on demand by the virtualized list, so
+    /// it must not depend on any other row having been rendered.
+    fn render_entry(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        match self.entries.get(index) {
+            None => div().into_any_element(),
+            Some(Entry::Separator) => div()
+                .py(DynamicSpacing::Base04.rems(cx))
+                .child(Divider::horizontal())
+                .into_any_element(),
+            Some(Entry::Header(path)) => render_file_header(path, &self.project, cx),
+            Some(Entry::Match(match_index)) => {
+                let Some(location_match) = self.matches.get(*match_index) else {
+                    return div().into_any_element();
+                };
+                ListItem::new(index)
+                    .spacing(ListItemSpacing::Sparse)
+                    .inset(true)
+                    .toggle_state(index == self.selected_index)
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        // Single click previews, double click jumps, so the
+                        // list can be browsed with the mouse without the
+                        // peek closing under the pointer.
+                        this.focus_handle.focus(window, cx);
+                        this.select(index, cx);
+                        if event.click_count() > 1 {
+                            this.open_selected(false, window, cx);
+                        }
+                    }))
+                    .child(render_location_row(location_match, self.max_line_number, cx))
+                    .into_any_element()
+            }
+        }
+    }
 
+    fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .id("lsp-peek-locations")
             .flex_none()
             .w(relative(self.list_width_fraction))
             .h_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.list_scroll_handle)
-            .children(entries)
+            .child(
+                list(
+                    self.list_state.clone(),
+                    cx.processor(|this, index, _, cx| this.render_entry(index, cx)),
+                )
+                .size_full(),
+            )
     }
 }
 
@@ -781,7 +787,12 @@ impl Focusable for PeekView {
 impl Render for PeekView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .key_context("LspPeekView")
+            // `menu` matters as much as the name: Vim's normal-mode bindings are
+            // all guarded by `VimControl && !menu`, so without it `j`, `k` and
+            // friends would drive the editor behind the peek while the peek has
+            // focus. Declaring it is how every other menu-like widget, such as
+            // `ContextMenu`, steps out of Vim's way.
+            .key_context("LspPeekView menu")
             .track_focus(&self.focus_handle)
             .block_mouse_except_scroll()
             .on_action(cx.listener(Self::select_next))
