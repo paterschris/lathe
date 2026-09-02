@@ -1,13 +1,10 @@
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
-
 # Lathe
 
 A customized code editor forked from [Zed](https://zed.dev), focused on mobile development workflows, deeper git tooling, in-editor code review, and theme customization.
 
 Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks for my own workflow without waiting on upstream review, and without needing each change to fit Zed's product scope. Upstream Zed is the primary project - this fork tracks it closely and layers on my own changes.
 
-**Platforms:** macOS (Apple Silicon), Linux (x86_64), and Windows (x86_64; experimental).
+**Platforms:** macOS (Apple Silicon), Linux (x86_64 and arm64), and Windows (x86_64 and arm64; experimental).
 
 **Stability:** Lathe is maintained for my own daily use. Upstream syncs can occasionally introduce breakage; bug reports are welcome.
 
@@ -17,12 +14,13 @@ Ordered by how much each one differentiates Lathe from stock Zed. Upstream alrea
 
 1. [Mobile development](#mobile-development-expo--react-native) - Expo and bare React Native panel
 2. [Merge conflicts and interactive rebase](#merge-conflicts-and-interactive-rebase) - conflict resolution tab, full-file split view, drag-and-drop rebase
-3. [Pull request reviews](#pull-request-reviews) - GitHub and Bitbucket Cloud, in-editor
-4. [AI agent integration](#ai-agent-integration) - multi-account sign-in, approval control
-5. [Theme and syntax highlighting](#theme-and-syntax-highlighting) - custom theme, live 135+ color customizer
-6. [Git additions](#git-additions) - explorer tab, branch tree, undo, Git Flow
-7. [AWS profiles](#aws-profiles) - per-window profile selector
-8. [Terminal, windows, and workspaces](#terminal-windows-and-workspaces) - awaiting-input indicator, workspace groups, per-window zoom
+3. [Pull request reviews](#pull-request-reviews) - GitHub, GitLab, and Bitbucket, in-editor
+4. [Code navigation](#code-navigation) - peek view for definitions and references
+5. [AI agent integration](#ai-agent-integration) - multi-account sign-in, approval control
+6. [Theme and syntax highlighting](#theme-and-syntax-highlighting) - custom theme, live 200+ color customizer
+7. [Git additions](#git-additions) - explorer tab, branch tree, undo, Git Flow
+8. [AWS profiles](#aws-profiles) - per-window profile selector
+9. [Terminal, windows, and workspaces](#terminal-windows-and-workspaces) - awaiting-input indicator, workspace groups, per-window zoom
 
 ---
 
@@ -32,7 +30,7 @@ Lathe ships a first-class Mobile panel that auto-detects the kind of mobile proj
 
 ![Mobile Panel, iOS](assets/screenshots/mobile-panel-ios.png)
 
-Both toolchain sections report their own state, so a missing JDK or an unaccepted SDK licence is visible before a build fails rather than after. The action row follows the platform you're targeting: an iOS project offers **Boot simulator** and **Install pods**, while an Android one swaps in **adb reverse** and builds against whichever emulator or device is selected.
+Both toolchain sections report their own state, so a missing JDK or an unaccepted SDK license is visible before a build fails rather than after. The action row follows the platform you're targeting: an iOS project offers **Boot simulator** and **Install pods**, while an Android one swaps in **adb reverse** and builds against whichever emulator or device is selected.
 
 ![Mobile Panel, Android](assets/screenshots/mobile-panel-android.png)
 
@@ -57,7 +55,19 @@ The interactive rebase modal supports drag-and-drop reordering of commits and pe
 
 ## Pull request reviews
 
-A pull request panel with browser-based auth for GitHub and Bitbucket Cloud: browse PRs, read and leave review comments, see reviewers, and approve or request changes without leaving the editor. Verdict buttons toggle, so clicking Approve again retracts your approval. A separate section lists PRs you authored, with reviewer roll-ups showing where each one stands. Still being polished; the panel button can be hidden via `pull_request_panel.button`.
+A pull request panel for GitHub, GitLab, and Bitbucket, including GitHub Enterprise and self-hosted GitLab: browse PRs, read and leave review comments, see reviewers and CI status, and approve or request changes without leaving the editor. GitHub and Bitbucket Cloud sign in through the browser; enterprise hosts and GitLab take a personal access token. Verdict buttons toggle, so clicking Approve again retracts your approval. A checks chip summarizes the host's CI for the branch - passed, failed, or still running, with counts - so you can see whether a PR is worth reviewing yet.
+
+Beyond reviewing, you can request reviewers, merge or squash and merge, move a PR between draft and ready, and close or reopen it. On a pull request you didn't open, those author-only actions sit under a **More** menu instead of the button row, so a merge or a decline is never one stray click away from a review verdict. A separate section lists PRs you authored, with reviewer roll-ups showing where each one stands. Still being polished; the panel button can be hidden via `pull_request_panel.button`.
+
+---
+
+## Code navigation
+
+Go to Definition, Declaration, Implementation, Type Definition, and Find All References open a peek: an inline block below the cursor line holding the list of locations beside a preview of the selected one, in the manner of VS Code's peek view. These used to open a multibuffer in a new tab, which took you out of the file you were reading to answer a question about it. Peek is now the default for all five, and cmd-click and alt-cmd-click route through it as well. The divider between the list and the preview can be dragged; its position carries to later peeks and persists across restarts.
+
+The list is virtualized, so a symbol with thousands of references doesn't lay out thousands of rows on every frame. The peek also takes a `menu` key context, which keeps Vim's normal-mode `j` and `k` on the peek list rather than driving the editor behind it.
+
+Set `lsp_results_location` to `multi_buffer` or `picker` to go back to a tab or a filterable picker instead.
 
 ---
 
@@ -80,7 +90,7 @@ Lathe ships with its own default theme and a refined syntax highlighting palette
 ![Default Theme](assets/screenshots/default-theme-code.png)
 
 ### Theme Customizer
-A built-in panel for editing all 135+ theme colors, including syntax token colors, with HSLA sliders and live preview. Includes category filters, Lathe-specific color badges, and per-color reset. Open via the command palette: `theme customizer: Open`.
+A built-in panel for editing all 200+ theme colors, including syntax token colors, with HSLA sliders and live preview. Includes category filters, Lathe-specific color badges, and per-color reset. Open via the command palette: `theme customizer: open theme customizer`.
 
 ![Command Palette](assets/screenshots/theme-customizer-command-palette.png)
 
@@ -101,9 +111,9 @@ Branch resets, deletes, renames, and tag creation record an undo entry, and the 
 ### Git Flow commands
 Start and finish feature, release, and hotfix branches from the command palette. Finishing merges with `--no-ff` into the right target, tags releases and hotfixes, merges back into `develop`, and deletes the local branch. Failures surface as errors rather than half-completing silently.
 
-- `git flow: Start Feature` / `git flow: Finish Feature`
-- `git flow: Start Release` / `git flow: Finish Release`
-- `git flow: Start Hotfix` / `git flow: Finish Hotfix`
+- `git flow: start feature` / `git flow: finish feature`
+- `git flow: start release` / `git flow: finish release`
+- `git flow: start hotfix` / `git flow: finish hotfix`
 
 ### Branch from commit
 From any commit in the history view or graph, create a new branch off that revision without first checking out. Useful for forking experimental work off a specific point.
@@ -156,12 +166,12 @@ Save the set of currently open projects as a named **workspace group**, then reo
 
 Commands (via the command palette):
 
-- `workspace groups: Save Workspace Group`
-- `workspace groups: Open Workspace Group`
-- `workspace groups: Update Current Workspace Group`
-- `workspace groups: Rename Current Workspace Group`
-- `workspace groups: Bind Workspace Group Account`
-- `workspace groups: Unbind Workspace Group Account`
+- `workspace groups: save workspace group`
+- `workspace groups: open workspace group`
+- `workspace groups: update current workspace group`
+- `workspace groups: rename current workspace group`
+- `workspace groups: bind workspace group account`
+- `workspace groups: unbind workspace group account`
 
 ### Per-window zoom
 `Cmd +`, `Cmd -`, and `Cmd 0` adjust the buffer and UI font size of only the active Lathe window, so two windows side-by-side can be zoomed independently. The "Reset Zoom" menu action and `Cmd +scroll-wheel` (when mouse-wheel zoom is enabled) also stay scoped to the focused window. The persisted variants (the menu's `… (persisted)` items) still write to `settings.json` and apply globally.
@@ -187,7 +197,7 @@ Download the latest release from [Releases](https://github.com/paterschris/lathe
 
 - **macOS**: Download the `.dmg`, open it, and drag **Lathe.app** to `/Applications`. A `.zip` is also available if you prefer. macOS builds are code-signed and notarized by Apple.
 - **Linux**: Download the `.tar.gz` and extract it, or use the install script after building from source (see below). Like upstream Zed, the editor needs the host's ALSA runtime (`libasound2` on Debian/Ubuntu, `alsa-lib` on Fedora/Arch) and working Vulkan drivers; both are preinstalled on typical desktop distros.
-- **Windows**: Download the x86_64 setup `.exe` or `.zip`. Windows builds are currently unsigned; see [Installing on Windows](#installing-on-windows).
+- **Windows**: Download the setup `.exe` or `.zip` for your architecture (x86_64 or arm64). Windows builds are currently unsigned; see [Installing on Windows](#installing-on-windows).
 
 ### Installing on Windows
 
@@ -244,8 +254,8 @@ open target/release/bundle/osx/Lathe.app
 
 Lathe ships on two channels:
 
-- **Stable** — tagged `vX.Y.Z`, the recommended build for daily use.
-- **Beta** — tagged `vX.Y.Z-beta`, published as GitHub prereleases with a distinct app icon. Beta builds typically contain the latest upstream Zed sync before it's rolled into stable.
+- **Stable** - tagged `vX.Y.Z`, the recommended build for daily use.
+- **Beta** - tagged `vX.Y.Z-beta`, published as GitHub prereleases with a distinct app icon. Beta builds typically contain the latest upstream Zed sync before it's rolled into stable.
 
 Homebrew installs stable by default. To try a beta, grab the `-beta` asset from [Releases](https://github.com/paterschris/lathe/releases).
 
@@ -291,9 +301,10 @@ Lathe periodically merges from [upstream Zed](https://github.com/zed-industries/
 
 Lathe inherits its licensing from upstream Zed:
 
-- The application is licensed under the [GNU Affero General Public License v3.0](LICENSE-AGPL).
-- `gpui` and several foundational crates are licensed under the [GNU General Public License v3.0](LICENSE-GPL).
-- Other components are licensed under the [Apache License 2.0](LICENSE-APACHE).
+- The source is licensed primarily under the [GNU General Public License v3.0 or later](LICENSE-GPL).
+- Some components are licensed under the [Apache License 2.0](LICENSE-APACHE), where marked.
+
+Upstream Zed relicensed from AGPL to GPL in May 2026, and this fork follows it, so there is no longer an AGPL license file.
 
 All upstream license terms are preserved. See the individual `LICENSE-*` files at the repo root.
 
