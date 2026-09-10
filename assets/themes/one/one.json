@@ -399,6 +399,14 @@
             "font_style": null,
             "font_weight": null
           },
+          "variable.parameter.chain_1": { "color": "#74ade8ff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_2": { "color": "#d07277ff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_3": { "color": "#a1c181ff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_4": { "color": "#dec184ff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_5": { "color": "#b477cfff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_6": { "color": "#6eb4bfff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_7": { "color": "#bf956aff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_8": { "color": "#dfc184ff", "font_style": null, "font_weight": null },
           "variable.special": {
             "color": "#bf956aff",
             "font_style": null,
@@ -816,6 +824,14 @@
             "font_style": null,
             "font_weight": null
           },
+          "variable.parameter.chain_1": { "color": "#5c78e2ff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_2": { "color": "#d3604fff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_3": { "color": "#669f59ff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_4": { "color": "#a48819ff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_5": { "color": "#a349abff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_6": { "color": "#3a82b7ff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_7": { "color": "#ad6e25ff", "font_style": null, "font_weight": null },
+          "variable.parameter.chain_8": { "color": "#984ea5ff", "font_style": null, "font_weight": null },
           "variable.special": {
             "color": "#ad6e25ff",
             "font_style": null,

@@ -104,6 +104,8 @@ struct SyntaxMapCapturesLayer<'a> {
     captures: QueryCaptures<'a, 'a, 'static, TextProvider<'a>, &'a [u8]>,
     next_capture: Option<QueryCapture<'a>>,
     grammar_index: usize,
+    query: &'a Query,
+    text: &'a Rope,
     _query_cursor: QueryCursorHandle,
 }
 
@@ -115,6 +117,7 @@ struct SyntaxMapMatchesLayer<'a> {
     has_next: bool,
     matches: QueryMatches<'a, 'a, 'static, TextProvider<'a>, &'a [u8]>,
     query: &'a Query,
+    text: &'a Rope,
     grammar_index: usize,
     _query_cursor: QueryCursorHandle,
 }
@@ -1159,6 +1162,8 @@ impl<'a> SyntaxMapCaptures<'a> {
             let mut layer = SyntaxMapCapturesLayer {
                 depth: layer.depth,
                 grammar_index,
+                query,
+                text,
                 next_capture: None,
                 captures,
                 _query_cursor: query_cursor,
@@ -1306,6 +1311,7 @@ impl<'a> SyntaxMapMatches<'a> {
                 grammar_index,
                 matches,
                 query,
+                text,
                 next_pattern_index: 0,
                 next_captures: Vec::new(),
                 has_next: false,
@@ -1388,7 +1394,11 @@ impl<'a> SyntaxMapMatches<'a> {
 
 impl SyntaxMapCapturesLayer<'_> {
     fn advance(&mut self) {
-        self.next_capture = self.captures.next().map(|(mat, ix)| mat.captures[*ix]);
+        self.next_capture = self
+            .captures
+            .by_ref()
+            .find(|(mat, _)| satisfies_custom_predicates(self.query, mat, self.text))
+            .map(|(mat, ix)| mat.captures[*ix]);
     }
 
     fn sort_key(&self) -> (usize, Reverse<usize>, usize) {
@@ -1405,7 +1415,7 @@ impl SyntaxMapMatchesLayer<'_> {
     fn advance(&mut self) {
         loop {
             if let Some(mat) = self.matches.next() {
-                if !satisfies_custom_predicates(self.query, mat) {
+                if !satisfies_custom_predicates(self.query, mat, self.text) {
                     continue;
                 }
                 self.next_captures.clear();
@@ -1445,11 +1455,23 @@ impl<'a> Iterator for SyntaxMapCaptures<'a> {
     }
 }
 
-fn satisfies_custom_predicates(query: &Query, mat: &QueryMatch) -> bool {
+fn satisfies_custom_predicates(query: &Query, mat: &QueryMatch, text: &Rope) -> bool {
     for predicate in query.general_predicates(mat.pattern_index) {
         let satisfied = match predicate.operator.as_ref() {
             "has-parent?" => has_parent(&predicate.args, mat),
             "not-has-parent?" => !has_parent(&predicate.args, mat),
+            "sibling-index-is-odd?" => sibling_index_parity(&predicate.args, mat, true),
+            "sibling-index-is-even?" => sibling_index_parity(&predicate.args, mat, false),
+            "ancestor-count-is-odd?" => ancestor_count_parity(&predicate.args, mat, true),
+            "ancestor-count-is-even?" => ancestor_count_parity(&predicate.args, mat, false),
+            "is-parameter-reference-odd?" => {
+                is_parameter_reference(&predicate.args, mat, text, true)
+            }
+            "is-parameter-reference-even?" => {
+                is_parameter_reference(&predicate.args, mat, text, false)
+            }
+            "sibling-index-mod?" => sibling_index_mod(&predicate.args, mat),
+            "is-parameter-reference-mod?" => is_parameter_reference_mod(&predicate.args, mat, text),
             _ => true,
         };
         if !satisfied {
@@ -1459,23 +1481,189 @@ fn satisfies_custom_predicates(query: &Query, mat: &QueryMatch) -> bool {
     true
 }
 
+fn resolve_capture<'a>(
+    args: &[QueryPredicateArg],
+    mat: &QueryMatch<'a, 'a>,
+) -> Option<QueryCapture<'a>> {
+    let QueryPredicateArg::Capture(capture_index) = args.first()? else {
+        return None;
+    };
+    mat.captures
+        .iter()
+        .find(|capture| capture.index == *capture_index)
+        .copied()
+}
+
 fn has_parent(args: &[QueryPredicateArg], mat: &QueryMatch) -> bool {
-    let (
-        Some(QueryPredicateArg::Capture(capture_ix)),
-        Some(QueryPredicateArg::String(parent_kind)),
-    ) = (args.first(), args.get(1))
-    else {
+    let Some(QueryPredicateArg::String(parent_kind)) = args.get(1) else {
         return false;
     };
-
-    let Some(capture) = mat.captures.iter().find(|c| c.index == *capture_ix) else {
+    let Some(capture) = resolve_capture(args, mat) else {
         return false;
     };
-
     capture
         .node
         .parent()
         .is_some_and(|p| p.kind() == parent_kind.as_ref())
+}
+
+fn sibling_index_parity(args: &[QueryPredicateArg], mat: &QueryMatch, want_odd: bool) -> bool {
+    let Some(capture) = resolve_capture(args, mat) else {
+        return false;
+    };
+    let Some(parent) = capture.node.parent() else {
+        return false;
+    };
+    let Some(grandparent) = parent.parent() else {
+        return false;
+    };
+    let mut cursor = grandparent.walk();
+    grandparent
+        .named_children(&mut cursor)
+        .enumerate()
+        .find(|(_, child)| child.id() == parent.id())
+        .is_some_and(|(index, _)| (index % 2 != 0) == want_odd)
+}
+
+fn sibling_index_mod(args: &[QueryPredicateArg], mat: &QueryMatch) -> bool {
+    let Some(capture) = resolve_capture(args, mat) else {
+        return false;
+    };
+    let (Some(QueryPredicateArg::String(modulus)), Some(QueryPredicateArg::String(remainder))) =
+        (args.get(1), args.get(2))
+    else {
+        return false;
+    };
+    let (Ok(modulus), Ok(remainder)) = (modulus.parse::<usize>(), remainder.parse::<usize>())
+    else {
+        return false;
+    };
+    if modulus == 0 {
+        return false;
+    }
+    let Some(parent) = capture.node.parent() else {
+        return false;
+    };
+    let Some(grandparent) = parent.parent() else {
+        return false;
+    };
+    let mut cursor = grandparent.walk();
+    grandparent
+        .named_children(&mut cursor)
+        .enumerate()
+        .find(|(_, child)| child.id() == parent.id())
+        .is_some_and(|(index, _)| index % modulus == remainder)
+}
+
+fn ancestor_count_parity(args: &[QueryPredicateArg], mat: &QueryMatch, want_odd: bool) -> bool {
+    let Some(capture) = resolve_capture(args, mat) else {
+        return false;
+    };
+    let kind = capture.node.kind();
+    let mut count = 0;
+    let mut current = capture.node.parent();
+    while let Some(ancestor) = current {
+        if ancestor.kind() == kind {
+            count += 1;
+        }
+        current = ancestor.parent();
+    }
+    count > 0 && (count % 2 != 0) == want_odd
+}
+
+fn is_parameter_reference(
+    args: &[QueryPredicateArg],
+    mat: &QueryMatch,
+    text: &Rope,
+    want_odd: bool,
+) -> bool {
+    let Some(capture) = resolve_capture(args, mat) else {
+        return false;
+    };
+    parameter_reference_index(capture.node, text).is_some_and(|index| (index % 2 != 0) == want_odd)
+}
+
+fn is_parameter_reference_mod(args: &[QueryPredicateArg], mat: &QueryMatch, text: &Rope) -> bool {
+    let Some(capture) = resolve_capture(args, mat) else {
+        return false;
+    };
+    let (Some(QueryPredicateArg::String(modulus)), Some(QueryPredicateArg::String(remainder))) =
+        (args.get(1), args.get(2))
+    else {
+        return false;
+    };
+    let (Ok(modulus), Ok(remainder)) = (modulus.parse::<usize>(), remainder.parse::<usize>())
+    else {
+        return false;
+    };
+    if modulus == 0 {
+        return false;
+    }
+    parameter_reference_index(capture.node, text).is_some_and(|index| index % modulus == remainder)
+}
+
+fn parameter_reference_index(node: tree_sitter::Node, text: &Rope) -> Option<usize> {
+    if node.kind() != "identifier" {
+        return None;
+    }
+    let name: String = text.chunks_in_range(node.byte_range()).collect();
+    let mut current = node.parent();
+    while let Some(ancestor) = current {
+        match ancestor.kind() {
+            "arrow_function"
+            | "function_declaration"
+            | "function_expression"
+            | "method_definition"
+            | "function"
+            | "generator_function"
+            | "generator_function_declaration" => {
+                return function_parameter_index(ancestor, &name, text);
+            }
+            _ => current = ancestor.parent(),
+        }
+    }
+    None
+}
+
+fn function_parameter_index(
+    function_node: tree_sitter::Node,
+    parameter_name: &str,
+    text: &Rope,
+) -> Option<usize> {
+    let parameters = (0..function_node.named_child_count() as u32)
+        .filter_map(|index| function_node.named_child(index))
+        .find(|child| child.kind() == "formal_parameters")?;
+    let mut cursor = parameters.walk();
+    let mut index = 0;
+    for parameter in parameters.named_children(&mut cursor) {
+        let identifier = match parameter.kind() {
+            "required_parameter" | "optional_parameter" => find_parameter_identifier(parameter),
+            "identifier" => Some(parameter),
+            _ => continue,
+        };
+        if let Some(identifier) = identifier {
+            let name: String = text.chunks_in_range(identifier.byte_range()).collect();
+            if name == parameter_name {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn find_parameter_identifier(parameter: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    for field in ["pattern", "name"] {
+        if let Some(identifier) = parameter.child_by_field_name(field) {
+            if identifier.kind() == "identifier" {
+                return Some(identifier);
+            }
+        }
+    }
+    let mut cursor = parameter.walk();
+    parameter
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "identifier")
 }
 
 fn join_ranges(

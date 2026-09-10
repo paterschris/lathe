@@ -3,13 +3,14 @@ use crate::{
     LanguageConfig, LanguageMatcher, LanguageName, LanguageQueries,
     buffer_tests::markdown_inline_lang, markdown_lang, rust_lang,
 };
+use anyhow::Context as _;
 use gpui::App;
 use pretty_assertions::assert_eq;
 use rand::rngs::StdRng;
 use std::borrow::Cow;
 use std::{env, ops::Range, sync::Arc};
-use text::{Buffer, BufferId, ReplicaId};
-use tree_sitter::Node;
+use text::{Buffer, BufferId, ReplicaId, Rope};
+use tree_sitter::{Node, Parser, Query, QueryCursor};
 use unindent::Unindent as _;
 use util::test::marked_text_ranges;
 
@@ -81,6 +82,61 @@ fn test_splice_included_ranges() {
             },
         }
     }
+}
+
+#[test]
+fn test_parameter_predicates_match_only_their_ordinal_parameter() -> anyhow::Result<()> {
+    let source = "function f(first, second, third) { return first + second + third; }";
+    let rope = Rope::from(source);
+    let language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+    let mut parser = Parser::new();
+    parser.set_language(&language)?;
+    let tree = parser
+        .parse(source, None)
+        .context("failed to parse TypeScript source")?;
+
+    let declaration_query = Query::new(
+        &language,
+        r#"
+        (required_parameter
+          (identifier) @parameter
+          (#sibling-index-mod? @parameter "3" "1"))
+        "#,
+    )?;
+    let reference_query = Query::new(
+        &language,
+        r#"
+        ((identifier) @parameter
+          (#is-parameter-reference-mod? @parameter "3" "1"))
+        "#,
+    )?;
+
+    assert_eq!(
+        matching_capture_texts(&declaration_query, tree.root_node(), &rope),
+        ["second"]
+    );
+    assert_eq!(
+        matching_capture_texts(&reference_query, tree.root_node(), &rope),
+        ["second", "second"]
+    );
+    Ok(())
+}
+
+fn matching_capture_texts(query: &Query, root: Node, text: &Rope) -> Vec<String> {
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, root, TextProvider(text));
+    let mut captures = Vec::new();
+    while let Some(query_match) = matches.next() {
+        if satisfies_custom_predicates(query, query_match, text) {
+            captures.extend(
+                query_match
+                    .captures
+                    .iter()
+                    .map(|capture| text.chunks_in_range(capture.node.byte_range()).collect()),
+            );
+        }
+    }
+    captures
 }
 
 #[gpui::test]
