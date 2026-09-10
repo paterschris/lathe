@@ -956,6 +956,7 @@ impl GitStore {
         client.add_entity_request_handler(Self::handle_diff_checkpoints);
         client.add_entity_request_handler(Self::handle_load_commit_diff);
         client.add_entity_request_handler(Self::handle_file_history);
+        client.add_entity_request_handler(Self::handle_change_to_commit);
         client.add_entity_request_handler(Self::handle_checkout_files);
         client.add_entity_request_handler(Self::handle_add_path_to_gitignore);
         client.add_entity_request_handler(Self::handle_add_path_to_git_info_exclude);
@@ -9499,8 +9500,6 @@ impl Repository {
         )
     }
 
-    /// Detached HEAD checkout of an arbitrary revision (commit SHA, tag, etc.).
-    /// Not yet wired through collab — bails on remote projects.
     pub fn delete_branch(
         &mut self,
         is_remote: bool,

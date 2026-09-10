@@ -117,6 +117,24 @@ impl super::GitStore {
         self.undo(id, cx)
     }
 
+    pub(super) async fn handle_change_to_commit(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitChangeToCommit>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+        let revision = envelope.payload.revision;
+
+        repository_handle
+            .update(&mut cx, |repository_handle, _| {
+                repository_handle.change_to_commit(revision)
+            })
+            .await??;
+
+        Ok(proto::Ack {})
+    }
+
     pub(super) async fn handle_file_history(
         this: Entity<Self>,
         envelope: TypedEnvelope<proto::GitFileHistory>,
@@ -325,6 +343,7 @@ impl super::Repository {
     }
 
     pub fn change_to_commit(&mut self, revision: String) -> oneshot::Receiver<Result<()>> {
+        let id = self.id;
         let label: SharedString = format!("git checkout {revision}").into();
         self.send_job(
             "change_to_commit",
@@ -334,8 +353,16 @@ impl super::Repository {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
                         backend.change_to_commit(revision).await
                     }
-                    RepositoryState::Remote(_) => {
-                        bail!("detached checkout is not yet supported on remote projects")
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                        client
+                            .request(proto::GitChangeToCommit {
+                                project_id: project_id.0,
+                                repository_id: id.to_proto(),
+                                revision,
+                            })
+                            .await?;
+
+                        Ok(())
                     }
                 }
             },

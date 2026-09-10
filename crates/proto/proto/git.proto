@@ -197,6 +197,12 @@ message GitChangeBranch {
   string branch_name = 4;
 }
 
+message GitChangeToCommit {
+  uint64 project_id = 1;
+  uint64 repository_id = 2;
+  string revision = 3;
+}
+
 message GitRenameBranch {
   uint64 project_id = 1;
   uint64 repository_id = 2;

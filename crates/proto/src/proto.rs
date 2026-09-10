@@ -314,6 +314,7 @@ messages!(
     (GitShow, Background),
     (GitCommitDetails, Background),
     (GitFileHistory, Background),
+    (GitChangeToCommit, Background),
     (GitFileHistoryResponse, Background),
     (GitCreateCheckpoint, Background),
     (GitCreateCheckpointResponse, Background),
@@ -573,6 +574,7 @@ request_messages!(
     (RegisterBufferWithLanguageServers, Ack),
     (GitShow, GitCommitDetails),
     (GitFileHistory, GitFileHistoryResponse),
+    (GitChangeToCommit, Ack),
     (GitCreateCheckpoint, GitCreateCheckpointResponse),
     (
         GitCreateArchiveCheckpoint,
@@ -798,6 +800,7 @@ entity_messages!(
     RegisterBufferWithLanguageServers,
     GitShow,
     GitFileHistory,
+    GitChangeToCommit,
     GitCreateCheckpoint,
     GitRestoreCheckpoint,
     GitCompareCheckpoints,

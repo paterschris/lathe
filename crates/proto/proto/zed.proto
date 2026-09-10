@@ -512,7 +512,11 @@ message Envelope {
     RefreshDocumentSymbols refresh_document_symbols = 477;
     // 478 and 479 are taken by the Lathe git_file_history pair above.
     BlameBufferAtRevision blame_buffer_at_revision = 480;
-    BlameBufferAtRevisionResponse blame_buffer_at_revision_response = 481; // current max
+    BlameBufferAtRevisionResponse blame_buffer_at_revision_response = 481;
+
+    // Lathe: detached HEAD checkout. Sits at the fork's tail, so an upstream
+    // merge that claims 482 renumbers this rather than the upstream message.
+    GitChangeToCommit git_change_to_commit = 482; // current max
   }
 
   reserved 87 to 88;
