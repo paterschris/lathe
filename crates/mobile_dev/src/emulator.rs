@@ -27,15 +27,19 @@ pub fn emulator_program() -> PathBuf {
 
 /// Path to `sdkmanager` in the SDK that has the command-line tools, if any.
 pub fn sdkmanager_path() -> Option<PathBuf> {
-    let path = toolchain::sdk_dir()?
-        .join(format!("cmdline-tools/latest/bin/{}", toolchain::tool_script("sdkmanager")));
+    let path = toolchain::sdk_dir()?.join(format!(
+        "cmdline-tools/latest/bin/{}",
+        toolchain::tool_script("sdkmanager")
+    ));
     path.is_file().then_some(path)
 }
 
 /// Path to `avdmanager` in the SDK that has the command-line tools, if any.
 pub fn avdmanager_path() -> Option<PathBuf> {
-    let path = toolchain::sdk_dir()?
-        .join(format!("cmdline-tools/latest/bin/{}", toolchain::tool_script("avdmanager")));
+    let path = toolchain::sdk_dir()?.join(format!(
+        "cmdline-tools/latest/bin/{}",
+        toolchain::tool_script("avdmanager")
+    ));
     path.is_file().then_some(path)
 }
 
@@ -46,6 +50,36 @@ pub fn default_system_image() -> &'static str {
         "system-images;android-35;google_apis;arm64-v8a"
     } else {
         "system-images;android-35;google_apis;x86_64"
+    }
+}
+
+/// Hardware profiles Lathe can create without requiring Android Studio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AvdProfile {
+    Phone,
+    Tablet,
+}
+
+impl AvdProfile {
+    pub fn avd_name(self) -> &'static str {
+        match self {
+            Self::Phone => "Lathe_Pixel_API35",
+            Self::Tablet => "Lathe_Pixel_Tablet_API35",
+        }
+    }
+
+    pub fn device_id(self) -> &'static str {
+        match self {
+            Self::Phone => "pixel_7",
+            Self::Tablet => "pixel_tablet",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Phone => "Phone (Pixel, API 35)",
+            Self::Tablet => "Tablet (Pixel Tablet, API 35)",
+        }
     }
 }
 
@@ -96,4 +130,17 @@ pub fn launch_avd(name: &str, env: &[(String, String)]) -> Result<()> {
         .spawn()
         .with_context(|| format!("launching emulator {name}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avd_profiles_use_distinct_names_and_hardware_definitions() {
+        assert_eq!(AvdProfile::Phone.avd_name(), "Lathe_Pixel_API35");
+        assert_eq!(AvdProfile::Phone.device_id(), "pixel_7");
+        assert_eq!(AvdProfile::Tablet.avd_name(), "Lathe_Pixel_Tablet_API35");
+        assert_eq!(AvdProfile::Tablet.device_id(), "pixel_tablet");
+    }
 }

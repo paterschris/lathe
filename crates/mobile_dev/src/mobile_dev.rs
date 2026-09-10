@@ -125,8 +125,10 @@ actions!(
         RunE2eAndroid,
         /// Forward the Metro dev-server port to a USB-attached Android device.
         AdbReverse,
-        /// Create a default Android emulator (AVD) within Lathe.
+        /// Create a default Android phone emulator (AVD) within Lathe.
         CreateAvd,
+        /// Create a default Android tablet emulator (AVD) within Lathe.
+        CreateTabletAvd,
         /// Launch the Spotlight sidecar for live Sentry monitoring.
         StartSpotlight,
         /// Stop the running Spotlight sidecar.
@@ -249,7 +251,12 @@ fn register_workspace_actions(
         })
         .register_action(|workspace, _: &CreateAvd, window, cx| {
             with_panel_in(workspace, window, cx, |panel, window, cx| {
-                panel.create_avd(window, cx)
+                panel.create_avd(emulator::AvdProfile::Phone, window, cx)
+            });
+        })
+        .register_action(|workspace, _: &CreateTabletAvd, window, cx| {
+            with_panel_in(workspace, window, cx, |panel, window, cx| {
+                panel.create_avd(emulator::AvdProfile::Tablet, window, cx)
             });
         })
         .register_action(|workspace, _: &StartSpotlight, window, cx| {
@@ -1302,12 +1309,15 @@ impl MobileDevPanel {
             .detach_and_log_err(cx);
     }
 
-    /// Create a default Pixel AVD entirely within Lathe (no Android Studio):
-    /// installs the emulator package and a system image via the SDK's
-    /// `sdkmanager`, then creates the AVD with `avdmanager`, all in a terminal
-    /// tab so the (large) download is visible. The new AVD appears in the
-    /// Android dropdown once the tracker next polls.
-    fn create_avd(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Create an Android phone or tablet AVD entirely within Lathe (no Android
+    /// Studio). The SDK download runs in a terminal tab, and the new AVD
+    /// appears in the Android dropdown once the tracker next polls.
+    fn create_avd(
+        &mut self,
+        profile: emulator::AvdProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (Some(sdkmanager), Some(avdmanager), Some(sdk)) = (
             emulator::sdkmanager_path(),
             emulator::avdmanager_path(),
@@ -1320,7 +1330,8 @@ impl MobileDevPanel {
             return;
         };
         let image = emulator::default_system_image();
-        let name = "Lathe_Pixel_API35";
+        let name = profile.avd_name();
+        let device_id = profile.device_id();
         let sdkmanager = shell_quote(&sdkmanager.to_string_lossy());
         let avdmanager = shell_quote(&avdmanager.to_string_lossy());
         // Accept licenses, install the emulator + system image, then create the
@@ -1328,9 +1339,16 @@ impl MobileDevPanel {
         let command = format!(
             "yes | {sdkmanager} --licenses >/dev/null 2>&1; \
              {sdkmanager} 'emulator' '{image}' && \
-             echo no | {avdmanager} create avd -n '{name}' -k '{image}' -d pixel_7 --force"
+             echo no | {avdmanager} create avd -n '{name}' -k '{image}' -d {device_id} --force"
         );
-        self.run_shell_in_terminal("Create AVD", command, sdk, true, window, cx);
+        self.run_shell_in_terminal(
+            format!("Create AVD ({})", profile.label()),
+            command,
+            sdk,
+            true,
+            window,
+            cx,
+        );
     }
 
     fn apply_device_poll(&mut self, result: Result<Vec<AdbDevice>>) {
@@ -1582,11 +1600,23 @@ impl MobileDevPanel {
                                     });
                             }
                         }
+                        let phone_panel = panel.clone();
                         menu = menu.separator().entry(
-                            "Create AVD (Pixel, API 35)",
+                            "Create AVD (Phone, Pixel API 35)",
                             None,
                             move |window, cx| {
-                                panel.update(cx, |panel, cx| panel.create_avd(window, cx));
+                                phone_panel.update(cx, |panel, cx| {
+                                    panel.create_avd(emulator::AvdProfile::Phone, window, cx)
+                                });
+                            },
+                        );
+                        menu = menu.entry(
+                            "Create AVD (Tablet, Pixel Tablet API 35)",
+                            None,
+                            move |window, cx| {
+                                panel.update(cx, |panel, cx| {
+                                    panel.create_avd(emulator::AvdProfile::Tablet, window, cx)
+                                });
                             },
                         );
                         menu

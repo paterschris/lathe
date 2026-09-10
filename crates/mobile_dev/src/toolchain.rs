@@ -226,7 +226,10 @@ fn find_java_home(jdk_dir: &Path) -> Option<PathBuf> {
             continue;
         }
         for candidate in [path.join("Contents/Home"), path.clone()] {
-            if candidate.join(format!("bin/{}", tool_binary("java"))).is_file() {
+            if candidate
+                .join(format!("bin/{}", tool_binary("java")))
+                .is_file()
+            {
                 return Some(candidate);
             }
         }
@@ -686,5 +689,4 @@ mod tests {
             format!("platform-tools/{}", tool_binary("adb")),
         );
     }
-
 }
