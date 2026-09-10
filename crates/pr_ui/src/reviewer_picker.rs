@@ -72,24 +72,22 @@ impl ReviewerPicker {
             let result = provider
                 .list_reviewer_candidates(&remote, auth, http_client)
                 .await;
-            picker
-                .update(cx, |picker, cx| {
-                    match result {
-                        Ok(candidates) if candidates.is_empty() => {
-                            picker.delegate.status = LoadStatus::Empty;
-                        }
-                        Ok(candidates) => {
-                            picker.delegate.filtered = (0..candidates.len()).collect();
-                            picker.delegate.candidates = candidates;
-                            picker.delegate.status = LoadStatus::Loaded;
-                        }
-                        Err(error) => {
-                            picker.delegate.status =
-                                LoadStatus::Failed(format!("{error:#}").into());
-                        }
+            picker.update(cx, |picker, cx| {
+                match result {
+                    Ok(candidates) if candidates.is_empty() => {
+                        picker.delegate.status = LoadStatus::Empty;
                     }
-                    cx.notify();
-                });
+                    Ok(candidates) => {
+                        picker.delegate.filtered = (0..candidates.len()).collect();
+                        picker.delegate.candidates = candidates;
+                        picker.delegate.status = LoadStatus::Loaded;
+                    }
+                    Err(error) => {
+                        picker.delegate.status = LoadStatus::Failed(format!("{error:#}").into());
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }

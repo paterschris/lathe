@@ -355,7 +355,8 @@ impl PullRequestView {
                 u32,
                 Option<GitHostAuth>,
                 Arc<dyn HttpClient>,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
             + Send
             + 'static,
     {
@@ -686,11 +687,7 @@ impl PullRequestView {
         let Some(new_comment) = self.new_comment.as_ref() else {
             return;
         };
-        let (path, line, side) = (
-            new_comment.path.clone(),
-            new_comment.line,
-            new_comment.side,
-        );
+        let (path, line, side) = (new_comment.path.clone(), new_comment.line, new_comment.side);
         let Some(editor) = self.new_comment_editor.clone() else {
             return;
         };
@@ -996,7 +993,9 @@ fn parse_hunk_new_start(header: &str) -> Option<u32> {
 /// Extracts the old-file start line from a `@@ -a,b +c,d @@` hunk header.
 fn parse_hunk_old_start(header: &str) -> Option<u32> {
     let after_minus = header.split('-').nth(1)?;
-    let number = after_minus.split(|ch: char| ch == ',' || ch == ' ').next()?;
+    let number = after_minus
+        .split(|ch: char| ch == ',' || ch == ' ')
+        .next()?;
     number.parse::<u32>().ok()
 }
 
@@ -2533,10 +2532,8 @@ impl PullRequestView {
                                 detail.deletions,
                             )
                         };
-                        let mut stats = format!(
-                            "{files} {}",
-                            if files == 1 { "file" } else { "files" }
-                        );
+                        let mut stats =
+                            format!("{files} {}", if files == 1 { "file" } else { "files" });
                         // Omit a zero side entirely: "+25" says what "+25 -0"
                         // says, without implying a deletion count was measured
                         // and found empty.
@@ -2549,9 +2546,7 @@ impl PullRequestView {
                                 if additions > 0 { "" } else { "," }
                             ));
                         }
-                        Label::new(stats)
-                            .color(Color::Muted)
-                            .size(LabelSize::Small)
+                        Label::new(stats).color(Color::Muted).size(LabelSize::Small)
                     })
                     .when_some(detail.commits, |this, commits| {
                         this.child(
@@ -2811,13 +2806,11 @@ impl PullRequestView {
                     .when(
                         matches!(detail.state, PullRequestState::Closed) && !in_flight,
                         |this| {
-                            this.child(
-                                Button::new("pr-reopen", "Reopen").on_click(cx.listener(
-                                    |this, _, _window, cx| {
-                                        this.reopen_pull_request(cx);
-                                    },
-                                )),
-                            )
+                            this.child(Button::new("pr-reopen", "Reopen").on_click(cx.listener(
+                                |this, _, _window, cx| {
+                                    this.reopen_pull_request(cx);
+                                },
+                            )))
                         },
                     )
                     .when(in_flight, |this| {
@@ -2930,9 +2923,7 @@ impl PullRequestView {
         self.workspace
             .update(cx, |workspace, cx| {
                 workspace.toggle_modal(window, cx, |window, cx| {
-                    crate::reviewer_picker::ReviewerPicker::new(
-                        provider, remote, view, window, cx,
-                    )
+                    crate::reviewer_picker::ReviewerPicker::new(provider, remote, view, window, cx)
                 });
             })
             .ok();
@@ -3142,7 +3133,10 @@ mod tests {
         );
         let files = parse_unified_diff(diff);
         assert_eq!(
-            files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+            files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
             vec!["a.txt", "b.txt"]
         );
         assert_eq!(files[0].hunks.len(), 2);
@@ -3227,7 +3221,10 @@ mod tests {
     #[test]
     fn parses_hunk_headers() {
         assert_eq!(parse_hunk_new_start("@@ -1,3 +1,4 @@"), Some(1));
-        assert_eq!(parse_hunk_new_start("@@ -10,2 +25,7 @@ fn context()"), Some(25));
+        assert_eq!(
+            parse_hunk_new_start("@@ -10,2 +25,7 @@ fn context()"),
+            Some(25)
+        );
         // A single-line hunk omits the count.
         assert_eq!(parse_hunk_new_start("@@ -1 +1 @@"), Some(1));
         assert_eq!(parse_hunk_new_start("not a hunk header"), None);
@@ -3247,8 +3244,7 @@ mod tests {
         );
         let files = parse_unified_diff(diff);
         let rebuilt = reconstruct_file_texts(&files[0]);
-        let (base, head, line_to_row) =
-            (rebuilt.base_text, rebuilt.head_text, rebuilt.line_to_row);
+        let (base, head, line_to_row) = (rebuilt.base_text, rebuilt.head_text, rebuilt.line_to_row);
 
         assert_eq!(base.as_deref(), Some("keep\ndrop\ntail\n"));
         assert_eq!(head, "keep\nadd\ntail\n");
@@ -3317,7 +3313,10 @@ mod tests {
     #[test]
     fn parses_old_side_hunk_headers() {
         assert_eq!(parse_hunk_old_start("@@ -1,3 +1,4 @@"), Some(1));
-        assert_eq!(parse_hunk_old_start("@@ -42,2 +25,7 @@ fn context()"), Some(42));
+        assert_eq!(
+            parse_hunk_old_start("@@ -42,2 +25,7 @@ fn context()"),
+            Some(42)
+        );
         assert_eq!(parse_hunk_old_start("@@ -7 +7 @@"), Some(7));
         assert_eq!(parse_hunk_old_start("not a hunk header"), None);
     }

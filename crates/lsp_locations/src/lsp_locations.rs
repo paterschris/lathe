@@ -769,7 +769,11 @@ impl PickerDelegate for LspLocationsDelegate {
                         .spacing(ListItemSpacing::Sparse)
                         .inset(true)
                         .toggle_state(selected)
-                        .child(render_location_row(location_match, self.max_line_number, cx))
+                        .child(render_location_row(
+                            location_match,
+                            self.max_line_number,
+                            cx,
+                        ))
                         .into_any_element(),
                 )
             }
@@ -844,9 +848,8 @@ pub(crate) fn render_location_row(
                 .w(rems((max_line_number.max(1).ilog10() + 1) as f32 * 0.5))
                 .justify_end()
                 .child(
-                    Label::new(location_match.line_number.to_string()).color(Color::Custom(
-                        cx.theme().colors().text_muted.opacity(0.5),
-                    )),
+                    Label::new(location_match.line_number.to_string())
+                        .color(Color::Custom(cx.theme().colors().text_muted.opacity(0.5))),
                 ),
         )
         .child(

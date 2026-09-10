@@ -204,8 +204,7 @@ impl ConnectGitHostModal {
                     }
                     Ok(DeviceTokenPoll::Authorized(token)) => {
                         let login = fetch_login(&http_client, &token).await.unwrap_or_default();
-                        let stored =
-                            git_host_credentials::set(cx, &host, &login, &token).await;
+                        let stored = git_host_credentials::set(cx, &host, &login, &token).await;
                         this.update(cx, |this, cx| match stored {
                             Ok(()) => cx.emit(DismissEvent),
                             Err(error) => {
@@ -378,11 +377,7 @@ impl ConnectGitHostModal {
         let token_page = self.token_page_url();
         v_flex()
             .gap_2()
-            .child(
-                Label::new(blurb)
-                    .color(Color::Muted)
-                    .size(LabelSize::Small),
-            )
+            .child(Label::new(blurb).color(Color::Muted).size(LabelSize::Small))
             .when(needs_username, |this| {
                 this.child(self.username_input.clone())
             })
@@ -436,8 +431,7 @@ impl Render for ConnectGitHostModal {
             .p_4()
             .gap_3()
             .child(
-                Label::new(format!("Connect {}", self.host.display_name()))
-                    .size(LabelSize::Large),
+                Label::new(format!("Connect {}", self.host.display_name())).size(LabelSize::Large),
             )
             .child(body)
             .when_some(self.error.clone(), |this, error| {

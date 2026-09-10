@@ -401,7 +401,11 @@ region = us-east-1
                 .iter()
                 .map(|profile| (profile.name.as_ref(), profile.sso))
                 .collect::<Vec<_>>(),
-            vec![("plain", false), ("via-session", true), ("via-start-url", true)],
+            vec![
+                ("plain", false),
+                ("via-session", true),
+                ("via-start-url", true)
+            ],
         );
     }
 
@@ -479,7 +483,15 @@ sso_session = my-org
 
     #[test]
     fn parses_nothing_from_empty_or_malformed_input() {
-        for config in ["", "\n\n", "[unclosed\n", "]backwards[\n", "= no key\n", "[]\n", "[profile ]\n"] {
+        for config in [
+            "",
+            "\n\n",
+            "[unclosed\n",
+            "]backwards[\n",
+            "= no key\n",
+            "[]\n",
+            "[profile ]\n",
+        ] {
             assert!(
                 parse_profiles(config).is_empty(),
                 "expected no profiles from {config:?}",
