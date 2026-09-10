@@ -93,10 +93,7 @@ impl AwsProfileSelector {
                     .unwrap_or_default();
                 let (project_config, profiles) = cx
                     .background_spawn(async move {
-                        let project_config = worktree_roots
-                            .iter()
-                            .map(|root| root.join(".aws").join("config"))
-                            .find(|path| path.is_file());
+                        let project_config = crate::project_config_path(&worktree_roots);
                         let config_path = project_config
                             .clone()
                             .unwrap_or_else(crate::aws_config_path);
