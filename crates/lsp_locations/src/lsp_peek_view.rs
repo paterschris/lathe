@@ -243,15 +243,8 @@ pub(crate) fn open_for_editor(
     let workspace = workspace.downgrade();
     window
         .spawn(cx, async move |cx| {
-            let Some((kind, matches)) = resolve_matches(
-                kind,
-                &editor,
-                &workspace,
-                &project,
-                SingleResult::Show,
-                cx,
-            )
-            .await
+            let Some((kind, matches)) =
+                resolve_matches(kind, &editor, &workspace, &project, SingleResult::Show, cx).await
             else {
                 return;
             };
@@ -678,7 +671,11 @@ impl PeekView {
             .justify_between()
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
-            .child(Label::new(summary).size(LabelSize::Small).color(Color::Muted))
+            .child(
+                Label::new(summary)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
             .child(
                 IconButton::new("close-peek", IconName::Close)
                     .icon_size(IconSize::Small)
@@ -696,8 +693,7 @@ impl PeekView {
             return;
         }
         let list_width = self.body_bounds.right() - pointer_x;
-        let fraction =
-            (list_width / width).clamp(MIN_LIST_WIDTH_FRACTION, MAX_LIST_WIDTH_FRACTION);
+        let fraction = (list_width / width).clamp(MIN_LIST_WIDTH_FRACTION, MAX_LIST_WIDTH_FRACTION);
         if fraction == self.list_width_fraction {
             return;
         }
@@ -757,7 +753,11 @@ impl PeekView {
                             this.open_selected(false, window, cx);
                         }
                     }))
-                    .child(render_location_row(location_match, self.max_line_number, cx))
+                    .child(render_location_row(
+                        location_match,
+                        self.max_line_number,
+                        cx,
+                    ))
                     .into_any_element()
             }
         }
@@ -815,11 +815,11 @@ impl Render for PeekView {
                     .flex_1()
                     .w_full()
                     .min_h_0()
-                    .on_drag_move(cx.listener(
-                        |this, event: &DragMoveEvent<PeekDivider>, _, cx| {
+                    .on_drag_move(
+                        cx.listener(|this, event: &DragMoveEvent<PeekDivider>, _, cx| {
                             this.resize(event.event.position.x, cx);
-                        },
-                    ))
+                        }),
+                    )
                     .child(
                         canvas(
                             {
@@ -851,9 +851,13 @@ impl Render for PeekView {
 mod tests {
     use super::*;
     use editor::test::editor_lsp_test_context::EditorLspTestContext;
-    use gpui::{TestAppContext, point, size};
+    use gpui::{TestAppContext, UpdateGlobal as _, point, size};
     use indoc::indoc;
+    use language::Buffer;
+    use multi_buffer::PathKey;
+    use settings::{KeybindSource, KeymapFile, SettingsStore};
     use workspace::Item as _;
+    use workspace::pane_group::SplitDirection;
 
     const SOURCE: &str = indoc! {r#"
         fn main() {
@@ -873,6 +877,23 @@ mod tests {
         .await;
         cx.set_state(SOURCE);
         cx
+    }
+
+    fn init_vim(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| settings.vim_mode = Some(true));
+            });
+            let mut bindings = KeymapFile::load_asset_allow_partial_failure("keymaps/vim.json", cx)
+                .expect("the bundled Vim keymap should parse");
+            for binding in &mut bindings {
+                binding.set_meta(KeybindSource::Vim.meta());
+            }
+            cx.bind_keys(bindings);
+            vim::init(cx);
+        });
     }
 
     fn respond_with(cx: &mut EditorLspTestContext, ranges: &'static [(u32, u32, u32)]) {
@@ -908,6 +929,47 @@ mod tests {
         })
     }
 
+    fn replace_with_multibuffer_editor(cx: &mut EditorLspTestContext) {
+        let source_editor = cx.editor.clone();
+        let workspace = cx.workspace.clone();
+        let replacement = cx.update(|window, cx| {
+            let source_multibuffer = source_editor.read(cx).buffer().clone();
+            let source_buffer = source_multibuffer.read(cx).as_singleton()?;
+            let source_end = source_buffer.read(cx).max_point();
+            let secondary_buffer = cx.new(|cx| Buffer::local("fn secondary() {}", cx));
+            let secondary_end = secondary_buffer.read(cx).max_point();
+            let multibuffer = cx.new(|cx| {
+                let mut multibuffer = MultiBuffer::new(Capability::ReadWrite);
+                multibuffer.set_excerpts_for_path(
+                    PathKey::sorted(0),
+                    source_buffer,
+                    [Point::new(0, 0)..source_end],
+                    0,
+                    cx,
+                );
+                multibuffer.set_excerpts_for_path(
+                    PathKey::sorted(1),
+                    secondary_buffer,
+                    [Point::new(0, 0)..secondary_end],
+                    0,
+                    cx,
+                );
+                multibuffer
+            });
+            let project = workspace.read(cx).project().clone();
+            let editor =
+                cx.new(|cx| Editor::for_multibuffer(multibuffer, Some(project), window, cx));
+            workspace.update(cx, |workspace, cx| {
+                workspace.add_item_to_active_pane(Box::new(editor.clone()), None, true, window, cx);
+            });
+            Some(editor)
+        });
+
+        if let Some(replacement) = replacement {
+            cx.editor = replacement;
+        }
+    }
+
     #[gpui::test]
     async fn test_multiple_references_open_peek(cx: &mut TestAppContext) {
         let mut cx = references_cx(cx).await;
@@ -928,6 +990,75 @@ mod tests {
                 "the first location should be selected"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_peek_opens_in_an_editor_pane_after_a_split(cx: &mut TestAppContext) {
+        let mut cx = references_cx(cx).await;
+        let workspace = cx.workspace.clone();
+        cx.update(|window, cx| {
+            let source_pane = workspace.read(cx).active_pane().clone();
+            workspace.update(cx, |workspace, cx| {
+                workspace.split_pane(source_pane, SplitDirection::Right, window, cx);
+            });
+        });
+        respond_with(&mut cx, &[(1, 8, 11), (2, 14, 17)]);
+
+        peek(&mut cx, LspPickerKind::References);
+
+        assert!(
+            open_peek_view(&mut cx).is_some(),
+            "an editor in a split pane should retain its peek block"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_peek_opens_in_a_multibuffer_editor(cx: &mut TestAppContext) {
+        let mut cx = references_cx(cx).await;
+        replace_with_multibuffer_editor(&mut cx);
+        let editor = cx.editor.clone();
+        assert!(
+            cx.update(|_, cx| !editor.read(cx).buffer().read(cx).is_singleton()),
+            "the test editor should contain more than one excerpt"
+        );
+        respond_with(&mut cx, &[(1, 8, 11), (2, 14, 17)]);
+
+        peek(&mut cx, LspPickerKind::References);
+
+        assert!(
+            open_peek_view(&mut cx).is_some(),
+            "a multibuffer editor should retain its peek block"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_vim_j_selects_the_next_peek_location(cx: &mut TestAppContext) {
+        init_vim(cx);
+        let mut cx = references_cx(cx).await;
+        respond_with(&mut cx, &[(1, 8, 11), (2, 14, 17)]);
+        peek(&mut cx, LspPickerKind::References);
+
+        let view = open_peek_view(&mut cx).expect("multiple references should open a peek");
+        assert_eq!(
+            cx.update(|_, cx| {
+                view.read(cx)
+                    .selected_location_match()
+                    .map(|location_match| location_match.line_number)
+            }),
+            Some(2)
+        );
+
+        cx.simulate_keystroke("j");
+
+        assert_eq!(
+            cx.update(|_, cx| {
+                view.read(cx)
+                    .selected_location_match()
+                    .map(|location_match| location_match.line_number)
+            }),
+            Some(3),
+            "Vim's menu binding should move the peek selection instead of the editor cursor"
+        );
     }
 
     #[gpui::test]
@@ -1112,10 +1243,7 @@ mod tests {
                 let uri = params.text_document_position_params.text_document.uri;
                 Ok(Some(lsp::GotoDefinitionResponse::Scalar(lsp::Location {
                     uri,
-                    range: lsp::Range::new(
-                        lsp::Position::new(1, 8),
-                        lsp::Position::new(1, 11),
-                    ),
+                    range: lsp::Range::new(lsp::Position::new(1, 8), lsp::Position::new(1, 11)),
                 })))
             });
 
@@ -1189,7 +1317,9 @@ mod tests {
     async fn test_confirm_opens_a_location_in_another_file(cx: &mut TestAppContext) {
         let mut cx = references_cx(cx).await;
 
-        let other_path = EditorLspTestContext::root_path().join("dir").join("other.rs");
+        let other_path = EditorLspTestContext::root_path()
+            .join("dir")
+            .join("other.rs");
         let workspace = cx.workspace.clone();
         let fs = cx.update(|_, cx| workspace.read(cx).project().read(cx).fs().clone());
         fs.as_fake()

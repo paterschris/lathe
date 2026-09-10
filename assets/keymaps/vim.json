@@ -186,6 +186,15 @@
     },
   },
   {
+    "context": "LspPeekView && menu",
+    "bindings": {
+      "j": "vim::MenuSelectNext",
+      "k": "vim::MenuSelectPrevious",
+      "g g": "menu::SelectFirst",
+      "shift-g": "menu::SelectLast",
+    },
+  },
+  {
     "context": "vim_mode == normal || vim_mode == visual || vim_mode == operator",
     "bindings": {
       "] ]": "vim::NextSectionStart",

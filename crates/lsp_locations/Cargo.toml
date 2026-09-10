@@ -42,4 +42,5 @@ language = { workspace = true, features = ["test-support"] }
 lsp = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
+vim.workspace = true
 workspace = { workspace = true, features = ["test-support"] }

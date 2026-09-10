@@ -10472,6 +10472,7 @@ dependencies = [
  "theme_settings",
  "ui",
  "util",
+ "vim",
  "workspace",
 ]
 
