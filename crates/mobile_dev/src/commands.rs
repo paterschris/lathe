@@ -7,7 +7,7 @@
 //! the React Native CLI directly, and both surface the scripts the project
 //! declares in its own `package.json`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::mobile_project::{MobileProject, ProjectKind};
 use crate::toolchain;
@@ -364,6 +364,21 @@ pub fn run_android(
 /// CLI errors ("Could not find the correct install APK file") even though the
 /// app installed. Gradle's `install<Variant>` task has no such problem, and we
 /// launch the flavor's exact `application_id` with `monkey`.
+/// The Gradle wrapper is a shell script named `gradlew` on Unix and a batch
+/// file named `gradlew.bat` on Windows. Windows also has no `./` convention,
+/// so the wrapper is addressed by absolute path there rather than relative to
+/// the working directory.
+fn gradle_wrapper(android_dir: &Path) -> String {
+    if cfg!(target_os = "windows") {
+        android_dir
+            .join("gradlew.bat")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        "./gradlew".to_string()
+    }
+}
+
 pub fn run_android_gradle(
     project: &MobileProject,
     variant: &str,
@@ -371,11 +386,12 @@ pub fn run_android_gradle(
     application_id: &str,
 ) -> Vec<ResolvedCommand> {
     let task = format!(":app:install{}", capitalize(variant));
+    let android_dir = project.root.join("android");
     let install = ResolvedCommand {
         label: format!("gradlew {task}"),
-        program: "./gradlew".to_string(),
+        program: gradle_wrapper(&android_dir),
         args: vec![task, "-PreactNativeDevServerPort=8081".to_string()],
-        cwd: project.root.join("android"),
+        cwd: android_dir,
         wants_android_env: true,
     };
     let adb = toolchain::managed_adb_path()
@@ -583,5 +599,28 @@ mod tests {
         let command = adb_reverse(&project(ProjectKind::BareReactNative), Some("ABC123"));
         assert!(command.args.windows(2).any(|w| w == ["-s", "ABC123"]));
         assert!(command.args.iter().any(|a| a == "reverse"));
+    }
+}
+
+#[cfg(test)]
+mod gradle_wrapper_tests {
+    use super::*;
+
+    #[test]
+    fn addresses_the_wrapper_the_way_the_host_can_run_it() {
+        let android_dir = Path::new("/projects/app/android");
+        let wrapper = gradle_wrapper(android_dir);
+        if cfg!(target_os = "windows") {
+            assert!(
+                wrapper.ends_with("gradlew.bat"),
+                "Windows runs the batch wrapper, not the shell script: {wrapper}",
+            );
+            assert!(
+                Path::new(&wrapper).is_absolute(),
+                "cmd.exe has no `./` convention, so the wrapper needs a full path: {wrapper}",
+            );
+        } else {
+            assert_eq!(wrapper, "./gradlew");
+        }
     }
 }

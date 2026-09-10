@@ -289,6 +289,10 @@ const README_COMMAND_PREFIXES: &[&str] = &[
     "expo ",
     "./scripts/",
     "./gradlew",
+    // Windows READMEs write the wrapper as `gradlew.bat` or `.\gradlew.bat`;
+    // `starts_with` is literal, so the Unix spelling above does not cover them.
+    "gradlew",
+    ".\\gradlew",
     "xcodebuild ",
     "fastlane ",
 ];

@@ -1198,7 +1198,7 @@ impl MobileDevPanel {
     }
 
     /// Open a new interactive terminal tab running `compound` in the user's
-    /// login+interactive shell.
+    /// shell.
     fn spawn_terminal(
         &mut self,
         title: impl Into<SharedString>,
@@ -1208,7 +1208,7 @@ impl MobileDevPanel {
         cx: &mut Context<Self>,
     ) {
         let title = title.into();
-        let login_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let (shell_program, shell_args) = shell_invocation(compound);
         let id = self.next_terminal_id;
         self.next_terminal_id += 1;
 
@@ -1216,8 +1216,8 @@ impl MobileDevPanel {
             id: TaskId(format!("mobile-dev-{id}")),
             full_label: title.to_string(),
             label: title.to_string(),
-            command: Some(login_shell),
-            args: vec!["-lic".to_string(), compound],
+            command: Some(shell_program),
+            args: shell_args,
             command_label: title.to_string(),
             cwd: Some(cwd),
             env: Default::default(),
@@ -2637,5 +2637,77 @@ impl Panel for MobileDevPanel {
         // startup). 6 collides with GitActivityPanel; 8 is the next free slot
         // after the debugger panel (7).
         8
+    }
+}
+
+/// Program and arguments for running `compound` in the user's shell.
+///
+/// On Unix this is deliberately a login *and* interactive shell. The
+/// toolchains this panel drives (node, adb, rbenv, the JDK) are usually only
+/// on `PATH` once the user's profile has been sourced, so `-lic` is
+/// load-bearing rather than incidental.
+///
+/// Windows has no counterpart. There is no `$SHELL`, `/bin/zsh` does not
+/// exist, and `-lic` are POSIX flags, so every terminal this panel opened on
+/// Windows failed to spawn. Windows resolves `PATH` from machine and user
+/// scope instead of a sourced profile, so there is nothing for a login shell
+/// to do there; the host shell's own command flags are enough. Those flags
+/// come from `ShellKind` so this stays consistent with the terminal panel
+/// rather than hard-coding `cmd.exe` quoting here.
+fn shell_invocation(compound: String) -> (String, Vec<String>) {
+    if cfg!(target_os = "windows") {
+        let program = util::shell::get_windows_system_shell();
+        let args = util::shell::ShellKind::new(&program, true).args_for_shell(true, compound);
+        (program, args)
+    } else {
+        // `/bin/sh` rather than `/bin/zsh` as the fallback: it is the one
+        // shell guaranteed to exist on both macOS and Linux, and it is only
+        // reached when `$SHELL` is unset.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        (shell, vec!["-lic".to_string(), compound])
+    }
+}
+
+#[cfg(test)]
+mod shell_invocation_tests {
+    use super::*;
+
+    #[test]
+    fn runs_the_compound_command_in_a_shell_the_host_has() {
+        let (program, args) = shell_invocation("echo hello".to_string());
+
+        assert!(!program.is_empty());
+        assert!(
+            args.iter().any(|arg| arg == "echo hello"),
+            "the command must survive intact: {args:?}",
+        );
+
+        if cfg!(target_os = "windows") {
+            assert!(
+                !program.starts_with('/'),
+                "a POSIX shell path cannot run on Windows: {program}",
+            );
+            assert!(
+                !args.iter().any(|arg| arg == "-lic"),
+                "`-lic` are POSIX flags: {args:?}",
+            );
+        } else {
+            assert_eq!(args.first().map(String::as_str), Some("-lic"));
+            assert!(
+                std::path::Path::new(&program).is_absolute(),
+                "the Unix shell is addressed by path: {program}",
+            );
+        }
+    }
+
+    #[test]
+    fn falls_back_to_a_shell_that_is_always_present() {
+        // Only meaningful off Windows, where the fallback is a POSIX path.
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        // `/bin/sh` exists on every macOS and Linux host; `/bin/zsh`, the
+        // previous fallback, is not guaranteed on Linux.
+        assert!(std::path::Path::new("/bin/sh").exists());
     }
 }

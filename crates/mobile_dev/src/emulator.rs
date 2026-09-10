@@ -17,23 +17,25 @@ use crate::toolchain;
 /// system); falls back to `emulator` on `PATH`.
 pub fn emulator_program() -> PathBuf {
     for sdk in toolchain::sdk_dirs() {
-        let emulator = sdk.join("emulator/emulator");
+        let emulator = sdk.join(format!("emulator/{}", toolchain::tool_binary("emulator")));
         if emulator.is_file() {
             return emulator;
         }
     }
-    PathBuf::from("emulator")
+    PathBuf::from(toolchain::tool_binary("emulator"))
 }
 
 /// Path to `sdkmanager` in the SDK that has the command-line tools, if any.
 pub fn sdkmanager_path() -> Option<PathBuf> {
-    let path = toolchain::sdk_dir()?.join("cmdline-tools/latest/bin/sdkmanager");
+    let path = toolchain::sdk_dir()?
+        .join(format!("cmdline-tools/latest/bin/{}", toolchain::tool_script("sdkmanager")));
     path.is_file().then_some(path)
 }
 
 /// Path to `avdmanager` in the SDK that has the command-line tools, if any.
 pub fn avdmanager_path() -> Option<PathBuf> {
-    let path = toolchain::sdk_dir()?.join("cmdline-tools/latest/bin/avdmanager");
+    let path = toolchain::sdk_dir()?
+        .join(format!("cmdline-tools/latest/bin/{}", toolchain::tool_script("avdmanager")));
     path.is_file().then_some(path)
 }
 

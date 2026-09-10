@@ -39,7 +39,30 @@ const SDK_PACKAGES: &[&str] = &[
     "build-tools;35.0.0",
 ];
 
-const SDKMANAGER_RELATIVE: &str = "cmdline-tools/latest/bin/sdkmanager";
+/// Android's command-line tools ship as `.bat` launchers on Windows and as
+/// extensionless shell scripts everywhere else, while the SDK's own binaries
+/// take the host's executable suffix. Every lookup here probes the file on
+/// disk, so a missing suffix does not fail loudly: the component simply reads
+/// as absent and the panel reports an uninstalled toolchain.
+pub(crate) fn tool_script(name: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{name}.bat")
+    } else {
+        name.to_string()
+    }
+}
+
+pub(crate) fn tool_binary(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
+fn sdkmanager_relative() -> String {
+    format!("cmdline-tools/latest/bin/{}", tool_script("sdkmanager"))
+}
+
+fn platform_tools_adb() -> String {
+    format!("platform-tools/{}", tool_binary("adb"))
+}
 
 pub fn managed_root() -> PathBuf {
     // NOT under data_dir(): on macOS that is "~/Library/Application Support",
@@ -56,7 +79,7 @@ fn managed_sdk_root() -> PathBuf {
 /// The managed adb binary, when the managed platform-tools are installed.
 /// Callers fall back to `adb` on PATH.
 pub fn managed_adb_path() -> Option<PathBuf> {
-    let adb = managed_sdk_root().join("platform-tools/adb");
+    let adb = managed_sdk_root().join(platform_tools_adb());
     adb.is_file().then_some(adb)
 }
 
@@ -65,7 +88,7 @@ pub fn managed_adb_path() -> Option<PathBuf> {
 /// install packages and create AVDs.
 pub fn sdk_dir() -> Option<PathBuf> {
     let managed = managed_sdk_root();
-    if managed.join(SDKMANAGER_RELATIVE).is_file() {
+    if managed.join(sdkmanager_relative()).is_file() {
         return Some(managed);
     }
     system_sdk_dir()
@@ -135,7 +158,7 @@ pub fn detect() -> ToolchainStatus {
         ComponentStatus::Managed(home)
     } else if let Some(home) = std::env::var_os("JAVA_HOME")
         .map(PathBuf::from)
-        .filter(|home| home.join("bin/java").is_file())
+        .filter(|home| home.join(format!("bin/{}", tool_binary("java"))).is_file())
     {
         ComponentStatus::System(home)
     } else {
@@ -143,7 +166,7 @@ pub fn detect() -> ToolchainStatus {
     };
 
     let managed_sdk = managed_sdk_root();
-    let managed_sdk_present = managed_sdk.join(SDKMANAGER_RELATIVE).is_file();
+    let managed_sdk_present = managed_sdk.join(sdkmanager_relative()).is_file();
     let (sdk_dir, managed) = if managed_sdk_present {
         (Some(managed_sdk), true)
     } else {
@@ -151,7 +174,7 @@ pub fn detect() -> ToolchainStatus {
     };
 
     let sdk = match &sdk_dir {
-        Some(dir) if dir.join(SDKMANAGER_RELATIVE).is_file() => {
+        Some(dir) if dir.join(sdkmanager_relative()).is_file() => {
             if managed {
                 ComponentStatus::Managed(dir.clone())
             } else {
@@ -177,7 +200,7 @@ pub fn detect() -> ToolchainStatus {
     ToolchainStatus {
         jdk,
         sdk,
-        platform_tools: component_in_sdk("platform-tools/adb"),
+        platform_tools: component_in_sdk(&platform_tools_adb()),
         licenses: component_in_sdk("licenses/android-sdk-license"),
     }
 }
@@ -192,7 +215,7 @@ fn system_sdk_dir() -> Option<PathBuf> {
         candidates.push(home.join("Android/Sdk"));
     }
     candidates.into_iter().find(|dir| {
-        dir.join(SDKMANAGER_RELATIVE).is_file() || dir.join("platform-tools/adb").is_file()
+        dir.join(sdkmanager_relative()).is_file() || dir.join(platform_tools_adb()).is_file()
     })
 }
 
@@ -203,7 +226,7 @@ fn find_java_home(jdk_dir: &Path) -> Option<PathBuf> {
             continue;
         }
         for candidate in [path.join("Contents/Home"), path.clone()] {
-            if candidate.join("bin/java").is_file() {
+            if candidate.join(format!("bin/{}", tool_binary("java"))).is_file() {
                 return Some(candidate);
             }
         }
@@ -301,9 +324,9 @@ async fn run_install(http: Arc<dyn HttpClient>, tx: &channel::Sender<InstallEven
     };
 
     let sdk = managed_sdk_root();
-    if sdk.join(SDKMANAGER_RELATIVE).is_file() {
+    if sdk.join(sdkmanager_relative()).is_file() {
         send_line(tx, "Command-line tools: already installed").await;
-    } else if system_sdk_dir().is_some_and(|dir| dir.join(SDKMANAGER_RELATIVE).is_file()) {
+    } else if system_sdk_dir().is_some_and(|dir| dir.join(sdkmanager_relative()).is_file()) {
         // A full system SDK exists; installing a second managed one would
         // just waste disk and shadow it.
         send_line(
@@ -323,7 +346,7 @@ async fn run_install(http: Arc<dyn HttpClient>, tx: &channel::Sender<InstallEven
     }) else {
         bail!("sdkmanager unavailable after command-line tools install");
     };
-    let sdkmanager = sdk_root.join(SDKMANAGER_RELATIVE);
+    let sdkmanager = sdk_root.join(sdkmanager_relative());
 
     accept_licenses(&sdkmanager, &sdk_root, &java_home, tx).await?;
     install_sdk_packages(&sdkmanager, &sdk_root, &java_home, tx).await?;
@@ -638,4 +661,30 @@ mod tests {
         status.licenses = ComponentStatus::Missing;
         assert!(!status.all_present());
     }
+
+    #[test]
+    fn tool_names_carry_the_host_suffixes() {
+        if cfg!(target_os = "windows") {
+            assert_eq!(tool_script("sdkmanager"), "sdkmanager.bat");
+            assert_eq!(tool_binary("adb"), "adb.exe");
+            assert_eq!(tool_binary("java"), "java.exe");
+        } else {
+            assert_eq!(tool_script("sdkmanager"), "sdkmanager");
+            assert_eq!(tool_binary("adb"), "adb");
+            assert_eq!(tool_binary("java"), "java");
+        }
+    }
+
+    #[test]
+    fn sdk_component_paths_use_the_suffixed_names() {
+        assert_eq!(
+            sdkmanager_relative(),
+            format!("cmdline-tools/latest/bin/{}", tool_script("sdkmanager")),
+        );
+        assert_eq!(
+            platform_tools_adb(),
+            format!("platform-tools/{}", tool_binary("adb")),
+        );
+    }
+
 }
