@@ -2,6 +2,38 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.0.1-beta - 2026-09-10
+
+Zoom now scales the whole window, not just the editor.
+
+### Changed
+
+- **`Cmd +`, `Cmd -`, and `Cmd 0` zoom every piece of text in the window together:** the editor, terminal, project panel, git panel, git graph, pull requests, agent panel, git commit editor, and markdown preview. The View menu zoom items and `Cmd + scroll-wheel` (when mouse-wheel zoom is enabled) do the same. Before this only the editor and terminal changed size, and the agent panel and markdown preview zoomed on their own when focused.
+- The zoom is still scoped to the active window, so two windows side-by-side can be zoomed independently.
+- The persisted zoom items write both `buffer_font_size` and `ui_font_size` to `settings.json`. Agent, git commit, and markdown preview sizes are only written when you had already set them. Reset clears all of them.
+
+### Added
+
+- **Create a Pixel Tablet Android virtual device from the Mobile panel.** The Android device menu now offers separate phone and tablet AVDs, both using API 35 and the host-matched Google APIs image.
+
+### Fixed
+
+- **Rainbow parameter highlighting works again.** Bundled themes define the eight parameter colors, and declarations and references now receive the color for their ordinal parameter position.
+- **Grouped runnable queries emit every runnable again.** The buffer now uses the grouped-runnable resolver, restoring table-test discovery and per-item metadata.
+- **New pull requests use local branch pickers.** The source and target branches must come from the repository's local branch list, so a mistyped branch cannot be submitted. Recorded API fixtures now cover close, reopen, reviewer requests, draft transitions, merge, and squash merge for GitHub, GitLab, and Bitbucket.
+- **Peek leaves hover popovers and context menus above it.** The peek remains above the minimap at deferred-draw priority 0, while the editor draws those overlays at higher priorities. Peek is also covered in multibuffer and split editors, and Vim `j` and `k` now move its location list.
+- **The Mobile panel can run on Windows.** It could not before: the panel shelled out to `./gradlew`, which is a Unix shell script rather than Windows' `gradlew.bat`, and it opened every terminal through `$SHELL -lic`, which on Windows means an unset variable, a `/bin/zsh` that does not exist, and POSIX-only flags. Sixteen further lookups asked for `sdkmanager`, `avdmanager`, `adb`, `java`, and `emulator` by their Unix names, so the Android toolchain reported itself as not installed rather than erroring. Run hints are also scraped from READMEs that spell the wrapper `gradlew.bat`.
+- **Checking out a commit works in remote and collab projects.** Detached HEAD checkout from the history view and commit graph previously failed on anything but a local repository.
+- An AWS profile whose name was empty wrote a malformed `credential_process` line into the AWS config. Empty names are now refused.
+
+### Known issues
+
+- The Windows fixes above are reasoned from Android's published tool layout and are verified by compilation and tests, but **no Windows runtime behavior has been observed**. Linux is likewise unexercised, as are the window zoom and peek view on both.
+- Detached HEAD checkout over collab ships without a test; the fork has no remote-git test harness. The other 16 Lathe git operations still refuse to run on remote projects.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v1.0.0 - 2026-09-01
 
 Lathe moves to 1.0 and off the version number it inherited from upstream. This release contains the peek view that shipped as v0.236.35-beta, plus the two fixes below.
