@@ -3218,13 +3218,13 @@ impl ConversationView {
         had_notifications
     }
 
-    fn agent_ui_font_size_changed(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn agent_ui_font_size_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(entry_view_state) = self
             .active_thread()
             .map(|active| active.read(cx).entry_view_state.clone())
         {
             entry_view_state.update(cx, |entry_view_state, cx| {
-                entry_view_state.agent_ui_font_size_changed(cx);
+                entry_view_state.agent_ui_font_size_changed(window, cx);
             });
         }
     }

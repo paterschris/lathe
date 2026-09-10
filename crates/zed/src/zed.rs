@@ -910,6 +910,44 @@ async fn initialize_agent_panel(
     anyhow::Ok(())
 }
 
+/// Persists a zoom step to `settings.json`. The buffer and UI sizes always
+/// move; the agent, git commit, and markdown preview sizes only move when the
+/// user has set them explicitly, since otherwise they inherit the base sizes.
+fn persist_zoom_delta(fs: Arc<dyn Fs>, delta: Pixels, cx: &mut App) {
+    update_settings_file(fs, cx, move |settings, cx| {
+        let theme_settings = ThemeSettings::get_global(cx);
+        let bump = |size: Pixels| -> settings::FontSize {
+            f32::from(theme_settings::clamp_font_size(size + delta)).into()
+        };
+        settings.theme.buffer_font_size = Some(bump(theme_settings.buffer_font_size(cx)));
+        settings.theme.ui_font_size = Some(bump(theme_settings.ui_font_size(cx)));
+        if settings.theme.agent_ui_font_size.is_some() {
+            settings.theme.agent_ui_font_size = Some(bump(theme_settings.agent_ui_font_size(cx)));
+        }
+        if settings.theme.agent_buffer_font_size.is_some() {
+            settings.theme.agent_buffer_font_size =
+                Some(bump(theme_settings.agent_buffer_font_size(cx)));
+        }
+        if let Some(size) = theme_settings.git_commit_buffer_font_size_settings() {
+            settings.theme.git_commit_buffer_font_size = Some(bump(size));
+        }
+        if let Some(size) = theme_settings.markdown_preview_font_size_settings() {
+            settings.theme.markdown_preview_font_size = Some(bump(size));
+        }
+    });
+}
+
+fn persist_zoom_reset(fs: Arc<dyn Fs>, cx: &mut App) {
+    update_settings_file(fs, cx, move |settings, _| {
+        settings.theme.buffer_font_size = None;
+        settings.theme.ui_font_size = None;
+        settings.theme.agent_ui_font_size = None;
+        settings.theme.agent_buffer_font_size = None;
+        settings.theme.git_commit_buffer_font_size = None;
+        settings.theme.markdown_preview_font_size = None;
+    });
+}
+
 fn register_actions(
     app_state: Arc<AppState>,
     workspace: &mut Workspace,
@@ -1206,16 +1244,9 @@ fn register_actions(
             let fs = app_state.fs.clone();
             move |_, action: &zed_actions::IncreaseBufferFontSize, window, cx| {
                 if action.persist {
-                    update_settings_file(fs.clone(), cx, move |settings, cx| {
-                        let buffer_font_size =
-                            ThemeSettings::get_global(cx).buffer_font_size(cx) + px(1.0);
-                        let _ = settings
-                            .theme
-                            .buffer_font_size
-                            .insert(f32::from(theme_settings::clamp_font_size(buffer_font_size)).into());
-                    });
+                    persist_zoom_delta(fs.clone(), px(1.0), cx);
                 } else {
-                    theme_settings::increase_buffer_font_size(window, cx);
+                    theme_settings::adjust_all_font_sizes(window, cx, px(1.0));
                 }
             }
         })
@@ -1223,16 +1254,9 @@ fn register_actions(
             let fs = app_state.fs.clone();
             move |_, action: &zed_actions::DecreaseBufferFontSize, window, cx| {
                 if action.persist {
-                    update_settings_file(fs.clone(), cx, move |settings, cx| {
-                        let buffer_font_size =
-                            ThemeSettings::get_global(cx).buffer_font_size(cx) - px(1.0);
-                        let _ = settings
-                            .theme
-                            .buffer_font_size
-                            .insert(f32::from(theme_settings::clamp_font_size(buffer_font_size)).into());
-                    });
+                    persist_zoom_delta(fs.clone(), px(-1.0), cx);
                 } else {
-                    theme_settings::decrease_buffer_font_size(window, cx);
+                    theme_settings::adjust_all_font_sizes(window, cx, px(-1.0));
                 }
             }
         })
@@ -1240,11 +1264,9 @@ fn register_actions(
             let fs = app_state.fs.clone();
             move |_, action: &zed_actions::ResetBufferFontSize, window, cx| {
                 if action.persist {
-                    update_settings_file(fs.clone(), cx, move |settings, _| {
-                        settings.theme.buffer_font_size = None;
-                    });
+                    persist_zoom_reset(fs.clone(), cx);
                 } else {
-                    theme_settings::reset_buffer_font_size(window, cx);
+                    theme_settings::reset_all_font_sizes(window, cx);
                 }
             }
         })
@@ -1252,17 +1274,9 @@ fn register_actions(
             let fs = app_state.fs.clone();
             move |_, action: &zed_actions::ResetAllZoom, window, cx| {
                 if action.persist {
-                    update_settings_file(fs.clone(), cx, move |settings, _| {
-                        settings.theme.ui_font_size = None;
-                        settings.theme.buffer_font_size = None;
-                        settings.theme.agent_ui_font_size = None;
-                        settings.theme.agent_buffer_font_size = None;
-                    });
+                    persist_zoom_reset(fs.clone(), cx);
                 } else {
-                    theme_settings::reset_ui_font_size(window, cx);
-                    theme_settings::reset_buffer_font_size(window, cx);
-                    theme_settings::reset_agent_ui_font_size(window, cx);
-                    theme_settings::reset_agent_buffer_font_size(window, cx);
+                    theme_settings::reset_all_font_sizes(window, cx);
                 }
             }
         })
@@ -4866,8 +4880,15 @@ mod tests {
         });
 
         // mouse_wheel_zoom is disabled by default — zoom should not work.
-        let initial_font_size =
-            cx.update(|_, cx| ThemeSettings::get_global(cx).buffer_font_size(cx).as_f32());
+        let initial_font_size = cx.update(|window, cx| {
+            let theme_settings = ThemeSettings::get_global(cx);
+            (
+                theme_settings
+                    .buffer_font_size_in_window(window, cx)
+                    .as_f32(),
+                theme_settings.ui_font_size_in_window(window, cx).as_f32(),
+            )
+        });
 
         cx.simulate_event(gpui::ScrollWheelEvent {
             position: mouse_position,
@@ -4876,8 +4897,15 @@ mod tests {
             ..Default::default()
         });
 
-        let font_size_after_disabled_zoom =
-            cx.update(|_, cx| ThemeSettings::get_global(cx).buffer_font_size(cx).as_f32());
+        let font_size_after_disabled_zoom = cx.update(|window, cx| {
+            let theme_settings = ThemeSettings::get_global(cx);
+            (
+                theme_settings
+                    .buffer_font_size_in_window(window, cx)
+                    .as_f32(),
+                theme_settings.ui_font_size_in_window(window, cx).as_f32(),
+            )
+        });
 
         assert_eq!(
             initial_font_size, font_size_after_disabled_zoom,
@@ -4904,12 +4932,23 @@ mod tests {
             ..Default::default()
         });
 
-        let increased_font_size =
-            cx.update(|_, cx| ThemeSettings::get_global(cx).buffer_font_size(cx).as_f32());
+        let increased_font_size = cx.update(|window, cx| {
+            let theme_settings = ThemeSettings::get_global(cx);
+            (
+                theme_settings
+                    .buffer_font_size_in_window(window, cx)
+                    .as_f32(),
+                theme_settings.ui_font_size_in_window(window, cx).as_f32(),
+            )
+        });
 
         assert!(
-            increased_font_size > initial_font_size,
+            increased_font_size.0 > initial_font_size.0,
             "Editor buffer font-size should have increased from scroll-zoom"
+        );
+        assert!(
+            increased_font_size.1 > initial_font_size.1,
+            "UI font-size should zoom together with the editor"
         );
 
         cx.update(|window, cx| {
@@ -4923,12 +4962,23 @@ mod tests {
             ..Default::default()
         });
 
-        let decreased_font_size =
-            cx.update(|_, cx| ThemeSettings::get_global(cx).buffer_font_size(cx).as_f32());
+        let decreased_font_size = cx.update(|window, cx| {
+            let theme_settings = ThemeSettings::get_global(cx);
+            (
+                theme_settings
+                    .buffer_font_size_in_window(window, cx)
+                    .as_f32(),
+                theme_settings.ui_font_size_in_window(window, cx).as_f32(),
+            )
+        });
 
         assert!(
-            decreased_font_size < increased_font_size,
+            decreased_font_size.0 < increased_font_size.0,
             "Editor buffer font-size should have decreased from scroll-zoom"
+        );
+        assert!(
+            decreased_font_size.1 < increased_font_size.1,
+            "UI font-size should zoom together with the editor"
         );
 
         // Disable mouse_wheel_zoom again and verify zoom stops working.
@@ -4940,8 +4990,15 @@ mod tests {
             });
         });
 
-        let font_size_before =
-            cx.update(|_, cx| ThemeSettings::get_global(cx).buffer_font_size(cx).as_f32());
+        let font_size_before = cx.update(|window, cx| {
+            let theme_settings = ThemeSettings::get_global(cx);
+            (
+                theme_settings
+                    .buffer_font_size_in_window(window, cx)
+                    .as_f32(),
+                theme_settings.ui_font_size_in_window(window, cx).as_f32(),
+            )
+        });
 
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
@@ -4954,8 +5011,15 @@ mod tests {
             ..Default::default()
         });
 
-        let font_size_after =
-            cx.update(|_, cx| ThemeSettings::get_global(cx).buffer_font_size(cx).as_f32());
+        let font_size_after = cx.update(|window, cx| {
+            let theme_settings = ThemeSettings::get_global(cx);
+            (
+                theme_settings
+                    .buffer_font_size_in_window(window, cx)
+                    .as_f32(),
+                theme_settings.ui_font_size_in_window(window, cx).as_f32(),
+            )
+        });
 
         assert_eq!(
             font_size_before, font_size_after,

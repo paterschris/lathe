@@ -142,7 +142,7 @@ pub struct AcpRegistry;
 #[serde(deny_unknown_fields)]
 pub struct ShowCallStats;
 
-/// Decreases the font size in the editor buffer.
+/// Zooms out: decreases the font size of the editor, terminal, agent panel, and all other UI text in the window.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
 #[action(namespace = zed)]
 #[serde(deny_unknown_fields)]
@@ -151,7 +151,7 @@ pub struct DecreaseBufferFontSize {
     pub persist: bool,
 }
 
-/// Increases the font size in the editor buffer.
+/// Zooms in: increases the font size of the editor, terminal, agent panel, and all other UI text in the window.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
 #[action(namespace = zed)]
 #[serde(deny_unknown_fields)]
@@ -199,7 +199,7 @@ pub enum OpenSettingsAtTarget {
     Project { worktree_id: usize },
 }
 
-/// Resets the buffer font size to the default value.
+/// Resets the zoom level of the editor, terminal, agent panel, and all other UI text in the window.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
 #[action(namespace = zed)]
 #[serde(deny_unknown_fields)]

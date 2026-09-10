@@ -20,7 +20,6 @@ use project::{AgentId, ProjectItem};
 use serde::{Deserialize, Serialize};
 
 use zed_actions::{
-    DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize,
     agent::{
         AddSelectionToThread, ConflictContent, LogoutAgent, OpenSettings, ReauthenticateAgent,
         ResetAgentZoom, ResetOnboarding, ResolveConflictedFilesWithAgent,
@@ -74,7 +73,7 @@ use notifications::status_toast::StatusToast;
 use project::{Project, ProjectPath, Worktree};
 use prompt_store::PromptStore;
 use settings::TerminalDockPosition;
-use settings::{NotifyWhenAgentWaiting, Settings, update_settings_file};
+use settings::{NotifyWhenAgentWaiting, Settings};
 
 use terminal::{Event as TerminalEvent, terminal_settings::TerminalSettings};
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
@@ -3060,89 +3059,6 @@ impl AgentPanel {
         self.new_thread_menu_handle.toggle(window, cx);
     }
 
-    pub fn increase_font_size(
-        &mut self,
-        action: &IncreaseBufferFontSize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.handle_font_size_action(action.persist, px(1.0), window, cx);
-    }
-
-    pub fn decrease_font_size(
-        &mut self,
-        action: &DecreaseBufferFontSize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.handle_font_size_action(action.persist, px(-1.0), window, cx);
-    }
-
-    fn handle_font_size_action(
-        &mut self,
-        persist: bool,
-        delta: Pixels,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match self.visible_font_size() {
-            WhichFontSize::AgentFont => {
-                if persist {
-                    update_settings_file(self.fs.clone(), cx, move |settings, cx| {
-                        let agent_ui_font_size =
-                            ThemeSettings::get_global(cx).agent_ui_font_size(cx) + delta;
-                        let agent_buffer_font_size =
-                            ThemeSettings::get_global(cx).agent_buffer_font_size(cx) + delta;
-
-                        let _ = settings.theme.agent_ui_font_size.insert(
-                            f32::from(theme_settings::clamp_font_size(agent_ui_font_size)).into(),
-                        );
-                        let _ = settings.theme.agent_buffer_font_size.insert(
-                            f32::from(theme_settings::clamp_font_size(agent_buffer_font_size))
-                                .into(),
-                        );
-                    });
-                } else {
-                    theme_settings::adjust_agent_ui_font_size(window, cx, |size| size + delta);
-                    theme_settings::adjust_agent_buffer_font_size(window, cx, |size| size + delta);
-                }
-            }
-            WhichFontSize::None => {
-                // The agent panel does not own this font size (e.g. when a
-                // terminal is the visible surface). Let the action bubble up
-                // to the workspace handler so the global buffer font size is
-                // adjusted instead.
-                cx.propagate();
-            }
-        }
-    }
-
-    pub fn reset_font_size(
-        &mut self,
-        action: &ResetBufferFontSize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match self.visible_font_size() {
-            WhichFontSize::AgentFont => {
-                if action.persist {
-                    update_settings_file(self.fs.clone(), cx, move |settings, _| {
-                        settings.theme.agent_ui_font_size = None;
-                        settings.theme.agent_buffer_font_size = None;
-                    });
-                } else {
-                    theme_settings::reset_agent_ui_font_size(window, cx);
-                    theme_settings::reset_agent_buffer_font_size(window, cx);
-                }
-            }
-            WhichFontSize::None => {
-                // Let the workspace handler reset the global buffer font size
-                // that the terminal uses.
-                cx.propagate();
-            }
-        }
-    }
-
     pub fn reset_agent_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         theme_settings::reset_agent_ui_font_size(window, cx);
         theme_settings::reset_agent_buffer_font_size(window, cx);
@@ -5596,9 +5512,6 @@ impl Render for AgentPanel {
             .on_action(cx.listener(Self::open_active_thread_as_markdown))
             .on_action(cx.listener(Self::manage_skills))
             .on_action(cx.listener(Self::toggle_options_menu))
-            .on_action(cx.listener(Self::increase_font_size))
-            .on_action(cx.listener(Self::decrease_font_size))
-            .on_action(cx.listener(Self::reset_font_size))
             .on_action(cx.listener(Self::toggle_zoom))
             .on_action(cx.listener(|this, _: &ReauthenticateAgent, window, cx| {
                 if let Some(conversation_view) = this.active_conversation_view() {

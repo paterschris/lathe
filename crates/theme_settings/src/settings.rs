@@ -3,7 +3,7 @@
 use crate::schema::{status_colors_refinement, syntax_overrides, theme_colors_refinement};
 use crate::{merge_accent_colors, merge_player_colors};
 use collections::HashMap;
-use gpui::{App, Font, FontFallbacks, FontStyle, Global, Pixels, SharedString, px};
+use gpui::{App, Font, FontFallbacks, FontStyle, Global, Pixels, SharedString, Window, px};
 use refineable::Refineable;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -15,11 +15,11 @@ use theme::{Appearance, DEFAULT_ICON_THEME_NAME, SyntaxTheme, Theme, UiDensity};
 mod font_size_overrides;
 pub use font_size_overrides::{
     AgentBufferFontSize, AgentUiFontSize, GitCommitBufferFontSize, adjust_agent_buffer_font_size,
-    adjust_agent_ui_font_size, adjust_buffer_font_size, adjust_git_commit_buffer_font_size,
-    adjust_ui_font_size, adjusted_font_size, clear_window_font_overrides,
-    decrease_buffer_font_size, increase_buffer_font_size, observe_buffer_font_size_adjustment,
-    reset_agent_buffer_font_size, reset_agent_buffer_font_size_for_all_windows,
-    reset_agent_ui_font_size, reset_agent_ui_font_size_for_all_windows, reset_buffer_font_size,
+    adjust_agent_ui_font_size, adjust_all_font_sizes, adjust_buffer_font_size,
+    adjust_git_commit_buffer_font_size, adjust_ui_font_size, adjusted_font_size,
+    clear_window_font_overrides, observe_buffer_font_size_adjustment, reset_agent_buffer_font_size,
+    reset_agent_buffer_font_size_for_all_windows, reset_agent_ui_font_size,
+    reset_agent_ui_font_size_for_all_windows, reset_all_font_sizes, reset_buffer_font_size,
     reset_buffer_font_size_for_all_windows, reset_git_commit_buffer_font_size,
     reset_git_commit_buffer_font_size_for_all_windows, reset_ui_font_size,
     reset_ui_font_size_for_all_windows, setup_ui_font,
@@ -425,6 +425,16 @@ impl ThemeSettings {
             .or(self.markdown_preview_font_size)
             .map(clamp_font_size)
             .unwrap_or_else(|| clamp_font_size(self.ui_font_size))
+    }
+
+    /// Returns the markdown preview font size for the given window. When no
+    /// explicit preview size is set it follows the window's zoomed UI size.
+    pub fn markdown_preview_font_size_in_window(&self, window: &Window, cx: &App) -> Pixels {
+        cx.try_global::<MarkdownPreviewFontSize>()
+            .map(|size| size.0)
+            .or(self.markdown_preview_font_size)
+            .map(clamp_font_size)
+            .unwrap_or_else(|| self.ui_font_size_in_window(window, cx))
     }
 
     /// Returns the buffer font size, read from the settings.

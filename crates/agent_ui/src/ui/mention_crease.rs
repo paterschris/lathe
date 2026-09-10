@@ -85,7 +85,7 @@ impl MentionCrease {
 impl RenderOnce for MentionCrease {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let settings = ThemeSettings::get_global(cx);
-        let font_size = settings.agent_buffer_font_size(cx);
+        let font_size = settings.agent_buffer_font_size_in_window(window, cx);
         let buffer_font = settings.buffer_font.clone();
         let is_loading = self.is_loading;
         let tooltip = self.tooltip;

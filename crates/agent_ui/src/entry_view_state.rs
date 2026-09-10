@@ -460,7 +460,7 @@ impl EntryViewState {
                 });
     }
 
-    pub fn agent_ui_font_size_changed(&mut self, cx: &mut App) {
+    pub fn agent_ui_font_size_changed(&mut self, window: &Window, cx: &mut App) {
         for entry in self.entries.iter() {
             match entry {
                 Entry::UserMessage { .. }
@@ -473,7 +473,7 @@ impl EntryViewState {
                         if let Ok(diff_editor) = view.clone().downcast::<Editor>() {
                             diff_editor.update(cx, |diff_editor, cx| {
                                 diff_editor.set_text_style_refinement(
-                                    diff_editor_text_style_refinement(cx),
+                                    diff_editor_text_style_refinement(window, cx),
                                 );
                                 cx.notify();
                             })
@@ -686,17 +686,17 @@ fn create_editor_diff(
         editor.set_show_git_diff_gutter(false, cx);
         editor.set_expand_all_diff_hunks(cx);
         editor.set_diff_hunk_delegate(Some(Arc::new(RestoreOnlyUnstagedDiffHunkDelegate)), cx);
-        editor.set_text_style_refinement(diff_editor_text_style_refinement(cx));
+        editor.set_text_style_refinement(diff_editor_text_style_refinement(window, cx));
         editor
     })
 }
 
-fn diff_editor_text_style_refinement(cx: &mut App) -> TextStyleRefinement {
+fn diff_editor_text_style_refinement(window: &Window, cx: &mut App) -> TextStyleRefinement {
     TextStyleRefinement {
         font_size: Some(
             TextSize::Small
                 .rems(cx)
-                .to_pixels(ThemeSettings::get_global(cx).agent_ui_font_size(cx))
+                .to_pixels(ThemeSettings::get_global(cx).agent_ui_font_size_in_window(window, cx))
                 .into(),
         ),
         ..Default::default()

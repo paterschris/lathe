@@ -1,8 +1,11 @@
 use collections::HashMap;
-use gpui::{App, Context, Global, Pixels, Subscription, Window, WindowId, px};
+use gpui::{App, Context, Global, Pixels, Subscription, Window, WindowId};
 use settings::Settings;
 
-use super::{ThemeSettings, clamp_font_size};
+use super::{
+    MarkdownPreviewFontSize, ThemeSettings, adjust_markdown_preview_font_size, clamp_font_size,
+    reset_markdown_preview_font_size,
+};
 
 /// In-memory per-window overrides for the buffer font size.
 ///
@@ -167,12 +170,46 @@ pub fn reset_buffer_font_size_for_all_windows(cx: &mut App) {
     }
 }
 
-pub fn increase_buffer_font_size(window: &mut Window, cx: &mut App) {
-    adjust_buffer_font_size(window, cx, |size| size + px(1.0));
+/// Zooms every font size the given window renders text with by `delta`, so the
+/// editor, terminal, docks and panels, agent panel, and git surfaces all scale
+/// together.
+///
+/// The agent and git commit sizes are read before the base sizes move because
+/// they fall back to the base sizes when no override exists; applying `delta`
+/// on top of an already-adjusted base would zoom them twice. The markdown
+/// preview override is app-wide rather than per-window, so it is only nudged
+/// when it is explicitly set and otherwise follows the window's UI size.
+pub fn adjust_all_font_sizes(window: &mut Window, cx: &mut App, delta: Pixels) {
+    let (agent_ui, agent_buffer, git_commit, markdown_preview_is_explicit) = {
+        let theme_settings = ThemeSettings::get_global(cx);
+        (
+            theme_settings.agent_ui_font_size_in_window(window, cx),
+            theme_settings.agent_buffer_font_size_in_window(window, cx),
+            theme_settings.git_commit_buffer_font_size_in_window(window, cx),
+            cx.has_global::<MarkdownPreviewFontSize>()
+                || theme_settings.markdown_preview_font_size.is_some(),
+        )
+    };
+
+    adjust_buffer_font_size(window, cx, |size| size + delta);
+    adjust_ui_font_size(window, cx, |size| size + delta);
+    adjust_agent_ui_font_size(window, cx, |_| agent_ui + delta);
+    adjust_agent_buffer_font_size(window, cx, |_| agent_buffer + delta);
+    adjust_git_commit_buffer_font_size(window, cx, |_| git_commit + delta);
+    if markdown_preview_is_explicit {
+        adjust_markdown_preview_font_size(cx, |size| size + delta);
+    }
 }
 
-pub fn decrease_buffer_font_size(window: &mut Window, cx: &mut App) {
-    adjust_buffer_font_size(window, cx, |size| size - px(1.0));
+/// Clears every per-window zoom override for the given window so all text
+/// returns to the sizes configured in settings.
+pub fn reset_all_font_sizes(window: &mut Window, cx: &mut App) {
+    reset_buffer_font_size(window, cx);
+    reset_ui_font_size(window, cx);
+    reset_agent_ui_font_size(window, cx);
+    reset_agent_buffer_font_size(window, cx);
+    reset_git_commit_buffer_font_size(window, cx);
+    reset_markdown_preview_font_size(cx);
 }
 
 #[allow(missing_docs)]
