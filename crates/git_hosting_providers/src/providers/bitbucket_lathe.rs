@@ -210,10 +210,7 @@ impl Bitbucket {
         .await?;
         let user: AuthenticatedBitbucketUser =
             serde_json::from_slice(&bytes).context("parsing authenticated Bitbucket user")?;
-        Ok(user
-            .nickname
-            .or(user.display_name)
-            .map(SharedString::from))
+        Ok(user.nickname.or(user.display_name).map(SharedString::from))
     }
 
     pub(super) async fn fetch_authenticated_uuid(
@@ -620,12 +617,7 @@ impl BitbucketPullRequest {
                     .as_deref()
                     .is_some_and(|role| role.eq_ignore_ascii_case("REVIEWER"))
             })
-            .filter_map(|participant| {
-                participant
-                    .user
-                    .as_ref()
-                    .and_then(|user| user.uuid.clone())
-            })
+            .filter_map(|participant| participant.user.as_ref().and_then(|user| user.uuid.clone()))
             .collect()
     }
 

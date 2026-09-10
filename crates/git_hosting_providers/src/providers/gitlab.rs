@@ -13,10 +13,10 @@ use urlencoding::encode;
 
 use git::{
     BuildCommitPermalinkParams, BuildPermalinkParams, DiffCommentSide, GitHostAuth,
-    GitHostAuthKind, GitHostingProvider, ParsedGitRemote, PullRequest, PullRequestAuthError,
-    NewPullRequest, PullRequestChecks, PullRequestDetail, ReviewerCandidate, PullRequestListFilter, PullRequestMergeMethod,
-    PullRequestReviewComment, PullRequestReviewVerdict, PullRequestReviewer, PullRequestState,
-    PullRequestSummary, RemoteUrl,
+    GitHostAuthKind, GitHostingProvider, NewPullRequest, ParsedGitRemote, PullRequest,
+    PullRequestAuthError, PullRequestChecks, PullRequestDetail, PullRequestListFilter,
+    PullRequestMergeMethod, PullRequestReviewComment, PullRequestReviewVerdict,
+    PullRequestReviewer, PullRequestState, PullRequestSummary, RemoteUrl, ReviewerCandidate,
 };
 
 fn merge_request_number_regex() -> &'static Regex {
@@ -457,7 +457,10 @@ impl GitHostingProvider for Gitlab {
                 let position = note.position.as_ref();
                 let path = position
                     .and_then(|position| {
-                        position.new_path.clone().or_else(|| position.old_path.clone())
+                        position
+                            .new_path
+                            .clone()
+                            .or_else(|| position.old_path.clone())
                     })
                     .unwrap_or_default();
                 // Only positioned notes anchor to the diff; an unpositioned one
@@ -1134,6 +1137,86 @@ mod tests {
                 repo: "zed".into(),
             }
         );
+    }
+
+    #[test]
+    fn test_gitlab_write_paths_accept_recorded_success_responses() -> anyhow::Result<()> {
+        let client: Arc<dyn HttpClient> =
+            http_client::FakeHttpClient::create(|request| async move {
+                let path = request.uri().path();
+                let method = request.method().as_str();
+                let body = match (method, path) {
+                    ("GET", "/api/v4/users") => r#"[{"id":1,"username":"reviewer"}]"#,
+                    ("GET", "/api/v4/projects/owner%2Frepo/merge_requests/7") => {
+                        r#"{"iid":7,"title":"Example","reviewers":[]}"#
+                    }
+                    ("PUT", "/api/v4/projects/owner%2Frepo/merge_requests/7")
+                    | ("PUT", "/api/v4/projects/owner%2Frepo/merge_requests/7/merge") => "{}",
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "unexpected GitLab write request: {method} {path}"
+                        ));
+                    }
+                };
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(body.into())?)
+            });
+        let provider = Gitlab::public_instance();
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let auth = Some(GitHostAuth::Bearer("token".into()));
+
+        futures::executor::block_on(provider.close_pull_request(
+            &remote,
+            7,
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.reopen_pull_request(
+            &remote,
+            7,
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.request_reviewers(
+            &remote,
+            7,
+            vec!["reviewer".into()],
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.set_pull_request_draft(
+            &remote,
+            7,
+            true,
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.set_pull_request_draft(
+            &remote,
+            7,
+            false,
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.merge_pull_request(
+            &remote,
+            7,
+            PullRequestMergeMethod::Merge,
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.merge_pull_request(
+            &remote,
+            7,
+            PullRequestMergeMethod::Squash,
+            auth,
+            client,
+        ))?;
+        Ok(())
     }
 
     #[test]

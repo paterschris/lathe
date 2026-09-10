@@ -14,10 +14,10 @@ use util::ResultExt as _;
 
 use git::{
     BuildCommitPermalinkParams, BuildPermalinkParams, DiffCommentSide, GitHostAuth,
-    GitHostAuthKind, GitHostingProvider, NewPullRequest, PullRequestChecks,
-    ReviewerCandidate, ParsedGitRemote, PullRequest, PullRequestAuthError, PullRequestDetail,
-    PullRequestListFilter, PullRequestMergeMethod, PullRequestReviewComment,
-    PullRequestReviewVerdict, PullRequestReviewer, PullRequestState, PullRequestSummary, RemoteUrl,
+    GitHostAuthKind, GitHostingProvider, NewPullRequest, ParsedGitRemote, PullRequest,
+    PullRequestAuthError, PullRequestChecks, PullRequestDetail, PullRequestListFilter,
+    PullRequestMergeMethod, PullRequestReviewComment, PullRequestReviewVerdict,
+    PullRequestReviewer, PullRequestState, PullRequestSummary, RemoteUrl, ReviewerCandidate,
 };
 
 use crate::get_host_from_git_remote_url;
@@ -460,8 +460,7 @@ impl GitHostingProvider for Github {
             &auth,
             Some(serde_json::to_vec(&body)?),
         )?;
-        let bytes =
-            github_send(&http_client, http_request, "creating GitHub pull request").await?;
+        let bytes = github_send(&http_client, http_request, "creating GitHub pull request").await?;
         let created: GithubPullRequest =
             serde_json::from_slice(&bytes).context("parsing created GitHub pull request")?;
         let state = created.pull_request_state();
@@ -1363,6 +1362,85 @@ mod tests {
             url.as_str(),
             "https://avatars.githubusercontent.com/u/e?email=12345%2Boctocat%40users.noreply.github.com&s=128"
         );
+    }
+
+    #[test]
+    fn test_github_write_paths_accept_recorded_success_responses() -> anyhow::Result<()> {
+        let client: Arc<dyn HttpClient> =
+            http_client::FakeHttpClient::create(|request| async move {
+                let path = request.uri().path();
+                let method = request.method().as_str();
+                let body = match (method, path) {
+                    ("PATCH", "/repos/owner/repo/pulls/7")
+                    | ("POST", "/repos/owner/repo/pulls/7/requested_reviewers")
+                    | ("PUT", "/repos/owner/repo/pulls/7/merge")
+                    | ("POST", "/graphql") => "{}",
+                    ("GET", "/repos/owner/repo/pulls/7") => r#"{"node_id":"PR_node"}"#,
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "unexpected GitHub write request: {method} {path}"
+                        ));
+                    }
+                };
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(body.into())?)
+            });
+        let provider = Github::public_instance();
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let auth = Some(GitHostAuth::Bearer("token".into()));
+
+        futures::executor::block_on(provider.close_pull_request(
+            &remote,
+            7,
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.reopen_pull_request(
+            &remote,
+            7,
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.request_reviewers(
+            &remote,
+            7,
+            vec!["reviewer".into()],
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.set_pull_request_draft(
+            &remote,
+            7,
+            true,
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.set_pull_request_draft(
+            &remote,
+            7,
+            false,
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.merge_pull_request(
+            &remote,
+            7,
+            PullRequestMergeMethod::Merge,
+            auth.clone(),
+            client.clone(),
+        ))?;
+        futures::executor::block_on(provider.merge_pull_request(
+            &remote,
+            7,
+            PullRequestMergeMethod::Squash,
+            auth,
+            client,
+        ))?;
+        Ok(())
     }
 
     /// GitHub logins are case-insensitive, so a viewer who typed "Octocat" into

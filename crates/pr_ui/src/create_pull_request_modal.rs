@@ -8,7 +8,7 @@ use gpui::{
 };
 use project::Project;
 use std::sync::Arc;
-use ui::{Checkbox, ToggleState, prelude::*};
+use ui::{Checkbox, ContextMenu, PopoverMenu, ToggleState, prelude::*};
 use ui_input::InputField;
 use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
@@ -36,6 +36,7 @@ pub fn open(
 struct RepositoryContext {
     provider: Arc<dyn GitHostingProvider + Send + Sync>,
     remote: ParsedGitRemote,
+    branches: Vec<SharedString>,
 }
 
 pub struct CreatePullRequestModal {
@@ -44,8 +45,8 @@ pub struct CreatePullRequestModal {
     focus_handle: FocusHandle,
     title_input: Entity<InputField>,
     body_input: Entity<InputField>,
-    source_input: Entity<InputField>,
-    target_input: Entity<InputField>,
+    source_branch: SharedString,
+    target_branch: SharedString,
     is_draft: bool,
     /// Resolved host and branch defaults. `None` until the initial lookup lands,
     /// or permanently when this workspace has no usable hosting remote.
@@ -73,16 +74,6 @@ impl CreatePullRequestModal {
                 .label("Description")
                 .tab_index(2)
         });
-        let source_input = cx.new(|cx| {
-            InputField::new(window, cx, "Branch with your changes")
-                .label("From")
-                .tab_index(3)
-        });
-        let target_input = cx.new(|cx| {
-            InputField::new(window, cx, "Branch to merge into")
-                .label("Into")
-                .tab_index(4)
-        });
         window.focus(&title_input.focus_handle(cx), cx);
 
         let mut this = Self {
@@ -91,8 +82,8 @@ impl CreatePullRequestModal {
             focus_handle: cx.focus_handle(),
             title_input,
             body_input,
-            source_input,
-            target_input,
+            source_branch: SharedString::default(),
+            target_branch: SharedString::default(),
             is_draft: false,
             context: None,
             error: None,
@@ -120,12 +111,13 @@ impl CreatePullRequestModal {
                     .branch
                     .as_ref()
                     .map(|branch| SharedString::from(branch.name().to_string()));
+                let branches = available_branch_names(&snapshot.branch_list);
                 let registry = GitHostingProviderRegistry::global(cx);
                 let (provider, remote) = parse_git_remote_url(registry, &remote_url)?;
-                Some((provider, remote, branch))
+                Some((provider, remote, branch, branches))
             });
 
-            let Some((provider, remote, branch)) = resolved.ok().flatten() else {
+            let Some((provider, remote, branch, branches)) = resolved.ok().flatten() else {
                 this.update(cx, |this, cx| {
                     this.error = Some(
                         "This workspace has no git repository with a supported hosting remote."
@@ -145,8 +137,6 @@ impl CreatePullRequestModal {
                     .flatten(),
                 None => None,
             };
-            // Best-effort: an unreachable host still lets the user type a target
-            // branch by hand rather than blocking the whole modal.
             let default_branch = provider
                 .default_branch(
                     &ParsedGitRemote {
@@ -161,15 +151,28 @@ impl CreatePullRequestModal {
                 .flatten()
                 .unwrap_or_else(|| SharedString::from("main"));
 
-            this.update_in(cx, |this, window, cx| {
-                let source_branch = branch.unwrap_or_default();
-                this.context = Some(RepositoryContext { provider, remote });
-                this.source_input.update(cx, |input, cx| {
-                    input.set_text(source_branch.as_ref(), window, cx);
+            this.update_in(cx, |this, _window, cx| {
+                let Some(fallback_branch) = branches.first().cloned() else {
+                    this.error =
+                        Some("No local branches are available for this pull request.".into());
+                    cx.notify();
+                    return;
+                };
+                let source_branch = branch
+                    .filter(|branch| branches.contains(branch))
+                    .unwrap_or_else(|| fallback_branch.clone());
+                let target_branch = branches
+                    .iter()
+                    .find(|branch| branch.as_ref() == default_branch.as_ref())
+                    .cloned()
+                    .unwrap_or(fallback_branch);
+                this.context = Some(RepositoryContext {
+                    provider,
+                    remote,
+                    branches,
                 });
-                this.target_input.update(cx, |input, cx| {
-                    input.set_text(default_branch.as_ref(), window, cx);
-                });
+                this.source_branch = source_branch;
+                this.target_branch = target_branch;
                 cx.notify();
             })
             .ok();
@@ -185,8 +188,8 @@ impl CreatePullRequestModal {
         };
         let title = self.title_input.read(cx).text(cx).trim().to_string();
         let body = self.body_input.read(cx).text(cx).trim().to_string();
-        let source_branch = self.source_input.read(cx).text(cx).trim().to_string();
-        let target_branch = self.target_input.read(cx).text(cx).trim().to_string();
+        let source_branch = self.source_branch.to_string();
+        let target_branch = self.target_branch.to_string();
 
         if title.is_empty() {
             self.error = Some("Give the pull request a title.".into());
@@ -317,6 +320,75 @@ impl Focusable for CreatePullRequestModal {
 
 impl ModalView for CreatePullRequestModal {}
 
+fn available_branch_names(branches: &[git::repository::Branch]) -> Vec<SharedString> {
+    let mut names: Vec<_> = branches
+        .iter()
+        .filter_map(|branch| {
+            branch
+                .ref_name
+                .as_ref()
+                .strip_prefix("refs/heads/")
+                .map(SharedString::from)
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+impl CreatePullRequestModal {
+    fn render_branch_picker(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        selected: SharedString,
+        branches: Vec<SharedString>,
+        weak_self: WeakEntity<Self>,
+        source: bool,
+    ) -> impl IntoElement {
+        v_flex()
+            .flex_1()
+            .gap_1()
+            .child(Label::new(label).size(LabelSize::Small))
+            .child(
+                PopoverMenu::new(id)
+                    .trigger(
+                        Button::new(format!("{id}-trigger"), selected)
+                            .full_width()
+                            .end_icon(
+                                Icon::new(IconName::ChevronDown)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .menu(move |window, cx| {
+                        let weak_self = weak_self.clone();
+                        let branches = branches.clone();
+                        Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                            let mut menu = menu;
+                            for branch in branches.clone() {
+                                let weak_self = weak_self.clone();
+                                menu = menu.entry(branch.clone(), None, move |_window, cx| {
+                                    weak_self
+                                        .update(cx, |this, cx| {
+                                            if source {
+                                                this.source_branch = branch.clone();
+                                            } else {
+                                                this.target_branch = branch.clone();
+                                            }
+                                            this.error = None;
+                                            cx.notify();
+                                        })
+                                        .log_err();
+                                });
+                            }
+                            menu
+                        }))
+                    }),
+            )
+    }
+}
+
 impl Render for CreatePullRequestModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ready = self.context.is_some();
@@ -324,6 +396,12 @@ impl Render for CreatePullRequestModal {
             .context
             .as_ref()
             .map(|context| format!("{}/{}", context.remote.owner, context.remote.repo));
+        let branches = self
+            .context
+            .as_ref()
+            .map(|context| context.branches.clone())
+            .unwrap_or_default();
+        let weak_self = cx.entity().downgrade();
 
         v_flex()
             .key_context("CreatePullRequestModal")
@@ -340,11 +418,7 @@ impl Render for CreatePullRequestModal {
                     .gap_0p5()
                     .child(Label::new("New Pull Request").size(LabelSize::Large))
                     .when_some(host_label, |this, repo| {
-                        this.child(
-                            Label::new(repo)
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        )
+                        this.child(Label::new(repo).size(LabelSize::Small).color(Color::Muted))
                     }),
             )
             .child(self.title_input.clone())
@@ -352,8 +426,22 @@ impl Render for CreatePullRequestModal {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().child(self.source_input.clone()))
-                    .child(div().flex_1().child(self.target_input.clone())),
+                    .child(self.render_branch_picker(
+                        "source-branch-picker",
+                        "From",
+                        self.source_branch.clone(),
+                        branches.clone(),
+                        weak_self.clone(),
+                        true,
+                    ))
+                    .child(self.render_branch_picker(
+                        "target-branch-picker",
+                        "Into",
+                        self.target_branch.clone(),
+                        branches,
+                        weak_self,
+                        false,
+                    )),
             )
             .child(
                 Checkbox::new(
@@ -390,5 +478,36 @@ impl Render for CreatePullRequestModal {
                         .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_picker_excludes_remote_tracking_refs_and_sorts_local_branches() {
+        let branches = [
+            git::repository::Branch {
+                is_head: false,
+                ref_name: "refs/heads/feature".into(),
+                upstream: None,
+                most_recent_commit: None,
+            },
+            git::repository::Branch {
+                is_head: true,
+                ref_name: "refs/heads/main".into(),
+                upstream: None,
+                most_recent_commit: None,
+            },
+            git::repository::Branch {
+                is_head: false,
+                ref_name: "refs/remotes/origin/main".into(),
+                upstream: None,
+                most_recent_commit: None,
+            },
+        ];
+
+        assert_eq!(available_branch_names(&branches), ["feature", "main"]);
     }
 }

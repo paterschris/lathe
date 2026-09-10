@@ -126,10 +126,7 @@ impl Gitlab {
     }
 
     pub(super) fn api_host(&self) -> String {
-        self.base_url
-            .host_str()
-            .unwrap_or("gitlab.com")
-            .to_string()
+        self.base_url.host_str().unwrap_or("gitlab.com").to_string()
     }
 
     /// The username the supplied credential authenticates as, used both to
@@ -370,7 +367,11 @@ impl Gitlab {
         match latest.status.as_str() {
             "success" => checks.succeeded += 1,
             "failed" => checks.failed += 1,
-            "running" | "pending" | "created" | "waiting_for_resource" | "preparing"
+            "running"
+            | "pending"
+            | "created"
+            | "waiting_for_resource"
+            | "preparing"
             | "scheduled" => checks.pending += 1,
             _ => checks.neutral += 1,
         }

@@ -183,9 +183,7 @@ impl Github {
             }
             match run.conclusion.as_deref() {
                 Some("success") => checks.succeeded += 1,
-                Some("failure") | Some("timed_out") | Some("startup_failure") => {
-                    checks.failed += 1
-                }
+                Some("failure") | Some("timed_out") | Some("startup_failure") => checks.failed += 1,
                 // `action_required` is a human gate, not a failure, but it is
                 // not a pass either.
                 _ => checks.neutral += 1,
@@ -1172,7 +1170,6 @@ mod tests {
 
         assert_eq!(github.api_base().unwrap(), "https://api.github.com");
     }
-
 }
 
 #[derive(Deserialize)]
