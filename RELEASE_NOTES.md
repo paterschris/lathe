@@ -2,6 +2,43 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.1.0 - 2026-09-11
+
+The first stable release since 1.0.0. It carries everything from the 1.0.1 beta plus the work below.
+
+### Added
+
+- **The composer walks your prompt history.** Up and down in the agent panel's composer recall prompts you have already sent, the way a shell walks its command history. The keys only take over at the edges of the text, so moving around inside a multi-line prompt is unchanged, and the editors for past and queued messages keep ordinary cursor movement.
+- **Create a Pixel Tablet Android virtual device from the Mobile panel.** The Android device menu offers separate phone and tablet AVDs, both on API 35 and the host-matched Google APIs image.
+- **Window zoom scales the whole window.** `Cmd +`, `Cmd -`, and `Cmd 0` resize the editor, terminal, project panel, git panel, git graph, pull requests, agent panel, git commit editor, and markdown preview together, scoped to the active window.
+- **Checking out a commit works in remote and collab projects.** Detached HEAD checkout from the history view and commit graph previously refused anything but a local repository.
+
+### Fixed
+
+- **The pull request panel shows every repository again.** It built its section list and then failed to store it, so a workspace with two repositories reported none at all and the panel read "No repositories open". Each repository now gets its own collapsible section with its open count.
+- **Clicking an agent link to a file outside the project opens it.** The link was resolved against the project's worktrees, which return nothing for an outside path, so the click silently did nothing.
+- **Creating a worktree from a remote branch starts from the remote tip.** The branch target resolved to `origin/main` rather than the fully qualified `refs/remotes/origin/main`.
+- **Rainbow parameter highlighting works again.** Bundled themes define the eight parameter colors, and declarations and references take the color for their ordinal position.
+- **Grouped runnable queries emit every runnable again**, restoring table-test discovery and per-item metadata.
+- **The Mobile panel runs on Windows.** It shelled out to `./gradlew`, a Unix shell script, and opened terminals through `$SHELL -lic`, neither of which exists there; sixteen further lookups asked for `sdkmanager`, `avdmanager`, `adb`, `java`, and `emulator` by their Unix names and so reported the Android toolchain as missing rather than erroring.
+- **New pull requests take their branches from pickers** rather than free text, so a mistyped branch cannot be submitted. Recorded API fixtures now cover close, reopen, reviewer requests, draft transitions, merge, and squash merge across GitHub, GitLab, and Bitbucket.
+- **The peek view leaves hover popovers and context menus above it**, and is covered in multibuffers and splits; Vim `j` and `k` move its location list.
+- Logging out of an agent that supports it now actually clears the authenticated state.
+
+### Changed
+
+- The feature catalog moved out of the README to [docs/features.md](docs/features.md), which doubles as the checklist of what this fork changes on top of upstream.
+
+### Known issues
+
+- **Two tests covering restoration of a promoted draft thread across a reload fail**, and have failed since v1.0.0. Reloading the agent panel may not restore a promoted thread's messages. Not a new regression, but not yet fixed.
+- One `project` test covering git state refresh for a bare `.git` file fails, also pre-existing.
+- **The Windows fixes above are verified by compilation and tests only.** No Windows machine has run them. Linux is likewise unexercised, as are the window zoom and peek view on both.
+- Detached HEAD checkout over collab ships without a test; the fork has no remote-git test harness. The other sixteen Lathe git operations still refuse to run on remote projects.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v1.0.1-beta - 2026-09-10
 
 Zoom now scales the whole window, not just the editor.
