@@ -8,6 +8,7 @@ use crate::{
         PromptLocalCommand, SlashCommandCompletion,
     },
     mention_set::{Mention, MentionImage, MentionSet, insert_crease_for_mention},
+    prompt_history::{self, PromptHistoryCursor},
 };
 use acp_thread::MentionUri;
 use agent::ThreadStore;
@@ -44,6 +45,7 @@ use util::paths::PathStyle;
 use util::{ResultExt, debug_panic};
 use workspace::{CollaboratorId, Workspace};
 use zed_actions::agent::{Chat, PasteRaw};
+use zed_actions::editor::{MoveDown, MoveUp};
 
 #[derive(Default)]
 pub struct SessionCapabilities {
@@ -207,6 +209,8 @@ pub struct MessageEditor {
     local_commands: SharedLocalCommands,
     agent_id: AgentId,
     thread_store: Option<Entity<ThreadStore>>,
+    prompt_history_enabled: bool,
+    prompt_history_cursor: PromptHistoryCursor,
     _subscriptions: Vec<Subscription>,
     _parse_slash_command_task: Task<()>,
 }
@@ -609,6 +613,8 @@ impl MessageEditor {
             local_commands,
             agent_id,
             thread_store,
+            prompt_history_enabled: false,
+            prompt_history_cursor: PromptHistoryCursor::default(),
             _subscriptions: subscriptions,
             _parse_slash_command_task: Task::ready(()),
         }
@@ -927,6 +933,11 @@ impl MessageEditor {
     }
 
     pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Replacing the composer's contents (sending, switching threads,
+        // restoring a draft) ends any walk through the prompt history.
+        // `recall_prompt` re-arms the cursor after the `set_message` it drives.
+        self.prompt_history_cursor = PromptHistoryCursor::default();
+
         self.editor.update(cx, |editor, cx| {
             editor.clear(window, cx);
             editor.remove_creases(
@@ -939,6 +950,89 @@ impl MessageEditor {
                 cx,
             )
         });
+    }
+
+    /// Lets up/down walk the prompts sent from this editor, as a shell walks
+    /// its command history. Only the panel's composer opts in: in the editors
+    /// for past and queued messages those keys stay plain cursor movement.
+    pub fn enable_prompt_history(&mut self) {
+        self.prompt_history_enabled = true;
+    }
+
+    fn recall_previous_prompt(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
+        let on_first_row = self
+            .cursor_display_row(cx)
+            .is_some_and(|(row, _last_row)| row == 0);
+        if !self.can_walk_prompt_history(cx) || !on_first_row {
+            cx.propagate();
+            return;
+        }
+
+        let draft = self.draft_content_blocks_snapshot(cx);
+        let mut cursor = std::mem::take(&mut self.prompt_history_cursor);
+        let prompt = prompt_history::previous(&mut cursor, draft, cx);
+        self.recall_prompt(prompt, cursor, window, cx);
+    }
+
+    fn recall_next_prompt(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
+        let on_last_row = self
+            .cursor_display_row(cx)
+            .is_some_and(|(row, last_row)| row == last_row);
+        if !self.can_walk_prompt_history(cx) || !on_last_row {
+            cx.propagate();
+            return;
+        }
+
+        let mut cursor = std::mem::take(&mut self.prompt_history_cursor);
+        let prompt = prompt_history::next(&mut cursor, cx);
+        self.recall_prompt(prompt, cursor, window, cx);
+    }
+
+    fn recall_prompt(
+        &mut self,
+        prompt: Option<Vec<acp::ContentBlock>>,
+        cursor: PromptHistoryCursor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(prompt) = prompt else {
+            self.prompt_history_cursor = cursor;
+            cx.propagate();
+            return;
+        };
+
+        cx.stop_propagation();
+        self.set_message(prompt, window, cx);
+        self.prompt_history_cursor = cursor;
+        self.editor.update(cx, |editor, cx| {
+            editor.move_to_end(&Default::default(), window, cx);
+        });
+    }
+
+    fn can_walk_prompt_history(&self, cx: &App) -> bool {
+        let editor = self.editor.read(cx);
+        self.prompt_history_enabled && !editor.read_only(cx) && !editor.context_menu_visible()
+    }
+
+    /// The row the cursor sits on and the editor's last row, both in display
+    /// coordinates so soft-wrapped prompts count their wrapped rows. Returns
+    /// `None` unless there is a single, empty selection, leaving up/down alone
+    /// while the user has a selection or multiple cursors.
+    fn cursor_display_row(&self, cx: &mut App) -> Option<(u32, u32)> {
+        let snapshot = self
+            .editor
+            .update(cx, |editor, cx| editor.display_snapshot(cx));
+        let editor = self.editor.read(cx);
+        if editor.selections.count() != 1 {
+            return None;
+        }
+
+        let selection = editor.selections.newest_display(&snapshot);
+        if !selection.is_empty() {
+            return None;
+        }
+
+        Some((selection.head().row().0, snapshot.max_point().row().0))
     }
 
     pub fn send(&mut self, cx: &mut Context<Self>) {
@@ -2013,6 +2107,8 @@ impl Render for MessageEditor {
             .capture_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste_raw))
             .capture_action(cx.listener(Self::paste))
+            .capture_action(cx.listener(Self::recall_previous_prompt))
+            .capture_action(cx.listener(Self::recall_next_prompt))
             .flex_1()
             .child({
                 let settings = ThemeSettings::get_global(cx);
@@ -2280,7 +2376,9 @@ mod tests {
         message_editor::{
             Mention, MessageEditor, MessageEditorEvent, SessionCapabilities, parse_mention_links,
         },
+        prompt_history,
     };
+    use zed_actions::editor::{MoveDown, MoveUp};
 
     #[test]
     fn test_session_capabilities_keep_commands_and_skills_separate() {
@@ -5768,5 +5866,105 @@ mod tests {
             text.starts_with("prefix text\n\n"),
             "Expected text to start with 'prefix text\\n\\n', got: {text:?}"
         );
+    }
+    /// The composer walks sent prompts with up/down like a shell, but only when
+    /// the cursor has nowhere left to go in the direction pressed, so editing a
+    /// multi-line prompt still works.
+    #[gpui::test]
+    async fn test_prompt_history_navigation(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let app_state = cx.update(AppState::test);
+
+        cx.update(|cx| {
+            editor::init(cx);
+            workspace::init(app_state.clone(), cx);
+        });
+
+        let project = Project::test(app_state.fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+
+        let editor = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let workspace_handle = cx.weak_entity();
+            let message_editor = cx.new(|cx| {
+                let mut message_editor = MessageEditor::new(
+                    workspace_handle,
+                    project.downgrade(),
+                    None,
+                    Default::default(),
+                    "Test Agent".into(),
+                    "Test",
+                    EditorMode::AutoHeight {
+                        max_lines: None,
+                        min_lines: 1,
+                    },
+                    window,
+                    cx,
+                );
+                message_editor.enable_prompt_history();
+                message_editor
+            });
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.add_item(
+                    Box::new(cx.new(|_| MessageEditorItem(message_editor.clone()))),
+                    true,
+                    true,
+                    None,
+                    window,
+                    cx,
+                );
+            });
+            message_editor.read(cx).focus_handle(cx).focus(window, cx);
+            message_editor.read(cx).editor().clone()
+        });
+
+        cx.update(|_window, cx| {
+            prompt_history::push(
+                vec![acp::ContentBlock::Text(acp::TextContent::new("older"))],
+                cx,
+            );
+            prompt_history::push(
+                vec![acp::ContentBlock::Text(acp::TextContent::new("newer"))],
+                cx,
+            );
+        });
+
+        cx.simulate_input("draft");
+
+        cx.dispatch_action(MoveUp);
+        editor.read_with(&cx, |editor, cx| assert_eq!(editor.text(cx), "newer"));
+
+        cx.dispatch_action(MoveUp);
+        editor.read_with(&cx, |editor, cx| assert_eq!(editor.text(cx), "older"));
+
+        // Nothing older to recall, so the composer keeps the oldest prompt.
+        cx.dispatch_action(MoveUp);
+        editor.read_with(&cx, |editor, cx| assert_eq!(editor.text(cx), "older"));
+
+        cx.dispatch_action(MoveDown);
+        editor.read_with(&cx, |editor, cx| assert_eq!(editor.text(cx), "newer"));
+
+        // Walking past the newest prompt restores what the user had typed.
+        cx.dispatch_action(MoveDown);
+        editor.read_with(&cx, |editor, cx| assert_eq!(editor.text(cx), "draft"));
+
+        // With the cursor on the last row of a multi-line prompt, up moves the
+        // cursor instead of recalling the history.
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.set_text("first line\nsecond line", window, cx);
+            editor.move_to_end(&Default::default(), window, cx);
+        });
+        cx.dispatch_action(MoveUp);
+        editor.read_with(&cx, |editor, cx| {
+            assert_eq!(editor.text(cx), "first line\nsecond line")
+        });
+        cx.dispatch_action(MoveUp);
+        editor.read_with(&cx, |editor, cx| assert_eq!(editor.text(cx), "newer"));
     }
 }

@@ -23,6 +23,7 @@ use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 use crate::completion_provider::PromptLocalCommand;
 use crate::message_editor::SharedSessionCapabilities;
 use crate::open_abs_path_at_point;
+use crate::prompt_history;
 use crate::ui::{
     SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
     TerminalToolHeader,
@@ -563,6 +564,7 @@ impl ThreadView {
                 window,
                 cx,
             );
+            editor.enable_prompt_history();
             if let Some(content) = initial_content {
                 match content {
                     AgentInitialContent::ThreadSummary { session_id, title } => {
@@ -1341,6 +1343,7 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_prompt_history(&message_editor, cx);
         let contents = self.resolve_message_contents(&message_editor, cx);
 
         self.thread_error.take();
@@ -1375,6 +1378,15 @@ impl ThreadView {
         });
 
         self.send_content(contents_task, false, window, cx);
+    }
+
+    /// Records what the user dispatched so the composer's up/down history can
+    /// recall it, mentions included. Snapshots the editor synchronously rather
+    /// than reusing the resolved prompt, which only lands after the editor has
+    /// already been cleared.
+    fn record_prompt_history(&self, message_editor: &Entity<MessageEditor>, cx: &mut App) {
+        let prompt = message_editor.read(cx).draft_content_blocks_snapshot(cx);
+        prompt_history::push(prompt, cx);
     }
 
     pub fn send_content(
@@ -1805,6 +1817,7 @@ impl ThreadView {
             return;
         }
 
+        self.record_prompt_history(&message_editor, cx);
         let contents = self.resolve_message_contents(&message_editor, cx);
 
         cx.spawn_in(window, async move |this, cx| {
