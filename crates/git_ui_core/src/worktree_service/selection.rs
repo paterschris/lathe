@@ -147,6 +147,6 @@ pub fn resolve_worktree_branch_target(branch_target: &NewWorktreeBranchTarget) -
         NewWorktreeBranchTarget::RemoteBranch {
             remote_name,
             branch_name,
-        } => Some(format!("{remote_name}/{branch_name}")),
+        } => Some(format!("refs/remotes/{remote_name}/{branch_name}")),
     }
 }

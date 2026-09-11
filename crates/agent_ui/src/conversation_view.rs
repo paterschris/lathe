@@ -6185,6 +6185,15 @@ pub(crate) mod tests {
             }
         }
 
+        fn supports_logout(&self) -> bool {
+            true
+        }
+
+        fn logout(&self, _cx: &mut App) -> Task<gpui::Result<()>> {
+            *self.authenticated.lock() = false;
+            Task::ready(Ok(()))
+        }
+
         fn prompt(
             &self,
             _params: acp::PromptRequest,
