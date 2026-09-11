@@ -13859,12 +13859,16 @@ dependencies = [
  "notifications",
  "picker",
  "project",
+ "serde_json",
  "settings",
+ "theme",
+ "theme_settings",
  "ui",
  "ui_input",
  "util",
  "workspace",
  "zed_actions",
+ "zlog",
 ]
 
 [[package]]

@@ -10,8 +10,7 @@ use git::{
 use gpui::http_client::HttpClient;
 use gpui::{
     Action, AppContext as _, AsyncWindowContext, ClipboardItem, Entity, EventEmitter, FocusHandle,
-    Focusable, ScrollStrategy, SharedString, Subscription, Task, UniformListScrollHandle,
-    WeakEntity, actions, uniform_list,
+    Focusable, ScrollHandle, SharedString, Subscription, Task, WeakEntity, actions,
 };
 use project::{
     Project,
@@ -253,7 +252,7 @@ struct RepoSection {
     /// changes. Held in state rather than computed in `render` so the keyboard
     /// cursor has a stable set of indices to move through.
     rows: Vec<PanelRow>,
-    scroll_handle: UniformListScrollHandle,
+    scroll_handle: ScrollHandle,
     /// Highest page fetched so far. "Load more" asks for the next one.
     loaded_pages: u32,
     loading_more: bool,
@@ -281,7 +280,7 @@ impl RepoSection {
             state: LoadState::Idle,
             host_context: None,
             rows: Vec::new(),
-            scroll_handle: UniformListScrollHandle::default(),
+            scroll_handle: ScrollHandle::default(),
             loaded_pages: 0,
             loading_more: false,
             reviewers: HashMap::new(),
@@ -363,6 +362,8 @@ pub struct PullRequestPanel {
     focus_handle: FocusHandle,
     /// One section per workspace repository, ordered by display name.
     sections: Vec<RepoSection>,
+    /// Repository sections whose pull request lists are hidden.
+    collapsed_sections: HashSet<RepositoryId>,
     filter: StateFilter,
     sort: SortOrder,
     /// When set, restrict the lists to PRs the connected account is a requested
@@ -417,6 +418,7 @@ impl PullRequestPanel {
                 fs,
                 focus_handle,
                 sections: Vec::new(),
+                collapsed_sections: HashSet::default(),
                 filter: StateFilter::Open,
                 sort: SortOrder::RecentlyUpdated,
                 reviewing: false,
@@ -431,6 +433,20 @@ impl PullRequestPanel {
 
     fn section_index(&self, id: RepositoryId) -> Option<usize> {
         self.sections.iter().position(|section| section.id == id)
+    }
+
+    fn toggle_section_collapsed(&mut self, id: RepositoryId, cx: &mut Context<Self>) {
+        if !self.collapsed_sections.remove(&id) {
+            self.collapsed_sections.insert(id);
+            if self.selected.is_some_and(|(section_index, _)| {
+                self.sections
+                    .get(section_index)
+                    .is_some_and(|section| section.id == id)
+            }) {
+                self.selected = None;
+            }
+        }
+        cx.notify();
     }
 
     /// Reconciles the sections with the workspace's repositories: existing
@@ -473,6 +489,8 @@ impl PullRequestPanel {
             }
         }
         self.sections = sections;
+        self.collapsed_sections
+            .retain(|id| self.sections.iter().any(|section| section.id == *id));
 
         for index in added {
             self.refresh_section(index, cx);
@@ -718,6 +736,10 @@ impl PullRequestPanel {
             self.selected = None;
             return;
         };
+        if self.collapsed_sections.contains(&section.id) {
+            self.selected = None;
+            return;
+        }
         if section
             .rows
             .get(row_index)
@@ -866,6 +888,7 @@ impl PullRequestPanel {
         self.sections
             .iter()
             .enumerate()
+            .filter(|(_, section)| !self.collapsed_sections.contains(&section.id))
             .flat_map(|(section_index, section)| {
                 section
                     .rows
@@ -913,9 +936,7 @@ impl PullRequestPanel {
         let (section_index, row_index) = position;
         self.selected = Some(position);
         if let Some(section) = self.sections.get(section_index) {
-            section
-                .scroll_handle
-                .scroll_to_item(row_index, ScrollStrategy::Nearest);
+            section.scroll_handle.scroll_to_item(row_index);
         }
         cx.notify();
     }
@@ -1328,13 +1349,14 @@ impl PullRequestPanel {
     fn render_section(
         &self,
         section_index: usize,
-        show_label: bool,
         divider: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(section) = self.sections.get(section_index) else {
             return div().into_any_element();
         };
+        let is_collapsed = self.collapsed_sections.contains(&section.id);
+        let id = section.id;
         let state = section.state.clone();
         let display_name = section.display_name.clone();
         let count = section.total();
@@ -1370,33 +1392,28 @@ impl PullRequestPanel {
                     .into_any_element()
                 } else {
                     let rows = section.rows.clone();
-                    uniform_list(
-                        list_id,
-                        rows.len(),
-                        cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                            range
-                                .filter_map(|ix| match rows.get(ix)? {
-                                    PanelRow::Header(label) => Some(
-                                        render_section_header(label.clone()).into_any_element(),
-                                    ),
-                                    PanelRow::PullRequest(summary) => Some(this.render_row(
-                                        section_index,
-                                        ix,
-                                        summary.clone(),
-                                        cx,
-                                    )),
-                                    PanelRow::LoadMore => {
-                                        Some(this.render_load_more(section_index, ix, cx))
-                                    }
-                                })
-                                .collect()
-                        }),
-                    )
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .track_scroll(&section.scroll_handle)
-                    .into_any_element()
+                    let rendered_rows: Vec<AnyElement> = rows
+                        .iter()
+                        .enumerate()
+                        .map(|(index, row)| match row {
+                            PanelRow::Header(label) => {
+                                render_section_header(label.clone()).into_any_element()
+                            }
+                            PanelRow::PullRequest(summary) => {
+                                self.render_row(section_index, index, summary.clone(), cx)
+                            }
+                            PanelRow::LoadMore => self.render_load_more(section_index, index, cx),
+                        })
+                        .collect();
+                    v_flex()
+                        .id(list_id)
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&section.scroll_handle)
+                        .children(rendered_rows)
+                        .into_any_element()
                 }
             }
             LoadState::NoHost(reason) => {
@@ -1442,16 +1459,21 @@ impl PullRequestPanel {
         };
 
         v_flex()
-            .flex_1()
             .min_h_0()
-            .overflow_hidden()
+            .when(is_collapsed, |this| this.flex_none())
+            .when(!is_collapsed, |this| this.flex_1().overflow_hidden())
             .when(divider, |this| {
                 this.border_b_1().border_color(cx.theme().colors().border)
             })
-            .when(show_label, |this| {
-                this.child(render_repo_label(display_name, count, loading, cx))
-            })
-            .child(body)
+            .child(render_repo_label(
+                id,
+                display_name,
+                count,
+                loading,
+                is_collapsed,
+                cx,
+            ))
+            .when(!is_collapsed, |this| this.child(body))
             .into_any_element()
     }
 
@@ -1484,10 +1506,11 @@ impl PullRequestPanel {
 
         let row = h_flex()
             .id(("pr-row", ix))
-            .h(rems(ROW_HEIGHT_REMS))
             .w_full()
             .px_2()
+            .py_1()
             .gap_2()
+            .items_start()
             .border_l_2()
             .border_color(if is_open_in_tab {
                 cx.theme().colors().border_focused
@@ -1638,9 +1661,9 @@ impl PullRequestPanel {
             .into_any_element()
     }
 
-    /// A compact reviewer summary for a PR list row: up to `MAX_ROLLUP_DOTS`
-    /// verdict-colored dots (approved green, changes-requested red, pending
-    /// hollow) plus a "+N" overflow, with a tooltip listing every reviewer.
+    /// A wrapped reviewer summary for a PR list row. Every verdict-colored dot
+    /// is visible: approved reviewers are green, changes-requested reviewers
+    /// are red, comments are blue, and pending reviews are hollow.
     /// `None` when reviewers are still loading or the host reports none.
     fn render_reviewer_rollup(
         &self,
@@ -1648,13 +1671,11 @@ impl PullRequestPanel {
         number: u32,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
-        const MAX_ROLLUP_DOTS: usize = 3;
         let reviewers = self.sections.get(section_index)?.reviewers_for(number)?;
         if reviewers.is_empty() {
             return None;
         }
-        let overflow = reviewers.len().saturating_sub(MAX_ROLLUP_DOTS);
-        let dots = reviewers.iter().take(MAX_ROLLUP_DOTS).map(|reviewer| {
+        let dots = reviewers.iter().map(|reviewer| {
             let (color, filled) = match reviewer.verdict {
                 Some(PullRequestReviewVerdict::Approve) => (Color::Success, true),
                 Some(PullRequestReviewVerdict::RequestChanges) => (Color::Error, true),
@@ -1689,16 +1710,10 @@ impl PullRequestPanel {
             h_flex()
                 .id(("pr-reviewer-rollup", number as usize))
                 .flex_none()
+                .w(px(56.))
+                .flex_wrap()
                 .gap_1()
-                .items_center()
                 .children(dots)
-                .when(overflow > 0, |this| {
-                    this.child(
-                        Label::new(format!("+{overflow}"))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                })
                 .tooltip(Tooltip::text(tooltip))
                 .into_any_element(),
         )
@@ -1734,23 +1749,35 @@ impl PullRequestPanel {
     }
 }
 
-/// Names the repository a section belongs to. Only drawn when more than one
-/// repository is open: with a single repository the panel header already says
-/// what is being listed.
+/// Names the repository a section belongs to and toggles its pull request list.
 fn render_repo_label(
+    id: RepositoryId,
     name: SharedString,
     count: usize,
     loading: bool,
-    cx: &App,
+    is_collapsed: bool,
+    cx: &mut Context<PullRequestPanel>,
 ) -> impl IntoElement {
     h_flex()
+        .id(("pull-request-repo-section", id.0))
         .h(rems(1.75))
         .px_2()
         .gap_1p5()
         .flex_none()
+        .cursor_pointer()
+        .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
         .bg(cx.theme().colors().elevated_surface_background)
         .border_b_1()
         .border_color(cx.theme().colors().border_variant)
+        .child(
+            Icon::new(if is_collapsed {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            })
+            .size(IconSize::XSmall)
+            .color(Color::Muted),
+        )
         .child(
             Icon::new(IconName::GitBranch)
                 .size(IconSize::XSmall)
@@ -1766,11 +1793,12 @@ fn render_repo_label(
             .size(LabelSize::XSmall)
             .color(Color::Muted),
         )
+        .on_click(cx.listener(move |this, _, _window, cx| {
+            this.toggle_section_collapsed(id, cx);
+        }))
 }
 
-/// A section header row inside a repository's flattened PR list. Occupies a full
-/// uniform row so it can sit between PR rows without breaking the list's fixed
-/// height.
+/// A section header row inside a repository's pull request list.
 fn render_section_header(label: SharedString) -> impl IntoElement {
     h_flex()
         .h(rems(ROW_HEIGHT_REMS))
@@ -1947,6 +1975,81 @@ impl Focusable for PullRequestPanel {
 
 impl EventEmitter<PanelEvent> for PullRequestPanel {}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use project::{FakeFs, Project};
+    use serde_json::json;
+    use settings::SettingsStore;
+    use util::path;
+    use workspace::MultiWorkspace;
+
+    #[gpui::test]
+    async fn sync_sections_includes_each_open_repository(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            zlog::init_test();
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            GitHostingProviderRegistry::default_global(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/root"),
+            json!({
+                "backend": { ".git": {} },
+                "management-ui": { ".git": {} },
+            }),
+        )
+        .await;
+
+        let project = Project::test(
+            fs,
+            [
+                path!("/root/backend").as_ref(),
+                path!("/root/management-ui").as_ref(),
+            ],
+            cx,
+        )
+        .await;
+        let scan_complete = project.read_with(cx, |project, cx| project.wait_for_initial_scan(cx));
+        scan_complete.await;
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |workspace, _| workspace.workspace().clone());
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            PullRequestPanel::new(workspace, window, cx)
+        });
+
+        let display_names = panel.read_with(cx, |panel, _| {
+            panel
+                .sections
+                .iter()
+                .map(|section| section.display_name.to_string())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(display_names, ["backend", "management-ui"]);
+
+        let backend_id = panel.read_with(cx, |panel, _| panel.sections[0].id);
+        panel.update(cx, |panel, cx| {
+            panel.toggle_section_collapsed(backend_id, cx);
+        });
+        assert!(panel.read_with(cx, |panel, _| {
+            panel.collapsed_sections.contains(&backend_id)
+        }));
+
+        panel.update(cx, |panel, cx| {
+            panel.toggle_section_collapsed(backend_id, cx);
+        });
+        assert!(!panel.read_with(cx, |panel, _| {
+            panel.collapsed_sections.contains(&backend_id)
+        }));
+    }
+}
+
 impl Render for PullRequestPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel_bg = cx.theme().colors().panel_background;
@@ -1960,10 +2063,9 @@ impl Render for PullRequestPanel {
             )
             .into_any_element()
         } else {
-            let show_labels = self.sections.len() > 1;
             let last = self.sections.len() - 1;
             let sections: Vec<AnyElement> = (0..self.sections.len())
-                .map(|index| self.render_section(index, show_labels, index < last, cx))
+                .map(|index| self.render_section(index, index < last, cx))
                 .collect();
             v_flex()
                 .flex_1()
