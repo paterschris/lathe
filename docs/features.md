@@ -4,7 +4,7 @@ Lathe is a fork of [Zed](https://zed.dev). This page is the full inventory of wh
 
 It has a second audience besides users. Every entry here is fork code living alongside upstream code, and an upstream merge resolved the wrong way can drop one silently: it still compiles, nothing fails, and the feature just stops existing. That has already happened three times. When syncing upstream, this page is the checklist of what to verify still works.
 
-Ordered by how much each one differentiates Lathe from stock Zed. Upstream already ships a commit graph, a tabbed git panel, and worktree support; the git section below covers what Lathe adds on top of those rather than restating them.
+Ordered by how much each one differentiates Lathe from stock Zed. Upstream already ships a commit graph, a tabbed git panel, worktree support, and single-file history; the git section below covers what Lathe adds on top of those rather than restating them.
 
 1. [Mobile development](#mobile-development-expo--react-native) - Expo and bare React Native panel
 2. [Merge conflicts and interactive rebase](#merge-conflicts-and-interactive-rebase) - conflict resolution tab, full-file split view, drag-and-drop rebase
@@ -100,7 +100,7 @@ A built-in panel for editing all 200+ theme colors, including syntax token color
 
 ## Git additions
 
-Zed already ships the commit graph, the tabbed git panel, and worktree support. Everything below is what Lathe layers on top.
+Zed already ships the commit graph, the tabbed git panel, worktree support, and the `git: file history` action. Everything below is what Lathe layers on top.
 
 ### Explorer tab and hierarchical branch folder tree
 Lathe adds a third **Explorer** tab to the git panel, alongside upstream's Changes and History. It lists branches, worktrees, and stashes for the repository in one filterable tree, and renders Local and Remote branches as a collapsible folder tree that splits names on `/`. So `feature/auth/login` and `feature/auth/signup` collapse under a single `feature/auth/` folder you can fold or expand. Folders show counts of contained branches and remember their open/closed state per section. Local branches that exist on the remote get an on-remote indicator. When the filter input is active the tree flattens so filter results stay legible. A multi-repo strip keeps every repository in the workspace one click away, with fetch-all and pull-all actions, plus any external repositories pinned via `repository_dashboard_pinned_repos`.
@@ -124,11 +124,8 @@ Check out any commit SHA from the history view into detached HEAD. For inspectin
 ### Worktrees that start up to date
 Creating a worktree from a remote branch fetches the latest origin state first, so the new worktree starts from the current remote tip instead of a stale local ref.
 
-### File history view
-Open the full commit history of a single file from the project panel and browse how it changed over time.
-
-### Git-aware tab and panel styling
-Tabs and project panel entries are color-coded by git status: modified, created, deleted, conflict, error, and warning states each get distinct colors.
+### Git status colors on tabs by default
+Upstream colors tab labels by git status behind `tabs.git_status`, off by default. Lathe turns it on, and keeps the label readable when the row is selected: a selected tab or project panel entry falls back to the default label color instead of tinting into its own selection background.
 
 ![Git Tab Styling](../assets/screenshots/git-aware-editor-tabs.png)
 

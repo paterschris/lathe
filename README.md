@@ -10,7 +10,7 @@ Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks
 
 ## Features
 
-Ordered by how much each one differentiates Lathe from stock Zed. Upstream already ships a commit graph, a tabbed git panel, and worktree support; the git section below covers what Lathe adds on top of those rather than restating them.
+Ordered by how much each one differentiates Lathe from stock Zed. Upstream already ships a commit graph, a tabbed git panel, worktree support, and single-file history; the git section below covers what Lathe adds on top of those rather than restating them.
 
 1. [Mobile development](docs/features.md#mobile-development-expo--react-native) - Expo and bare React Native panel
 2. [Merge conflicts and interactive rebase](docs/features.md#merge-conflicts-and-interactive-rebase) - conflict resolution tab, full-file split view, drag-and-drop rebase
