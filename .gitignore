@@ -54,7 +54,6 @@ crates/docs_preprocessor/actions.json
 
 # Local documentation audit files
 /december-2025-releases.md
-/docs/december-2025-documentation-gaps.md
 chris.r.paterson@pricehawk.dev.p12
 
 # Local scratch files
@@ -65,3 +64,6 @@ chris.r.paterson@pricehawk.dev.p12
 .nixos-test-history
 
 .local*
+
+# Fork-internal development notes, never committed
+/notes/
