@@ -1407,7 +1407,12 @@ impl DiagnosticPopover {
                             ),
                     )
                     .child(div().absolute().top_1().right_1().child({
-                        let message = self.local_diagnostic.diagnostic.message.clone();
+                        let message = self
+                            .local_diagnostic
+                            .diagnostic
+                            .message
+                            .as_shared_string()
+                            .clone();
                         CopyButton::new("copy-diagnostic", message).tooltip_label("Copy Diagnostic")
                     }))
                     .custom_scrollbars(
@@ -2764,6 +2769,7 @@ mod tests {
             value: label.to_string(),
             tooltip: None,
             location: None,
+            command: None,
         }];
 
         let hint_start = InlayOffset(MultiBufferOffset(100));
@@ -2808,11 +2814,13 @@ mod tests {
                 value: "→ ".to_string(), // 4 bytes (3 + 1)
                 tooltip: None,
                 location: None,
+                command: None,
             },
             InlayHintLabelPart {
                 value: "path".to_string(), // 4 bytes
                 tooltip: None,
                 location: None,
+                command: None,
             },
         ];
 

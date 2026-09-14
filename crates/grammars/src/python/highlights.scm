@@ -155,18 +155,17 @@
   function: (identifier) @function.call)
 
 (decorator
-  "@" @punctuation.special)
-
-(decorator
-  "@" @punctuation.special
+  "@" @function.decorator
   [
     (identifier) @function.decorator
     (attribute
+      object: (identifier) @function.decorator
       attribute: (identifier) @function.decorator)
     (call
       function: (identifier) @function.decorator.call)
     (call
       (attribute
+        object: (identifier) @function.decorator.call
         attribute: (identifier) @function.decorator.call))
   ])
 
@@ -398,7 +397,6 @@
   "&"
   "%"
   "%="
-  "@"
   "^"
   "+"
   "->"
@@ -422,6 +420,9 @@
   "^="
   "|="
 ] @operator
+
+(binary_operator
+  operator: "@" @operator)
 
 [
   "and"
@@ -476,8 +477,9 @@
 ] @keyword.definition
 
 (decorator
-  (identifier) @attribute.builtin
-  (#any-of? @attribute.builtin "classmethod" "staticmethod" "property"))
+  "@" @attribute.builtin
+  (identifier) @attribute.builtin @_decorator
+  (#any-of? @_decorator "classmethod" "staticmethod" "property"))
 
 (attribute
   attribute: (identifier) @attribute.special

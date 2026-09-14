@@ -10,7 +10,7 @@
 .DS_Store
 .blob_store
 .build
-.claude/
+.claude/settings.local.json
 .envrc
 .flatpak-builder
 .idea
@@ -54,16 +54,10 @@ crates/docs_preprocessor/actions.json
 
 # Local documentation audit files
 /december-2025-releases.md
-chris.r.paterson@pricehawk.dev.p12
-
-# Local scratch files
-/entities.json
-/mempalace.yaml
+/docs/december-2025-documentation-gaps.md
 
 # NixOS integration test state
 .nixos-test-history
 
 .local*
-
-# Fork-internal development notes, never committed
-/notes/
+.cache

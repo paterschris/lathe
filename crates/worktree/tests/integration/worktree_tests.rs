@@ -1,4 +1,3 @@
-mod worktree_regression_tests;
 mod worktree_settings_tests;
 
 use anyhow::Result;
@@ -798,6 +797,544 @@ async fn test_symlinked_dir_inside_project(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_scan_symlinks_always(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.project.worktree.scan_symlinks =
+                    Some(settings::ScanSymlinksSetting::Always);
+            });
+        });
+    });
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/root",
+        json!({
+            "dir1": {
+                "deps": {
+                    // symlink target placed here by create_symlink below
+                },
+                "src": {
+                    "a.rs": "",
+                },
+            },
+            "dir2": {
+                "src": {
+                    "b.rs": "",
+                }
+            }
+        }),
+    )
+    .await;
+
+    fs.create_symlink("/root/dir1/deps/dep-dir2".as_ref(), "../../dir2".into())
+        .await
+        .unwrap();
+
+    let tree = Worktree::local(
+        Path::new("/root/dir1"),
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    // With scan_symlinks = Always, the symlinked directory's contents should be
+    // fully visible on the first scan without any manual expansion.
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-dir2"), true),
+                (rel_path("deps/dep-dir2/src"), true),
+                (rel_path("deps/dep-dir2/src/b.rs"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_scan_symlinks_expanded(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    // scan_symlinks defaults to Expanded — no settings change needed.
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/root",
+        json!({
+            "dir1": {
+                "deps": {
+                    // symlink target placed here by create_symlink below
+                },
+                "src": {
+                    "a.rs": "",
+                },
+            },
+            "dir2": {
+                "src": {
+                    "b.rs": "",
+                }
+            }
+        }),
+    )
+    .await;
+
+    fs.create_symlink("/root/dir1/deps/dep-dir2".as_ref(), "../../dir2".into())
+        .await
+        .unwrap();
+
+    let tree = Worktree::local(
+        Path::new("/root/dir1"),
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    // With the default scan_symlinks = Expanded, the symlinked directory
+    // should appear as an UnloadedDir entry with no children visible.
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-dir2"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+
+        assert_eq!(
+            tree.entry_for_path(rel_path("deps/dep-dir2")).unwrap().kind,
+            EntryKind::UnloadedDir
+        );
+    });
+
+    // Manually expand the symlinked directory.
+    tree.read_with(cx, |tree, _| {
+        tree.as_local()
+            .unwrap()
+            .refresh_entries_for_paths(vec![rel_path("deps/dep-dir2").into()])
+    })
+    .recv()
+    .await;
+
+    // After expansion, dep-dir2's immediate children are visible. Subdirectories
+    // within it are present but not yet scanned.
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-dir2"), true),
+                (rel_path("deps/dep-dir2/src"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+
+        assert_eq!(
+            tree.entry_for_path(rel_path("deps/dep-dir2/src"))
+                .unwrap()
+                .kind,
+            EntryKind::UnloadedDir
+        );
+    });
+
+    // Expand the subdirectory inside the symlinked directory.
+    tree.read_with(cx, |tree, _| {
+        tree.as_local()
+            .unwrap()
+            .refresh_entries_for_paths(vec![rel_path("deps/dep-dir2/src").into()])
+    })
+    .recv()
+    .await;
+
+    // After expanding the subdirectory, its files are visible.
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-dir2"), true),
+                (rel_path("deps/dep-dir2/src"), true),
+                (rel_path("deps/dep-dir2/src/b.rs"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+    });
+}
+
+#[gpui::test(iterations = 10)]
+async fn test_circular_symlinks_always(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.project.worktree.scan_symlinks =
+                    Some(settings::ScanSymlinksSetting::Always);
+            });
+        });
+    });
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/root",
+        json!({
+            "project": {
+                "lib": {
+                    "a": {
+                        "a.txt": ""
+                    }
+                },
+                "deps": {}
+            },
+            "outside": {
+                "data.txt": ""
+            }
+        }),
+    )
+    .await;
+
+    fs.create_symlink("/root/project/deps/ext".as_ref(), "../../outside".into())
+        .await
+        .unwrap();
+    fs.create_symlink("/root/outside/back".as_ref(), "../../project".into())
+        .await
+        .unwrap();
+
+    let tree = Worktree::local(
+        Path::new("/root/project"),
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    tree.read_with(cx, |tree, _| {
+        let entries: Vec<_> = tree
+            .entries(true, 0)
+            .map(|entry| (entry.path.as_ref(), entry.is_external))
+            .collect();
+
+        assert_eq!(
+            entries,
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/ext"), true),
+                (rel_path("deps/ext/data.txt"), true),
+                (rel_path("lib"), false),
+                (rel_path("lib/a"), false),
+                (rel_path("lib/a/a.txt"), false),
+            ]
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_scan_symlinks_always_respects_gitignore(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.project.worktree.scan_symlinks =
+                    Some(settings::ScanSymlinksSetting::Always);
+            });
+        });
+    });
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/root",
+        json!({
+            "project": {
+                ".gitignore": "ignored-dep\n",
+                "deps": {}
+            },
+            "external-included": {
+                "src": {
+                    "included.rs": ""
+                }
+            },
+            "external-ignored": {
+                "src": {
+                    "ignored.rs": ""
+                }
+            }
+        }),
+    )
+    .await;
+
+    fs.create_symlink(
+        "/root/project/deps/included-dep".as_ref(),
+        "../../external-included".into(),
+    )
+    .await
+    .unwrap();
+    fs.create_symlink(
+        "/root/project/deps/ignored-dep".as_ref(),
+        "../../external-ignored".into(),
+    )
+    .await
+    .unwrap();
+
+    let tree = Worktree::local(
+        Path::new("/root/project"),
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external, entry.is_ignored))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false, false),
+                (rel_path(".gitignore"), false, false),
+                (rel_path("deps"), false, false),
+                (rel_path("deps/ignored-dep"), true, true),
+                (rel_path("deps/included-dep"), true, false),
+                (rel_path("deps/included-dep/src"), true, false),
+                (rel_path("deps/included-dep/src/included.rs"), true, false),
+            ]
+        );
+
+        assert_eq!(
+            tree.entry_for_path(rel_path("deps/ignored-dep"))
+                .unwrap()
+                .kind,
+            EntryKind::UnloadedDir
+        );
+    });
+}
+
+// Real-fs counterparts to the FakeFs scan_symlinks tests above. FakeFs does not
+// model `fs::canonicalize` against a real filesystem, so platform-specific
+// canonicalization or readdir behavior is not covered by the FakeFs tests.
+// These tests use a real temp directory and a real symlink to exercise the
+// production path on the host platform.
+#[cfg(unix)]
+#[gpui::test]
+async fn test_real_fs_scan_symlinks_always(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    init_test(cx);
+
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.project.worktree.scan_symlinks =
+                    Some(settings::ScanSymlinksSetting::Always);
+            });
+        });
+    });
+
+    let temp_root = TempTree::new(json!({
+        "project": {
+            "deps": {},
+            "src": {
+                "a.rs": "",
+            },
+        },
+        "external": {
+            "src": {
+                "b.rs": "",
+            },
+        },
+    }));
+
+    // Relative symlink: from temp_root/project/deps/, `../../external` resolves
+    // to temp_root/external — outside the worktree root at temp_root/project.
+    std::os::unix::fs::symlink(
+        "../../external",
+        temp_root.path().join("project/deps/dep-external"),
+    )
+    .unwrap();
+
+    let project_root = temp_root.path().join("project");
+    let tree = Worktree::local(
+        project_root.as_path(),
+        true,
+        RealFs::new(None, cx.executor()),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-external"), true),
+                (rel_path("deps/dep-external/src"), true),
+                (rel_path("deps/dep-external/src/b.rs"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+    });
+}
+
+#[cfg(unix)]
+#[gpui::test]
+async fn test_real_fs_scan_symlinks_expanded(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    init_test(cx);
+
+    // scan_symlinks defaults to Expanded — no settings change needed.
+
+    let temp_root = TempTree::new(json!({
+        "project": {
+            "deps": {},
+            "src": {
+                "a.rs": "",
+            },
+        },
+        "external": {
+            "src": {
+                "b.rs": "",
+            },
+        },
+    }));
+
+    std::os::unix::fs::symlink(
+        "../../external",
+        temp_root.path().join("project/deps/dep-external"),
+    )
+    .unwrap();
+
+    let project_root = temp_root.path().join("project");
+    let tree = Worktree::local(
+        project_root.as_path(),
+        true,
+        RealFs::new(None, cx.executor()),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    // Before expansion, the symlinked directory should appear as an UnloadedDir
+    // with no children visible.
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-external"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+
+        assert_eq!(
+            tree.entry_for_path(rel_path("deps/dep-external"))
+                .unwrap()
+                .kind,
+            EntryKind::UnloadedDir
+        );
+    });
+
+    // Manually expand the symlinked directory. This is the case #51382 was
+    // added to fix; if this assertion fails it's a regression of that fix on
+    // real filesystems.
+    tree.read_with(cx, |tree, _| {
+        tree.as_local()
+            .unwrap()
+            .refresh_entries_for_paths(vec![rel_path("deps/dep-external").into()])
+    })
+    .recv()
+    .await;
+
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| (entry.path.as_ref(), entry.is_external))
+                .collect::<Vec<_>>(),
+            vec![
+                (rel_path(""), false),
+                (rel_path("deps"), false),
+                (rel_path("deps/dep-external"), true),
+                (rel_path("deps/dep-external/src"), true),
+                (rel_path("src"), false),
+                (rel_path("src/a.rs"), false),
+            ]
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_internal_symlink_updates_preserve_entry_ids(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.background_executor.clone());
@@ -898,7 +1435,7 @@ async fn test_renaming_case_only(cx: &mut TestAppContext) {
     const OLD_NAME: &str = "aaa.rs";
     const NEW_NAME: &str = "AAA.rs";
 
-    let fs = Arc::new(RealFs::new(None, cx.executor()));
+    let fs = RealFs::new(None, cx.executor());
     let temp_root = TempTree::new(json!({
         OLD_NAME: "",
     }));
@@ -1016,9 +1553,7 @@ async fn test_root_rescan_reconciles_stale_state(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn test_root_rescan_does_not_miss_event_before_readding_root_watcher(
-    cx: &mut TestAppContext,
-) {
+async fn test_root_rescan_keeps_root_watcher_registered(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.background_executor.clone());
     fs.insert_tree("/root", json!({})).await;
@@ -1038,16 +1573,17 @@ async fn test_root_rescan_does_not_miss_event_before_readding_root_watcher(
     cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
         .await;
 
-    fs.create_file_before_next_watch_add("/root", "/root/created-before-root-readd.txt");
+    // Dropping and re-registering the root watch would open a window in
+    // which filesystem events are lost.
     fs.emit_fs_event("/root", Some(PathEventKind::Rescan));
+    tree.flush_fs_events(cx).await;
 
-    wait_for_condition(cx, |cx| {
-        tree.read_with(cx, |tree, _| {
-            tree.entry_for_path(rel_path("created-before-root-readd.txt"))
-                .is_some()
-        })
-    })
-    .await;
+    let root_watch_calls = fs
+        .watch_calls()
+        .into_iter()
+        .filter(|path| path == Path::new("/root"))
+        .count();
+    assert_eq!(root_watch_calls, 1);
 }
 
 #[gpui::test]
@@ -1446,7 +1982,7 @@ async fn test_write_file(cx: &mut TestAppContext) {
     let worktree = Worktree::local(
         dir.path(),
         true,
-        Arc::new(RealFs::new(None, cx.executor())),
+        RealFs::new(None, cx.executor()),
         Default::default(),
         true,
         WorktreeId::from_proto(0),
@@ -1454,9 +1990,6 @@ async fn test_write_file(cx: &mut TestAppContext) {
     )
     .await
     .unwrap();
-
-    #[cfg(not(target_os = "macos"))]
-    fs::fs_watcher::global(|_| {}).unwrap();
 
     cx.read(|cx| worktree.read(cx).as_local().unwrap().scan_complete())
         .await;
@@ -1545,7 +2078,7 @@ async fn test_file_scan_inclusions(cx: &mut TestAppContext) {
     let tree = Worktree::local(
         dir.path(),
         true,
-        Arc::new(RealFs::new(None, cx.executor())),
+        RealFs::new(None, cx.executor()),
         Default::default(),
         true,
         WorktreeId::from_proto(0),
@@ -1614,7 +2147,7 @@ async fn test_file_scan_exclusions_overrules_inclusions(cx: &mut TestAppContext)
     let tree = Worktree::local(
         dir.path(),
         true,
-        Arc::new(RealFs::new(None, cx.executor())),
+        RealFs::new(None, cx.executor()),
         Default::default(),
         true,
         WorktreeId::from_proto(0),
@@ -1676,7 +2209,7 @@ async fn test_file_scan_inclusions_reindexes_on_setting_change(cx: &mut TestAppC
     let tree = Worktree::local(
         dir.path(),
         true,
-        Arc::new(RealFs::new(None, cx.executor())),
+        RealFs::new(None, cx.executor()),
         Default::default(),
         true,
         WorktreeId::from_proto(0),
@@ -1765,7 +2298,7 @@ async fn test_file_scan_exclusions(cx: &mut TestAppContext) {
     let tree = Worktree::local(
         dir.path(),
         true,
-        Arc::new(RealFs::new(None, cx.executor())),
+        RealFs::new(None, cx.executor()),
         Default::default(),
         true,
         WorktreeId::from_proto(0),
@@ -1852,7 +2385,7 @@ async fn test_hidden_files(cx: &mut TestAppContext) {
     let tree = Worktree::local(
         dir.path(),
         true,
-        Arc::new(RealFs::new(None, cx.executor())),
+        RealFs::new(None, cx.executor()),
         Default::default(),
         true,
         WorktreeId::from_proto(0),
@@ -1964,7 +2497,7 @@ async fn test_fs_events_in_exclusions(cx: &mut TestAppContext) {
     let tree = Worktree::local(
         dir.path(),
         true,
-        Arc::new(RealFs::new(None, cx.executor())),
+        RealFs::new(None, cx.executor()),
         Default::default(),
         true,
         WorktreeId::from_proto(0),
@@ -2081,7 +2614,7 @@ async fn test_fs_events_in_dot_git_worktree(cx: &mut TestAppContext) {
     let tree = Worktree::local(
         dot_git_worktree_dir.clone(),
         true,
-        Arc::new(RealFs::new(None, cx.executor())),
+        RealFs::new(None, cx.executor()),
         Default::default(),
         true,
         WorktreeId::from_proto(0),
@@ -2238,7 +2771,7 @@ async fn test_create_dir_all_on_create_entry(cx: &mut TestAppContext) {
         assert!(tree.entry_for_path(rel_path("a/b")).unwrap().is_dir());
     });
 
-    let fs_real = Arc::new(RealFs::new(None, cx.executor()));
+    let fs_real = RealFs::new(None, cx.executor());
     let temp_root = TempTree::new(json!({
         "a": {}
     }));
@@ -3601,6 +4134,69 @@ async fn test_repo_exclude(executor: BackgroundExecutor, cx: &mut TestAppContext
 }
 
 #[gpui::test]
+async fn test_repo_exclude_anchored_pattern(executor: BackgroundExecutor, cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(executor);
+    let project_dir = Path::new(path!("/project"));
+    fs.insert_tree(
+        project_dir,
+        json!({
+            ".git": {
+                "info": {
+                    "exclude": "vendor/cache"
+                }
+            },
+            "vendor": {
+                "cache": {
+                    "blob.bin": "",
+                },
+                "keep.txt": "",
+            },
+            "elsewhere": {
+                "vendor": {
+                    "cache": {
+                        "blob.bin": "",
+                    },
+                },
+            },
+        }),
+    )
+    .await;
+
+    let worktree = Worktree::local(
+        project_dir,
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+    worktree
+        .update(cx, |worktree, _| {
+            worktree.as_local().unwrap().scan_complete()
+        })
+        .await;
+    cx.run_until_parked();
+
+    // An anchored pattern (containing a `/`) is matched relative to the work
+    // tree root, so only the top-level `vendor/cache` is ignored.
+    worktree.update(cx, |worktree, _cx| {
+        check_worktree_entries(
+            worktree,
+            WorktreeExpectations {
+                ignored_paths: &["vendor/cache"],
+                tracked_paths: &["vendor/keep.txt", "elsewhere/vendor/cache"],
+                ..Default::default()
+            },
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_repo_exclude_applies_within_nested_repos(
     executor: BackgroundExecutor,
     cx: &mut TestAppContext,
@@ -4066,7 +4662,7 @@ async fn test_invisible_worktree_does_not_track_ancestor_git_repository(
 }
 
 #[gpui::test]
-async fn test_linked_worktree_git_file_event_does_not_panic(
+async fn test_linked_worktree_gitfile_event_preserves_repo(
     executor: BackgroundExecutor,
     cx: &mut TestAppContext,
 ) {
@@ -4271,20 +4867,6 @@ async fn test_noisy_dot_git_events_do_not_emit_git_repo_update(
     tree.update(cx, |tree, _| tree.as_local().unwrap().scan_complete())
         .await;
     cx.run_until_parked();
-
-    // Trigger a filesystem event inside the main repo's .git directory
-    // (which the linked worktree scanner watches via the commondir). This
-    // uses the sentinel-file helper to ensure the event goes through the
-    // real watcher path, exactly as it would in production.
-    tree.flush_fs_events_in_root_git_repository(cx).await;
-
-    // The worktree should still be intact.
-    tree.read_with(cx, |tree, _| {
-        assert_eq!(
-            tree.snapshot().root_repo_common_dir().map(|p| p.as_ref()),
-            Some(Path::new(path!("/main_repo/.git"))),
-        );
-    });
 
     let repo_update_count: Rc<Cell<usize>> = Rc::new(Cell::new(0));
     tree.update(cx, {
@@ -4563,6 +5145,143 @@ async fn test_linked_worktree_event_in_unregistered_common_git_dir_does_not_pani
 }
 
 #[gpui::test]
+async fn test_dot_git_dir_event_does_not_suppress_children(
+    executor: BackgroundExecutor,
+    cx: &mut TestAppContext,
+) {
+    // On Windows, modifying a file inside .git causes ReadDirectoryChangesW to also emit
+    // a Modify event for the .git directory itself (because its last-write timestamp changes).
+    // When these events arrive in the same batch, a naive ancestor-based dedup would collapse
+    // all child events into the .git directory event, losing the information about which
+    // specific files changed. This test verifies that the git-related event processing happens
+    // before the dedup, so that meaningful .git child events still trigger UpdatedGitRepositories.
+    init_test(cx);
+
+    let fs = FakeFs::new(executor.clone());
+    let project_dir = Path::new(path!("/project"));
+    fs.insert_tree(
+        project_dir,
+        json!({
+            ".git": {},
+            "src": {
+                "main.rs": "fn main() {}",
+            },
+        }),
+    )
+    .await;
+
+    let worktree = Worktree::local(
+        project_dir,
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+    worktree
+        .update(cx, |worktree, _| {
+            worktree.as_local().unwrap().scan_complete()
+        })
+        .await;
+    cx.run_until_parked();
+
+    let dot_git = project_dir.join(DOT_GIT);
+
+    // Case 1: Event for .git/index.lock only should NOT emit UpdatedGitRepositories
+    // (index.lock is in the skipped files list)
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(dot_git.join("index.lock"), Some(PathEventKind::Created));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            !got_git_update,
+            "should NOT emit UpdatedGitRepositories when .git batch only contains index.lock"
+        );
+    }
+
+    // Case 2: Event for just .git (bare directory event) should emit UpdatedGitRepositories
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(dot_git.clone(), Some(PathEventKind::Changed));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            got_git_update,
+            "should emit UpdatedGitRepositories for a bare .git directory event"
+        );
+    }
+
+    // Case 3: Events for .git AND .git/index should emit UpdatedGitRepositories
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(dot_git.clone(), Some(PathEventKind::Changed));
+        fs.emit_fs_event(dot_git.join("index"), Some(PathEventKind::Changed));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            got_git_update,
+            "should emit UpdatedGitRepositories when .git batch contains index"
+        );
+    }
+
+    // Case 4: Event for .git/index only should emit UpdatedGitRepositories
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(dot_git.join("index"), Some(PathEventKind::Changed));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            got_git_update,
+            "should emit UpdatedGitRepositories for a .git/index event"
+        );
+    }
+
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(dot_git, Some(PathEventKind::Rescan));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            got_git_update,
+            "should emit UpdatedGitRepositories for a .git rescan event"
+        );
+    }
+
+    {
+        let mut events = cx.events(&worktree);
+        fs.pause_events();
+        fs.emit_fs_event(project_dir, Some(PathEventKind::Rescan));
+        fs.unpause_events_and_flush();
+        executor.run_until_parked();
+
+        let got_git_update = drain_git_repo_updates(&mut events);
+        assert!(
+            got_git_update,
+            "should emit UpdatedGitRepositories for a .git rescan event"
+        );
+    }
+}
+
+#[gpui::test]
 async fn test_dot_git_event_explained_by_filtered_sibling_does_not_emit_git_repo_update(
     executor: BackgroundExecutor,
     cx: &mut TestAppContext,
@@ -4702,7 +5421,7 @@ async fn test_ref_updates_in_dot_git_subdirectories_are_detected(cx: &mut TestAp
     let tree = Worktree::local(
         dir.path(),
         true,
-        Arc::new(RealFs::new(None, cx.executor())),
+        RealFs::new(None, cx.executor()),
         Default::default(),
         true,
         WorktreeId::from_proto(0),
@@ -5224,6 +5943,70 @@ async fn test_single_file_worktree_deleted(cx: &mut TestAppContext) {
         deleted_event_received.get(),
         "Should receive Deleted event when single-file worktree root is deleted"
     );
+}
+
+#[gpui::test]
+async fn test_root_ancestor_rename_is_detected_without_fs_events(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project": {
+                "src": {
+                    "main.rs": "fn main() {}",
+                },
+            },
+        }),
+    )
+    .await;
+
+    let tree = Worktree::local(
+        Path::new(path!("/code/project")),
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    // Renaming an ancestor of the root produces no event under the watched
+    // path, so only the periodic root check can notice it.
+    fs.rename(
+        Path::new(path!("/code")),
+        Path::new(path!("/src")),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    cx.background_executor.run_until_parked();
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(tree.abs_path().as_ref(), Path::new(path!("/code/project")));
+    });
+
+    cx.background_executor
+        .advance_clock(worktree::ROOT_PATH_CHECK_INTERVAL);
+    cx.background_executor.run_until_parked();
+
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(tree.abs_path().as_ref(), Path::new(path!("/src/project")));
+        assert_eq!(tree.root_name(), "project");
+        assert_eq!(
+            tree.entries(false, 0)
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                rel_path("").into(),
+                rel_path("src").into(),
+                rel_path("src/main.rs").into(),
+            ]
+        );
+    });
 }
 
 #[gpui::test]
