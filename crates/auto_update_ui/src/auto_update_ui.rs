@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use agent_settings::{AgentSettings, WindowLayout};
+use anyhow::{Context as _, Result};
 use auto_update::{AutoUpdater, release_notes_url};
 use db::kvp::Dismissable;
 use editor::{Editor, MultiBuffer};
@@ -9,6 +10,7 @@ use gpui::{
     App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, TaskExt, Window, actions,
     prelude::*,
 };
+use http_client::HttpClientWithUrl;
 use markdown_preview::markdown_preview_view::{MarkdownPreviewMode, MarkdownPreviewView};
 use notifications::status_toast::StatusToast;
 use release_channel::{AppVersion, ReleaseChannel};
@@ -89,6 +91,35 @@ fn notify_release_notes_failed_to_show(
     workspace.show_error(ReleaseNotesError { url }, cx);
 }
 
+/// Fetches the release notes for the running version, preferring the Lathe
+/// releases endpoint and falling back to Zed's release notes API when the
+/// channel has no Lathe releases endpoint configured.
+async fn fetch_release_notes(
+    client: Arc<HttpClientWithUrl>,
+    release_channel: ReleaseChannel,
+    version: String,
+) -> Result<ReleaseNotesBody> {
+    if auto_update::lathe_update_base_url(release_channel).is_some() {
+        let notes =
+            auto_update::fetch_release_notes(client, release_channel, version.clone()).await?;
+        return Ok(ReleaseNotesBody {
+            title: notes.title,
+            release_notes: notes.notes,
+        });
+    }
+
+    let url = client.build_url(&format!(
+        "/api/release_notes/v2/{}/{}",
+        release_channel.dev_name(),
+        version
+    ));
+    let mut response = client.get(&url, Default::default(), true).await?;
+    let mut body = Vec::new();
+    response.body_mut().read_to_end(&mut body).await?;
+    serde_json::from_slice(body.as_slice())
+        .with_context(|| format!("error deserializing release notes from {url}"))
+}
+
 fn view_release_notes_locally(
     workspace: &mut Workspace,
     window: &mut Window,
@@ -109,11 +140,6 @@ fn view_release_notes_locally(
     let version = AppVersion::global(cx).to_string();
 
     let client = client::Client::global(cx).http_client();
-    let url = client.build_url(&format!(
-        "/api/release_notes/v2/{}/{}",
-        release_channel.dev_name(),
-        version
-    ));
 
     let markdown = workspace
         .app_state()
@@ -122,21 +148,10 @@ fn view_release_notes_locally(
 
     cx.spawn_in(window, async move |workspace, cx| {
         let markdown = markdown.await.log_err();
-        let response = client.get(&url, Default::default(), true).await;
-        let Some(mut response) = response.log_err() else {
-            workspace
-                .update_in(cx, notify_release_notes_failed_to_show)
-                .log_err();
-            return;
-        };
-
-        let mut body = Vec::new();
-        response.body_mut().read_to_end(&mut body).await.ok();
-
-        let body: serde_json::Result<ReleaseNotesBody> = serde_json::from_slice(body.as_slice());
+        let notes = fetch_release_notes(client, release_channel, version).await;
 
         let res: Option<()> = maybe!(async {
-            let body = body.ok()?;
+            let body = notes.log_err()?;
             let project = workspace
                 .read_with(cx, |workspace, _| workspace.project().clone())
                 .ok()?;

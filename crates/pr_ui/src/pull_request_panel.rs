@@ -16,7 +16,7 @@ use project::{
     Project,
     git_store::{GitStore, GitStoreEvent, Repository, RepositoryId},
 };
-use settings::Settings;
+use settings::{Settings, SettingsStore};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*, right_click_menu};
@@ -54,6 +54,19 @@ pub fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
         workspace.toggle_panel_focus::<PullRequestPanel>(window, cx);
     });
+}
+
+/// Why a reload is happening, which decides whether it is allowed to disturb
+/// what is currently on screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefreshMode {
+    /// The user asked for it (opening the panel, the Refresh action, changing a
+    /// filter). Clearing the list and showing a spinner or an error is correct
+    /// feedback here.
+    Interactive,
+    /// The auto-refresh timer asked for it. The user did not, so the list must
+    /// not flicker, shrink, or be replaced by an error page.
+    Background,
 }
 
 #[derive(Clone)]
@@ -104,6 +117,24 @@ impl FailureMessage {
         };
         FailureMessage { summary, detail }
     }
+}
+
+/// A failure from a background refresh.
+///
+/// Deliberately separate from `LoadState::Failed` / `LoadState::AuthExpired`:
+/// those replace the list, which is the right answer when the user asked for a
+/// reload and got nothing. A timer-driven failure instead leaves the previous
+/// results on screen and raises this as a banner above them, because the list
+/// is still real, it is just no longer known to be current.
+#[derive(Clone)]
+enum BackgroundFailure {
+    /// The stored credential for `host` expired. Recoverable by reconnecting,
+    /// and worth saying so loudly: every later refresh will fail the same way
+    /// until it is fixed.
+    AuthExpired {
+        host: SharedString,
+    },
+    Other(FailureMessage),
 }
 
 /// The two partitions the panel renders. `authored` holds PRs opened by the
@@ -267,6 +298,18 @@ struct RepoSection {
     /// on repository updates, and what makes it stop once there is something to
     /// query.
     awaiting_remotes: bool,
+    /// The `updated_at` this panel last observed for each PR number. Seeded on
+    /// the first successful load and updated on every load after it, so a
+    /// background refresh can tell a genuinely changed PR from one that merely
+    /// came back in the response again.
+    /// Set when a background refresh fails, cleared by the next success. Shown
+    /// as a banner over the retained list rather than replacing it.
+    background_failure: Option<BackgroundFailure>,
+    last_seen_updated_at: HashMap<u32, SharedString>,
+    /// PRs whose `updated_at` moved since this panel last saw them, and which
+    /// the user has not opened yet. Purely a display hint; it never affects
+    /// which PRs are fetched or shown.
+    updated_since_seen: HashSet<u32>,
     _load_task: Option<Task<()>>,
     _enrich_task: Option<Task<()>>,
 }
@@ -285,6 +328,9 @@ impl RepoSection {
             loading_more: false,
             reviewers: HashMap::new(),
             awaiting_remotes: true,
+            background_failure: None,
+            last_seen_updated_at: HashMap::new(),
+            updated_since_seen: HashSet::default(),
             _load_task: None,
             _enrich_task: None,
         }
@@ -315,6 +361,20 @@ impl RepoSection {
     /// Rebuilds the flattened row list from this section's load state, applying
     /// the panel-wide sort. Returns the pull request the cursor was on before
     /// the rebuild so the caller can restore it.
+    /// Folds a freshly loaded set into this section's seen-state, flagging any
+    /// PR whose `updated_at` moved since the last observation.
+    fn note_loaded(&mut self, loaded: &LoadedPullRequests) {
+        note_updated_pull_requests(
+            &mut self.last_seen_updated_at,
+            &mut self.updated_since_seen,
+            loaded,
+        );
+    }
+
+    fn is_updated_since_seen(&self, number: u32) -> bool {
+        self.updated_since_seen.contains(&number)
+    }
+
     fn rebuild_rows(&mut self, sort: SortOrder) {
         let mut rows = Vec::new();
         if let LoadState::Loaded(loaded) = &self.state {
@@ -376,7 +436,12 @@ pub struct PullRequestPanel {
     /// so the row matching the visible tab stays identifiable after the cursor
     /// moves.
     opened_pr: Option<(RepositoryId, u32)>,
+    /// Whether the dock is currently showing this panel. Drives the
+    /// auto-refresh timer: polling a panel nobody is looking at spends the
+    /// host's rate limit for no benefit.
+    active: bool,
     _subscriptions: Vec<Subscription>,
+    _auto_refresh_task: Option<Task<()>>,
 }
 
 impl PullRequestPanel {
@@ -411,6 +476,9 @@ impl PullRequestPanel {
                     }
                     this.refresh_all(cx);
                 }),
+                cx.observe_global::<SettingsStore>(|this, cx| {
+                    this.restart_auto_refresh(cx);
+                }),
             ];
             let mut this = Self {
                 workspace: workspace_weak,
@@ -424,7 +492,9 @@ impl PullRequestPanel {
                 reviewing: false,
                 selected: None,
                 opened_pr: None,
+                active: false,
                 _subscriptions: subscriptions,
+                _auto_refresh_task: None,
             };
             this.sync_sections(cx);
             this
@@ -493,7 +563,7 @@ impl PullRequestPanel {
             .retain(|id| self.sections.iter().any(|section| section.id == *id));
 
         for index in added {
-            self.refresh_section(index, cx);
+            self.refresh_section(index, RefreshMode::Interactive, cx);
         }
         self.clamp_selection();
         cx.notify();
@@ -519,20 +589,54 @@ impl PullRequestPanel {
                 if let Some(index) = self.section_index(*id)
                     && self.sections[index].awaiting_remotes
                 {
-                    self.refresh_section(index, cx);
+                    self.refresh_section(index, RefreshMode::Interactive, cx);
                 }
             }
             _ => {}
         }
     }
 
+    /// Rebuilds the auto-refresh timer from the current settings and
+    /// visibility. Dropping the previous task cancels it, which is how the
+    /// timer pauses while the panel is hidden.
+    fn restart_auto_refresh(&mut self, cx: &mut Context<Self>) {
+        self._auto_refresh_task = None;
+        if !self.active {
+            return;
+        }
+        let settings = PullRequestPanelSettings::get_global(cx);
+        if !settings.auto_refresh {
+            return;
+        }
+        let interval = settings.auto_refresh_interval;
+        self._auto_refresh_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(interval).await;
+                if this
+                    .update(cx, |this, cx| this.background_refresh_all(cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }));
+    }
+
     fn refresh_all(&mut self, cx: &mut Context<Self>) {
         for index in 0..self.sections.len() {
-            self.refresh_section(index, cx);
+            self.refresh_section(index, RefreshMode::Interactive, cx);
         }
     }
 
-    fn refresh_section(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// Timer-driven reload of every section. Unlike `refresh_all` this leaves
+    /// whatever is on screen in place until new results actually arrive.
+    fn background_refresh_all(&mut self, cx: &mut Context<Self>) {
+        for index in 0..self.sections.len() {
+            self.refresh_section(index, RefreshMode::Background, cx);
+        }
+    }
+
+    fn refresh_section(&mut self, index: usize, mode: RefreshMode, cx: &mut Context<Self>) {
         let filter = self.filter;
         let reviewing = self.reviewing;
         let sort = self.sort;
@@ -543,12 +647,31 @@ impl PullRequestPanel {
         };
         let id = section.id;
         let candidates = section.remote_candidates(cx);
+
+        // A background pass only has something to protect when results are
+        // already displayed. Any other state (never loaded, previously failed,
+        // still loading) has nothing to lose, so it takes the interactive path
+        // and gets a normal load, which doubles as automatic recovery from a
+        // transient failure.
+        let preserve = mode == RefreshMode::Background
+            && matches!(section.state, LoadState::Loaded(_))
+            && !section.loading_more;
+        if mode == RefreshMode::Background && section.loading_more {
+            // A "Load more" request is in flight and owns `_load_task`.
+            // Starting a refresh here would cancel it and drop the page the
+            // user explicitly asked for.
+            return;
+        }
+
         section.awaiting_remotes = candidates.is_empty();
-        section.loaded_pages = 0;
-        section.loading_more = false;
-        section.rows.clear();
 
         if candidates.is_empty() {
+            if preserve {
+                return;
+            }
+            section.loaded_pages = 0;
+            section.loading_more = false;
+            section.rows.clear();
             section.host_context = None;
             section._load_task = None;
             section.state = LoadState::NoHost(
@@ -560,11 +683,31 @@ impl PullRequestPanel {
             return;
         }
 
-        section.state = LoadState::Loading;
+        // Re-fetch exactly as many pages as are on screen, so a background
+        // refresh of a list the user has paged through does not silently
+        // shrink it back to the first page.
+        let pages = if preserve {
+            section.loaded_pages.max(1)
+        } else {
+            section.loaded_pages = 0;
+            section.loading_more = false;
+            section.rows.clear();
+            section.background_failure = None;
+            section.state = LoadState::Loading;
+            1
+        };
+
         section._load_task = Some(cx.spawn(async move |this, cx| {
-            let result =
-                load_pull_requests(candidates, registry, filter, reviewing, 1, http_client, cx)
-                    .await;
+            let result = load_pull_request_pages(
+                candidates,
+                registry,
+                filter,
+                reviewing,
+                pages,
+                http_client,
+                cx,
+            )
+            .await;
             this.update(cx, |this, cx| {
                 let Some(index) = this.section_index(id) else {
                     return;
@@ -577,14 +720,39 @@ impl PullRequestPanel {
                             loaded,
                         }) => {
                             section.host_context = Some((provider, remote));
-                            section.loaded_pages = 1;
+                            section.background_failure = None;
+                            section.loaded_pages = pages;
+                            section.note_loaded(&loaded);
                             section.state = LoadState::Loaded(loaded);
                         }
                         Ok(LoadOutcome::NoHost(reason)) => {
-                            section.host_context = None;
-                            section.state = LoadState::NoHost(reason);
+                            if !preserve {
+                                section.host_context = None;
+                                section.state = LoadState::NoHost(reason);
+                            }
                         }
                         Err(error) => {
+                            // A background failure is deliberately silent: the
+                            // already-displayed list stays exactly as it is
+                            // rather than being replaced by an error panel. The
+                            // next manual refresh surfaces the real message.
+                            if preserve {
+                                log::warn!(
+                                    "background pull request refresh failed, keeping previous results: {error:#}"
+                                );
+                                section.background_failure = Some(
+                                    match error.downcast_ref::<git::PullRequestAuthError>() {
+                                        Some(auth_error) => BackgroundFailure::AuthExpired {
+                                            host: auth_error.host.clone(),
+                                        },
+                                        None => BackgroundFailure::Other(
+                                            FailureMessage::from_error(&error),
+                                        ),
+                                    },
+                                );
+                                cx.notify();
+                                return;
+                            }
                             section.host_context = None;
                             section.state = match error.downcast_ref::<git::PullRequestAuthError>()
                             {
@@ -993,6 +1161,13 @@ impl PullRequestPanel {
                 .is_some_and(|candidate| candidate.number == number)
         });
         self.opened_pr = Some((repository_id, number));
+        // Opening a PR is what marks it seen, so the updated indicator clears
+        // here rather than on the next refresh. A PR that changes again after
+        // this point is flagged again.
+        if let Some(section) = self.sections.get_mut(section_index) {
+            section.updated_since_seen.remove(&number);
+            section.rebuild_rows(self.sort);
+        }
         if let Some(row_index) = row_index {
             self.selected = Some((section_index, row_index));
         }
@@ -1346,6 +1521,84 @@ impl PullRequestPanel {
     /// One repository's pane. Every section is a flex child with a zero basis so
     /// the available height is divided evenly between the repositories, and each
     /// one scrolls on its own.
+    /// The strip shown above results that are still on screen after a
+    /// background refresh failed. It reports staleness without taking the list
+    /// away, and offers the same recovery action the blocking states do.
+    fn render_background_failure(
+        &self,
+        section_index: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let section = self.sections.get(section_index)?;
+        let failure = section.background_failure.clone()?;
+        let accent = Color::Warning.color(cx);
+
+        let strip = h_flex()
+            .id(("pull-request-panel-stale", section_index))
+            .w_full()
+            .px_2()
+            .py_1()
+            .gap_1p5()
+            .items_center()
+            .bg(accent.opacity(0.12))
+            .border_b_1()
+            .border_color(accent.opacity(0.4))
+            .child(
+                Icon::new(IconName::Warning)
+                    .size(IconSize::XSmall)
+                    .color(Color::Warning),
+            );
+
+        let element = match failure {
+            BackgroundFailure::AuthExpired { host } => {
+                let display = crate::pull_request_view::host_display_name(cx, &host);
+                let host_for_action = host.to_string();
+                strip
+                    .child(
+                        Label::new(format!(
+                            "{display} sign-in expired. List may be out of date."
+                        ))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning)
+                        .truncate(),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(
+                            ("pull-request-panel-stale-reconnect", section_index),
+                            "Reconnect",
+                        )
+                        .label_size(LabelSize::XSmall)
+                        .on_click(cx.listener(move |_, _, window, cx| {
+                            window.dispatch_action(
+                                Box::new(zed_actions::ConnectGitHost {
+                                    host: host_for_action.clone(),
+                                }),
+                                cx,
+                            );
+                        })),
+                    )
+            }
+            BackgroundFailure::Other(message) => strip
+                .child(
+                    Label::new(format!("Could not refresh. {}", message.summary))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning)
+                        .truncate(),
+                )
+                .tooltip(move |_, cx| Tooltip::simple(message.detail.clone(), cx))
+                .child(div().flex_1())
+                .child(
+                    Button::new(("pull-request-panel-stale-retry", section_index), "Retry")
+                        .label_size(LabelSize::XSmall)
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.refresh_section(section_index, RefreshMode::Interactive, cx)
+                        })),
+                ),
+        };
+        Some(element.into_any_element())
+    }
+
     fn render_section(
         &self,
         section_index: usize,
@@ -1425,7 +1678,7 @@ impl PullRequestPanel {
                     .child(
                         Button::new(("pull-request-panel-retry", section_index), "Try Again")
                             .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.refresh_section(section_index, cx)
+                                this.refresh_section(section_index, RefreshMode::Interactive, cx)
                             })),
                     )
                     .into_any_element()
@@ -1473,7 +1726,10 @@ impl PullRequestPanel {
                 is_collapsed,
                 cx,
             ))
-            .when(!is_collapsed, |this| this.child(body))
+            .when(!is_collapsed, |this| {
+                this.children(self.render_background_failure(section_index, cx))
+                    .child(body)
+            })
             .into_any_element()
     }
 
@@ -1499,6 +1755,7 @@ impl PullRequestPanel {
             PullRequestState::Closed => Color::Error,
         };
 
+        let is_updated = section.is_updated_since_seen(number);
         let is_open_in_tab = self.opened_pr == Some((section.id, number));
         let is_selected = self.selected == Some((section_index, ix));
         let summary_for_menu = summary.clone();
@@ -1549,9 +1806,26 @@ impl PullRequestPanel {
                 }),
             )
             .child(
-                Icon::new(IconName::PullRequest)
-                    .size(IconSize::Small)
-                    .color(state_color),
+                // The icon column doubles as the updated-since-seen gutter. The
+                // dot sits directly under the icon, which puts it left of the
+                // author name on the row below. The placeholder keeps the
+                // column a fixed width so titles do not shift horizontally as
+                // rows are flagged and cleared.
+                v_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_0p5()
+                    .child(
+                        Icon::new(IconName::PullRequest)
+                            .size(IconSize::Small)
+                            .color(state_color),
+                    )
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .when(is_updated, |this| this.bg(Color::Info.color(cx))),
+                    ),
             )
             .child(
                 v_flex()
@@ -1825,6 +2099,95 @@ enum LoadOutcome {
 /// credential. Stopping at the first usable remote is deliberate: a fork shows
 /// its own `origin` pull requests (often none) rather than falling through to
 /// the `upstream` project and surfacing the canonical repository's PRs.
+/// Records the `updated_at` of every PR in `loaded`, inserting into `updated`
+/// any whose timestamp moved since it was last seen.
+///
+/// On the first load nothing is flagged: no PR has a prior `updated_at`
+/// recorded, so the comparison cannot fire. That is what keeps opening the
+/// panel from lighting up every row at once.
+///
+/// Entries are never pruned for PRs that drop out of the response. A PR leaves
+/// the list whenever the state filter changes, and dropping its seen-state
+/// would silently clear an unread mark the user has not looked at yet. The map
+/// is bounded by the number of PRs in the repository.
+fn note_updated_pull_requests(
+    last_seen: &mut HashMap<u32, SharedString>,
+    updated: &mut HashSet<u32>,
+    loaded: &LoadedPullRequests,
+) {
+    for summary in loaded.authored.iter().chain(loaded.others.iter()) {
+        if let Some(previous) = last_seen.get(&summary.number)
+            && previous != &summary.updated_at
+        {
+            updated.insert(summary.number);
+        }
+        last_seen.insert(summary.number, summary.updated_at.clone());
+    }
+}
+
+/// Loads `pages` pages and concatenates them into one result, mirroring how
+/// `load_more` extends a section. Used so a background refresh can rebuild a
+/// list the user has paged through at its current length instead of truncating
+/// it to the first page.
+async fn load_pull_request_pages(
+    candidates: Vec<String>,
+    registry: Arc<GitHostingProviderRegistry>,
+    filter: StateFilter,
+    reviewing: bool,
+    pages: u32,
+    http_client: Arc<dyn HttpClient>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<LoadOutcome> {
+    let mut combined: Option<LoadOutcome> = None;
+    for page in 1..=pages.max(1) {
+        let outcome = load_pull_requests(
+            candidates.clone(),
+            registry.clone(),
+            filter,
+            reviewing,
+            page,
+            http_client.clone(),
+            cx,
+        )
+        .await?;
+
+        match (&mut combined, outcome) {
+            (None, outcome) => combined = Some(outcome),
+            // A later page reporting no host is not a reason to discard the
+            // pages already collected.
+            (Some(_), LoadOutcome::NoHost(_)) => break,
+            (
+                Some(LoadOutcome::Loaded {
+                    loaded: existing, ..
+                }),
+                LoadOutcome::Loaded { loaded: next, .. },
+            ) => {
+                // `authored` is re-queried whole on every page, so the first
+                // page's copy is already complete. Only the paged partition
+                // grows, deduplicated by number in case the host repeats a row
+                // across a page boundary.
+                let seen: HashSet<u32> = existing
+                    .authored
+                    .iter()
+                    .chain(existing.others.iter())
+                    .map(|summary| summary.number)
+                    .collect();
+                existing.others.extend(
+                    next.others
+                        .into_iter()
+                        .filter(|s| !seen.contains(&s.number)),
+                );
+                existing.may_have_more = next.may_have_more;
+                if !existing.may_have_more {
+                    break;
+                }
+            }
+            (Some(LoadOutcome::NoHost(_)), _) => break,
+        }
+    }
+    combined.ok_or_else(|| anyhow::anyhow!("no pull request pages were requested"))
+}
+
 async fn load_pull_requests(
     candidates: Vec<String>,
     registry: Arc<GitHostingProviderRegistry>,
@@ -1985,6 +2348,111 @@ mod tests {
     use util::path;
     use workspace::MultiWorkspace;
 
+    fn summary(number: u32, updated_at: &str) -> PullRequestSummary {
+        PullRequestSummary {
+            number,
+            title: format!("PR {number}").into(),
+            author_login: "octocat".into(),
+            state: PullRequestState::Open,
+            source_branch: "feature".into(),
+            target_branch: "main".into(),
+            url: "https://example.com/pull/1".parse().unwrap(),
+            updated_at: updated_at.into(),
+            is_draft: false,
+        }
+    }
+
+    fn loaded(summaries: Vec<PullRequestSummary>) -> LoadedPullRequests {
+        LoadedPullRequests {
+            authored: Vec::new(),
+            others: summaries,
+            may_have_more: false,
+        }
+    }
+
+    #[test]
+    fn first_load_flags_nothing() {
+        let mut last_seen = HashMap::new();
+        let mut updated = HashSet::default();
+        note_updated_pull_requests(
+            &mut last_seen,
+            &mut updated,
+            &loaded(vec![summary(1, "2026-09-14T10:00:00Z")]),
+        );
+        assert!(
+            updated.is_empty(),
+            "opening the panel should not flag every row"
+        );
+        assert_eq!(last_seen.len(), 1);
+    }
+
+    #[test]
+    fn only_a_moved_timestamp_flags_a_pull_request() {
+        let mut last_seen = HashMap::new();
+        let mut updated = HashSet::default();
+        let first = loaded(vec![
+            summary(1, "2026-09-14T10:00:00Z"),
+            summary(2, "2026-09-14T10:00:00Z"),
+        ]);
+        note_updated_pull_requests(&mut last_seen, &mut updated, &first);
+
+        // PR 1 changed, PR 2 came back identical.
+        let second = loaded(vec![
+            summary(1, "2026-09-14T11:30:00Z"),
+            summary(2, "2026-09-14T10:00:00Z"),
+        ]);
+        note_updated_pull_requests(&mut last_seen, &mut updated, &second);
+
+        assert!(updated.contains(&1));
+        assert!(!updated.contains(&2), "an unchanged PR must not be flagged");
+    }
+
+    #[test]
+    fn a_flag_survives_later_refreshes_until_it_is_cleared() {
+        let mut last_seen = HashMap::new();
+        let mut updated = HashSet::default();
+        note_updated_pull_requests(
+            &mut last_seen,
+            &mut updated,
+            &loaded(vec![summary(1, "2026-09-14T10:00:00Z")]),
+        );
+        note_updated_pull_requests(
+            &mut last_seen,
+            &mut updated,
+            &loaded(vec![summary(1, "2026-09-14T11:00:00Z")]),
+        );
+        assert!(updated.contains(&1));
+
+        // A refresh that sees no further change must not clear the mark: the
+        // user has still not opened it.
+        note_updated_pull_requests(
+            &mut last_seen,
+            &mut updated,
+            &loaded(vec![summary(1, "2026-09-14T11:00:00Z")]),
+        );
+        assert!(
+            updated.contains(&1),
+            "the indicator clears on open, not on the next refresh"
+        );
+
+        // Opening the PR is what clears it.
+        updated.remove(&1);
+        note_updated_pull_requests(
+            &mut last_seen,
+            &mut updated,
+            &loaded(vec![summary(1, "2026-09-14T11:00:00Z")]),
+        );
+        assert!(!updated.contains(&1));
+
+        // A change after that flags it again.
+        note_updated_pull_requests(
+            &mut last_seen,
+            &mut updated,
+            &loaded(vec![summary(1, "2026-09-14T12:00:00Z")]),
+        );
+        assert!(updated.contains(&1));
+    }
+
     #[gpui::test]
     async fn sync_sections_includes_each_open_repository(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -2143,6 +2611,20 @@ impl Panel for PullRequestPanel {
 
     fn starts_open(&self, _: &Window, _: &App) -> bool {
         false
+    }
+
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if active {
+            // What is on screen was last accurate when the panel was hidden,
+            // which may have been hours ago. Reload immediately rather than
+            // making the user wait out a full interval for a correct list.
+            self.background_refresh_all(cx);
+        }
+        self.restart_auto_refresh(cx);
     }
 
     fn activation_priority(&self) -> u32 {

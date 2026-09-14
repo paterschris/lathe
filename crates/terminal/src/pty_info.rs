@@ -241,6 +241,11 @@ impl PtyProcessInfo {
     pub fn pid(&self) -> Option<Pid> {
         self.pid_getter.pid()
     }
+
+    pub fn has_running_foreground_process(&self) -> bool {
+        self.pid()
+            .is_some_and(|pid| pid != self.pid_getter.fallback_pid())
+    }
 }
 
 #[cfg(all(test, unix))]

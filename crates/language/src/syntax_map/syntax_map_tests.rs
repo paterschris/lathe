@@ -128,7 +128,7 @@ fn matching_capture_texts(query: &Query, root: Node, text: &Rope) -> Vec<String>
     let mut matches = cursor.matches(query, root, TextProvider(text));
     let mut captures = Vec::new();
     while let Some(query_match) = matches.next() {
-        if satisfies_custom_predicates(query, query_match, text) {
+        if satisfies_custom_predicates(query, query_match) {
             captures.extend(
                 query_match
                     .captures

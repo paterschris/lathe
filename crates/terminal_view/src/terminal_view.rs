@@ -1719,6 +1719,17 @@ impl Item for TerminalView {
         }
     }
 
+    fn close_confirmation(&self, cx: &App) -> Option<workspace::item::CloseConfirmation> {
+        self.terminal
+            .read(cx)
+            .has_running_process()
+            .then_some(workspace::item::CloseConfirmation {
+                message: "Close running terminal?",
+                detail: "Closing this terminal will stop its running process.",
+                confirm_label: "Close Terminal",
+            })
+    }
+
     fn tab_bg_override(&self, is_active: bool, _cx: &App) -> Option<Hsla> {
         if is_active {
             // Green background with low alpha to subtly distinguish active terminal tabs
@@ -1819,7 +1830,6 @@ impl SerializableItem for TerminalView {
         _workspace: &mut Workspace,
         item_id: workspace::ItemId,
         _closing: bool,
-        _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Task<anyhow::Result<()>>> {
         let terminal = self.terminal().read(cx);

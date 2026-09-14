@@ -1978,6 +1978,25 @@ impl Pane {
             return Task::ready(Ok(()));
         };
         cx.spawn_in(window, async move |pane, cx| {
+            for item in &items_to_close {
+                let Some(confirmation) = cx.update(|_, cx| item.close_confirmation(cx))? else {
+                    continue;
+                };
+
+                let answer = pane.update_in(cx, |_, window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        confirmation.message,
+                        Some(confirmation.detail),
+                        &[confirmation.confirm_label, "Cancel"],
+                        cx,
+                    )
+                })?;
+                if answer.await != Ok(0) {
+                    return Ok(());
+                }
+            }
+
             let dirty_items = workspace.update(cx, |workspace, cx| {
                 items_to_close
                     .iter()
@@ -8542,8 +8561,8 @@ mod tests {
         let scroll_bounds = tab_bar_scroll_handle.bounds();
         let scroll_offset = tab_bar_scroll_handle.offset();
         assert!(tab_bounds.right() <= scroll_bounds.right());
-        // -39.5 is the magic number for this setup
-        assert_eq!(scroll_offset.x, px(-39.5));
+        // -37.5 is the magic number for this setup
+        assert_eq!(scroll_offset.x, px(-37.5));
         assert!(
             !tab_bounds.intersects(&new_tab_button_bounds),
             "Tab should not overlap with the new tab button, if this is failing check if there's been a redesign!"

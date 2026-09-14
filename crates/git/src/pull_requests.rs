@@ -205,7 +205,9 @@ pub struct ReviewerCandidate {
 impl ReviewerCandidate {
     /// Name to lead with: the full name when known, else the handle.
     pub fn primary_label(&self) -> SharedString {
-        self.display_name.clone().unwrap_or_else(|| self.login.clone())
+        self.display_name
+            .clone()
+            .unwrap_or_else(|| self.login.clone())
     }
 
     /// Text a fuzzy match should run against, so typing either a name or a

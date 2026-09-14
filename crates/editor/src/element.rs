@@ -9,6 +9,7 @@ use crate::{
     SelectionDragState, SizingBehavior, SoftWrap, ToPoint,
     code_context_menus::{CodeActionsMenu, MENU_ASIDE_MAX_WIDTH, MENU_ASIDE_MIN_WIDTH, MENU_GAP},
     column_pixels,
+    cursor_animation::{CursorViewport, LogicalCursorPosition},
     display_map::{
         Block, BlockContext, BlockStyle, ChunkRendererId, DisplaySnapshot, EditorMargins,
         HighlightKey, HighlightedChunk, ToDisplayPoint,
@@ -79,7 +80,7 @@ use std::{
     ops::{Deref, Range},
     rc::Rc,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use sum_tree::Bias;
 use text::BufferId;
@@ -138,6 +139,7 @@ impl LineNumberStyle {
 
 #[derive(Debug)]
 struct SelectionLayout {
+    id: usize,
     head: DisplayPoint,
     cursor_shape: CursorShape,
     is_newest: bool,
@@ -165,6 +167,7 @@ impl SelectionLayout {
         is_local: bool,
         user_name: Option<SharedString>,
     ) -> Self {
+        let id = selection.id;
         let buffer_snapshot = map.buffer_snapshot();
         let point_selection = selection.map(|p| p.to_point(buffer_snapshot));
         let display_selection = point_selection.map(|p| p.to_display_point(map));
@@ -218,6 +221,7 @@ impl SelectionLayout {
         }
 
         Self {
+            id,
             head,
             cursor_shape,
             is_newest,
@@ -276,6 +280,7 @@ impl EditorElement {
 
         crate::rust_analyzer_ext::apply_related_actions(editor, window, cx);
         crate::clangd_ext::apply_related_actions(editor, window, cx);
+        crate::emmet_ext::apply_related_actions(editor, window, cx);
 
         register_action(editor, window, Editor::open_context_menu);
         register_action(editor, window, Editor::move_left);
@@ -1174,8 +1179,41 @@ impl EditorElement {
         let mut autoscroll_bounds = None;
         let cursor_layouts = self.editor.update(cx, |editor, cx| {
             let mut cursors = Vec::new();
+            let mut handled_animation_cursors = HashSet::default();
+            let mut request_animation_frame = false;
 
             let show_local_cursors = editor.show_local_cursors(window, cx);
+            let animation_settings = EditorSettings::get_global(cx).cursor_animation;
+            let animation_enabled = animation_settings.enabled && !cx.reduce_motion();
+            let animation_context = animation_enabled.then(|| {
+                (
+                    CursorViewport::new(
+                        content_origin,
+                        text_hitbox.bounds,
+                        scroll_position,
+                        scroll_pixel_position,
+                        line_height,
+                        em_advance,
+                    ),
+                    Instant::now(),
+                )
+            });
+
+            if animation_enabled {
+                let newest_animation_selection_id = if editor.leader_id.is_none()
+                    && cursor_shape_supports_cursor_animation(editor.cursor_shape)
+                {
+                    Some(editor.selections.newest_anchor().id)
+                } else {
+                    None
+                };
+
+                editor
+                    .cursor_animations
+                    .reconcile_newest_selection(newest_animation_selection_id);
+            } else {
+                editor.cursor_animations.clear();
+            }
 
             for (player_color, selections) in selections {
                 for selection in selections {
@@ -1315,6 +1353,7 @@ impl EditorElement {
                         shape: selection.cursor_shape,
                         block_text,
                         cursor_name: None,
+                        animated_corners: None,
                     };
                     let cursor_name = selection.user_name.clone().map(|name| CursorName {
                         string: name,
@@ -1322,7 +1361,39 @@ impl EditorElement {
                         is_top_row: cursor_position.row().0 == 0,
                     });
                     cursor.layout(content_origin, cursor_name, window, cx);
+                    if selection.is_local
+                        && cursor_shape_supports_cursor_animation(selection.cursor_shape)
+                    {
+                        if let Some((cursor_viewport, animation_now)) = animation_context {
+                            handled_animation_cursors.insert(selection.id);
+                            let target_bounds =
+                                window.pixel_snap_bounds(cursor.bounds(content_origin));
+                            cursor.animated_corners = editor.cursor_animations.update(
+                                selection.id,
+                                LogicalCursorPosition {
+                                    row: cursor_position.row().0,
+                                    column: cursor_position.column(),
+                                },
+                                target_bounds,
+                                cursor_viewport,
+                                animation_now,
+                            );
+                            request_animation_frame |= cursor.animated_corners.is_some();
+                        }
+                    } else if animation_enabled && selection.is_local {
+                        editor.cursor_animations.remove(selection.id);
+                    }
                     cursors.push(cursor);
+                }
+            }
+
+            if animation_enabled {
+                editor.cursor_animations.capture_newest_state();
+                editor
+                    .cursor_animations
+                    .retain(|selection_id| handled_animation_cursors.contains(&selection_id));
+                if request_animation_frame {
+                    window.request_animation_frame();
                 }
             }
 
@@ -4819,7 +4890,7 @@ impl EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (Vec<AnyElement>, Vec<(DisplayRow, Bounds<Pixels>)>) {
-        let diff_hunk_delegate = editor.read(cx).diff_hunk_delegate();
+        let diff_hunk_renderer = editor.read(cx).diff_hunk_renderer();
         let hovered_diff_hunk_row = editor.read(cx).hovered_diff_hunk_row;
         let sticky_top = text_hitbox.bounds.top() + sticky_header_height;
 
@@ -4891,7 +4962,7 @@ impl EditorElement {
                         sticky_top.min(max_y)
                     };
 
-                    let mut element = diff_hunk_delegate.render_hunk_controls(
+                    let mut element = diff_hunk_renderer.render_hunk_controls(
                         display_row_range.start.0,
                         status,
                         multi_buffer_range.clone(),
@@ -6824,7 +6895,7 @@ impl EditorElement {
         let unstaged = !self
             .editor
             .read(cx)
-            .diff_hunk_delegate()
+            .diff_hunk_renderer()
             .render_hunk_as_staged(&status, cx);
         let unstaged_hollow = matches!(
             ProjectSettings::get_global(cx).git.hunk_style,
@@ -6870,6 +6941,7 @@ impl EditorElement {
                         let start = range.start.to_display_point(display_snapshot);
                         let end = range.end.to_display_point(display_snapshot);
                         let selection_layout = SelectionLayout {
+                            id: 0,
                             head: start,
                             range: start..end,
                             cursor_shape: CursorShape::Bar,
@@ -9247,14 +9319,41 @@ impl Element for EditorElement {
                         cx,
                     );
 
+                    // While a search holds results in place, freeze the scroll range so
+                    // the scrollbar and minimap do not jitter as rewrapping settles.
+                    let frozen_scroll_state = if self.editor.read(cx).search_results_hold.is_some()
+                    {
+                        let is_rewrapping =
+                            self.editor.read(cx).display_map.read(cx).is_rewrapping(cx);
+                        self.editor.update(cx, |editor, _| {
+                            editor.frozen_scroll_range(
+                                is_rewrapping,
+                                scrollbar_layout_information.scroll_range,
+                                editor_width,
+                                scrollbar_layout_information.editor_bounds.size,
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    let effective_scrollbar_layout_information =
+                        frozen_scroll_state.map_or(scrollbar_layout_information, |settled| {
+                            ScrollbarLayoutInformation {
+                                scroll_range: settled.range,
+                                ..scrollbar_layout_information
+                            }
+                        });
+                    let effective_editor_width =
+                        frozen_scroll_state.map_or(editor_width, |settled| settled.editor_width);
+
                     let scrollbars_layout = self.layout_scrollbars(
                         &snapshot,
-                        &scrollbar_layout_information,
+                        &effective_scrollbar_layout_information,
                         content_offset,
                         scroll_position,
                         non_visible_cursors,
                         right_margin,
-                        editor_width,
+                        effective_editor_width,
                         window,
                         cx,
                     );
@@ -9487,7 +9586,7 @@ impl Element for EditorElement {
                             &snapshot,
                             minimap_width,
                             scroll_position,
-                            &scrollbar_layout_information,
+                            &effective_scrollbar_layout_information,
                             scrollbars_layout.as_ref(),
                             window,
                             cx,
@@ -9567,7 +9666,7 @@ impl Element for EditorElement {
                     };
 
                     let (diff_hunk_controls, diff_hunk_control_bounds) =
-                        if is_read_only && self.editor.read(cx).diff_hunk_delegate.is_none() {
+                        if is_read_only && self.editor.read(cx).diff_hunk_renderer.is_none() {
                             (vec![], vec![])
                         } else {
                             self.layout_diff_hunk_controls(
@@ -9795,6 +9894,7 @@ struct ContextMenuLayout {
 }
 
 /// Holds information required for layouting the editor scrollbars.
+#[derive(Clone, Copy)]
 struct ScrollbarLayoutInformation {
     /// The bounds of the editor area (excluding the content offset).
     editor_bounds: Bounds<Pixels>,
@@ -10567,6 +10667,7 @@ pub struct CursorLayout {
     shape: CursorShape,
     block_text: Option<ShapedLine>,
     cursor_name: Option<AnyElement>,
+    animated_corners: Option<[gpui::Point<Pixels>; 4]>,
 }
 
 #[derive(Debug)]
@@ -10593,6 +10694,7 @@ impl CursorLayout {
             shape,
             block_text,
             cursor_name: None,
+            animated_corners: None,
         }
     }
 
@@ -10663,7 +10765,19 @@ impl CursorLayout {
     }
 
     pub fn paint(&mut self, origin: gpui::Point<Pixels>, window: &mut Window, cx: &mut App) {
-        let bounds = self.bounds(origin);
+        if let Some(corners) = self.animated_corners {
+            let mut builder = gpui::PathBuilder::fill();
+            builder.add_polygon(&corners, true);
+            if let Ok(path) = builder.build() {
+                if let Some(name) = &mut self.cursor_name {
+                    name.paint(window, cx);
+                }
+                window.paint_path(path, self.color);
+                return;
+            }
+        }
+
+        let bounds = window.pixel_snap_bounds(self.bounds(origin));
 
         //Draw background or border quad
         let cursor = if matches!(self.shape, CursorShape::Hollow) {
@@ -10695,6 +10809,10 @@ impl CursorLayout {
     pub fn shape(&self) -> CursorShape {
         self.shape
     }
+}
+
+fn cursor_shape_supports_cursor_animation(shape: CursorShape) -> bool {
+    matches!(shape, CursorShape::Bar | CursorShape::Block)
 }
 
 #[derive(Debug)]
@@ -11319,6 +11437,7 @@ mod tests {
                         summary: None,
                         previous: None,
                         filename: String::new(),
+                        boundary: false,
                     }],
                     ..Default::default()
                 },
@@ -12005,7 +12124,7 @@ mod tests {
                 );
 
                 // Blur the editor so that it displays placeholder text.
-                window.blur();
+                window.blur(cx);
             })
             .unwrap();
 
@@ -12375,6 +12494,7 @@ mod tests {
             };
 
             let spanning_selection = SelectionLayout {
+                id: 0,
                 head: DisplayPoint::new(DisplayRow(3), 7),
                 cursor_shape: CursorShape::Bar,
                 is_newest: true,
@@ -12424,6 +12544,7 @@ mod tests {
             };
 
             let selection = SelectionLayout {
+                id: 0,
                 head: DisplayPoint::new(DisplayRow(2), 0),
                 cursor_shape: CursorShape::Bar,
                 is_newest: true,

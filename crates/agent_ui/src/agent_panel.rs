@@ -183,6 +183,10 @@ impl fmt::Display for TerminalId {
 pub struct AgentPanelTerminalInfo {
     pub id: TerminalId,
     pub title: SharedString,
+    /// The user-assigned name, when the terminal has been renamed. `title` is
+    /// what to display; this distinguishes a chosen name from one derived from
+    /// the running program.
+    pub custom_title: Option<SharedString>,
     pub created_at: DateTime<Utc>,
     pub has_notification: bool,
 }
@@ -2836,12 +2840,40 @@ impl AgentPanel {
         self.terminals.contains_key(&terminal_id)
     }
 
+    /// Renames a terminal owned by this panel, returning whether it was found
+    /// here. The caller falls back to renaming through the metadata store when
+    /// no panel owns the terminal, so a terminal that is live must be persisted
+    /// by this path rather than left to that fallback.
+    pub fn rename_terminal(
+        &mut self,
+        terminal_id: TerminalId,
+        title: SharedString,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(terminal) = self.terminals.get(&terminal_id) else {
+            return false;
+        };
+        terminal.view.update(cx, |terminal_view, cx| {
+            terminal_view.set_custom_title(Some(title.to_string()), cx);
+        });
+        crate::terminal_thread_metadata_store::TerminalThreadMetadataStore::global(cx).update(
+            cx,
+            |store, cx| store.rename_terminal(terminal_id, title, cx),
+        );
+        true
+    }
+
     pub fn terminals(&self, cx: &App) -> Vec<AgentPanelTerminalInfo> {
         self.terminals
             .iter()
             .map(|(id, terminal)| AgentPanelTerminalInfo {
                 id: *id,
                 title: terminal.title(cx),
+                custom_title: terminal
+                    .view
+                    .read(cx)
+                    .custom_title()
+                    .map(SharedString::from),
                 created_at: terminal.created_at,
                 has_notification: terminal.has_notification,
             })
@@ -6181,7 +6213,7 @@ mod tests {
         user_message_editor.update_in(cx, |_editor, window, cx| {
             window.dispatch_action(Box::new(zed_actions::agent::Chat), cx);
         });
-        cx.update(|window, _cx| window.blur());
+        cx.update(|window, cx| window.blur(cx));
         cx.run_until_parked();
 
         workspace.update_in(cx, |workspace, window, cx| {

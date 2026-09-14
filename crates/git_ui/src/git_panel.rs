@@ -66,7 +66,6 @@ use language_model::{
 use menu;
 use multi_buffer::ExcerptBoundaryInfo;
 use notifications::status_toast::StatusToast;
-use panel::PanelHeader;
 use project::git_store::GitAccess;
 use project::{
     Fs, Project, ProjectPath,
@@ -519,6 +518,12 @@ pub(crate) enum RemoteOperationKind {
     Fetch,
     Pull,
     Push,
+}
+
+#[derive(Clone)]
+struct RemoteSyncFailure {
+    action: SharedString,
+    output: String,
 }
 
 pub fn register(workspace: &mut Workspace) {
@@ -1047,6 +1052,7 @@ pub struct GitPanel {
     new_staged_count: usize,
     pending_commit: Option<Task<()>>,
     pending_remote_operation: Option<RemoteOperationKind>,
+    remote_sync_failure: Option<RemoteSyncFailure>,
     amend_pending: bool,
     original_commit_message: Option<String>,
     pending_commit_message_restores: BTreeMap<String, SerializedCommitMessage>,
@@ -1236,7 +1242,7 @@ impl GitPanel {
             let mut was_group_by = GitPanelSettings::get_global(cx).group_by;
             let mut was_tree_view = GitPanelSettings::get_global(cx).tree_view;
             let mut was_file_icons = GitPanelSettings::get_global(cx).file_icons;
-            let mut was_folder_icons = GitPanelSettings::get_global(cx).folder_icons;
+            let mut was_folder_indicator = GitPanelSettings::get_global(cx).folder_indicator;
             let mut was_diff_stats = GitPanelSettings::get_global(cx).diff_stats;
             cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
                 let settings = GitPanelSettings::get_global(cx);
@@ -1244,7 +1250,7 @@ impl GitPanel {
                 let group_by = settings.group_by;
                 let tree_view = settings.tree_view;
                 let file_icons = settings.file_icons;
-                let folder_icons = settings.folder_icons;
+                let folder_indicator = settings.folder_indicator;
                 let diff_stats = settings.diff_stats;
                 if tree_view != was_tree_view {
                     match (&mut this.view_mode, tree_view) {
@@ -1271,14 +1277,14 @@ impl GitPanel {
                 if (diff_stats != was_diff_stats) || update_entries {
                     this.update_visible_entries(window, cx);
                 }
-                if file_icons != was_file_icons || folder_icons != was_folder_icons {
+                if file_icons != was_file_icons || folder_indicator != was_folder_indicator {
                     cx.notify();
                 }
                 was_sort_by = sort_by;
                 was_group_by = group_by;
                 was_tree_view = tree_view;
                 was_file_icons = file_icons;
-                was_folder_icons = folder_icons;
+                was_folder_indicator = folder_indicator;
                 was_diff_stats = diff_stats;
             })
             .detach();
@@ -1375,6 +1381,7 @@ impl GitPanel {
                 diff_stat_total: DiffStat::default(),
                 pending_commit: None,
                 pending_remote_operation: None,
+                remote_sync_failure: None,
                 amend_pending,
                 original_commit_message,
                 pending_commit_message_restores,
@@ -3859,14 +3866,19 @@ impl GitPanel {
                 let remote_message = fetch.await?;
                 this.update(cx, |this, cx| {
                     let action = match fetch_options {
-                        FetchOptions::All => RemoteAction::Fetch(None),
+                        FetchOptions::All | FetchOptions::Unshallow => {
+                            RemoteAction::Fetch(None)
+                        }
                         FetchOptions::Remote(remote) => RemoteAction::Fetch(Some(remote)),
                     };
                     match remote_message {
-                        Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
+                        Ok(remote_message) => {
+                            this.clear_remote_sync_failure(cx);
+                            this.show_remote_output(action, remote_message, cx)
+                        }
                         Err(e) => {
                             log::error!("Error while fetching {:?}", e);
-                            this.show_error_toast(action.name(), e, cx)
+                            this.show_remote_sync_error(action.name(), e, cx)
                         }
                     }
 
@@ -4004,7 +4016,7 @@ impl GitPanel {
                 }
                 Err(e) => {
                     log::error!("Failed to get current remote: {}", e);
-                    this.update(cx, |this, cx| this.show_error_toast("pull", e, cx))
+                    this.update(cx, |this, cx| this.show_remote_sync_error("pull", e, cx))
                         .ok();
                     return Ok(());
                 }
@@ -4027,10 +4039,13 @@ impl GitPanel {
 
             let action = RemoteAction::Pull(remote);
             this.update(cx, |this, cx| match remote_message {
-                Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
+                Ok(remote_message) => {
+                    this.clear_remote_sync_failure(cx);
+                    this.show_remote_output(action, remote_message, cx)
+                }
                 Err(e) => {
                     log::error!("Error while pulling {:?}", e);
-                    this.show_error_toast(action.name(), e, cx)
+                    this.show_remote_sync_error(action.name(), e, cx)
                 }
             })
             .ok();
@@ -4085,7 +4100,7 @@ impl GitPanel {
                 Ok(Some(remote)) => remote,
                 Ok(None) => {
                     this.update(cx, |this, cx| {
-                        this.show_error_toast(
+                        this.show_remote_sync_error(
                             "push",
                             anyhow::anyhow!("No remote available to push to. Add a remote to be able to publish changes."),
                             cx,
@@ -4096,7 +4111,7 @@ impl GitPanel {
                 }
                 Err(e) => {
                     log::error!("Failed to get current remote: {}", e);
-                    this.update(cx, |this, cx| this.show_error_toast("push", e, cx))
+                    this.update(cx, |this, cx| this.show_remote_sync_error("push", e, cx))
                         .ok();
                     return Ok(());
                 }
@@ -4128,10 +4143,13 @@ impl GitPanel {
 
             let action = RemoteAction::Push(branch.name().to_owned().into(), remote);
             this.update(cx, |this, cx| match remote_output {
-                Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
+                Ok(remote_message) => {
+                    this.clear_remote_sync_failure(cx);
+                    this.show_remote_output(action, remote_message, cx)
+                }
                 Err(e) => {
                     log::error!("Error while pushing {:?}", e);
-                    this.show_error_toast(action.name(), e, cx)
+                    this.show_remote_sync_error(action.name(), e, cx)
                 }
             })?;
 
@@ -4283,6 +4301,27 @@ impl GitPanel {
 
     fn clear_remote_operation(&mut self, cx: &mut Context<Self>) {
         self.pending_remote_operation.take();
+        cx.notify();
+    }
+
+    fn clear_remote_sync_failure(&mut self, cx: &mut Context<Self>) {
+        if self.remote_sync_failure.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn show_remote_sync_error(
+        &mut self,
+        action: impl Into<SharedString>,
+        error: anyhow::Error,
+        cx: &mut Context<Self>,
+    ) {
+        let action = action.into();
+        self.remote_sync_failure = Some(RemoteSyncFailure {
+            action: action.clone(),
+            output: format_git_error_toast_message(&error),
+        });
+        self.show_error_toast(action, error, cx);
         cx.notify();
     }
 
@@ -6082,6 +6121,8 @@ impl GitPanel {
         } else {
             false
         };
+        let remote_sync_failure = self.remote_sync_failure.clone();
+        let workspace = self.workspace.clone();
 
         let vertical_buttons = v_flex()
             .h_full()
@@ -6137,6 +6178,57 @@ impl GitPanel {
 
         let footer = v_flex()
             .when(self.commit_editor_expanded, |this| this.flex_1().min_h_0())
+            .when_some(remote_sync_failure, |this, failure| {
+                let action = failure.action.clone();
+                let output = failure.output.clone();
+                let summary = output
+                    .lines()
+                    .next()
+                    .unwrap_or("Git command failed")
+                    .to_owned();
+                let workspace = workspace.clone();
+                this.child(
+                    h_flex()
+                        .id("remote-sync-failure")
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .gap_1()
+                        .bg(cx.theme().status().error_background)
+                        .border_b_1()
+                        .border_color(cx.theme().status().error_border)
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
+                            workspace
+                                .update(cx, |workspace, cx| {
+                                    lathe::open_output(
+                                        action.clone(),
+                                        workspace,
+                                        &output,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                                .log_err();
+                        })
+                        .child(
+                            Icon::new(IconName::XCircle)
+                                .size(IconSize::Small)
+                                .color(Color::Error),
+                        )
+                        .child(
+                            Label::new(format!("{} failed: {}", failure.action, summary))
+                                .size(LabelSize::Small)
+                                .color(Color::Error)
+                                .truncate(),
+                        )
+                        .child(
+                            Label::new("View Log")
+                                .size(LabelSize::Small)
+                                .color(Color::Error),
+                        ),
+                )
+            })
             .child(PanelRepoFooter::new(
                 display_name,
                 branch,
@@ -8081,12 +8173,12 @@ impl GitPanel {
         };
 
         let settings = GitPanelSettings::get_global(cx);
-        let folder_icon = if settings.folder_icons {
+        let folder_icon = if settings.folder_indicator.shows_icon() {
             FileIcons::get_folder_icon(entry.expanded, entry.key.path.as_std_path(), cx)
         } else {
             FileIcons::get_chevron_icon(entry.expanded, cx)
         };
-        let fallback_folder_icon = if settings.folder_icons {
+        let fallback_folder_icon = if settings.folder_indicator.shows_icon() {
             if entry.expanded {
                 IconName::FolderOpen
             } else {
@@ -8747,7 +8839,6 @@ impl Panel for GitPanel {
     }
 }
 
-impl PanelHeader for GitPanel {}
 
 pub fn panel_editor_container(_window: &mut Window, cx: &mut App) -> Div {
     v_flex()
@@ -8829,6 +8920,10 @@ impl GitPanelMessageTooltip {
                     author_name: details.author_name.clone(),
                     author_email: details.author_email.clone(),
                     commit_time: OffsetDateTime::from_unix_timestamp(details.commit_timestamp)?,
+                    // `git::CommitDetails` carries no shallow-clone information;
+                    // a commit loaded by SHA from the panel is never a blame
+                    // boundary, so the boundary notice stays hidden.
+                    boundary: false,
                     message: Some(ParsedCommitMessage::parse(
                         details.sha.to_string(),
                         details.message.to_string(),
@@ -12148,6 +12243,17 @@ mod tests {
             panel.clear_remote_operation(cx);
             assert!(panel.pending_remote_operation.is_none());
             assert!(panel.start_remote_operation(RemoteOperationKind::Pull, cx));
+
+            panel.show_remote_sync_error("push", anyhow::anyhow!("remote rejected the push"), cx);
+            let failure = panel
+                .remote_sync_failure
+                .as_ref()
+                .expect("a failed remote operation should remain visible");
+            assert_eq!(failure.action, "push");
+            assert_eq!(failure.output, "remote rejected the push");
+
+            panel.clear_remote_sync_failure(cx);
+            assert!(panel.remote_sync_failure.is_none());
         });
     }
 

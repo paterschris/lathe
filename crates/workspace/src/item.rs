@@ -169,6 +169,15 @@ pub enum ItemBufferKind {
     None,
 }
 
+/// A prompt shown before an item is closed while it still owns work that would
+/// be interrupted by removal from its pane.
+#[derive(Clone, Copy)]
+pub struct CloseConfirmation {
+    pub message: &'static str,
+    pub detail: &'static str,
+    pub confirm_label: &'static str,
+}
+
 pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
     type Event;
 
@@ -286,6 +295,9 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
     }
     fn is_dirty(&self, _: &App) -> bool {
         false
+    }
+    fn close_confirmation(&self, _: &App) -> Option<CloseConfirmation> {
+        None
     }
     fn is_awaiting_input(&self, _: &App) -> bool {
         false
@@ -542,6 +554,7 @@ pub trait ItemHandle: 'static + Send {
     fn item_id(&self) -> EntityId;
     fn to_any_view(&self) -> AnyView;
     fn is_dirty(&self, cx: &App) -> bool;
+    fn close_confirmation(&self, cx: &App) -> Option<CloseConfirmation>;
     fn is_awaiting_input(&self, cx: &App) -> bool;
     fn awaiting_input_tooltip(&self, cx: &App) -> &'static str;
     fn capability(&self, cx: &App) -> Capability;
@@ -1063,6 +1076,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn is_dirty(&self, cx: &App) -> bool {
         self.read(cx).is_dirty(cx)
+    }
+
+    fn close_confirmation(&self, cx: &App) -> Option<CloseConfirmation> {
+        self.read(cx).close_confirmation(cx)
     }
 
     fn is_awaiting_input(&self, cx: &App) -> bool {

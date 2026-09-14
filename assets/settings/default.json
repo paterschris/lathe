@@ -266,6 +266,14 @@
   //
   // Default: "bar"
   "cursor_shape": "bar",
+  // Cursor movement animation.
+  "cursor_animation": {
+    // Whether cursor movement animation is enabled.
+    "enabled": false,
+  },
+  // Whether to detect a buffer's language from its content when it has no
+  // recognized file extension.
+  "language_detection": true,
   // Determines when the mouse cursor should be hidden in response to keyboard
   // input.
   //
@@ -764,6 +772,8 @@
     "whole_word": false,
     // Whether to match case sensitively.
     "case_sensitive": false,
+    // Start searching as you type in project search, without pressing Enter.
+    "search_on_type": false,
     // Whether to include gitignored files in search results.
     "include_ignored": false,
     // Whether to interpret the search query as a regular expression.
@@ -819,6 +829,9 @@
   // Can be a combination of "left", "right" and "bottom".
   "resize_all_panels_in_dock": ["left"],
   "project_panel": {
+    // Delay before an entry's title tooltip appears.
+    // Values: "default" (1500ms), "disabled", or { "custom": <milliseconds> }
+    "title_tooltip_delay": "default",
     // Whether to show the project panel button in the status bar
     "button": true,
     // Whether to hide the gitignore entries in the project panel.
@@ -831,8 +844,9 @@
     "entry_spacing": "comfortable",
     // Whether to show file icons in the project panel.
     "file_icons": true,
-    // Whether to show folder icons or chevrons for directories in the project panel.
-    "folder_icons": true,
+    // What to show beside directories in the project panel.
+    // Values: icon, chevron, both
+    "folder_indicator": "icon",
     // Whether to show the git status in the project panel.
     "git_status": true,
     // Amount of indentation for nested items.
@@ -938,6 +952,8 @@
     },
   },
   "outline_panel": {
+    // Whether to hide symbol entries in multi-buffers, showing only files.
+    "multi_buffer_hide_symbols": false,
     // Whether to show the outline panel button in the status bar
     "button": true,
     // Default width of the outline panel.
@@ -946,8 +962,9 @@
     "dock": "right",
     // Whether to show file icons in the outline panel.
     "file_icons": true,
-    // Whether to show folder icons or chevrons for directories in the outline panel.
-    "folder_icons": true,
+    // What to show beside directories in the outline panel.
+    // Values: icon, chevron, both
+    "folder_indicator": "icon",
     // Whether to show the git status in the outline panel.
     "git_status": true,
     // Amount of indentation for nested items.
@@ -1010,6 +1027,12 @@
     "dock": "right",
     // Default width of the pull request panel.
     "default_width": 360,
+    // Whether to periodically reload pull requests while the panel is visible.
+    // The timer is paused whenever the panel is hidden, and a reload runs once
+    // on reopen.
+    "auto_refresh": true,
+    // Seconds between automatic reloads. Clamped to a minimum of 30.
+    "auto_refresh_interval_seconds": 300,
   },
   "git_activity_panel": {
     // Whether to show the git activity panel button in the status bar.
@@ -1037,8 +1060,9 @@
     "file_icons": false,
     // Whether to show folder icons or chevrons for directories in the git panel.
     //
-    // Default: true
-    "folder_icons": true,
+    // Values: icon, chevron, both
+    // Default: icon
+    "folder_indicator": "icon",
     // What branch name to use if `init.defaultBranch` is not set
     //
     // Default: main
@@ -1200,6 +1224,9 @@
     },
     // When enabled, agent edits will be displayed in single-file editors for review
     "single_file_review": false,
+    // Whether to keep the machine awake while the agent is working, so a long
+    // run is not interrupted by the system going to sleep.
+    "prevent_idle_sleep": true,
     // Settings for automatic agent context compaction, which summarizes earlier
     // messages to free up room in the model's context window once it grows too
     // large.
@@ -1889,6 +1916,15 @@
     "hour_format": "hour12",
   },
   // Status bar-related settings.
+  // Template for the window title.
+  "window_title_format": "${projectName}${separator}${fileName}",
+  // String substituted for ${separator} in the window title format.
+  "window_title_separator": " — ",
+  // Whether to reveal an already open file in an existing pane instead of
+  // opening it in the active pane.
+  "reveal_if_open": false,
+  // What to show when opening a new window. Values: empty_tab, launchpad
+  "on_new_window": "launchpad",
   "status_bar": {
     // Whether to show the status bar.
     "experimental.show": true,
@@ -1908,6 +1944,9 @@
     // Whether to show the AWS profile selector in the status bar when
     // AWS profiles are configured on this machine.
     "aws_profile_selector_button": true,
+    // Whether to show the pending-keystrokes indicator in the status bar while a
+    // multi-key binding is part-way entered.
+    "pending_keystrokes_indicator": true,
   },
   // Settings specific to the terminal
   "terminal": {

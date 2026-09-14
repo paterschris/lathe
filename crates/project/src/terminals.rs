@@ -7,7 +7,6 @@ use itertools::Itertools as _;
 use language::LanguageName;
 use remote::{Interactive, RemoteClient};
 use settings::{Settings, SettingsLocation};
-use smol::channel::bounded;
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},

@@ -123,6 +123,31 @@ impl ApplicationMenu {
         cleaned
     }
 
+    fn add_menu_items(menu: ContextMenu, items: Vec<OwnedMenuItem>) -> ContextMenu {
+        Self::sanitize_menu_items(items)
+            .into_iter()
+            .fold(menu, |menu, item| match item {
+                OwnedMenuItem::Separator => menu.separator(),
+                OwnedMenuItem::Action {
+                    name,
+                    action,
+                    checked,
+                    disabled,
+                    ..
+                } => menu.action_checked_with_disabled(name, action, checked, disabled),
+                OwnedMenuItem::Submenu(submenu) => {
+                    let items = submenu.items;
+                    menu.submenu(submenu.name, move |menu, _window, _cx| {
+                        Self::add_menu_items(menu, items.clone())
+                    })
+                }
+                OwnedMenuItem::SystemMenu(_) => {
+                    // A system menu doesn't make sense in this context, so ignore it
+                    menu
+                }
+            })
+    }
+
     fn build_menu_from_items(
         entry: MenuEntry,
         window: &mut Window,
@@ -131,45 +156,8 @@ impl ApplicationMenu {
         ContextMenu::build(window, cx, |menu, window, cx| {
             // Grab current focus handle so menu can shown items in context with the focused element
             let menu = menu.when_some(window.focused(cx), |menu, focused| menu.context(focused));
-            let sanitized_items = Self::sanitize_menu_items(entry.menu.items);
 
-            sanitized_items
-                .into_iter()
-                .fold(menu, |menu, item| match item {
-                    OwnedMenuItem::Separator => menu.separator(),
-                    OwnedMenuItem::Action {
-                        name,
-                        action,
-                        checked,
-                        disabled,
-                        ..
-                    } => menu.action_checked_with_disabled(name, action, checked, disabled),
-                    OwnedMenuItem::Submenu(submenu) => {
-                        submenu
-                            .items
-                            .into_iter()
-                            .fold(menu, |menu, item| match item {
-                                OwnedMenuItem::Separator => menu.separator(),
-                                OwnedMenuItem::Action {
-                                    name,
-                                    action,
-                                    checked,
-                                    disabled,
-                                    ..
-                                } => menu
-                                    .action_checked_with_disabled(name, action, checked, disabled),
-                                OwnedMenuItem::Submenu(_) => menu,
-                                OwnedMenuItem::SystemMenu(_) => {
-                                    // A system menu doesn't make sense in this context, so ignore it
-                                    menu
-                                }
-                            })
-                    }
-                    OwnedMenuItem::SystemMenu(_) => {
-                        // A system menu doesn't make sense in this context, so ignore it
-                        menu
-                    }
-                })
+            Self::add_menu_items(menu, entry.menu.items)
         })
     }
 

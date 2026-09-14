@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use fs::Fs;
 
 use gpui::{
@@ -12,7 +12,6 @@ use remote::RemoteConnectionOptions;
 use settings::Settings;
 pub use settings::SidebarSide;
 use std::cell::{Cell, RefCell};
-use std::future::Future;
 use std::path::PathBuf;
 use std::rc::Rc;
 use ui::prelude::*;
@@ -327,9 +326,7 @@ pub struct MultiWorkspace {
     /// entity. Reading the entity from `Workspace::apply_window_title` would
     /// double-lease and abort when the title is refreshed from inside
     /// `activate` (which already holds a mutable borrow of `MultiWorkspace`).
-    /// This mirrors the `active_workspace_id` cell used for chrome ownership.
-    /// `MultiWorkspace` is the only writer; workspaces only read. Kept in sync
-    /// with `workspace_group_name`.
+    /// `MultiWorkspace` is the only writer; workspaces only read.
     shared_group_name: Rc<RefCell<Option<String>>>,
 }
 
@@ -358,7 +355,6 @@ impl MultiWorkspace {
                 task.detach();
             }
         });
-        let quit_subscription = cx.on_app_quit(Self::app_will_quit);
         let settings_subscription = cx.observe_global_in::<settings::SettingsStore>(window, {
             let mut previous_multi_workspace_enabled = !DisableAiSettings::get_global(cx)
                 .disable_ai
@@ -392,19 +388,15 @@ impl MultiWorkspace {
             }],
             project_groups: Vec::new(),
             active_workspace_id,
-            shared_group_name,
             sidebar: None,
             sidebar_open: false,
             sidebar_overlay: None,
             pending_removal_tasks: Vec::new(),
             _serialize_task: None,
-            _subscriptions: vec![
-                release_subscription,
-                quit_subscription,
-                settings_subscription,
-            ],
+            _subscriptions: vec![release_subscription, settings_subscription],
             previous_focus_handle: None,
             workspace_group_name: None,
+            shared_group_name,
         }
     }
 
@@ -577,44 +569,25 @@ impl MultiWorkspace {
     }
 
     pub fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
-        cx.spawn_in(window, async move |this, cx| {
-            let workspaces = this.update(cx, |multi_workspace, _cx| {
-                multi_workspace.workspaces().cloned().collect::<Vec<_>>()
-            })?;
-
-            let mut prepared = anyhow::Ok(true);
-            for workspace in workspaces {
-                prepared = match workspace.update_in(cx, |workspace, window, cx| {
-                    workspace.prepare_to_close(CloseIntent::CloseWindow, window, cx)
-                }) {
-                    Ok(task) => task.await,
-                    Err(error) => Err(error),
-                };
-                if !matches!(prepared, Ok(true)) {
-                    break;
-                }
-            }
-
-            if !matches!(prepared, Ok(true)) {
-                this.update(cx, |multi_workspace, cx| {
-                    for workspace in multi_workspace.workspaces() {
-                        workspace.update(cx, |workspace, _| {
-                            workspace.removing = false;
-                        });
-                    }
-                })?;
-                prepared?;
+        let Some(window_handle) = window.window_handle().downcast::<Self>() else {
+            log::error!("cannot close a window whose root is not a MultiWorkspace");
+            return;
+        };
+        cx.spawn(async move |_, cx| {
+            if !crate::prepare_window_to_close(window_handle, CloseIntent::CloseWindow, cx)
+                .await
+                .context("preparing the window to close")?
+            {
                 return anyhow::Ok(());
             }
 
-            let flush_tasks = this.update_in(cx, |multi_workspace, window, cx| {
-                multi_workspace.flush_pending_serialization(window, cx)
-            })?;
-            futures::future::join_all(flush_tasks).await;
+            crate::flush_windows_serialization(&[window_handle], cx).await;
 
-            cx.update(|window, _cx| {
-                window.remove_window();
-            })?;
+            window_handle
+                .update(cx, |_, window, _cx| {
+                    window.remove_window();
+                })
+                .context("removing the closed window")?;
 
             anyhow::Ok(())
         })
@@ -838,7 +811,12 @@ impl MultiWorkspace {
         let active_workspace_id = self.active_workspace_id.clone();
         let shared_group_name = self.shared_group_name.clone();
         workspace.update(cx, |workspace, cx| {
-            workspace.set_multi_workspace(weak_self, active_workspace_id, shared_group_name, cx);
+            workspace.set_multi_workspace(
+                weak_self,
+                active_workspace_id,
+                shared_group_name,
+                cx,
+            );
         });
 
         let entity = cx.entity();
@@ -1484,11 +1462,50 @@ impl MultiWorkspace {
         }
     }
 
-    /// Re-tag every workspace in this window with the current session id and
-    /// window id in the database. Guards against restored workspaces keeping a
-    /// stale `session_id` (which would exclude them from the next launch's
-    /// `last_session` restore if the app were to crash or be force-quit before
-    /// any normal serialization event fires).
+    fn sync_sidebar_to_workspace(&self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        if self.sidebar_open() {
+            let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
+            workspace.update(cx, |workspace, _| {
+                workspace.set_sidebar_focus_handle(sidebar_focus_handle);
+            });
+        }
+    }
+
+    pub fn serialize(&mut self, cx: &mut Context<Self>) {
+        self._serialize_task = Some(cx.spawn(async move |this, cx| {
+            let Ok(task) = this.update(cx, |this, cx| this.serialize_now(cx)) else {
+                return;
+            };
+            task.await;
+        }));
+    }
+
+    fn serialize_now(&mut self, cx: &mut Context<Self>) -> impl Future<Output = ()> + use<> {
+        let state = MultiWorkspaceState {
+            active_workspace_id: self.workspace().read(cx).database_id(),
+            project_groups: self
+                .project_groups
+                .iter()
+                .map(|group| {
+                    crate::persistence::model::SerializedProjectGroup::from_group(
+                        &group.key,
+                        group.expanded,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            sidebar_open: self.sidebar_open,
+            sidebar_state: self.sidebar.as_ref().and_then(|s| s.serialized_state(cx)),
+            workspace_group_name: self.workspace_group_name.clone(),
+        };
+        let window_id = self.window_id;
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        async move {
+            crate::persistence::write_multi_workspace_state(&kvp, window_id, state).await;
+        }
+    }
+
+    /// Used by the quit handler to ensure pending DB writes
+    /// complete before the process exits.
     pub fn rebind_session_bindings(&self, window: &Window, cx: &mut Context<Self>) {
         let window_id = window.window_handle().window_id().as_u64();
         let session_id = self.workspace().read(cx).session_id();
@@ -1508,51 +1525,10 @@ impl MultiWorkspace {
         }
     }
 
-    fn sync_sidebar_to_workspace(&self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
-        if self.sidebar_open() {
-            let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
-            workspace.update(cx, |workspace, _| {
-                workspace.set_sidebar_focus_handle(sidebar_focus_handle);
-            });
-        }
-    }
-
-    pub fn serialize(&mut self, cx: &mut Context<Self>) {
-        self._serialize_task = Some(cx.spawn(async move |this, cx| {
-            let Some((window_id, state)) = this
-                .read_with(cx, |this, cx| {
-                    let state = MultiWorkspaceState {
-                        active_workspace_id: this.workspace().read(cx).database_id(),
-                        project_groups: this
-                            .project_groups
-                            .iter()
-                            .map(|group| {
-                                crate::persistence::model::SerializedProjectGroup::from_group(
-                                    &group.key,
-                                    group.expanded,
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                        sidebar_open: this.sidebar_open,
-                        sidebar_state: this.sidebar.as_ref().and_then(|s| s.serialized_state(cx)),
-                        workspace_group_name: this.workspace_group_name.clone(),
-                    };
-                    (this.window_id, state)
-                })
-                .ok()
-            else {
-                return;
-            };
-            let kvp = cx.update(|cx| db::kvp::KeyValueStore::global(cx));
-            crate::persistence::write_multi_workspace_state(&kvp, window_id, state).await;
-        }));
-    }
-
-    /// Returns the in-flight serialization task (if any) so the caller can
-    /// await it. Used by the quit handler to ensure pending DB writes
-    /// complete before the process exits.
-    pub fn flush_serialization(&mut self) -> Task<()> {
-        self._serialize_task.take().unwrap_or(Task::ready(()))
+    pub fn flush_serialization(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        self._serialize_task.take();
+        let serialization = self.serialize_now(cx);
+        cx.spawn(async move |_, _| serialization.await)
     }
 
     pub fn flush_pending_serialization(
@@ -1567,20 +1543,8 @@ impl MultiWorkspace {
             }));
         }
         tasks.append(&mut self.take_pending_removal_tasks());
-        tasks.push(self.flush_serialization());
+        tasks.push(self.flush_serialization(cx));
         tasks
-    }
-
-    fn app_will_quit(&mut self, _cx: &mut Context<Self>) -> impl Future<Output = ()> + use<> {
-        let mut tasks: Vec<Task<()>> = Vec::new();
-        if let Some(task) = self._serialize_task.take() {
-            tasks.push(task);
-        }
-        tasks.extend(std::mem::take(&mut self.pending_removal_tasks));
-
-        async move {
-            futures::future::join_all(tasks).await;
-        }
     }
 
     pub fn focus_active_workspace(&self, window: &mut Window, cx: &mut App) {
@@ -1810,7 +1774,7 @@ impl MultiWorkspace {
                 }));
             }
         }
-        self.serialize(cx);
+        tasks.push(self.flush_serialization(cx));
         tasks
     }
 

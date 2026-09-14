@@ -544,6 +544,7 @@ pub struct CommitDetails {
 #[derive(Debug)]
 pub struct CommitDiff {
     pub files: Vec<CommitFile>,
+    pub is_shallow_boundary: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -636,6 +637,23 @@ async fn load_commit_object<R: smol::io::AsyncBufRead + Unpin>(
     }
 }
 
+async fn is_shallow_boundary_commit(
+    git: &GitBinary,
+    shallow_file_path: &Path,
+    commit: &str,
+) -> Result<bool> {
+    let shallow_contents = match smol::fs::read_to_string(shallow_file_path).await {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading shallow file"),
+    };
+    let oid = git
+        .run(&["rev-parse", "--verify", &format!("{commit}^{{commit}}")])
+        .await
+        .context("resolving commit for shallow boundary check")?;
+    Ok(shallow_contents.lines().any(|line| line.trim() == oid.trim()))
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Remote {
     pub name: SharedString,
@@ -656,18 +674,22 @@ pub enum ResetMode {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum FetchOptions {
     All,
+    Unshallow,
     Remote(Remote),
 }
 
 impl FetchOptions {
     pub fn to_proto(&self) -> Option<String> {
         match self {
-            FetchOptions::All => None,
+            FetchOptions::All | FetchOptions::Unshallow => None,
             FetchOptions::Remote(remote) => Some(remote.clone().name.into()),
         }
     }
 
-    pub fn from_proto(remote_name: Option<String>) -> Self {
+    pub fn from_proto(remote_name: Option<String>, unshallow: bool) -> Self {
+        if unshallow {
+            return FetchOptions::Unshallow;
+        }
         match remote_name {
             Some(name) => FetchOptions::Remote(Remote { name: name.into() }),
             None => FetchOptions::All,
@@ -677,6 +699,7 @@ impl FetchOptions {
     pub fn name(&self) -> SharedString {
         match self {
             Self::All => "Fetch all remotes".into(),
+            Self::Unshallow => "Fetch missing history".into(),
             Self::Remote(remote) => remote.name.clone(),
         }
     }
@@ -686,6 +709,7 @@ impl std::fmt::Display for FetchOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FetchOptions::All => write!(f, "--all"),
+            FetchOptions::Unshallow => write!(f, "--unshallow"),
             FetchOptions::Remote(remote) => write!(f, "{}", remote.name),
         }
     }
@@ -915,7 +939,12 @@ pub trait GitRepository: Send + Sync {
     /// preview a rebase and to build its interactive plan before running it.
     fn commits_in_range(&self, range: String) -> BoxFuture<'_, Result<Vec<CommitSummary>>>;
 
-    fn load_commit(&self, commit: String, cx: AsyncApp) -> BoxFuture<'_, Result<CommitDiff>>;
+    fn load_commit(
+        &self,
+        commit: String,
+        ignore_shallow_boundary: bool,
+        cx: AsyncApp,
+    ) -> BoxFuture<'_, Result<CommitDiff>>;
     fn blame(
         &self,
         path: RepoPath,
@@ -1518,9 +1547,23 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
-    fn load_commit(&self, commit: String, cx: AsyncApp) -> BoxFuture<'_, Result<CommitDiff>> {
+    fn load_commit(
+        &self,
+        commit: String,
+        ignore_shallow_boundary: bool,
+        cx: AsyncApp,
+    ) -> BoxFuture<'_, Result<CommitDiff>> {
         let git = self.git_binary();
+        let shallow_file_path = self.repository.lock().commondir().join("shallow");
         cx.background_spawn(async move {
+            if !ignore_shallow_boundary
+                && is_shallow_boundary_commit(&git, &shallow_file_path, &commit).await?
+            {
+                return Ok(CommitDiff {
+                    files: Vec::new(),
+                    is_shallow_boundary: true,
+                });
+            }
             let show_output = git
                 .build_command(&[
                     "show",
@@ -1609,7 +1652,10 @@ impl GitRepository for RealGitRepository {
                 })
             }
 
-            Ok(CommitDiff { files })
+            Ok(CommitDiff {
+                files,
+                is_shallow_boundary: false,
+            })
         })
         .boxed()
     }
@@ -5784,7 +5830,7 @@ mod tests {
         git_command(repo_dir.path(), ["commit", "-m", "type change"]);
 
         let commit_diff = repository
-            .load_commit("HEAD".to_string(), cx.to_async())
+            .load_commit("HEAD".to_string(), false, cx.to_async())
             .await
             .expect("failed to load type-changed commit");
         assert_eq!(commit_diff.files.len(), 1);
@@ -5837,7 +5883,7 @@ mod tests {
         .expect("failed to open repository");
 
         let commit_diff = repository
-            .load_commit("HEAD".to_string(), cx.to_async())
+            .load_commit("HEAD".to_string(), false, cx.to_async())
             .await
             .expect("failed to load commit that adds a gitlink");
         assert_eq!(commit_diff.files.len(), 2);
@@ -5867,7 +5913,7 @@ mod tests {
         git_command(repo_dir.path(), ["commit", "-m", "update submodule"]);
 
         let commit_diff = repository
-            .load_commit("HEAD".to_string(), cx.to_async())
+            .load_commit("HEAD".to_string(), false, cx.to_async())
             .await
             .expect("failed to load commit that updates a gitlink");
         let [gitlink] = commit_diff.files.as_slice() else {
@@ -5888,7 +5934,7 @@ mod tests {
         git_command(repo_dir.path(), ["commit", "-m", "remove submodule"]);
 
         let commit_diff = repository
-            .load_commit("HEAD".to_string(), cx.to_async())
+            .load_commit("HEAD".to_string(), false, cx.to_async())
             .await
             .expect("failed to load commit that deletes a gitlink");
         let [gitlink] = commit_diff.files.as_slice() else {

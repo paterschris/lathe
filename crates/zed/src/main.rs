@@ -215,7 +215,7 @@ fn main() {
     // surfaces as EMFILE ("Too many open files") and silently breaks file reads
     // and subprocess spawns.
     #[cfg(unix)]
-    util::increase_open_file_limit();
+    util::increase_open_file_limit().log_err();
 
     let args = Args::parse();
 

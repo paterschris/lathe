@@ -1034,13 +1034,11 @@ impl AcpConnection {
         let (connection_tx, connection_rx) = futures::channel::oneshot::channel();
         let connection_future =
             connect_client_future("zed", transport, dispatch_tx.clone(), connection_tx);
-        let io_task = cx
-            .background_executor()
-            .spawn_dedicated(move |_executor| async move {
-                if let Err(err) = connection_future.await {
-                    log::error!("ACP connection error: {err}");
-                }
-            });
+        let io_task = cx.background_spawn(async move {
+            if let Err(err) = connection_future.await {
+                log::error!("ACP connection error: {err}");
+            }
+        });
 
         let connection_rx = async move {
             connection_rx
@@ -1672,7 +1670,6 @@ fn meta_terminal_auth_task(
     }
 
     let meta = match method {
-        acp::AuthMethod::EnvVar(env_var) => env_var.meta.as_ref(),
         acp::AuthMethod::Terminal(terminal) => terminal.meta.as_ref(),
         acp::AuthMethod::Agent(agent) => agent.meta.as_ref(),
         _ => None,

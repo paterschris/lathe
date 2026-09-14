@@ -999,6 +999,7 @@ mod tests {
 
         let agent_settings = AgentSettings {
             enabled: true,
+            prevent_idle_sleep: true,
             button: true,
             dock: DockPosition::Right,
             flexible: true,

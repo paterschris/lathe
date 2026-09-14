@@ -13,6 +13,8 @@
 //! `gpui`-only leaf so feature crates can depend on it to register hooks without
 //! forming a dependency cycle.
 
+mod module_tripwire;
+
 use gpui::App;
 
 /// Initialize every Lathe feature. Call once, early in application startup,

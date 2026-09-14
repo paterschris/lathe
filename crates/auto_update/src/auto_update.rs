@@ -394,6 +394,21 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
 pub fn lathe_update_base_url(channel: ReleaseChannel) -> Option<String> {
     lathe_update::update_base_url(channel)
 }
+
+pub use lathe_update::ReleaseNotes;
+
+/// Fetches the Lathe release notes for `version` from the GitHub releases API
+/// configured for `channel`. Returns `None` when the channel has no releases
+/// endpoint (Nightly and Dev).
+pub async fn fetch_release_notes(
+    http_client: Arc<HttpClientWithUrl>,
+    channel: ReleaseChannel,
+    version: String,
+) -> Result<ReleaseNotes> {
+    let api_url = lathe_update_base_url(channel)
+        .context("no release notes endpoint is configured for this channel")?;
+    lathe_update::get_release_notes(http_client, &api_url, channel, &version).await
+}
 pub fn release_notes_url(cx: &mut App) -> Option<String> {
     let release_channel = ReleaseChannel::try_global(cx)?;
     // For Stable/Preview/Beta prefer the Lathe GitHub releases page when a

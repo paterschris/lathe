@@ -2388,7 +2388,7 @@ impl OutlinePanel {
                     directory.entry.is_ignored,
                     is_active,
                 );
-                let icon = if settings.folder_icons {
+                let icon = if settings.folder_indicator.shows_icon() {
                     FileIcons::get_folder_icon(is_expanded, directory.entry.path.as_std_path(), cx)
                 } else {
                     FileIcons::get_chevron_icon(is_expanded, cx)
@@ -2485,7 +2485,7 @@ impl OutlinePanel {
                 .map(|entry| entry.git_summary)
                 .unwrap_or_default();
             let color = entry_git_aware_label_color(git_status, is_ignored, is_active);
-            let icon = if settings.folder_icons {
+            let icon = if settings.folder_indicator.shows_icon() {
                 FileIcons::get_folder_icon(is_expanded, &Path::new(&name), cx)
             } else {
                 FileIcons::get_chevron_icon(is_expanded, cx)
@@ -6015,15 +6015,13 @@ outline: fn hints_lifetimes_named  <==== selected"
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(
-                    r#"one/
+                r#"one/
   a.txt
     search: «aaa» aaa  <==== selected
     search: aaa «aaa»
 two/
   b.txt
-    search: a «aaa»"#,
-                ),
+    search: a «aaa»"#.to_string(),
             );
         });
 
@@ -6043,13 +6041,11 @@ two/
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(
-                    r#"one/
+                r#"one/
   a.txt  <==== selected
 two/
   b.txt
-    search: a «aaa»"#,
-                ),
+    search: a «aaa»"#.to_string(),
             );
         });
 
@@ -6069,11 +6065,9 @@ two/
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(
-                    r#"one/
+                r#"one/
   a.txt
-two/  <==== selected"#,
-                ),
+two/  <==== selected"#.to_string(),
             );
         });
 
@@ -6092,13 +6086,11 @@ two/  <==== selected"#,
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(
-                    r#"one/
+                r#"one/
   a.txt
 two/  <==== selected
   b.txt
-    search: a «aaa»"#,
-                )
+    search: a «aaa»"#.to_string()
             );
         });
     }
@@ -6536,11 +6528,10 @@ outline: struct OutlineEntryExcerpt
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(
-                    r#"frontend-project/
+                r#"frontend-project/
   public/lottie/
     syntax-tree.json
-      search: {{ "something": "«static»" }}  <==== selected
+      search: { "something": "«static»" }  <==== selected
   src/
     app/(site)/
       (about)/jobs/[slug]/
@@ -6551,8 +6542,7 @@ outline: struct OutlineEntryExcerpt
           search: «static»
     components/
       ErrorBoundary.tsx
-        search: «static»"#
-                )
+        search: «static»"#.to_string()
             );
         });
 
@@ -6575,17 +6565,15 @@ outline: struct OutlineEntryExcerpt
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(
-                    r#"frontend-project/
+                r#"frontend-project/
   public/lottie/
     syntax-tree.json
-      search: {{ "something": "«static»" }}
+      search: { "something": "«static»" }
   src/
     app/(site)/  <==== selected
     components/
       ErrorBoundary.tsx
-        search: «static»"#
-                )
+        search: «static»"#.to_string()
             );
         });
 
@@ -6605,17 +6593,15 @@ outline: struct OutlineEntryExcerpt
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(
-                    r#"frontend-project/
+                r#"frontend-project/
   public/lottie/
     syntax-tree.json
-      search: {{ "something": "«static»" }}
+      search: { "something": "«static»" }
   src/
     app/(site)/
     components/
       ErrorBoundary.tsx
-        search: «static»  <==== selected"#
-                )
+        search: «static»  <==== selected"#.to_string()
             );
         });
 
@@ -6639,16 +6625,14 @@ outline: struct OutlineEntryExcerpt
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(
-                    r#"frontend-project/
+                r#"frontend-project/
   public/lottie/
     syntax-tree.json
-      search: {{ "something": "«static»" }}
+      search: { "something": "«static»" }
   src/
     app/(site)/
     components/
-      ErrorBoundary.tsx  <==== selected"#
-                )
+      ErrorBoundary.tsx  <==== selected"#.to_string()
             );
         });
 
@@ -6672,17 +6656,15 @@ outline: struct OutlineEntryExcerpt
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(
-                    r#"frontend-project/
+                r#"frontend-project/
   public/lottie/
     syntax-tree.json
-      search: {{ "something": "«static»" }}
+      search: { "something": "«static»" }
   src/
     app/(site)/
     components/
       ErrorBoundary.tsx  <==== selected
-        search: «static»"#
-                )
+        search: «static»"#.to_string()
             );
         });
 
@@ -6701,7 +6683,7 @@ outline: struct OutlineEntryExcerpt
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(r#"frontend-project/"#)
+                r#"frontend-project/"#.to_string()
             );
         });
 
@@ -6720,11 +6702,10 @@ outline: struct OutlineEntryExcerpt
                     outline_panel.selected_entry(),
                     cx,
                 ),
-                format!(
-                    r#"frontend-project/
+                r#"frontend-project/
   public/lottie/
     syntax-tree.json
-      search: {{ "something": "«static»" }}
+      search: { "something": "«static»" }
   src/
     app/(site)/
       (about)/jobs/[slug]/
@@ -6735,8 +6716,7 @@ outline: struct OutlineEntryExcerpt
           search: «static»
     components/
       ErrorBoundary.tsx  <==== selected
-        search: «static»"#
-                )
+        search: «static»"#.to_string()
             );
         });
     }

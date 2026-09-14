@@ -3706,17 +3706,22 @@ impl ThreadView {
         cx: &Context<Self>,
     ) -> AnyElement {
         let is_compacting = compaction.is_in_progress();
-        let summary = compaction.summary.clone();
+        let summary = &compaction.summary;
+        let error = compaction.error.clone();
+        let has_details = !summary.is_empty() || error.is_some();
         let is_expanded = self
             .entry_view_state
             .read(cx)
             .is_compaction_expanded(entry_ix);
+        let details = (is_expanded && has_details).then_some((summary, error));
 
         let id = format!("context-compaction-{entry_ix}");
-        let header_label = match compaction.status {
+        let header_label = match &compaction.status {
             acp_thread::ContextCompactionStatus::InProgress => "Compacting Context…",
             acp_thread::ContextCompactionStatus::Completed => "Context Compacted",
+            acp_thread::ContextCompactionStatus::Failed => "Compaction Failed",
             acp_thread::ContextCompactionStatus::Canceled => "Compaction Canceled",
+            acp_thread::ContextCompactionStatus::Other(_) => "Context Compaction",
         };
         let chevron_end = if is_expanded {
             IconName::ChevronUp
@@ -3731,13 +3736,13 @@ impl ThreadView {
                 Button::new(id, header_label)
                     .label_size(LabelSize::Small)
                     .loading(is_compacting)
-                    .disabled(is_compacting)
+                    .disabled(!has_details)
                     .start_icon(
                         Icon::new(IconName::Compact)
                             .size(IconSize::XSmall)
                             .color(Color::Muted),
                     )
-                    .when(!is_compacting, |this| {
+                    .when(has_details, |this| {
                         this.end_icon(
                             Icon::new(chevron_end)
                                 .size(IconSize::XSmall)
@@ -3764,20 +3769,48 @@ impl ThreadView {
                     .border_color(gpui::transparent_black())
                     .rounded_sm()
                     .child(header)
-                    .when_some(summary.filter(|_| is_expanded), |this, summary| {
+                    .when_some(details, |this, (summary, error)| {
                         this.border_color(self.tool_card_border_color(cx))
                             .bg(cx.theme().colors().editor_background.opacity(0.2))
-                            .child(
-                                div()
-                                    .id(("compaction-summary", entry_ix))
-                                    .p_2()
-                                    .text_ui(cx)
-                                    .child(self.render_markdown(
-                                        summary,
-                                        MarkdownStyle::themed(MarkdownFont::Agent, window, cx),
-                                        cx,
-                                    )),
-                            )
+                            .when(!summary.is_empty(), |this| {
+                                this.child(
+                                    v_flex()
+                                        .id(("compaction-summary", entry_ix))
+                                        .p_2()
+                                        .gap_2()
+                                        .text_ui(cx)
+                                        // Upstream renders these through
+                                        // `render_output_content_block`, which this fork's
+                                        // thread view does not carry. Compaction summaries are
+                                        // markdown, so rendering that directly keeps the
+                                        // previous behavior without pulling in the whole
+                                        // tool-output rendering path.
+                                        .children(summary.iter().filter_map(|content| {
+                                            content.markdown().map(|markdown| {
+                                                self.render_markdown(
+                                                    markdown.clone(),
+                                                    MarkdownStyle::themed(
+                                                        MarkdownFont::Agent,
+                                                        window,
+                                                        cx,
+                                                    ),
+                                                    cx,
+                                                )
+                                            })
+                                        })),
+                                )
+                            })
+                            .when_some(error, |this, error| {
+                                let mut style =
+                                    MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
+                                style.base_text_style.color = Color::Error.color(cx);
+                                this.child(
+                                    div()
+                                        .id(("compaction-error", entry_ix))
+                                        .p_2()
+                                        .child(self.render_markdown(error, style, cx)),
+                                )
+                            })
                             .child(
                                 h_flex()
                                     .border_t_1()
@@ -3809,7 +3842,7 @@ impl ThreadView {
             .into_any()
     }
 
-    fn toggle_compaction_expansion(
+    pub(super) fn toggle_compaction_expansion(
         &mut self,
         entry_ix: usize,
         window: &mut Window,

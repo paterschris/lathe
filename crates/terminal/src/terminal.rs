@@ -3108,6 +3108,15 @@ impl Terminal {
         self.task.as_ref()
     }
 
+    pub fn has_running_process(&self) -> bool {
+        self.task()
+            .is_some_and(|task| task.status == TaskStatus::Running)
+            || matches!(
+                &self.terminal_type,
+                TerminalType::Pty { info, .. } if info.has_running_foreground_process()
+            )
+    }
+
     pub fn wait_for_completed_task(&self, cx: &App) -> Task<Option<ExitStatus>> {
         if let Some(task) = self.task() {
             if task.status == TaskStatus::Running {

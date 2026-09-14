@@ -16,5 +16,6 @@ doctest = false
 gpui.workspace = true
 lathe_hooks.workspace = true
 pr_ui.workspace = true
+workspace.workspace = true
 git_graph.workspace = true
 mobile_dev.workspace = true

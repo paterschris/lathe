@@ -82,6 +82,12 @@ pub use worktree_settings::WorktreeSettings;
 
 pub const FS_WATCH_LATENCY: Duration = Duration::from_millis(100);
 
+/// How often the background scanner verifies that the worktree root still
+/// exists at its recorded path. Native watchers report the root itself being
+/// renamed or deleted, but not a rename of one of its ancestors, which leaves
+/// the watcher silently attached to a path that no longer exists.
+pub const ROOT_PATH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
 // The git index lock file. Changes to it are noise for git metadata rescans, so the
 // worktree skips them. The `git` crate no longer exports this name, so it is defined here.
 const INDEX_LOCK: &str = "index.lock";
@@ -4565,6 +4571,10 @@ impl BackgroundScanner {
         // Continue processing events until the worktree is dropped.
         self.phase = BackgroundScannerPhase::Events;
 
+        let root_path_check_timer = self.executor.timer(ROOT_PATH_CHECK_INTERVAL).fuse();
+        futures::pin_mut!(root_path_check_timer);
+        let mut root_path_missing = false;
+
         loop {
             select_biased! {
                 // Process any path refresh requests from the worktree. Prioritize
@@ -4618,6 +4628,20 @@ impl BackgroundScanner {
                     if let Some(path) = &global_gitignore_file {
                         self.update_global_gitignore(&path).await;
                     }
+                }
+
+                _ = root_path_check_timer => {
+                    let root_path = self.state.lock().await.snapshot.abs_path.clone();
+                    match self.fs.canonicalize(root_path.as_path()).await {
+                        Ok(_) => root_path_missing = false,
+                        Err(error) => {
+                            if !root_path_missing {
+                                root_path_missing = true;
+                                self.report_root_moved_or_deleted(&root_path, &error).await;
+                            }
+                        }
+                    }
+                    root_path_check_timer.set(self.executor.timer(ROOT_PATH_CHECK_INTERVAL).fuse());
                 }
             }
         }
@@ -4753,56 +4777,67 @@ impl BackgroundScanner {
         events
     }
 
-    async fn process_events(&self, mut events: Vec<PathEvent>) {
-        let root_path = self.state.lock().await.snapshot.abs_path.clone();
-        let root_canonical_path = self.fs.canonicalize(root_path.as_path()).await;
-        let root_canonical_path = match &root_canonical_path {
-            Ok(path) => SanitizedPath::new(path),
-            Err(err) => {
-                let new_path = self
-                    .state
-                    .lock()
-                    .await
-                    .snapshot
-                    .root_file_handle
-                    .clone()
-                    .and_then(|handle| match handle.current_path(&self.fs) {
-                        Ok(new_path) => Some(new_path),
-                        Err(e) => {
-                            log::error!("Failed to refresh worktree root path: {e:#}");
-                            None
-                        }
-                    })
-                    .map(|path| SanitizedPath::new_arc(&path))
-                    .filter(|new_path| *new_path != root_path);
+    /// Reports that the worktree root is no longer reachable at its recorded
+    /// path, resolving the new location from the root file handle when the root
+    /// was renamed rather than deleted.
+    async fn report_root_moved_or_deleted(
+        &self,
+        root_path: &Arc<SanitizedPath>,
+        canonicalize_error: &anyhow::Error,
+    ) {
+            let new_path = self
+                .state
+                .lock()
+                .await
+                .snapshot
+                .root_file_handle
+                .clone()
+                .and_then(|handle| match handle.current_path(&self.fs) {
+                    Ok(new_path) => Some(new_path),
+                    Err(e) => {
+                        log::error!("Failed to refresh worktree root path: {e:#}");
+                        None
+                    }
+                })
+                .map(|path| SanitizedPath::new_arc(&path))
+                .filter(|new_path| new_path != root_path);
 
-                if let Some(new_path) = new_path {
+            if let Some(new_path) = new_path {
+                log::info!(
+                    "root renamed from {:?} to {:?}",
+                    root_path.as_path(),
+                    new_path.as_path(),
+                );
+                self.status_updates_tx
+                    .unbounded_send(ScanState::RootUpdated { new_path })
+                    .ok();
+            } else {
+                log::error!("root path could not be canonicalized: {canonicalize_error:#}");
+
+                // For single-file worktrees, if we can't canonicalize and the file handle
+                // fallback also failed, the file is gone - close the worktree
+                if self.is_single_file {
                     log::info!(
-                        "root renamed from {:?} to {:?}",
-                        root_path.as_path(),
-                        new_path.as_path(),
+                        "single-file worktree root {:?} no longer exists, marking as deleted",
+                        root_path.as_path()
                     );
                     self.status_updates_tx
-                        .unbounded_send(ScanState::RootUpdated { new_path })
+                        .unbounded_send(ScanState::RootDeleted)
                         .ok();
-                } else {
-                    log::error!("root path could not be canonicalized: {err:#}");
-
-                    // For single-file worktrees, if we can't canonicalize and the file handle
-                    // fallback also failed, the file is gone - close the worktree
-                    if self.is_single_file {
-                        log::info!(
-                            "single-file worktree root {:?} no longer exists, marking as deleted",
-                            root_path.as_path()
-                        );
-                        self.status_updates_tx
-                            .unbounded_send(ScanState::RootDeleted)
-                            .ok();
-                    }
                 }
+            }
+    }
+
+    async fn process_events(&self, mut events: Vec<PathEvent>) {
+        let root_path = self.state.lock().await.snapshot.abs_path.clone();
+        let root_canonical_path = match self.fs.canonicalize(root_path.as_path()).await {
+            Ok(path) => path,
+            Err(error) => {
+                self.report_root_moved_or_deleted(&root_path, &error).await;
                 return;
             }
         };
+        let root_canonical_path = SanitizedPath::new(&root_canonical_path);
 
         {
             let state = self.state.lock().await;

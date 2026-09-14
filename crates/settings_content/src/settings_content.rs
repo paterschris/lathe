@@ -203,7 +203,7 @@ pub struct SettingsContent {
     pub repository_dashboard_pinned_repos: Option<Vec<String>>,
 
     /// Settings for the pull request sidebar panel.
-    pub pull_request_panel: Option<PanelSettingsContent>,
+    pub pull_request_panel: Option<PullRequestPanelSettingsContent>,
 
     /// Settings for the git activity feed panel (live in-flight git commands).
     pub git_activity_panel: Option<PanelSettingsContent>,
@@ -305,6 +305,13 @@ pub struct SettingsContent {
     /// The URL of the Zed server to connect to.
     pub server_url: Option<String>,
 
+    /// The URL used as the key for credential storage.
+    ///
+    /// When set, credentials are stored under this URL instead of `server_url`.
+    /// This allows running multiple Zed instances side by side without them
+    /// overwriting each other's keychain entries.
+    pub credentials_url: Option<String>,
+
     /// Configuration for session-related features
     pub session: Option<SessionSettingsContent>,
     /// Control what info is collected by Zed.
@@ -338,6 +345,31 @@ pub struct SettingsContent {
 
     /// Local overrides for feature flags, keyed by flag name.
     pub feature_flags: Option<FeatureFlagsMap>,
+
+    /// Settings for developer-oriented instrumentation tools (profilers,
+    /// tracers, etc.) that can be toggled at runtime.
+    pub instrumentation: Option<InstrumentationSettingsContent>,
+}
+
+/// Configuration for developer-oriented instrumentation tools that collect
+/// diagnostic data about a running Zed instance.
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct InstrumentationSettingsContent {
+    /// Configuration for the performance profiler, accessed via the
+    /// `zed: open performance profiler` action.
+    pub performance_profiler: Option<PerformanceProfilerSettingsContent>,
+}
+
+/// Configuration for the performance profiler which collects timing data
+/// for foreground and background executor tasks.
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct PerformanceProfilerSettingsContent {
+    /// Whether to collect timing data for foreground and background executor tasks.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, MergeFrom)]
@@ -415,9 +447,10 @@ impl SettingsContent {
 fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
-        call_hierarchy, file_finder, git_panel, tabs, tab_bar, status_bar, preview_tabs, agent,
-        agent_servers, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics,
-        git,
+        call_hierarchy, file_finder, git_panel, repository_dashboard_pinned_repos,
+        pull_request_panel, git_activity_panel, mobile_dev_panel, tabs, tab_bar, status_bar,
+        preview_tabs, agent, agent_servers, ai_accounts, audio, auto_update, base_keymap,
+        collaboration_panel, debugger, diagnostics, git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
         journal, log, line_indicator_format, language_models, outline_panel, project_panel,
         node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
@@ -736,6 +769,33 @@ pub struct CallSettingsContent {
     ///
     /// Default: false
     pub share_on_join: Option<bool>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct PullRequestPanelSettingsContent {
+    /// Whether to show the panel button in the status bar.
+    ///
+    /// Default: true
+    pub button: Option<bool>,
+    /// Where to dock the panel.
+    ///
+    /// Default: right
+    pub dock: Option<DockPosition>,
+    /// Default width of the panel in pixels.
+    ///
+    /// Default: 360
+    pub default_width: Option<PixelSetting>,
+    /// Whether to periodically reload pull requests while the panel is visible.
+    ///
+    /// Default: true
+    pub auto_refresh: Option<bool>,
+    /// How long to wait between automatic reloads, in seconds. Values below 30
+    /// are clamped to 30 so a misconfigured setting cannot hammer the host's
+    /// API.
+    ///
+    /// Default: 300
+    pub auto_refresh_interval_seconds: Option<u64>,
 }
 
 #[with_fallible_options]

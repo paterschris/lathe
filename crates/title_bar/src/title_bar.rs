@@ -1282,10 +1282,7 @@ impl TitleBar {
             git::git_host_credentials::connectable_hosts(cx)
                 .into_iter()
                 .map(|host| lathe_git_integrations::GitHostMenuEntry {
-                    connected_login: git::git_host_credentials::connected_username(
-                        cx,
-                        host.host(),
-                    ),
+                    connected_login: git::git_host_credentials::connected_username(cx, host.host()),
                     host: host.host().to_string(),
                     display_name: host.display_name().to_string(),
                 })

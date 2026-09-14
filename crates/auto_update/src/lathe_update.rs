@@ -66,7 +66,12 @@ pub fn release_notes_url(channel: ReleaseChannel) -> Option<String> {
 struct GitHubRelease {
     tag_name: String,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
     draft: bool,
+    #[serde(default)]
     assets: Vec<GitHubAsset>,
 }
 
@@ -103,13 +108,59 @@ fn release_matches_channel(release: &GitHubRelease, channel: ReleaseChannel) -> 
     }
 }
 
-pub async fn get_release_asset(
+/// The release notes for a single published Lathe release.
+pub struct ReleaseNotes {
+    /// The release name, or its tag when the release has no name.
+    pub title: String,
+    /// The release body, as Markdown.
+    pub notes: String,
+}
+
+/// Fetches the release notes for `version` on `channel` from the GitHub
+/// releases API. Falls back to the newest release matching the channel when
+/// no release is tagged for the running version, which happens for locally
+/// built binaries whose version was never published.
+pub async fn get_release_notes(
     http_client: Arc<HttpClientWithUrl>,
     api_url: &str,
     channel: ReleaseChannel,
-    os: &str,
-    arch: &str,
-) -> Result<ReleaseAsset> {
+    version: &str,
+) -> Result<ReleaseNotes> {
+    let releases = get_releases(http_client, api_url).await?;
+    let suffix = channel_tag_suffix(channel).unwrap_or_default();
+    let version = version.trim_start_matches('v');
+    let tag = format!("v{version}{suffix}");
+
+    let release = releases
+        .iter()
+        .find(|release| !release.draft && release.tag_name == tag)
+        .or_else(|| {
+            releases
+                .iter()
+                .find(|release| release_matches_channel(release, channel))
+        })
+        .with_context(|| format!("no release notes found for {tag} at {api_url}"))?;
+
+    let notes = release
+        .body
+        .clone()
+        .filter(|body| !body.trim().is_empty())
+        .with_context(|| format!("release {} has no release notes", release.tag_name))?;
+
+    Ok(ReleaseNotes {
+        title: release
+            .name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| release.tag_name.clone()),
+        notes,
+    })
+}
+
+async fn get_releases(
+    http_client: Arc<HttpClientWithUrl>,
+    api_url: &str,
+) -> Result<Vec<GitHubRelease>> {
     let mut response = http_client.get(api_url, Default::default(), true).await?;
     let mut body = Vec::new();
     response.body_mut().read_to_end(&mut body).await?;
@@ -125,21 +176,30 @@ pub async fn get_release_asset(
     // `/releases` list endpoint to discover prerelease channels (beta,
     // preview) that `/latest` excludes. List responses are returned newest
     // first by the GitHub API, so the first match wins.
-    let release: GitHubRelease = if let Ok(single) = serde_json::from_slice::<GitHubRelease>(&body)
-    {
-        single
+    if let Ok(single) = serde_json::from_slice::<GitHubRelease>(&body) {
+        Ok(vec![single])
     } else {
-        let releases: Vec<GitHubRelease> = serde_json::from_slice(&body).with_context(|| {
+        serde_json::from_slice(&body).with_context(|| {
             format!(
                 "error deserializing release(s) {:?}",
                 String::from_utf8_lossy(&body),
             )
-        })?;
-        releases
-            .into_iter()
-            .find(|r| release_matches_channel(r, channel))
-            .with_context(|| format!("no release matched channel {:?} at {api_url}", channel))?
-    };
+        })
+    }
+}
+
+pub async fn get_release_asset(
+    http_client: Arc<HttpClientWithUrl>,
+    api_url: &str,
+    channel: ReleaseChannel,
+    os: &str,
+    arch: &str,
+) -> Result<ReleaseAsset> {
+    let releases = get_releases(http_client, api_url).await?;
+    let release = releases
+        .into_iter()
+        .find(|release| release_matches_channel(release, channel))
+        .with_context(|| format!("no release matched channel {:?} at {api_url}", channel))?;
 
     // Asset naming produced by the release workflow:
     //   macOS:   Lathe-<version>-<arch>-macos.{dmg,zip}    (arch: aarch64 | x86_64)

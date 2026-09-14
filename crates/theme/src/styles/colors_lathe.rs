@@ -254,6 +254,7 @@ impl ThemeColors {
             ThemeColorField::VimHelixNormalForeground => self.vim_helix_normal_foreground = value,
             ThemeColorField::VimHelixSelectForeground => self.vim_helix_select_foreground = value,
             ThemeColorField::EditorForeground => self.editor_foreground = value,
+            ThemeColorField::EditorCodeLensForeground => self.editor_code_lens_foreground = Some(value),
             ThemeColorField::EditorBackground => self.editor_background = value,
             ThemeColorField::EditorGutterBackground => self.editor_gutter_background = value,
             ThemeColorField::EditorSubheaderBackground => self.editor_subheader_background = value,
