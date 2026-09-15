@@ -1034,11 +1034,14 @@ impl AcpConnection {
         let (connection_tx, connection_rx) = futures::channel::oneshot::channel();
         let connection_future =
             connect_client_future("zed", transport, dispatch_tx.clone(), connection_tx);
-        let io_task = cx.background_spawn(async move {
-            if let Err(err) = connection_future.await {
-                log::error!("ACP connection error: {err}");
-            }
-        });
+        let io_task = cx
+            .background_executor()
+            .scheduler_executor()
+            .spawn_dedicated(move |_executor| async move {
+                if let Err(err) = connection_future.await {
+                    log::error!("ACP connection error: {err}");
+                }
+            });
 
         let connection_rx = async move {
             connection_rx
