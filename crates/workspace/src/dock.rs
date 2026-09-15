@@ -149,9 +149,12 @@ pub trait PanelHandle: Send + Sync {
     fn is_awaiting_input(&self, cx: &App) -> bool;
     fn awaiting_input_tooltip(&self, cx: &App) -> &'static str;
     fn hide_button_setting(&self, cx: &App) -> Option<HideStatusItem>;
-    fn move_to_next_position(&self, window: &mut Window, cx: &mut App) {
+    /// The dock this panel would cycle to next, skipping positions it rejects.
+    /// Shared by the keybinding and by any caller that needs the destination
+    /// without applying it.
+    fn next_position(&self, window: &Window, cx: &App) -> DockPosition {
         let current_position = self.position(window, cx);
-        let next_position = [
+        [
             DockPosition::Left,
             DockPosition::Bottom,
             DockPosition::Right,
@@ -160,8 +163,11 @@ pub trait PanelHandle: Send + Sync {
         .filter(|position| self.position_is_valid(*position, cx))
         .skip_while(|valid_position| *valid_position != current_position)
         .nth(1)
-        .unwrap_or(DockPosition::Left);
+        .unwrap_or(DockPosition::Left)
+    }
 
+    fn move_to_next_position(&self, window: &mut Window, cx: &mut App) {
+        let next_position = self.next_position(window, cx);
         self.set_position(next_position, window, cx);
     }
 }
@@ -407,7 +413,7 @@ pub struct PanelSizeState {
 struct PanelEntry {
     panel: Arc<dyn PanelHandle>,
     size_state: PanelSizeState,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: Vec<Subscription>,
 }
 
 pub struct PanelButtons {
@@ -416,6 +422,15 @@ pub struct PanelButtons {
 }
 
 pub(crate) const PANEL_SIZE_STATE_KEY: &str = "dock_panel_size";
+
+/// Per-workspace override for which dock a panel lives in.
+///
+/// `Panel::position` reads global settings, so without an override every
+/// workspace resolves the same value and moving a panel in one window moves it
+/// in every other window, and in other release channels too, since
+/// `paths::config_dir()` is shared across channels. A workspace that has been
+/// customized records its own choice here and stops following the setting.
+pub(crate) const PANEL_DOCK_POSITION_KEY: &str = "dock_panel_position";
 
 fn panel_uses_flexible_width(
     position: DockPosition,
@@ -664,74 +679,16 @@ impl Dock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> usize {
-        let subscriptions = [
+        // Cloned up front: the subscriptions below consume `workspace`.
+        let workspace_for_placement = workspace.clone();
+        let mut subscriptions = vec![
             cx.observe(&panel, |_, _, cx| cx.notify()),
             cx.observe_global_in::<SettingsStore>(window, {
                 let workspace = workspace.clone();
                 let panel = panel.clone();
 
                 move |this, window, cx| {
-                    let new_position = panel.read(cx).position(window, cx);
-                    if new_position == this.position {
-                        return;
-                    }
-
-                    let Ok(new_dock) = workspace.update(cx, |workspace, cx| {
-                        if panel.is_zoomed(window, cx) {
-                            workspace.zoomed_position = Some(new_position);
-                        }
-                        match new_position {
-                            DockPosition::Left => &workspace.left_dock,
-                            DockPosition::Bottom => &workspace.bottom_dock,
-                            DockPosition::Right => &workspace.right_dock,
-                        }
-                        .clone()
-                    }) else {
-                        return;
-                    };
-
-                    let panel_id = Entity::entity_id(&panel);
-                    let was_visible = this.is_open()
-                        && this
-                            .visible_panel()
-                            .is_some_and(|active_panel| active_panel.panel_id() == panel_id);
-                    let size_state = this
-                        .panel_entries
-                        .iter()
-                        .find(|entry| entry.panel.panel_id() == panel_id)
-                        .map(|entry| entry.size_state)
-                        .unwrap_or_default();
-
-                    let previous_axis = this.position.axis();
-                    let next_axis = new_position.axis();
-                    let size_state = if previous_axis == next_axis {
-                        size_state
-                    } else {
-                        PanelSizeState::default()
-                    };
-
-                    if !this.remove_panel(&panel, window, cx) {
-                        // Panel was already moved from this dock
-                        return;
-                    }
-
-                    new_dock.update(cx, |new_dock, cx| {
-                        let index =
-                            new_dock.add_panel(panel.clone(), workspace.clone(), window, cx);
-                        if let Some(added_panel) = new_dock.panel_for_id(panel_id).cloned() {
-                            new_dock.set_panel_size_state(added_panel.as_ref(), size_state, cx);
-                        }
-                        if was_visible {
-                            new_dock.set_open(true, window, cx);
-                            new_dock.activate_panel(index, window, cx);
-                        }
-                    });
-
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            workspace.serialize_workspace(window, cx);
-                        })
-                        .ok();
+                    this.relocate_panel(&panel, &workspace, window, cx);
                 }
             }),
             {
@@ -811,6 +768,18 @@ impl Dock {
                 },
             ),
         ];
+
+        // A workspace-local placement change notifies the workspace rather than
+        // writing global settings, so only this window's docks react.
+        if let Some(workspace_entity) = workspace_for_placement.upgrade() {
+            subscriptions.push(cx.observe_in(&workspace_entity, window, {
+                let workspace = workspace_for_placement.clone();
+                let panel = panel.clone();
+                move |this, _, window, cx| {
+                    this.relocate_panel(&panel, &workspace, window, cx);
+                }
+            }));
+        }
 
         let index = match self
             .panel_entries
@@ -1303,6 +1272,97 @@ impl Dock {
             .flatten()
             .and_then(|json| serde_json::from_str::<PanelSizeState>(&json).log_err())
     }
+
+    pub(crate) fn load_persisted_dock_position(
+        workspace: &Workspace,
+        panel_key: &str,
+        cx: &App,
+    ) -> Option<DockPosition> {
+        // Database id only. `session_id` is shared by every workspace in the
+        // process, so falling back to it would let two unsaved workspaces read
+        // each other's placement. See `Workspace::set_panel_dock_position`.
+        let workspace_id = workspace.database_id().map(|id| i64::from(id).to_string())?;
+        let kvp = KeyValueStore::global(cx);
+        let scope = kvp.scoped(PANEL_DOCK_POSITION_KEY);
+        scope
+            .read(&format!("{workspace_id}:{panel_key}"))
+            .log_err()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<settings::DockPosition>(&json).log_err())
+            .map(DockPosition::from)
+    }
+
+    /// Moves `panel` into whichever dock it currently belongs in, preserving
+    /// visibility and size. Driven both by global settings changes and by a
+    /// workspace-local placement change, so the two paths cannot diverge.
+    fn relocate_panel<T: Panel>(
+        &mut self,
+        panel: &Entity<T>,
+        workspace: &WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let new_position = panel.read(cx).position(window, cx);
+        if new_position == self.position {
+            return;
+        }
+
+        let Ok(new_dock) = workspace.update(cx, |workspace, cx| {
+            if panel.is_zoomed(window, cx) {
+                workspace.zoomed_position = Some(new_position);
+            }
+            match new_position {
+                DockPosition::Left => &workspace.left_dock,
+                DockPosition::Bottom => &workspace.bottom_dock,
+                DockPosition::Right => &workspace.right_dock,
+            }
+            .clone()
+        }) else {
+            return;
+        };
+
+        let panel_id = Entity::entity_id(panel);
+        let was_visible = self.is_open()
+            && self
+                .visible_panel()
+                .is_some_and(|active_panel| active_panel.panel_id() == panel_id);
+        let size_state = self
+            .panel_entries
+            .iter()
+            .find(|entry| entry.panel.panel_id() == panel_id)
+            .map(|entry| entry.size_state)
+            .unwrap_or_default();
+
+        let previous_axis = self.position.axis();
+        let next_axis = new_position.axis();
+        let size_state = if previous_axis == next_axis {
+            size_state
+        } else {
+            PanelSizeState::default()
+        };
+
+        if !self.remove_panel(panel, window, cx) {
+            // Panel was already moved from this dock
+            return;
+        }
+
+        new_dock.update(cx, |new_dock, cx| {
+            let index = new_dock.add_panel(panel.clone(), workspace.clone(), window, cx);
+            if let Some(added_panel) = new_dock.panel_for_id(panel_id).cloned() {
+                new_dock.set_panel_size_state(added_panel.as_ref(), size_state, cx);
+            }
+            if was_visible {
+                new_dock.set_open(true, window, cx);
+                new_dock.activate_panel(index, window, cx);
+            }
+        });
+
+        workspace
+            .update(cx, |workspace, cx| {
+                workspace.serialize_workspace(window, cx);
+            })
+            .ok();
+    }
 }
 
 impl Render for Dock {
@@ -1505,6 +1565,35 @@ impl Render for PanelButtons {
                                         );
                                         has_position_entries = true;
                                     }
+                                }
+
+                                // Only offered once this workspace has its own
+                                // placement; otherwise the panel is already
+                                // following the global setting.
+                                let has_placement = workspace_for_menu
+                                    .upgrade()
+                                    .and_then(|ws| {
+                                        ws.read(cx).panel_dock_position(panel.panel_key(), cx)
+                                    })
+                                    .is_some();
+                                if has_placement {
+                                    let panel_for_default = panel.clone();
+                                    let workspace_for_default = workspace_for_menu.clone();
+                                    menu = menu.entry(
+                                        "Use Default Position",
+                                        None,
+                                        move |_window, cx| {
+                                            if let Some(ws) = workspace_for_default.upgrade() {
+                                                ws.update(cx, |workspace, cx| {
+                                                    workspace.clear_panel_dock_position(
+                                                        panel_for_default.panel_key(),
+                                                        cx,
+                                                    );
+                                                });
+                                            }
+                                        },
+                                    );
+                                    has_position_entries = true;
                                 }
                                 if supports_flexible {
                                     if has_position_entries {

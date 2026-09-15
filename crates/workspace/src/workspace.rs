@@ -1648,6 +1648,11 @@ pub struct Workspace {
     session_id: Option<String>,
     scheduled_tasks: Vec<Task<()>>,
     last_open_dock_positions: Vec<DockPosition>,
+    /// Per-panel dock placement chosen in this workspace, keyed by
+    /// `Panel::panel_key`. Authoritative for reads so a placement change is
+    /// visible immediately; the key-value store behind it is written in the
+    /// background purely for durability.
+    panel_dock_positions: HashMap<String, Option<DockPosition>>,
     removing: bool,
     open_in_dev_container: bool,
     _dev_container_task: Option<Task<Result<()>>>,
@@ -2168,6 +2173,7 @@ impl Workspace {
 
             scheduled_tasks: Vec::new(),
             last_open_dock_positions: Vec::new(),
+            panel_dock_positions: HashMap::default(),
             removing: false,
             sidebar_focus_handle: None,
             multi_workspace,
@@ -2697,6 +2703,75 @@ impl Workspace {
                     serde_json::to_string(&size_state)?,
                 )
                 .await
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// This workspace's placement for `panel_key`, or `None` to follow the
+    /// global setting. Reads the in-memory value first so a placement set in
+    /// this session is visible before the background write lands.
+    pub fn panel_dock_position(&self, panel_key: &str, cx: &App) -> Option<DockPosition> {
+        // A stored `None` records an explicit clear, so it must not fall
+        // through to the key-value store, whose delete is written in the
+        // background and may not have landed yet.
+        if let Some(position) = self.panel_dock_positions.get(panel_key) {
+            return *position;
+        }
+        dock::Dock::load_persisted_dock_position(self, panel_key, cx)
+    }
+
+    /// Places `panel_key` in `position` for this workspace only.
+    ///
+    /// Panels otherwise read their dock from global settings, which is shared
+    /// by every window and, because `paths::config_dir()` ignores the release
+    /// channel, by every channel too. Recording the choice here keeps it local.
+    pub fn set_panel_dock_position(
+        &mut self,
+        panel_key: &str,
+        position: DockPosition,
+        cx: &mut Context<Self>,
+    ) {
+        if self.panel_dock_positions.get(panel_key) == Some(&Some(position)) {
+            return;
+        }
+        self.panel_dock_positions
+            .insert(panel_key.to_string(), Some(position));
+        cx.notify();
+
+        // Keyed on the database id alone. `session_id` is shared by every
+        // workspace in the process, so falling back to it would make two
+        // unsaved workspaces read each other's placement.
+        let Some(workspace_id) = self.database_id().map(|id| i64::from(id).to_string()) else {
+            return;
+        };
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        let key = format!("{workspace_id}:{panel_key}");
+        let position: settings::DockPosition = position.into();
+        cx.background_spawn(async move {
+            let scope = kvp.scoped(dock::PANEL_DOCK_POSITION_KEY);
+            scope.write(key, serde_json::to_string(&position)?).await
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Drops this workspace's placement so the panel follows global settings again.
+    pub fn clear_panel_dock_position(&mut self, panel_key: &str, cx: &mut Context<Self>) {
+        if self.panel_dock_positions.get(panel_key) == Some(&None) {
+            return;
+        }
+        // Recorded as an explicit `None` rather than removed: the stored value
+        // may still be in the key-value store until the delete below lands.
+        self.panel_dock_positions.insert(panel_key.to_string(), None);
+        cx.notify();
+
+        let Some(workspace_id) = self.database_id().map(|id| i64::from(id).to_string()) else {
+            return;
+        };
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        let key = format!("{workspace_id}:{panel_key}");
+        cx.background_spawn(async move {
+            let scope = kvp.scoped(dock::PANEL_DOCK_POSITION_KEY);
+            scope.delete(key).await
         })
         .detach_and_log_err(cx);
     }
@@ -3632,22 +3707,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let docks = self.all_docks();
-        let active_dock = docks
+        let active_dock = self
+            .all_docks()
             .into_iter()
-            .find(|dock| dock.focus_handle(cx).contains_focused(window, cx));
+            .find(|dock| dock.focus_handle(cx).contains_focused(window, cx))
+            .cloned();
 
-        if let Some(dock) = active_dock {
-            dock.update(cx, |dock, cx| {
-                let active_panel = dock
-                    .active_panel()
-                    .filter(|panel| panel.panel_focus_handle(cx).contains_focused(window, cx));
+        let Some(dock) = active_dock else {
+            return;
+        };
+        let Some(panel) = dock
+            .read(cx)
+            .active_panel()
+            .filter(|panel| panel.panel_focus_handle(cx).contains_focused(window, cx))
+            .cloned()
+        else {
+            return;
+        };
 
-                if let Some(panel) = active_panel {
-                    panel.move_to_next_position(window, cx);
-                }
-            })
-        }
+        panel.move_to_next_position(window, cx);
     }
 
     pub fn prepare_to_close(
@@ -16580,6 +16658,49 @@ mod tests {
                 .is_some()),
             "reopen with an active modal that dismisses after the action should reveal the stash"
         );
+    }
+
+    #[gpui::test]
+    async fn test_panel_dock_position_is_per_workspace(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project_a = Project::test(fs.clone(), [], cx).await;
+        let (mw_a, cx) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+        let workspace_a = mw_a.read_with(cx, |mw, _| mw.workspace().clone());
+
+        // No placement recorded yet: the panel follows the global setting.
+        workspace_a.update(cx, |workspace, cx| {
+            assert_eq!(workspace.panel_dock_position(TestPanel::panel_key(), cx), None);
+        });
+
+        workspace_a.update(cx, |workspace, cx| {
+            workspace.set_panel_dock_position(TestPanel::panel_key(), DockPosition::Right, cx);
+            assert_eq!(
+                workspace.panel_dock_position(TestPanel::panel_key(), cx),
+                Some(DockPosition::Right),
+                "a recorded placement should be readable immediately, before the background write lands"
+            );
+        });
+
+        // A second workspace must not inherit the first one's placement. This is
+        // the whole point: the global setting is shared, the placement is not.
+        let project_b = Project::test(fs, [], cx).await;
+        let (mw_b, cx_b) = cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_b, window, cx));
+        let workspace_b = mw_b.read_with(cx_b, |mw, _| mw.workspace().clone());
+        workspace_b.update(cx_b, |workspace, cx| {
+            assert_eq!(
+                workspace.panel_dock_position(TestPanel::panel_key(), cx),
+                None,
+                "a second workspace should not inherit another workspace's placement"
+            );
+        });
+
+        // Clearing returns the workspace to following the global setting.
+        workspace_a.update(cx, |workspace, cx| {
+            workspace.clear_panel_dock_position(TestPanel::panel_key(), cx);
+            assert_eq!(workspace.panel_dock_position(TestPanel::panel_key(), cx), None);
+        });
     }
 
     #[gpui::test]

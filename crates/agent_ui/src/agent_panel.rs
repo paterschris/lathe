@@ -980,6 +980,13 @@ pub struct AgentPanel {
     workspace: WeakEntity<Workspace>,
     /// Workspace id is used as a database key
     workspace_id: Option<WorkspaceId>,
+    /// This workspace's own dock placement for the panel, if it has one.
+    ///
+    /// Held as a value because `Workspace::add_panel` calls `Panel::position`
+    /// while it holds `&mut Workspace`. Reading the workspace handle from
+    /// inside `position` hits GPUI's double-lease panic, and `read_with`'s
+    /// `Result` does not cover that case.
+    workspace_dock_position: Option<DockPosition>,
     user_store: Entity<UserStore>,
     project: Entity<Project>,
     fs: Arc<dyn Fs>,
@@ -1248,6 +1255,8 @@ impl AgentPanel {
         let language_registry = project.read(cx).languages().clone();
         let client = workspace.client().clone();
         let workspace_id = workspace.database_id();
+        let workspace_dock_position =
+            workspace.panel_dock_position(<AgentPanel as Panel>::panel_key(), cx);
         let workspace = workspace.weak_handle();
 
         let context_server_registry =
@@ -1327,6 +1336,7 @@ impl AgentPanel {
 
         let mut panel = Self {
             workspace_id,
+            workspace_dock_position,
             base_view,
             last_created_entry_kind: AgentPanelEntryKind::Thread,
             workspace,
@@ -4082,6 +4092,22 @@ fn agent_panel_dock_position(cx: &App) -> DockPosition {
     AgentSettings::get_global(cx).dock.into()
 }
 
+/// The panel's dock for a given workspace: that workspace's own placement if it
+/// has one, otherwise the global `agent.dock` setting.
+///
+/// `Panel::position` stays the single source of truth. Everything else in the
+/// codebase (`dock_at_position`, `is_dock_at_position_open`, sizing, zoom)
+/// routes off `position`, so resolving the override anywhere else would leave
+/// those callers disagreeing with the dock the panel is actually in.
+fn agent_panel_dock_position_in(
+    workspace_dock_position: Option<DockPosition>,
+    cx: &App,
+) -> DockPosition {
+    workspace_dock_position
+        .filter(|position| *position != DockPosition::Bottom)
+        .unwrap_or_else(|| agent_panel_dock_position(cx))
+}
+
 fn project_agents_md_path(
     project: &Entity<Project>,
     require_existing_file: bool,
@@ -4171,7 +4197,7 @@ impl Panel for AgentPanel {
     }
 
     fn position(&self, _window: &Window, cx: &App) -> DockPosition {
-        agent_panel_dock_position(cx)
+        agent_panel_dock_position_in(self.workspace_dock_position, cx)
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
@@ -4184,12 +4210,18 @@ impl Panel for AgentPanel {
             DockPosition::Right | DockPosition::Bottom => "right",
         };
         telemetry::event!("Agent Panel Side Changed", side = side);
-        settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
-            settings
-                .agent
-                .get_or_insert_default()
-                .set_dock(position.into());
-        });
+        // Recorded against this workspace rather than written to global
+        // settings, which every window and every release channel share.
+        self.workspace_dock_position = Some(position);
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.set_panel_dock_position(
+                    <AgentPanel as Panel>::panel_key(),
+                    position,
+                    cx,
+                );
+            })
+            .ok();
     }
 
     fn default_size(&self, window: &Window, cx: &App) -> Pixels {

@@ -1183,6 +1183,23 @@ impl PullRequestPanel {
             .ok();
     }
 
+    /// Clears a PR's updated indicator without opening it. A PR that changes
+    /// again after this point is flagged again, exactly as if it had been
+    /// opened.
+    fn mark_pull_request_read(
+        &mut self,
+        section_index: usize,
+        number: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(section) = self.sections.get_mut(section_index) else {
+            return;
+        };
+        if section.updated_since_seen.remove(&number) {
+            cx.notify();
+        }
+    }
+
     /// Checks out the pull request's source branch in the repository the row
     /// belongs to.
     ///
@@ -1312,6 +1329,7 @@ impl PullRequestPanel {
 fn row_context_menu(
     section_index: usize,
     summary: &PullRequestSummary,
+    is_updated: bool,
     panel: WeakEntity<PullRequestPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -1326,7 +1344,8 @@ fn row_context_menu(
         let copy_branch = branch.clone();
         let checkout = branch.clone();
         let copy_title = format!("#{number} {title}");
-        let panel_for_checkout = panel;
+        let panel_for_checkout = panel.clone();
+        let panel_for_mark_read = panel;
         menu.entry("Open on Host Website", None, move |_window, cx| {
             cx.open_url(&open_url);
         })
@@ -1347,6 +1366,16 @@ fn row_context_menu(
                     panel.checkout_branch(section_index, checkout.clone(), cx);
                 })
                 .ok();
+        })
+        .when(is_updated, move |menu| {
+            menu.separator()
+                .entry("Mark as Read", None, move |_window, cx| {
+                    panel_for_mark_read
+                        .update(cx, |panel, cx| {
+                            panel.mark_pull_request_read(section_index, number, cx);
+                        })
+                        .ok();
+                })
         })
     })
 }
@@ -1814,7 +1843,7 @@ impl PullRequestPanel {
                 v_flex()
                     .flex_none()
                     .items_center()
-                    .gap_0p5()
+                    .gap_1p5()
                     .child(
                         Icon::new(IconName::PullRequest)
                             .size(IconSize::Small)
@@ -1898,7 +1927,14 @@ impl PullRequestPanel {
         right_click_menu(("pr-row-menu", ix))
             .trigger(move |_, _, _| row)
             .menu(move |window, cx| {
-                row_context_menu(section_index, &summary_for_menu, panel.clone(), window, cx)
+                row_context_menu(
+                    section_index,
+                    &summary_for_menu,
+                    is_updated,
+                    panel.clone(),
+                    window,
+                    cx,
+                )
             })
             .into_any_element()
     }

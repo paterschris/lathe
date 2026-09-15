@@ -8,7 +8,7 @@ use agent_settings::AgentSettings;
 use git::Clone as GitClone;
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Render, Styled, Task, TaskExt, Window, actions, img,
+    ParentElement, Render, ScrollHandle, Styled, Task, TaskExt, Window, actions, img,
 };
 use gpui::{WeakEntity, linear_color_stop, linear_gradient};
 use menu::{SelectNext, SelectPrevious};
@@ -16,7 +16,9 @@ use menu::{SelectNext, SelectPrevious};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{DefaultOpenBehavior, Settings};
-use ui::{ButtonLike, Divider, DividerColor, KeyBinding, prelude::*};
+use ui::{
+    ButtonLike, Divider, DividerColor, KeyBinding, StatefulInteractiveElement, prelude::*,
+};
 use util::ResultExt;
 use zed_actions::{
     Extensions, OpenKeymap, OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette,
@@ -242,6 +244,7 @@ pub struct WelcomePage {
     focus_handle: FocusHandle,
     fallback_to_recent_projects: bool,
     recent_workspaces: Option<Vec<RecentWorkspace>>,
+    scroll_handle: ScrollHandle,
 }
 
 impl WelcomePage {
@@ -282,6 +285,7 @@ impl WelcomePage {
             focus_handle,
             fallback_to_recent_projects,
             recent_workspaces: None,
+            scroll_handle: ScrollHandle::new(),
         }
     }
 
@@ -465,48 +469,53 @@ impl Render for WelcomePage {
             .child(
                 v_flex()
                     .id("welcome-content")
-                    .p_8()
-                    .max_w_128()
                     .size_full()
-                    .gap_6()
-                    .justify_center()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
                     .child(
-                        h_flex()
+                        v_flex()
+                            .p_8()
+                            .max_w_128()
                             .w_full()
-                            .justify_center()
-                            .mb_4()
-                            .gap_4()
-                            .child(img("images/lathe_logo.png").size(rems_from_px(45_f32)))
+                            .mx_auto()
+                            .gap_6()
                             .child(
-                                v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted)
-                                        .italic(),
-                                ),
-                            ),
-                    )
-                    .child(first_section.render(Default::default(), &self.focus_handle))
-                    .child(second_section)
-                    .when(ai_enabled && !showing_recent_projects, |this| {
-                        let agent_tab_index = next_tab_index;
-                        next_tab_index += 1;
-                        this.child(self.render_agent_card(agent_tab_index, cx))
-                    })
-                    .when(!self.fallback_to_recent_projects, |this| {
-                        this.child(
-                            v_flex().gap_4().child(Divider::horizontal()).child(
-                                Button::new("welcome-exit", "Return to Onboarding")
-                                    .tab_index(next_tab_index as isize)
-                                    .full_width()
-                                    .label_size(LabelSize::XSmall)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(OpenOnboarding.boxed_clone(), cx);
-                                    }),
-                            ),
-                        )
-                    }),
+                                h_flex()
+                                    .w_full()
+                                    .justify_center()
+                                    .mb_4()
+                                    .gap_4()
+                                    .child(img("images/lathe_logo.png").size(rems_from_px(45_f32)))
+                                    .child(
+                                        v_flex().child(Headline::new(welcome_label)).child(
+                                            Label::new("The editor for what's next")
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted)
+                                                .italic(),
+                                        ),
+                                    ),
+                            )
+                            .child(first_section.render(Default::default(), &self.focus_handle))
+                            .child(second_section)
+                            .when(ai_enabled && !showing_recent_projects, |this| {
+                                let agent_tab_index = next_tab_index;
+                                next_tab_index += 1;
+                                this.child(self.render_agent_card(agent_tab_index, cx))
+                            })
+                            .when(!self.fallback_to_recent_projects, |this| {
+                                this.child(
+                                    v_flex().gap_4().child(Divider::horizontal()).child(
+                                        Button::new("welcome-exit", "Return to Onboarding")
+                                            .tab_index(next_tab_index as isize)
+                                            .full_width()
+                                            .label_size(LabelSize::XSmall)
+                                            .on_click(|_, window, cx| {
+                                                window.dispatch_action(OpenOnboarding.boxed_clone(), cx);
+                                            }),
+                                    ),
+                                )
+                            }),
+                    ),
             )
     }
 }
