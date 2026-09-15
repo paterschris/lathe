@@ -8,6 +8,7 @@ A large upstream merge, plus per-workspace panel placement and a quieter pull re
 
 ### Added
 
+- **Thread History is scoped to the current workspace again.** Upstream renamed the global Archive view to "Thread History" in April and deleted the per-workspace history view five days later, so the panel had been listing threads from every project at once. History now shows only the active workspace's threads, archived ones included. A thread opened in a linked git worktree still appears under its main workspace, so worktree isolation does not hide it.
 - **The agent panel's dock is remembered per workspace.** Moving the panel used to write the global `agent.dock` setting, which every window shares, and which every release channel shares too because the config directory ignores the channel. Dragging the panel in one project moved it in all of them, stable and beta alike. A workspace that has been customized now records its own placement and stops following the setting. **Use Default Position** in the panel menu, offered only once a workspace has a placement of its own, hands it back to the global setting.
 - **Mark a pull request as read without opening it.** Right-click a flagged row in the pull request panel and choose **Mark as Read** to clear its updated indicator. The entry appears only on rows that are actually flagged, and a pull request that changes again afterwards is flagged again, exactly as if it had been opened.
 

@@ -16,7 +16,7 @@ Ordered by how much each one differentiates Lathe from stock Zed. Upstream alrea
 2. [Merge conflicts and interactive rebase](docs/features.md#merge-conflicts-and-interactive-rebase) - conflict resolution tab, full-file split view, drag-and-drop rebase
 3. [Pull request reviews](docs/features.md#pull-request-reviews) - GitHub, GitLab, and Bitbucket, in-editor
 4. [Code navigation](docs/features.md#code-navigation) - peek view for definitions and references
-5. [AI agent integration](docs/features.md#ai-agent-integration) - multi-account sign-in, approval control
+5. [AI agent integration](docs/features.md#ai-agent-integration) - multi-account sign-in, approval control, per-workspace thread history
 6. [Theme and syntax highlighting](docs/features.md#theme-and-syntax-highlighting) - custom theme, live 200+ color customizer
 7. [Git additions](docs/features.md#git-additions) - explorer tab, branch tree, undo, Git Flow
 8. [AWS profiles](docs/features.md#aws-profiles) - per-window profile selector
@@ -100,6 +100,8 @@ Lathe ships on two channels:
 - **Beta** - tagged `vX.Y.Z-beta`, published as GitHub prereleases with a distinct app icon. Beta builds typically contain the latest upstream Zed sync before it's rolled into stable.
 
 Homebrew installs stable by default. To try a beta, grab the `-beta` asset from [Releases](https://github.com/paterschris/lathe/releases).
+
+To be notified when a new version ships, use **Watch > Custom > Releases** at the top of this repository. Starring bookmarks the project but does not send release notifications.
 
 ## Updating
 

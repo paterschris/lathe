@@ -73,6 +73,10 @@ Set `lsp_results_location` to `multi_buffer` or `picker` to go back to a tab or 
 
 Up and down in the agent panel's composer walk the prompts you have already sent, the way a shell walks its command history. The keys only take over at the edges of the text: on the first display row for up, the last for down, so navigating within a multi-line prompt still moves the cursor normally. The editors for past and queued messages deliberately keep plain cursor movement, since swapping their content out from under an edit would be surprising.
 
+### Per-workspace thread history
+
+Archived agent threads appear in Thread History for the current workspace. The history is sorted chronologically, and restoring a thread returns it to that workspace's thread list.
+
 ### Agent accounts and approval control
 Sign in to multiple subscription accounts for the external agents in the Agent Panel (Claude Code, Codex, Gemini) and switch between them from the panel's account chip. Account selection is per-workspace, so a work project and a personal project can each stay on their own identity. An approval selector picks each agent's approval / sandbox level; the level is applied when the agent process spawns, so changes take effect on the next thread. Agents with their own native approval control keep it and skip the selector.
 
