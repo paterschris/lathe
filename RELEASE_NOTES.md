@@ -2,6 +2,32 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.2.0 - 2026-09-15
+
+A large upstream merge, plus per-workspace panel placement and a quieter pull request panel.
+
+### Added
+
+- **The agent panel's dock is remembered per workspace.** Moving the panel used to write the global `agent.dock` setting, which every window shares, and which every release channel shares too because the config directory ignores the channel. Dragging the panel in one project moved it in all of them, stable and beta alike. A workspace that has been customized now records its own placement and stops following the setting. **Use Default Position** in the panel menu, offered only once a workspace has a placement of its own, hands it back to the global setting.
+- **Mark a pull request as read without opening it.** Right-click a flagged row in the pull request panel and choose **Mark as Read** to clear its updated indicator. The entry appears only on rows that are actually flagged, and a pull request that changes again afterwards is flagged again, exactly as if it had been opened.
+
+### Fixed
+
+- **The welcome page scrolls again.** Its padding, maximum width and vertical centering sat on the scrolling container itself, so content taller than the window was clipped rather than reachable. Those now sit on an inner column that centers horizontally, and the scroll position is tracked.
+- **Cycling a panel to its next dock no longer risks a panic.** Moving the focused panel resolved its destination while the dock was already being updated, which is the shape GPUI rejects with a double lease. The destination is now read first, through a new `next_position`, and applied outside the update.
+- Relocating a panel between docks runs through one shared path, so the global-settings route and the new per-workspace route cannot drift apart in how they preserve a panel's visibility and size.
+
+### Changed
+
+- **Merged upstream Zed**, 262 commits. Among them: an LSP call hierarchy modal and its `call_hierarchy.modal_max_width` setting, agent client protocol 2.1, and Rust 1.98.1.
+
+### Known issues
+
+- This release was verified by a full `cargo check --workspace --all-targets` on macOS. The new per-workspace placement test compiles, but the test suite was not run before the cut, and Windows and Linux are unexercised.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v1.1.0 - 2026-09-11
 
 The first stable release since 1.0.0. It carries everything from the 1.0.1 beta plus the work below.
