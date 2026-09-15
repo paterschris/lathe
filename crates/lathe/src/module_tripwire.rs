@@ -55,3 +55,43 @@ fn workspace_extensions_exist() {
     let _ = Workspace::first_awaiting_input_tooltip;
     let _ = Workspace::focus_first_awaiting_input;
 }
+
+// ---------------------------------------------------------------------------
+// Single-file-dependency modules
+//
+// The guards below cover Lathe modules whose `mod` declaration and every one of
+// their call sites live in the same upstream-owned file. That combination is
+// what makes a module die quietly: one merge that takes upstream's copy of the
+// declaring file removes the declaration and the callers together, so nothing
+// is left to fail. `theme_customizer` was lost exactly this way.
+//
+// Modules referenced from more than one file in their own crate are not listed
+// here; those already fail loudly, because the surviving caller stops compiling.
+
+// Guards `mod lathe;` in `acp_tools.rs` (ACP stream inspector).
+#[allow(unused_imports)]
+use acp_tools::StreamMessageDirection as _AcpToolsLatheGuard;
+
+// Guards `mod lathe_update;` in `auto_update.rs` (Lathe release channel).
+#[allow(unused_imports)]
+use auto_update::ReleaseNotes as _AutoUpdateLatheGuard;
+
+// Guards `mod terminal_lathe;` in `terminal.rs` (awaiting-input detection).
+#[allow(unused_imports)]
+use terminal::InteractivePromptKind as _TerminalLatheGuard;
+
+// Guards `mod lathe_colors;` and `mod colors_lathe;` in `theme/styles.rs`
+// (the 200+ customizable colors and their categories).
+#[allow(unused_imports)]
+use theme::{ColorCategory as _ColorsLatheGuard, LatheThemeColors as _LatheColorsGuard};
+
+/// Guards `mod lathe;` in `project/src/git_store.rs`, whose contents are
+/// inherent `GitStore` methods rather than a namespaced path.
+#[allow(dead_code)]
+fn git_store_extensions_exist() {
+    use project::git_store::GitStore;
+
+    let _ = GitStore::file_history;
+    let _ = GitStore::file_history_paginated;
+    let _ = GitStore::undo_log;
+}

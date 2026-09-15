@@ -9985,11 +9985,16 @@ dependencies = [
 name = "lathe"
 version = "0.1.0"
 dependencies = [
+ "acp_tools",
+ "auto_update",
  "git_graph",
  "gpui",
  "lathe_hooks",
  "mobile_dev",
  "pr_ui",
+ "project",
+ "terminal",
+ "theme",
  "workspace",
 ]
 

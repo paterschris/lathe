@@ -90,7 +90,6 @@ pub const ROOT_PATH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 // The git index lock file. Changes to it are noise for git metadata rescans, so the
 // worktree skips them. The `git` crate no longer exports this name, so it is defined here.
-const INDEX_LOCK: &str = "index.lock";
 
 /// A set of local or remote files that are being opened as part of a project.
 /// Responsible for tracking related FS (for local)/collab (for remote) events and corresponding updates.
@@ -4844,16 +4843,24 @@ impl BackgroundScanner {
             events = Self::normalized_events_for_worktree(&state, &root_canonical_path, events);
         }
 
+        log::debug!("raw events for process_events: {events:?}");
+
+        fn skip_ix(ranges: &mut SmallVec<[Range<usize>; 4]>, ix: usize) {
+            if let Some(last_range) = ranges.last_mut()
+                && last_range.end == ix
+            {
+                last_range.end += 1;
+            } else {
+                ranges.push(ix..ix + 1);
+            }
+        }
+
+        // Check for events inside .git directories, so that we know which repositories need their git state reloaded.
+        //
         // Certain directories may have FS changes, but do not lead to git data changes that Zed cares about.
         // Ignore these, to avoid Zed unnecessarily rescanning git metadata.
-        let skipped_file_names_in_dot_git = [
-            COMMIT_MESSAGE,
-            INDEX_LOCK,
-            FETCH_HEAD,
-            ORIG_HEAD,
-            BISECT_LOG,
-            GC_PID,
-        ];
+        let skipped_file_names_in_dot_git =
+            [COMMIT_MESSAGE, FETCH_HEAD, ORIG_HEAD, BISECT_LOG, GC_PID];
         let skipped_dirs_in_dot_git = [
             FSMONITOR_DAEMON,
             LFS_DIR,
@@ -4864,7 +4871,6 @@ impl BackgroundScanner {
             SEQUENCER_DIR,
         ];
 
-        let mut relative_paths = Vec::with_capacity(events.len());
         let mut dot_git_abs_paths = Vec::new();
         let mut work_dirs_needing_exclude_update = Vec::new();
 
@@ -4884,16 +4890,6 @@ impl BackgroundScanner {
             // standalone bare event (macOS coalescing) still triggers a rescan.
             let mut bare_dot_git_abs_paths = Vec::new();
             let mut dot_git_dirs_with_ignored_events = Vec::new();
-
-            fn skip_ix(ranges: &mut SmallVec<[Range<usize>; 4]>, ix: usize) {
-                if let Some(last_range) = ranges.last_mut()
-                    && last_range.end == ix
-                {
-                    last_range.end += 1;
-                } else {
-                    ranges.push(ix..ix + 1);
-                }
-            }
 
             for (ix, event) in events.iter().enumerate() {
                 let abs_path = SanitizedPath::new(&event.path);
@@ -5055,59 +5051,16 @@ impl BackgroundScanner {
                 false
             }
         });
+
+        let mut relative_paths = Vec::with_capacity(events.len());
+
         {
             let snapshot = &self.state.lock().await.snapshot;
 
             let mut ranges_to_drop = SmallVec::<[Range<usize>; 4]>::new();
 
-            fn skip_ix(ranges: &mut SmallVec<[Range<usize>; 4]>, ix: usize) {
-                if let Some(last_range) = ranges.last_mut()
-                    && last_range.end == ix
-                {
-                    last_range.end += 1;
-                } else {
-                    ranges.push(ix..ix + 1);
-                }
-            }
-
             for (ix, event) in events.iter().enumerate() {
                 let abs_path = SanitizedPath::new(&event.path);
-                // TODO(merge): verify this dot_git detection still aligns with upstream's
-                // rewritten event loop (upstream consolidated skip handling above).
-                let mut is_git_related = false;
-                let mut dot_git_paths = None;
-
-                for ancestor in abs_path.as_path().ancestors() {
-                    if is_dot_git(ancestor, self.fs.as_ref()).await {
-                        let path_in_git_dir = abs_path
-                            .as_path()
-                            .strip_prefix(ancestor)
-                            .expect("stripping off the ancestor");
-                        dot_git_paths = Some((ancestor.to_owned(), path_in_git_dir.to_owned()));
-                        break;
-                    }
-                }
-
-                if let Some((dot_git_abs_path, path_in_git_dir)) = dot_git_paths {
-                    let condition = skipped_file_names_in_dot_git.iter().any(|skipped| {
-                        OsStr::new(skipped) == path_in_git_dir.as_path().as_os_str()
-                    }) || skipped_dirs_in_dot_git
-                        .iter()
-                        .any(|skipped_git_subdir| path_in_git_dir.starts_with(skipped_git_subdir));
-                    if condition {
-                        log::debug!(
-                            "ignoring event {abs_path:?} as it's in the .git directory among skipped files or directories"
-                        );
-                        skip_ix(&mut ranges_to_drop, ix);
-                        continue;
-                    }
-
-                    is_git_related = true;
-                    if !dot_git_abs_paths.contains(&dot_git_abs_path) {
-                        dot_git_abs_paths.push(dot_git_abs_path);
-                    }
-                }
-
                 // TODO: this strips the root case-sensitively, so on a case-insensitive
                 // volume an event whose casing differs from the canonical root is
                 // dropped. Once `fs` exposes per-volume case-sensitivity (e.g. on the
@@ -5140,15 +5093,6 @@ impl BackgroundScanner {
                 ) {
                     path
                 } else {
-                    if is_git_related {
-                        log::debug!(
-                            "ignoring event {abs_path:?}, since it's in git dir outside of root path {root_canonical_path:?}",
-                        );
-                    } else {
-                        log::error!(
-                            "ignoring event {abs_path:?} outside of root path {root_canonical_path:?}",
-                        );
-                    }
                     skip_ix(&mut ranges_to_drop, ix);
                     continue;
                 };
@@ -5175,15 +5119,12 @@ impl BackgroundScanner {
                         .is_some_and(|entry| entry.kind == EntryKind::Dir)
                 });
                 if !parent_dir_is_loaded {
-                    log::debug!("ignoring event {relative_path:?} within unloaded directory");
+                    log::debug!("filtering event {relative_path:?} within unloaded directory");
                     skip_ix(&mut ranges_to_drop, ix);
                     continue;
                 }
 
                 if self.settings.is_path_excluded(&relative_path) {
-                    if !is_git_related {
-                        log::debug!("ignoring FS event for excluded path {relative_path:?}");
-                    }
                     skip_ix(&mut ranges_to_drop, ix);
                     continue;
                 }
@@ -5219,13 +5160,15 @@ impl BackgroundScanner {
         self.state.lock().await.snapshot.scan_id += 1;
 
         let (scan_job_tx, scan_job_rx) = channel::unbounded();
-        log::debug!(
-            "received fs events {:?}",
-            relative_paths
-                .iter()
-                .map(|event_root| &event_root.path)
-                .collect::<Vec<_>>()
-        );
+        if !relative_paths.is_empty() {
+            log::debug!(
+                "will update project paths {:?}",
+                relative_paths
+                    .iter()
+                    .map(|event_root| &event_root.path)
+                    .collect::<Vec<_>>()
+            );
+        }
         self.reload_entries_for_paths(
             &root_path,
             &root_canonical_path,
@@ -6240,13 +6183,8 @@ impl BackgroundScanner {
             // causing the GitStore to repeatedly tear it down and re-create it
             // with a fresh `RepositoryId`. So preserve the repository unless the
             // `.git` entry is confirmed absent.
-            // TODO(merge): the common_dir_abs_path OR-clause preserves Lathe worktree support.
             let dot_git_present =
-                !matches!(self.fs.metadata(&entry.dot_git_abs_path).await, Ok(None))
-                    || matches!(
-                        self.fs.metadata(&entry.common_dir_abs_path).await,
-                        Ok(Some(_))
-                    );
+                !matches!(self.fs.metadata(&entry.dot_git_abs_path).await, Ok(None));
 
             if exists_in_snapshot || dot_git_present {
                 ids_to_preserve.insert(work_directory_id);
