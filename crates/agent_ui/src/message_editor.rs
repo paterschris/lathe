@@ -8,7 +8,8 @@ use crate::{
         PromptLocalCommand, SlashCommandCompletion,
     },
     mention_set::{Mention, MentionImage, MentionSet, insert_crease_for_mention},
-    prompt_history::{self, PromptHistoryCursor},
+    prompt_history::{self, PromptHistoryCursor, PromptHistoryScope},
+    thread_metadata_store::ThreadId,
 };
 use acp_thread::MentionUri;
 use agent::ThreadStore;
@@ -210,6 +211,7 @@ pub struct MessageEditor {
     agent_id: AgentId,
     thread_store: Option<Entity<ThreadStore>>,
     prompt_history_enabled: bool,
+    prompt_history_scope: Option<PromptHistoryScope>,
     prompt_history_cursor: PromptHistoryCursor,
     _subscriptions: Vec<Subscription>,
     _parse_slash_command_task: Task<()>,
@@ -614,6 +616,7 @@ impl MessageEditor {
             agent_id,
             thread_store,
             prompt_history_enabled: false,
+            prompt_history_scope: None,
             prompt_history_cursor: PromptHistoryCursor::default(),
             _subscriptions: subscriptions,
             _parse_slash_command_task: Task::ready(()),
@@ -955,8 +958,16 @@ impl MessageEditor {
     /// Lets up/down walk the prompts sent from this editor, as a shell walks
     /// its command history. Only the panel's composer opts in: in the editors
     /// for past and queued messages those keys stay plain cursor movement.
-    pub fn enable_prompt_history(&mut self) {
+    pub fn enable_prompt_history(&mut self, thread_id: ThreadId) {
         self.prompt_history_enabled = true;
+        self.prompt_history_scope = Some(PromptHistoryScope::new(
+            self.workspace.entity_id(),
+            thread_id,
+        ));
+    }
+
+    pub(crate) fn prompt_history_scope(&self) -> Option<PromptHistoryScope> {
+        self.prompt_history_scope
     }
 
     fn recall_previous_prompt(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
@@ -968,9 +979,13 @@ impl MessageEditor {
             return;
         }
 
+        let Some(scope) = self.prompt_history_scope() else {
+            cx.propagate();
+            return;
+        };
         let draft = self.draft_content_blocks_snapshot(cx);
         let mut cursor = std::mem::take(&mut self.prompt_history_cursor);
-        let prompt = prompt_history::previous(&mut cursor, draft, cx);
+        let prompt = prompt_history::previous(scope, &mut cursor, draft, cx);
         self.recall_prompt(prompt, cursor, window, cx);
     }
 
@@ -983,8 +998,12 @@ impl MessageEditor {
             return;
         }
 
+        let Some(scope) = self.prompt_history_scope() else {
+            cx.propagate();
+            return;
+        };
         let mut cursor = std::mem::take(&mut self.prompt_history_cursor);
-        let prompt = prompt_history::next(&mut cursor, cx);
+        let prompt = prompt_history::next(scope, &mut cursor, cx);
         self.recall_prompt(prompt, cursor, window, cx);
     }
 
@@ -1011,7 +1030,10 @@ impl MessageEditor {
 
     fn can_walk_prompt_history(&self, cx: &App) -> bool {
         let editor = self.editor.read(cx);
-        self.prompt_history_enabled && !editor.read_only(cx) && !editor.context_menu_visible()
+        self.prompt_history_enabled
+            && self.prompt_history_scope.is_some()
+            && !editor.read_only(cx)
+            && !editor.context_menu_visible()
     }
 
     /// The row the cursor sits on and the editor's last row, both in display
@@ -2376,7 +2398,8 @@ mod tests {
         message_editor::{
             Mention, MessageEditor, MessageEditorEvent, SessionCapabilities, parse_mention_links,
         },
-        prompt_history,
+        prompt_history::{self, PromptHistoryScope},
+        thread_metadata_store::ThreadId,
     };
     use zed_actions::editor::{MoveDown, MoveUp};
 
@@ -5887,6 +5910,9 @@ mod tests {
         let workspace = window
             .read_with(cx, |mw, _| mw.workspace().clone())
             .unwrap();
+        let workspace_id = workspace.entity_id();
+        let thread_id = ThreadId::new();
+        let scope = PromptHistoryScope::new(workspace_id, thread_id);
 
         let mut cx = VisualTestContext::from_window(window.into(), cx);
 
@@ -5907,7 +5933,7 @@ mod tests {
                     window,
                     cx,
                 );
-                message_editor.enable_prompt_history();
+                message_editor.enable_prompt_history(thread_id);
                 message_editor
             });
             workspace.active_pane().update(cx, |pane, cx| {
@@ -5926,10 +5952,12 @@ mod tests {
 
         cx.update(|_window, cx| {
             prompt_history::push(
+                scope,
                 vec![acp::ContentBlock::Text(acp::TextContent::new("older"))],
                 cx,
             );
             prompt_history::push(
+                scope,
                 vec![acp::ContentBlock::Text(acp::TextContent::new("newer"))],
                 cx,
             );

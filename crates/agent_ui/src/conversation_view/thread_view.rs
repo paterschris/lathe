@@ -564,7 +564,7 @@ impl ThreadView {
                 window,
                 cx,
             );
-            editor.enable_prompt_history();
+            editor.enable_prompt_history(root_thread_id);
             if let Some(content) = initial_content {
                 match content {
                     AgentInitialContent::ThreadSummary { session_id, title } => {
@@ -1385,8 +1385,12 @@ impl ThreadView {
     /// than reusing the resolved prompt, which only lands after the editor has
     /// already been cleared.
     fn record_prompt_history(&self, message_editor: &Entity<MessageEditor>, cx: &mut App) {
-        let prompt = message_editor.read(cx).draft_content_blocks_snapshot(cx);
-        prompt_history::push(prompt, cx);
+        let message_editor = message_editor.read(cx);
+        let Some(scope) = message_editor.prompt_history_scope() else {
+            return;
+        };
+        let prompt = message_editor.draft_content_blocks_snapshot(cx);
+        prompt_history::push(scope, prompt, cx);
     }
 
     pub fn send_content(
