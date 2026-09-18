@@ -2,6 +2,16 @@
 
 A customized code editor forked from [Zed](https://zed.dev), focused on mobile development workflows, deeper git tooling, in-editor code review, and theme customization.
 
+### [Download Lathe](https://github.com/paterschris/lathe/releases/latest)
+
+The latest release for macOS, Linux, and Windows. On macOS you can also install it with Homebrew:
+
+```sh
+brew install --cask paterschris/tap/lathe
+```
+
+Per-platform notes, including Windows, are in [Install](#install).
+
 Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks for my own workflow without waiting on upstream review, and without needing each change to fit Zed's product scope. Upstream Zed is the primary project - this fork tracks it closely and layers on my own changes.
 
 **Platforms:** macOS (Apple Silicon), Linux (x86_64 and arm64), and Windows (x86_64 and arm64; experimental).
