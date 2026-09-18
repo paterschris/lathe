@@ -13,11 +13,12 @@ use gpui::{
     Focusable, ScrollHandle, SharedString, Subscription, Task, WeakEntity, actions,
 };
 use project::{
-    Project,
+    Project, repo_identity_path_if_local,
     git_store::{GitStore, GitStoreEvent, Repository, RepositoryId},
 };
 use settings::{Settings, SettingsStore};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*, right_click_menu};
 use util::ResultExt as _;
@@ -523,7 +524,7 @@ impl PullRequestPanel {
     /// sections keep their loaded pull requests, repositories that have gone
     /// away drop out, and newly opened ones start loading immediately.
     fn sync_sections(&mut self, cx: &mut Context<Self>) {
-        let mut repositories: Vec<Entity<Repository>> = self
+        let all_repositories: Vec<Entity<Repository>> = self
             .project
             .read(cx)
             .git_store()
@@ -532,7 +533,63 @@ impl PullRequestPanel {
             .values()
             .cloned()
             .collect();
-        repositories.sort_by_key(|repository| repository.read(cx).display_name().to_lowercase());
+
+        // One section per repository *identity*, not per `Repository`. A linked
+        // worktree is its own repository in the git store but shares a remote
+        // with its main checkout, so rendering one section each would list the
+        // same pull requests twice, the second time under the worktree's
+        // directory name (`.pr12-review` rather than `offline-mode`).
+        //
+        // The main checkout is preferred as the representative so the label and
+        // the remote come from it; when only a worktree is open, the first
+        // repository seen for that identity stands in.
+        let mut grouped: Vec<(Option<PathBuf>, Entity<Repository>, SharedString)> = Vec::new();
+        for repository in all_repositories {
+            let (identity, is_main, label) = {
+                let repo = repository.read(cx);
+                let snapshot = repo.snapshot();
+                let identity = repo_identity_path_if_local(
+                    &snapshot.common_dir_abs_path,
+                    snapshot.path_style,
+                )
+                .map(Path::to_path_buf);
+                let label = identity
+                    .as_deref()
+                    .and_then(|identity| {
+                        if identity.extension() == Some(std::ffi::OsStr::new("git")) {
+                            identity.file_stem()
+                        } else {
+                            identity.file_name()
+                        }
+                    })
+                    .and_then(|name| name.to_str())
+                    .map(SharedString::from)
+                    .unwrap_or_else(|| repo.display_name());
+                (identity, snapshot.is_main_worktree(), label)
+            };
+
+            // A repository whose identity cannot be resolved locally never
+            // groups; it keeps a section of its own, as before.
+            let existing = identity.as_ref().and_then(|identity| {
+                grouped
+                    .iter_mut()
+                    .find(|(other, _, _)| other.as_ref() == Some(identity))
+            });
+            match existing {
+                Some(entry) => {
+                    if is_main {
+                        entry.1 = repository;
+                        entry.2 = label;
+                    }
+                }
+                None => grouped.push((identity, repository, label)),
+            }
+        }
+        grouped.sort_by_key(|(_, _, label)| label.to_lowercase());
+        let repositories: Vec<(Entity<Repository>, SharedString)> = grouped
+            .into_iter()
+            .map(|(_, repository, label)| (repository, label))
+            .collect();
 
         let mut existing: HashMap<RepositoryId, RepoSection> = std::mem::take(&mut self.sections)
             .into_iter()
@@ -541,11 +598,8 @@ impl PullRequestPanel {
 
         let mut added = Vec::new();
         let mut sections = Vec::with_capacity(repositories.len());
-        for repository in repositories {
-            let (id, display_name) = {
-                let repository = repository.read(cx);
-                (repository.id, repository.display_name())
-            };
+        for (repository, display_name) in repositories {
+            let id = repository.read(cx).id;
             match existing.remove(&id) {
                 Some(mut section) => {
                     section.display_name = display_name;
@@ -2377,6 +2431,7 @@ impl EventEmitter<PanelEvent> for PullRequestPanel {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git::repository::Worktree as GitWorktree;
     use gpui::TestAppContext;
     use project::{FakeFs, Project};
     use serde_json::json;
@@ -2487,6 +2542,93 @@ mod tests {
             &loaded(vec![summary(1, "2026-09-14T12:00:00Z")]),
         );
         assert!(updated.contains(&1));
+    }
+
+    #[gpui::test]
+    async fn sync_sections_groups_linked_worktrees_with_their_repository(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            zlog::init_test();
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            GitHostingProviderRegistry::default_global(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/root"),
+            json!({
+                "offline-mode": { ".git": {} },
+            }),
+        )
+        .await;
+        fs.set_branch_name(Path::new(path!("/root/offline-mode/.git")), Some("master"));
+        fs.insert_branches(
+            Path::new(path!("/root/offline-mode/.git")),
+            &["master", "pr12-review"],
+        );
+
+        // A linked worktree of `offline-mode`, checked out beside it. The git
+        // store reports it as its own repository, so without grouping the panel
+        // renders a second section titled `.pr12-review`.
+        fs.add_linked_worktree_for_repo(
+            Path::new(path!("/root/offline-mode/.git")),
+            true,
+            GitWorktree {
+                path: PathBuf::from(path!("/root/.pr12-review")),
+                ref_name: Some("refs/heads/pr12-review".into()),
+                sha: "abc123".into(),
+                is_main: false,
+                is_bare: false,
+            },
+        )
+        .await;
+
+        let project = Project::test(
+            fs,
+            [
+                path!("/root/offline-mode").as_ref(),
+                path!("/root/.pr12-review").as_ref(),
+            ],
+            cx,
+        )
+        .await;
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |workspace, _| workspace.workspace().clone());
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            PullRequestPanel::new(workspace, window, cx)
+        });
+
+        // Without this the test could pass vacuously: if the worktree never
+        // registered as its own repository there would be one section anyway,
+        // and the grouping below would never have run.
+        let repository_count = project.read_with(cx, |project, cx| {
+            project.git_store().read(cx).repositories().len()
+        });
+        assert_eq!(
+            repository_count, 2,
+            "the linked worktree must register as a separate repository for this \
+             test to exercise the grouping at all"
+        );
+
+        let display_names = panel.read_with(cx, |panel, _| {
+            panel
+                .sections
+                .iter()
+                .map(|section| section.display_name.to_string())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            display_names,
+            ["offline-mode"],
+            "a linked worktree shares its repository's remote, so its pull requests \
+             belong under the main checkout rather than in a section of their own"
+        );
     }
 
     #[gpui::test]
