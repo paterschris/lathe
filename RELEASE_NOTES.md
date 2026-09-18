@@ -2,6 +2,33 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.3.0-beta - 2026-09-18
+
+A scoping pass on the agent panel's history, a compact mode for terminal cards, and the experimental notebook editor behind a setting.
+
+### Added
+
+- **Compact terminal cards.** A collapsed terminal card spent its header on the working directory and still carried the full command block underneath, so a thread that ran many commands scrolled mostly as boilerplate. With `agent.compact_terminal_cards` on, a collapsed card is one line: the header shows the first line of the command and the command block appears only once the card is expanded. A toggle sits with the other composer controls, and `agent: toggle compact terminal cards` writes the setting, so the choice sticks. Off by default.
+- **The experimental Jupyter notebook editor can be switched on.** It previously registered only behind an upstream feature flag or the `LOCAL_NOTEBOOK_DEV` environment variable, neither of which a normal build can reach, so opening an `.ipynb` file always fell through to raw JSON. `jupyter.notebook_enabled`, also under **Languages & Tools -> Jupyter Notebooks** in the settings UI, now registers it as well, and takes effect in the running app. It is still experimental, and because upstream has no way to unregister an editor, turning it back off needs a restart.
+
+### Fixed
+
+- **Prompt history no longer bleeds between threads and windows.** The up/down walk read one app-global list, so prompts typed in another project's thread turned up in a composer that had nothing to do with them. History is now kept per thread per window. The editors for past and queued messages keep ordinary cursor movement, as before.
+- **Thread History follows the window you are looking at.** Scoping it by worktree paths still let two windows opened on the same paths share one history, and switching the active workspace left the list showing the threads of the workspace you just left. Threads now record the workspace they were created in and the archive rebuilds when the active workspace changes. Threads written before this release fall back to the old path match, so nothing disappears from history.
+- **A linked git worktree no longer duplicates its pull requests.** Opening a worktree beside its main checkout gave the pull request panel two sections listing the same pull requests, the second titled after the worktree directory (`.pr12-review` rather than `offline-mode`). Sections are now built per repository, with the main checkout providing the name and the remote.
+
+### Changed
+
+- The README opens with a download link and the Homebrew command, instead of leaving them halfway down the page.
+
+### Known issues
+
+- This release was verified by a full `cargo check --workspace --all-targets` and the test suites for the changed crates (`agent_ui`, `sidebar`, `pr_ui`, `repl`) on macOS. None of it was exercised in a running build, and Windows and Linux are untested.
+- Two draft-reload tests in `agent_panel` (`test_draft_promotion_creates_metadata_and_new_session_on_reload` and `test_new_draft_survives_reload_when_real_thread_is_active`) fail. They fail at the 1.2.0 tag as well, so they predate this release rather than coming from it, and the underlying draft-restore behavior is unverified in both.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v1.2.0 - 2026-09-15
 
 A large upstream merge, plus per-workspace panel placement and a quieter pull request panel.
