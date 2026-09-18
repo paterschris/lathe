@@ -2866,10 +2866,10 @@ impl AgentPanel {
         terminal.view.update(cx, |terminal_view, cx| {
             terminal_view.set_custom_title(Some(title.to_string()), cx);
         });
-        crate::terminal_thread_metadata_store::TerminalThreadMetadataStore::global(cx).update(
-            cx,
-            |store, cx| store.rename_terminal(terminal_id, title, cx),
-        );
+        crate::terminal_thread_metadata_store::TerminalThreadMetadataStore::global(cx)
+            .update(cx, |store, cx| {
+                store.rename_terminal(terminal_id, title, cx)
+            });
         true
     }
 
@@ -4215,11 +4215,7 @@ impl Panel for AgentPanel {
         self.workspace_dock_position = Some(position);
         self.workspace
             .update(cx, |workspace, cx| {
-                workspace.set_panel_dock_position(
-                    <AgentPanel as Panel>::panel_key(),
-                    position,
-                    cx,
-                );
+                workspace.set_panel_dock_position(<AgentPanel as Panel>::panel_key(), position, cx);
             })
             .ok();
     }
@@ -6496,6 +6492,7 @@ mod tests {
                         updated_at: Utc::now(),
                         created_at: Some(Utc::now()),
                         interacted_at: None,
+                        workspace_id: Some(workspace_id),
                         worktree_paths: WorktreePaths::from_folder_paths(&PathList::default()),
                         remote_connection: None,
                         archived: false,
