@@ -2740,6 +2740,8 @@
   // Jupyter settings
   "jupyter": {
     "enabled": true,
+    // Enable the experimental .ipynb notebook editor.
+    "notebook_enabled": false,
     "kernel_selections": {},
     // Specify the language name as the key and the kernel name as the value.
     // "kernel_selections": {

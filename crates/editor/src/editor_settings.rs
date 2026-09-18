@@ -92,6 +92,10 @@ pub struct Jupyter {
     ///
     /// Default: true
     pub enabled: bool,
+    /// Whether the experimental Jupyter notebook editor is enabled.
+    ///
+    /// Default: false
+    pub notebook_enabled: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -210,6 +214,10 @@ impl EditorSettings {
     pub fn jupyter_enabled(cx: &App) -> bool {
         EditorSettings::get_global(cx).jupyter.enabled
     }
+
+    pub fn notebook_enabled(cx: &App) -> bool {
+        EditorSettings::get_global(cx).jupyter.notebook_enabled
+    }
 }
 
 impl Settings for EditorSettings {
@@ -222,6 +230,7 @@ impl Settings for EditorSettings {
         let axes = scrollbar.axes.unwrap();
         let toolbar = editor.toolbar.unwrap();
         let search = editor.search.unwrap();
+        let jupyter = editor.jupyter.unwrap();
         let drag_and_drop_selection = editor.drag_and_drop_selection.unwrap();
         let sticky_scroll = editor.sticky_scroll.unwrap();
         let file_diff = content.git.as_ref().unwrap().file_diff.unwrap();
@@ -319,7 +328,8 @@ impl Settings for EditorSettings {
             go_to_definition_scroll_strategy: editor.go_to_definition_scroll_strategy.unwrap(),
             lsp_results_location: editor.lsp_results_location.unwrap(),
             jupyter: Jupyter {
-                enabled: editor.jupyter.unwrap().enabled.unwrap(),
+                enabled: jupyter.enabled.unwrap(),
+                notebook_enabled: jupyter.notebook_enabled.unwrap(),
             },
             snippet_sort_order: editor.snippet_sort_order.unwrap(),
             diagnostics_max_severity: editor.diagnostics_max_severity.map(Into::into),

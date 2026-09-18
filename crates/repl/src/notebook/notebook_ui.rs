@@ -10,14 +10,14 @@ use feature_flags::{FeatureFlagAppExt as _, NotebookFeatureFlag};
 use futures::FutureExt;
 use futures::future::Shared;
 use gpui::{
-    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, ListScrollEvent,
-    ListState, Point, Task, TaskExt, actions, list, prelude::*,
+    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, Global, KeyContext,
+    ListScrollEvent, ListState, Point, Task, TaskExt, actions, list, prelude::*,
 };
 use jupyter_protocol::JupyterKernelspec;
 use language::{Language, LanguageRegistry};
 use log;
 use project::{Project, ProjectEntryId, ProjectPath};
-use settings::Settings as _;
+use settings::{Settings as _, SettingsStore};
 use ui::{CommonAnimationExt, KeyBinding, Tooltip, prelude::*};
 use workspace::item::{ItemEvent, SaveOptions, TabContentParams};
 use workspace::searchable::SearchableItemHandle;
@@ -30,6 +30,7 @@ use nbformat::v4::Metadata as NotebookMetadata;
 use serde_json;
 use uuid::Uuid;
 
+use crate::JupyterSettings;
 use crate::components::{KernelPickerDelegate, KernelSelector};
 use crate::kernels::{
     Kernel, KernelSession, KernelSpecification, KernelStatus, LocalKernelSpecification,
@@ -71,15 +72,41 @@ pub(crate) const CONTROL_SIZE: f32 = 20.0;
 
 const NOTEBOOK_EXTENSION: &str = "ipynb";
 
-pub fn init(cx: &mut App) {
-    if cx.has_flag::<NotebookFeatureFlag>() || std::env::var("LOCAL_NOTEBOOK_DEV").is_ok() {
-        workspace::register_project_item::<NotebookEditor>(cx);
+struct NotebookEditorRegistered;
+
+impl Global for NotebookEditorRegistered {}
+
+fn register_notebook_editor(cx: &mut App) {
+    if cx.has_global::<NotebookEditorRegistered>() {
+        return;
     }
+
+    workspace::register_project_item::<NotebookEditor>(cx);
+    cx.set_global(NotebookEditorRegistered);
+}
+
+fn notebook_editor_enabled(cx: &App) -> bool {
+    JupyterSettings::notebook_enabled(cx)
+        || cx.has_flag::<NotebookFeatureFlag>()
+        || std::env::var("LOCAL_NOTEBOOK_DEV").is_ok()
+}
+
+pub fn init(cx: &mut App) {
+    if notebook_editor_enabled(cx) {
+        register_notebook_editor(cx);
+    }
+
+    cx.observe_global::<SettingsStore>(|cx| {
+        if notebook_editor_enabled(cx) {
+            register_notebook_editor(cx);
+        }
+    })
+    .detach();
 
     cx.observe_flag::<NotebookFeatureFlag, _>({
         move |flag, cx| {
             if *flag {
-                workspace::register_project_item::<NotebookEditor>(cx);
+                register_notebook_editor(cx);
             } else {
                 // todo: there is no way to unregister a project item, so if the feature flag
                 // gets turned off they need to restart Zed.

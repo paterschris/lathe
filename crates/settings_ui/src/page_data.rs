@@ -3292,6 +3292,37 @@ fn editor_page() -> SettingsPage {
 }
 
 fn languages_and_tools_page(cx: &App) -> SettingsPage {
+    fn jupyter_notebooks_section() -> [SettingsPageItem; 2] {
+        [
+            SettingsPageItem::SectionHeader("Jupyter Notebooks"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Experimental Notebook Editor",
+                description: "Open and edit Jupyter (.ipynb) notebooks. This experimental editor may have issues. Restart Lathe after disabling it.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("jupyter.notebook_enabled"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .as_ref()?
+                            .notebook_enabled
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .get_or_insert_default()
+                            .notebook_enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     fn file_types_section() -> [SettingsPageItem; 2] {
         [
             SettingsPageItem::SectionHeader("File Types"),
@@ -3597,6 +3628,7 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
         items: {
             concat_sections!(
                 non_editor_language_settings_data(),
+                jupyter_notebooks_section(),
                 file_types_section(),
                 diagnostics_section(),
                 inline_diagnostics_section(),

@@ -16,6 +16,10 @@ impl JupyterSettings {
         // This allows the editor to set up context for key bindings/actions.
         EditorSettings::jupyter_enabled(cx)
     }
+
+    pub fn notebook_enabled(cx: &App) -> bool {
+        EditorSettings::notebook_enabled(cx)
+    }
 }
 
 impl Settings for JupyterSettings {
