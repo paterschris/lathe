@@ -471,6 +471,7 @@ fn save_thread_metadata(
             updated_at,
             created_at,
             interacted_at,
+            workspace_id: None,
             worktree_paths,
             archived: false,
             remote_connection,
@@ -507,6 +508,7 @@ fn save_thread_metadata_with_main_paths(
         updated_at,
         created_at: None,
         interacted_at: None,
+        workspace_id: None,
         worktree_paths: WorktreePaths::from_path_lists(main_worktree_paths, folder_paths).unwrap(),
         archived: false,
         remote_connection: None,
@@ -534,6 +536,7 @@ fn save_draft_metadata_with_main_paths(
         updated_at,
         created_at: None,
         interacted_at: None,
+        workspace_id: None,
         worktree_paths: WorktreePaths::from_path_lists(main_worktree_paths, folder_paths).unwrap(),
         archived: false,
         remote_connection: None,
@@ -1161,6 +1164,7 @@ async fn test_neighboring_activatable_entry_stays_within_project(cx: &mut TestAp
                 updated_at: Utc::now(),
                 created_at: Some(Utc::now()),
                 interacted_at: None,
+                workspace_id: None,
                 archived: false,
                 remote_connection: None,
             },
@@ -1253,6 +1257,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
                     interacted_at: None,
+                    workspace_id: None,
                     archived: false,
                     remote_connection: None,
                 },
@@ -1280,6 +1285,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
                     interacted_at: None,
+                    workspace_id: None,
                     archived: false,
                     remote_connection: None,
                 },
@@ -1307,6 +1313,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
                     interacted_at: None,
+                    workspace_id: None,
                     archived: false,
                     remote_connection: None,
                 },
@@ -1335,6 +1342,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
                     interacted_at: None,
+                    workspace_id: None,
                     archived: false,
                     remote_connection: None,
                 },
@@ -1363,6 +1371,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                     updated_at: Utc::now(),
                     created_at: Some(Utc::now()),
                     interacted_at: None,
+                    workspace_id: None,
                     archived: false,
                     remote_connection: None,
                 },
@@ -1838,6 +1847,84 @@ fn setup_sidebar_with_agent_panel(
     let workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
     let panel = add_agent_panel(&workspace, cx);
     (sidebar, panel)
+}
+
+#[gpui::test]
+async fn thread_history_tracks_the_active_workspace(cx: &mut TestAppContext) {
+    let project_a = init_test_project_with_agent_panel("/project-a", cx).await;
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/project-b", serde_json::json!({ "src": {} }))
+        .await;
+    let project_b = project::Project::test(fs, ["/project-b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    let (sidebar, _panel_a) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let workspace_a = multi_workspace.read_with(cx, |multi_workspace, _cx| {
+        multi_workspace.workspace().clone()
+    });
+    let workspace_b = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.test_add_workspace(project_b.clone(), window, cx)
+    });
+    let _panel_b = add_agent_panel(&workspace_b, cx);
+
+    let session_a = acp::SessionId::new(Arc::from("history-workspace-a"));
+    let session_b = acp::SessionId::new(Arc::from("history-workspace-b"));
+    let timestamp = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap();
+    save_thread_metadata(
+        session_a.clone(),
+        Some("Workspace A Thread".into()),
+        timestamp,
+        None,
+        None,
+        &project_a,
+        cx,
+    );
+    save_thread_metadata(
+        session_b.clone(),
+        Some("Workspace B Thread".into()),
+        timestamp,
+        None,
+        None,
+        &project_b,
+        cx,
+    );
+
+    let (thread_a, thread_b) = cx.update(|_window, cx| {
+        let store = ThreadMetadataStore::global(cx);
+        let store = store.read(cx);
+        let thread_a = store
+            .entry_by_session(&session_a)
+            .expect("workspace A metadata should exist")
+            .thread_id;
+        let thread_b = store
+            .entry_by_session(&session_b)
+            .expect("workspace B metadata should exist")
+            .thread_id;
+        (thread_a, thread_b)
+    });
+
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.activate(workspace_a.clone(), None, window, cx);
+    });
+    cx.run_until_parked();
+    sidebar.update_in(cx, |sidebar, window, cx| sidebar.show_archive(window, cx));
+
+    let archive_thread_ids = |cx: &mut gpui::VisualTestContext| {
+        sidebar.read_with(cx, |sidebar, cx| match &sidebar.view {
+            SidebarView::Archive(archive) => archive.read(cx).visible_thread_ids(),
+            SidebarView::ThreadList => panic!("thread history should be open"),
+        })
+    };
+
+    assert_eq!(archive_thread_ids(cx), vec![thread_a]);
+
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.activate(workspace_b.clone(), None, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(archive_thread_ids(cx), vec![thread_b]);
 }
 
 #[gpui::test]
@@ -7662,6 +7749,7 @@ async fn test_sidebar_keeps_multi_root_thread_with_stale_main_paths(cx: &mut Tes
                     updated_at: Utc::now(),
                     created_at: None,
                     interacted_at: None,
+                    workspace_id: None,
                     worktree_paths: WorktreePaths::from_folder_paths(&folder_paths),
                     archived: false,
                     remote_connection: None,
@@ -7743,6 +7831,7 @@ async fn test_activate_archived_thread_with_saved_paths_activates_matching_works
                 updated_at: Utc::now(),
                 created_at: None,
                 interacted_at: None,
+                workspace_id: None,
                 worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
                     "/project-b",
                 )])),
@@ -7813,6 +7902,7 @@ async fn test_activate_archived_thread_cwd_fallback_with_matching_workspace(
                 updated_at: Utc::now(),
                 created_at: None,
                 interacted_at: None,
+                workspace_id: None,
                 worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[
                     std::path::PathBuf::from("/project-b"),
                 ])),
@@ -7881,6 +7971,7 @@ async fn test_activate_archived_thread_no_paths_no_cwd_uses_active_workspace(
                 updated_at: Utc::now(),
                 created_at: None,
                 interacted_at: None,
+                workspace_id: None,
                 worktree_paths: WorktreePaths::default(),
                 archived: false,
                 remote_connection: None,
@@ -7939,6 +8030,7 @@ async fn test_activate_archived_thread_saved_paths_opens_new_workspace(cx: &mut 
                 updated_at: Utc::now(),
                 created_at: None,
                 interacted_at: None,
+                workspace_id: None,
                 worktree_paths: WorktreePaths::from_folder_paths(&path_list_b),
                 archived: false,
                 remote_connection: None,
@@ -7996,6 +8088,7 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
                 updated_at: Utc::now(),
                 created_at: None,
                 interacted_at: None,
+                workspace_id: None,
                 worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
                     "/project-b",
                 )])),
@@ -8075,6 +8168,7 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
         updated_at: Utc::now(),
         created_at: None,
         interacted_at: None,
+        workspace_id: None,
         worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
             "/project-b",
         )])),
@@ -8158,6 +8252,7 @@ async fn test_activate_archived_thread_prefers_current_window_for_matching_paths
         updated_at: Utc::now(),
         created_at: None,
         interacted_at: None,
+        workspace_id: None,
         worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
             "/project-a",
         )])),
@@ -8488,6 +8583,7 @@ async fn test_archive_last_worktree_thread_removes_workspace(cx: &mut TestAppCon
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0).unwrap(),
             created_at: None,
             interacted_at: None,
+            workspace_id: None,
             worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
                 "/remote/project",
             )])),
@@ -9142,6 +9238,7 @@ async fn test_archive_last_worktree_thread_not_blocked_by_remote_thread_at_same_
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
             created_at: None,
             interacted_at: None,
+            workspace_id: None,
             worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
                 "/wt-feature-a",
             )])),
@@ -9957,6 +10054,7 @@ async fn test_unarchive_first_thread_in_group_does_not_create_spurious_draft(
                     updated_at: Utc::now(),
                     created_at: None,
                     interacted_at: None,
+                    workspace_id: None,
                     worktree_paths: WorktreePaths::from_folder_paths(&path_list_b),
                     archived: true,
                     remote_connection: None,
@@ -10051,6 +10149,7 @@ async fn test_unarchive_into_new_workspace_does_not_create_duplicate_real_thread
                     updated_at: Utc::now(),
                     created_at: None,
                     interacted_at: None,
+                    workspace_id: None,
                     worktree_paths: WorktreePaths::from_folder_paths(&path_list_b),
                     archived: true,
                     remote_connection: None,
@@ -10278,6 +10377,7 @@ async fn test_unarchive_into_inactive_existing_workspace_does_not_leave_active_d
                     updated_at: Utc::now(),
                     created_at: None,
                     interacted_at: None,
+                    workspace_id: None,
                     worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[
                         PathBuf::from("/project-b"),
                     ])),
@@ -11129,6 +11229,7 @@ async fn test_unarchive_linked_worktree_thread_into_project_group_shows_only_res
                     updated_at: Utc::now(),
                     created_at: None,
                     interacted_at: None,
+                    workspace_id: None,
                     worktree_paths: WorktreePaths::from_path_lists(
                         main_paths.clone(),
                         folder_paths.clone(),
@@ -11680,6 +11781,7 @@ async fn test_legacy_thread_with_canonical_path_opens_main_repo_workspace(cx: &m
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
             created_at: None,
             interacted_at: None,
+            workspace_id: None,
             worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[PathBuf::from(
                 "/project",
             )])),
@@ -12670,6 +12772,7 @@ mod property_test {
             updated_at,
             created_at: None,
             interacted_at: None,
+            workspace_id: None,
             worktree_paths: WorktreePaths::from_path_lists(main_worktree_paths, path_list).unwrap(),
             archived: false,
             remote_connection: None,
@@ -12743,6 +12846,7 @@ mod property_test {
                         updated_at,
                         created_at: None,
                         interacted_at: None,
+                        workspace_id: None,
                         worktree_paths: project.read(cx).worktree_paths(cx),
                         archived: false,
                         remote_connection: project.read(cx).remote_connection_options(cx),
@@ -13608,6 +13712,7 @@ async fn test_remote_project_integration_does_not_briefly_render_as_separate_pro
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 1).unwrap(),
             created_at: None,
             interacted_at: None,
+            workspace_id: None,
             worktree_paths: WorktreePaths::from_path_lists(
                 main_worktree_paths,
                 PathList::new(&[PathBuf::from("/project-wt-1")]),
@@ -14573,6 +14678,7 @@ async fn test_remote_archive_thread_with_active_connection(
                 .unwrap(),
             created_at: None,
             interacted_at: None,
+            workspace_id: None,
             worktree_paths: WorktreePaths::from_path_lists(
                 PathList::new(&[PathBuf::from("/project")]),
                 PathList::new(&[PathBuf::from("/worktrees/project/feature-a/project")]),
@@ -14714,6 +14820,7 @@ async fn test_remote_linked_worktree_workspace_to_remove_uses_remote_connection(
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
             created_at: None,
             interacted_at: None,
+            workspace_id: None,
             worktree_paths: WorktreePaths::from_path_lists(
                 main_folder_paths,
                 worktree_folder_paths.clone(),

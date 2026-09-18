@@ -64,7 +64,7 @@ use ui::{
 };
 use util::{ResultExt, size::format_file_size, time::duration_alt_display};
 use util::{debug_panic, defer};
-use workspace::{CollaboratorId, MultiWorkspace, NewTerminal, PathList, Workspace};
+use workspace::{CollaboratorId, MultiWorkspace, NewTerminal, PathList, Workspace, WorkspaceId};
 use zed_actions::agent::{Chat, ToggleModelSelector};
 
 use super::config_options::ConfigOptionsView;
@@ -90,8 +90,8 @@ use crate::{
     OpenAddContextMenu, OpenAgentDiff, RejectAll, RejectOnce, RemoveFirstQueuedMessage,
     ScrollOutputLineDown, ScrollOutputLineUp, ScrollOutputPageDown, ScrollOutputPageUp,
     ScrollOutputToBottom, ScrollOutputToNextMessage, ScrollOutputToPreviousMessage,
-    ScrollOutputToTop, SendImmediately, SendNextQueuedMessage, ToggleFastMode,
-    ToggleProfileSelector, ToggleSteerFirstQueuedMessage, ToggleThinkingEffortMenu,
+    ScrollOutputToTop, SendImmediately, SendNextQueuedMessage, ToggleCompactTerminalCards,
+    ToggleFastMode, ToggleProfileSelector, ToggleSteerFirstQueuedMessage, ToggleThinkingEffortMenu,
     ToggleThinkingMode, UndoLastReject,
 };
 
@@ -679,6 +679,12 @@ impl ConversationView {
     pub fn updated_at(&self, cx: &App) -> Option<Instant> {
         self.as_connected()
             .and_then(|connected| connected.conversation.read(cx).updated_at)
+    }
+
+    pub(crate) fn workspace_id(&self, cx: &App) -> Option<WorkspaceId> {
+        self.workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).database_id())
     }
 
     pub fn navigate_to_thread(
@@ -4555,6 +4561,7 @@ pub(crate) mod tests {
                         updated_at: Utc::now(),
                         created_at: Some(Utc::now()),
                         interacted_at: None,
+                        workspace_id: None,
                         worktree_paths: WorktreePaths::from_folder_paths(&PathList::default()),
                         remote_connection: None,
                         archived: false,

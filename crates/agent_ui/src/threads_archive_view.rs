@@ -62,9 +62,14 @@ enum ThreadFilter {
 /// worktree isolation creates.
 fn thread_belongs_to_workspace(
     thread: &ThreadMetadata,
+    workspace_id: Option<WorkspaceId>,
     workspace_paths: &PathList,
     remote_connection: Option<&RemoteConnectionOptions>,
 ) -> bool {
+    if let Some(thread_workspace_id) = thread.workspace_id {
+        return Some(thread_workspace_id) == workspace_id;
+    }
+
     thread.matches_remote_connection(remote_connection)
         && (thread.folder_paths() == workspace_paths
             || thread.main_worktree_paths() == workspace_paths)
@@ -258,6 +263,17 @@ impl ThreadsArchiveView {
         self.selection.is_some()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn visible_thread_ids(&self) -> Vec<ThreadId> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                ArchiveListItem::Entry { thread, .. } => Some(thread.thread_id),
+                ArchiveListItem::BucketSeparator(_) => None,
+            })
+            .collect()
+    }
+
     pub fn clear_selection(&mut self) {
         self.selection = None;
     }
@@ -289,12 +305,20 @@ impl ThreadsArchiveView {
     /// `None` when the workspace handle is gone, which shows every thread
     /// rather than an empty list: losing the handle is not a reason to tell
     /// someone they have no history.
-    fn workspace_scope(&self, cx: &App) -> Option<(PathList, Option<RemoteConnectionOptions>)> {
+    fn workspace_scope(
+        &self,
+        cx: &App,
+    ) -> Option<(
+        Option<WorkspaceId>,
+        PathList,
+        Option<RemoteConnectionOptions>,
+    )> {
         let workspace = self.workspace.upgrade()?;
         let workspace = workspace.read(cx);
+        let workspace_id = workspace.database_id();
         let paths = PathList::new(&workspace.root_paths(cx));
         let remote_connection = workspace.project().read(cx).remote_connection_options(cx);
-        Some((paths, remote_connection))
+        Some((workspace_id, paths, remote_connection))
     }
 
     fn update_items(&mut self, cx: &mut Context<Self>) {
@@ -302,8 +326,13 @@ impl ThreadsArchiveView {
         let store = ThreadMetadataStore::global(cx).read(cx);
 
         let in_scope = |thread: &ThreadMetadata| match &workspace_scope {
-            Some((workspace_paths, remote_connection)) => {
-                thread_belongs_to_workspace(thread, workspace_paths, remote_connection.as_ref())
+            Some((workspace_id, workspace_paths, remote_connection)) => {
+                thread_belongs_to_workspace(
+                    thread,
+                    *workspace_id,
+                    workspace_paths,
+                    remote_connection.as_ref(),
+                )
             }
             None => true,
         };
@@ -1691,6 +1720,7 @@ mod tests {
             updated_at: Utc::now(),
             created_at: None,
             interacted_at: None,
+            workspace_id: None,
             worktree_paths,
             remote_connection: None,
             archived: false,
@@ -1701,7 +1731,7 @@ mod tests {
     fn test_thread_belongs_to_its_own_workspace() {
         let paths = PathList::new(&[Path::new("/project-a")]);
         let thread = thread_with_paths(WorktreePaths::from_folder_paths(&paths));
-        assert!(thread_belongs_to_workspace(&thread, &paths, None));
+        assert!(thread_belongs_to_workspace(&thread, None, &paths, None));
     }
 
     #[test]
@@ -1710,8 +1740,20 @@ mod tests {
         let project_b = PathList::new(&[Path::new("/project-b")]);
         let thread = thread_with_paths(WorktreePaths::from_folder_paths(&project_a));
         assert!(
-            !thread_belongs_to_workspace(&thread, &project_b, None),
+            !thread_belongs_to_workspace(&thread, None, &project_b, None),
             "a thread from another project must not appear in this workspace's history"
+        );
+    }
+
+    #[test]
+    fn test_thread_from_another_workspace_instance_is_excluded() {
+        let paths = PathList::new(&[Path::new("/project-a")]);
+        let mut thread = thread_with_paths(WorktreePaths::from_folder_paths(&paths));
+        thread.workspace_id = Some(WorkspaceId::from_i64(1));
+
+        assert!(
+            !thread_belongs_to_workspace(&thread, Some(WorkspaceId::from_i64(2)), &paths, None,),
+            "a thread from another workspace instance must not appear in this workspace's history"
         );
     }
 
@@ -1726,7 +1768,7 @@ mod tests {
                 .expect("path lists have equal length"),
         );
         assert!(
-            thread_belongs_to_workspace(&thread, &main_paths, None),
+            thread_belongs_to_workspace(&thread, None, &main_paths, None),
             "worktree isolation must not hide a thread from its workspace's history"
         );
     }

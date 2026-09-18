@@ -847,6 +847,10 @@ impl Sidebar {
                     this.sync_active_entry_from_active_workspace(cx);
                     this.replace_archived_panel_thread(window, cx);
                     this.schedule_update_entries(false, cx);
+                    if matches!(this.view, SidebarView::Archive(_)) {
+                        this.show_thread_list(window, cx);
+                        this.show_archive(window, cx);
+                    }
                 }
                 MultiWorkspaceEvent::WorkspaceAdded(workspace) => {
                     this.subscribe_to_workspace(workspace, window, cx);
