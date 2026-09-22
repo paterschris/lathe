@@ -281,6 +281,22 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
     fn can_split(&self) -> bool {
         false
     }
+
+    fn can_open_in_new_window(&self) -> bool {
+        false
+    }
+
+    fn clone_for_new_window(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Task<Option<Entity<Self>>>
+    where
+        Self: Sized,
+    {
+        Task::ready(None)
+    }
+
     fn clone_on_split(
         &self,
         workspace_id: Option<WorkspaceId>,
@@ -533,6 +549,12 @@ pub trait ItemHandle: 'static + Send {
     fn buffer_kind(&self, cx: &App) -> ItemBufferKind;
     fn boxed_clone(&self) -> Box<dyn ItemHandle>;
     fn can_split(&self, cx: &App) -> bool;
+    fn can_open_in_new_window(&self, cx: &App) -> bool;
+    fn clone_for_new_window(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Option<Box<dyn ItemHandle>>>;
     fn clone_on_split(
         &self,
         workspace_id: Option<WorkspaceId>,
@@ -764,6 +786,22 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn can_split(&self, cx: &App) -> bool {
         self.read(cx).can_split()
+    }
+
+    fn can_open_in_new_window(&self, cx: &App) -> bool {
+        self.read(cx).can_open_in_new_window()
+    }
+
+    fn clone_for_new_window(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Option<Box<dyn ItemHandle>>> {
+        let task = self.update(cx, |item, cx| item.clone_for_new_window(window, cx));
+        cx.background_spawn(async move {
+            task.await
+                .map(|handle| Box::new(handle) as Box<dyn ItemHandle>)
+        })
     }
 
     fn clone_on_split(
@@ -1779,6 +1817,18 @@ pub mod test {
 
         fn can_split(&self) -> bool {
             true
+        }
+
+        fn can_open_in_new_window(&self) -> bool {
+            true
+        }
+
+        fn clone_for_new_window(
+            &self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> Task<Option<Entity<Self>>> {
+            self.clone_on_split(None, window, cx)
         }
 
         fn clone_on_split(

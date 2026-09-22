@@ -1,3 +1,4 @@
+mod floating_terminal;
 mod persistence;
 mod terminal_awaiting_input;
 mod terminal_bell;
@@ -14,7 +15,7 @@ use gpui::{
     Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
     FocusHandle, Focusable, Font, Hsla, KeyContext, KeyDownEvent, Keystroke, MouseButton,
     MouseDownEvent, Pixels, Point as GpuiPoint, Render, ScrollWheelEvent, Styled, Subscription,
-    Task, TaskExt, WeakEntity, actions, anchored, deferred, div, hsla,
+    Task, TaskExt, WeakEntity, WindowId, actions, anchored, deferred, div, hsla,
 };
 use menu;
 use persistence::TerminalDb;
@@ -40,7 +41,9 @@ use terminal::{
     terminal_settings::{CursorShape, TerminalSettings},
 };
 use terminal_element::TerminalElement;
-use terminal_panel::TerminalPanel;
+use terminal_panel::{
+    MoveTerminalToNewWindow, MoveTerminalToWindow, ReturnTerminalToWorkspace, TerminalPanel,
+};
 use terminal_path_like_target::{hover_path_like_target, open_path_like_target};
 use terminal_scrollbar::TerminalScrollHandle;
 use ui::{
@@ -55,6 +58,7 @@ use workspace::{
     item::{
         HighlightedText, Item, ItemEvent, SerializableItem, TabContentParams, TabTooltipContent,
     },
+    notifications::{NotificationId, simple_message_notification::MessageNotification},
     register_serializable_item,
     searchable::{
         Direction, SearchEvent, SearchOptions, SearchToken, SearchableItem, SearchableItemHandle,
@@ -465,6 +469,145 @@ impl TerminalView {
         self.focus_handle.focus(window, cx);
     }
 
+    #[cfg(test)]
+    pub(crate) fn workspace_id(&self) -> Option<WorkspaceId> {
+        self.workspace_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn awaiting_input(&self) -> Option<InteractivePromptKind> {
+        self.awaiting_input
+    }
+
+    /// Drives the awaiting-input indicator directly. The real signal comes from
+    /// an idle timer over live terminal state, which a test cannot reproduce
+    /// deterministically.
+    #[cfg(test)]
+    pub(crate) fn set_awaiting_input_for_test(&mut self, kind: Option<InteractivePromptKind>) {
+        self.awaiting_input = kind;
+    }
+
+    /// Whether this terminal lives in a floating window. That covers both a
+    /// terminal moved into a window of its own and one started inside a window
+    /// opened for some other item, so neither can be moved out again.
+    fn is_floating(&self, cx: &App) -> bool {
+        self.workspace
+            .upgrade()
+            .is_some_and(|workspace| workspace.read(cx).is_floating())
+    }
+
+    /// Whether this is the terminal that was moved into `window`, and so has a
+    /// workspace waiting to take it back.
+    fn can_return_to_workspace(&self, window: &Window, cx: &App) -> bool {
+        floating_terminal::is_transferred_terminal(
+            window.window_handle().window_id(),
+            &self.self_handle,
+            cx,
+        )
+    }
+
+    fn can_move_to_new_window(&self, cx: &App) -> bool {
+        self.shows_workspace_actions() && !self.is_floating(cx)
+    }
+
+    /// The floating windows this terminal could be moved into, each with the
+    /// label the menus name it by.
+    ///
+    /// The window the terminal is already in is left out, as are windows
+    /// belonging to a different project: those are someone else's workspace
+    /// arrangement, and naming them by whatever file they happen to show would
+    /// only make the list harder to read.
+    fn move_targets(&self, window: &Window, cx: &App) -> Vec<(WindowId, SharedString)> {
+        if !self.can_move_to_new_window(cx) {
+            return Vec::new();
+        }
+        let Some(project) = self
+            .workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).project().clone())
+        else {
+            return Vec::new();
+        };
+        workspace::floating_window_targets(&project, window, cx)
+    }
+
+    pub fn move_to_new_window(
+        &mut self,
+        _: &MoveTerminalToNewWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(floating_terminal::MoveTarget::NewWindow, window, cx);
+    }
+
+    pub fn move_to_window(
+        &mut self,
+        action: &MoveTerminalToWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(
+            floating_terminal::MoveTarget::ExistingWindow(WindowId::from(action.0)),
+            window,
+            cx,
+        );
+    }
+
+    fn move_to(
+        &mut self,
+        target: floating_terminal::MoveTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_move_to_new_window(cx) {
+            return;
+        }
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let terminal_view = cx.entity();
+        // Deferred because moving the terminal re-adds it to a pane, which
+        // updates this entity while it is already being updated here.
+        window.defer(cx, move |window, cx| {
+            if let Err(error) = floating_terminal::move_terminal_to_window(
+                terminal_view,
+                workspace.clone(),
+                target,
+                window,
+                cx,
+            ) {
+                workspace.update(cx, |workspace, cx| {
+                    struct MoveTerminalToWindowFailed;
+
+                    workspace.show_notification(
+                        NotificationId::unique::<MoveTerminalToWindowFailed>(),
+                        cx,
+                        |cx| {
+                            cx.new(|cx| {
+                                MessageNotification::new(
+                                    format!("Could not move the terminal to a window: {error}"),
+                                    cx,
+                                )
+                            })
+                        },
+                    );
+                });
+            }
+        });
+    }
+
+    pub fn return_to_workspace(
+        &mut self,
+        _: &ReturnTerminalToWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_return_to_workspace(window, cx) {
+            return;
+        }
+        floating_terminal::return_from_window(window, cx);
+    }
+
     pub fn rename_terminal(
         &mut self,
         _: &RenameTerminal,
@@ -534,6 +677,9 @@ impl TerminalView {
             .selection_text
             .as_ref()
             .is_some_and(|text| !text.is_empty());
+        let can_move_to_new_window = self.can_move_to_new_window(cx);
+        let move_targets = self.move_targets(window, cx);
+        let can_return_to_workspace = self.can_return_to_workspace(window, cx);
         let context_menu = ContextMenu::build(window, cx, |menu, _, _| {
             menu.context(self.focus_handle.clone())
                 .when(self.shows_workspace_actions(), |menu| {
@@ -567,6 +713,27 @@ impl TerminalView {
                             })
                     },
                 )
+                .when(can_move_to_new_window, |menu| {
+                    let menu = menu.separator();
+                    if move_targets.is_empty() {
+                        menu.action("Move to New Window", Box::new(MoveTerminalToNewWindow))
+                    } else {
+                        let move_targets = move_targets.clone();
+                        menu.submenu("Move to Window", move |menu, _, _| {
+                            let menu = menu.action("New Window", Box::new(MoveTerminalToNewWindow));
+                            move_targets.iter().fold(menu, |menu, (window_id, label)| {
+                                menu.action(
+                                    label.clone(),
+                                    Box::new(MoveTerminalToWindow(window_id.as_u64())),
+                                )
+                            })
+                        })
+                    }
+                })
+                .when(can_return_to_workspace, |menu| {
+                    menu.separator()
+                        .action("Return to Workspace", Box::new(ReturnTerminalToWorkspace))
+                })
                 .when(self.shows_workspace_actions(), |menu| {
                     menu.separator().action(
                         "Close Terminal Tab",
@@ -1330,6 +1497,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(TerminalView::select_all))
             .on_action(cx.listener(TerminalView::rerun_task))
             .on_action(cx.listener(TerminalView::rename_terminal))
+            .on_action(cx.listener(TerminalView::move_to_new_window))
+            .on_action(cx.listener(TerminalView::move_to_window))
+            .on_action(cx.listener(TerminalView::return_to_workspace))
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_down(
                 MouseButton::Right,
@@ -1392,8 +1562,19 @@ impl Item for TerminalView {
     type Event = ItemEvent;
 
     fn activated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_handle.focus(window, cx);
-        self.focus_in(window, cx);
+        // Whether an activated item takes focus is the pane's decision, and it
+        // has already acted on it by the time this runs: a terminal that
+        // finishes starting in the background is activated without focus so it
+        // cannot pull the user out of a modal they have open. Taking focus here
+        // would override that.
+        //
+        // `focus_in` still runs for the focused case, where re-activating a tab
+        // that already holds focus fires no focus change of its own, so the
+        // awaiting-input indicator would otherwise stay lit on a terminal the
+        // user is looking at.
+        if self.focus_handle.is_focused(window) {
+            self.focus_in(window, cx);
+        }
     }
 
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent> {
@@ -1661,15 +1842,34 @@ impl Item for TerminalView {
 
     fn tab_extra_context_menu_actions(
         &self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<(SharedString, Box<dyn gpui::Action>)> {
-        let terminal = self.terminal.read(cx);
-        if terminal.task().is_none() {
-            vec![("Rename".into(), Box::new(RenameTerminal))]
-        } else {
-            Vec::new()
+        let mut actions: Vec<(SharedString, Box<dyn gpui::Action>)> = Vec::new();
+        if self.terminal.read(cx).task().is_none() {
+            actions.push(("Rename".into(), Box::new(RenameTerminal)));
         }
+        if self.can_move_to_new_window(cx) {
+            actions.push((
+                "Move to New Window".into(),
+                Box::new(MoveTerminalToNewWindow),
+            ));
+            // The tab menu takes label/action pairs and cannot nest, so the
+            // windows are listed flat here rather than under a submenu like the
+            // terminal's own context menu.
+            for (window_id, label) in self.move_targets(window, cx) {
+                actions.push((
+                    format!("Move to Window: {label}").into(),
+                    Box::new(MoveTerminalToWindow(window_id.as_u64())),
+                ));
+            }
+        } else if self.can_return_to_workspace(window, cx) {
+            actions.push((
+                "Return to Workspace".into(),
+                Box::new(ReturnTerminalToWorkspace),
+            ));
+        }
+        actions
     }
 
     fn buffer_kind(&self, _: &App) -> workspace::item::ItemBufferKind {
@@ -1789,6 +1989,10 @@ impl Item for TerminalView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A terminal can be transferred between workspaces (for instance when
+        // it is moved into a window of its own), so its workspace-scoped
+        // actions must follow it rather than keep pointing at where it started.
+        self.workspace = workspace.weak_handle();
         if self.terminal().read(cx).task().is_none() {
             if let Some((new_id, old_id)) = workspace.database_id().zip(self.workspace_id) {
                 log::debug!(

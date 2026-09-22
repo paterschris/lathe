@@ -38,6 +38,8 @@ use workspace::{
 };
 
 use anyhow::{Result, anyhow};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use zed_actions::assistant::InlineAssist;
 
 const TERMINAL_PANEL_KEY: &str = "TerminalPanel";
@@ -48,9 +50,23 @@ actions!(
         /// Toggles the terminal panel.
         Toggle,
         /// Toggles focus on the terminal panel.
-        ToggleFocus
+        ToggleFocus,
+        /// Moves the active terminal into its own window, keeping its process running.
+        MoveTerminalToNewWindow,
+        /// Returns a terminal from its own window to the workspace it came from.
+        ReturnTerminalToWorkspace
     ]
 );
+
+/// Moves the active terminal into an additional window that is already open,
+/// keeping its process running.
+///
+/// The target window is named by its id, which is only meaningful for the menu
+/// entries this is generated for: ids are assigned as windows open, so binding
+/// this in a keymap would not name any particular window.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Action)]
+#[action(namespace = terminal_panel)]
+pub struct MoveTerminalToWindow(pub u64);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(
@@ -929,7 +945,7 @@ impl TerminalPanel {
         })
     }
 
-    fn add_terminal_shell(
+    pub(crate) fn add_terminal_shell(
         &mut self,
         force_local: bool,
         cwd: Option<PathBuf>,

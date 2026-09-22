@@ -870,6 +870,18 @@ impl Item for Editor {
         true
     }
 
+    fn can_open_in_new_window(&self) -> bool {
+        true
+    }
+
+    fn clone_for_new_window(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<Entity<Editor>>> {
+        self.clone_on_split(None, window, cx)
+    }
+
     fn clone_on_split(
         &self,
         _workspace_id: Option<WorkspaceId>,

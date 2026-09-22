@@ -27,8 +27,8 @@ const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
 use crate::open_remote_project_with_existing_connection;
 use crate::{
-    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, OpenMode,
-    Panel, Workspace, WorkspaceId, client_side_decorations,
+    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, FloatingWindowManager, Item,
+    ModalView, OpenMode, Panel, Workspace, WorkspaceId, client_side_decorations,
     persistence::model::MultiWorkspaceState,
 };
 
@@ -569,6 +569,27 @@ impl MultiWorkspace {
     }
 
     pub fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        if FloatingWindowManager::return_to_source(window.window_handle().window_id(), cx) {
+            // A return handler hands its items back on a deferred task, and one
+            // window can hold several of them, so whether anything is left has
+            // to be decided after that task has run rather than guessed at from
+            // the item count now.
+            let multi_workspace = cx.entity();
+            window.defer(cx, move |window, cx| {
+                let is_empty = multi_workspace
+                    .read(cx)
+                    .workspace()
+                    .read(cx)
+                    .items(cx)
+                    .next()
+                    .is_none();
+                if is_empty {
+                    window.remove_window();
+                }
+            });
+            return;
+        }
+
         let Some(window_handle) = window.window_handle().downcast::<Self>() else {
             log::error!("cannot close a window whose root is not a MultiWorkspace");
             return;

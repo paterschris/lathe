@@ -1,7 +1,7 @@
 use crate::{
-    CloseWindow, NewCenterTerminal, NewFile, NewTerminal, OpenInTerminal, OpenOptions,
-    OpenTerminal, OpenVisible, SplitDirection, ToggleFileFinder, ToggleProjectSymbols, ToggleZoom,
-    Workspace, WorkspaceItemBuilder, ZoomIn, ZoomOut,
+    CloseWindow, NewCenterTerminal, NewFile, NewTerminal, OpenActiveItemInNewWindow,
+    OpenInTerminal, OpenOptions, OpenTerminal, OpenVisible, SplitDirection, ToggleFileFinder,
+    ToggleProjectSymbols, ToggleZoom, Workspace, WorkspaceItemBuilder, ZoomIn, ZoomOut,
     focus_follows_mouse::FocusFollowsMouse as _,
     invalid_item_view::InvalidItemView,
     item::{
@@ -23,7 +23,7 @@ use gpui::{
     DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
     Focusable, Hsla, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel,
     Render, ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window,
-    actions, anchored, deferred, prelude::*,
+    WindowId, actions, anchored, deferred, prelude::*,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};
@@ -1500,6 +1500,42 @@ impl Pane {
             self.update_active_tab(index);
             cx.notify();
         }
+    }
+
+    pub(crate) fn open_item_in_new_window(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_item_in_window(index, None, window, cx)
+    }
+
+    /// Opens the item at `index` in a floating window: a new one, or the
+    /// already-open window named by `target`.
+    pub(crate) fn open_item_in_window(
+        &mut self,
+        index: usize,
+        target: Option<WindowId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self.items.get(index) else {
+            return;
+        };
+        if !item.can_open_in_new_window(cx) {
+            return;
+        }
+        let item = item.boxed_clone();
+
+        self.activate_item(index, true, true, window, cx);
+
+        let Some(workspace) = Workspace::for_window(window, cx) else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_item_in_window(item, target, window, cx);
+        });
     }
 
     fn update_active_tab(&mut self, index: usize) {
@@ -3137,12 +3173,23 @@ impl Pane {
         let pane = cx.entity().downgrade();
         let menu_context = item.item_focus_handle(cx);
         let item_handle = item.boxed_clone();
+        let can_open_in_new_window = item.can_open_in_new_window(cx);
 
         right_click_menu(ix)
             .trigger(|_, _, _| tab)
             .menu(move |window, cx| {
                 let pane = pane.clone();
                 let menu_context = menu_context.clone();
+                // Built when the menu opens rather than when the tab renders, so
+                // it lists the windows that are open right now.
+                let open_in_window_targets = if can_open_in_new_window {
+                    pane.upgrade()
+                        .and_then(|pane| pane.read(cx).project.upgrade())
+                        .map(|project| crate::floating_window_targets(&project, window, cx))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 let extra_actions = item_handle.tab_extra_context_menu_actions(window, cx);
                 ContextMenu::build(window, cx, move |mut menu, window, cx| {
                     let close_active_item_action = CloseActiveItem {
@@ -3262,7 +3309,45 @@ impl Pane {
                                     pane.close_all_items(&close_all_items_action, window, cx)
                                         .detach_and_log_err(cx)
                                 }),
-                            );
+                            )
+                            .when(can_open_in_new_window, |menu| {
+                                let menu = menu.separator();
+                                if open_in_window_targets.is_empty() {
+                                    return menu.entry(
+                                        "Open in New Window",
+                                        Some(OpenActiveItemInNewWindow.boxed_clone()),
+                                        window.handler_for(&pane, move |pane, window, cx| {
+                                            pane.open_item_in_new_window(ix, window, cx);
+                                        }),
+                                    );
+                                }
+                                let targets = open_in_window_targets.clone();
+                                let pane = pane.clone();
+                                menu.submenu("Open in Window", move |menu, window, _| {
+                                    let menu = menu.entry(
+                                        "New Window",
+                                        Some(OpenActiveItemInNewWindow.boxed_clone()),
+                                        window.handler_for(&pane, move |pane, window, cx| {
+                                            pane.open_item_in_new_window(ix, window, cx);
+                                        }),
+                                    );
+                                    targets.iter().fold(menu, |menu, (window_id, label)| {
+                                        let window_id = *window_id;
+                                        menu.entry(
+                                            label.clone(),
+                                            None,
+                                            window.handler_for(&pane, move |pane, window, cx| {
+                                                pane.open_item_in_window(
+                                                    ix,
+                                                    Some(window_id),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }),
+                                        )
+                                    })
+                                })
+                            });
 
                         let pin_tab_entries = |menu: ContextMenu| {
                             menu.separator().map(|this| {

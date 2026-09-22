@@ -440,6 +440,8 @@ actions!(
         NewSearch,
         /// Opens a new window.
         NewWindow,
+        /// Opens a second view of the active item in a new window.
+        OpenActiveItemInNewWindow,
         /// Opens multiple files.
         OpenFiles,
         /// Opens the current location in terminal.
@@ -1678,6 +1680,7 @@ pub struct Workspace {
     persisted_recent_navigation_history: Vec<PathBuf>,
     last_active_project_path: Option<ProjectPath>,
     restoring_workspace: bool,
+    window_kind: WorkspaceWindowKind,
 }
 
 impl EventEmitter<Event> for Workspace {}
@@ -1724,11 +1727,326 @@ pub enum OpenMode {
     Activate,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceWindowKind {
+    Persistent,
+    Floating,
+}
+
+#[derive(Clone)]
+pub struct FloatingWindowSource {
+    workspace: WeakEntity<Workspace>,
+    pane: WeakEntity<Pane>,
+}
+
+impl FloatingWindowSource {
+    pub fn workspace(&self) -> &WeakEntity<Workspace> {
+        &self.workspace
+    }
+
+    pub fn pane(&self) -> &WeakEntity<Pane> {
+        &self.pane
+    }
+}
+
+struct FloatingWindow {
+    source: FloatingWindowSource,
+    window: WindowHandle<MultiWorkspace>,
+    return_handler: Box<dyn FnOnce(&mut App) -> Result<()> + 'static>,
+}
+
+#[derive(Default)]
+pub struct FloatingWindowManager {
+    windows: HashMap<WindowId, FloatingWindow>,
+}
+
+impl Global for FloatingWindowManager {}
+
+impl FloatingWindowManager {
+    pub fn register(
+        window: WindowHandle<MultiWorkspace>,
+        source_workspace: WeakEntity<Workspace>,
+        source_pane: WeakEntity<Pane>,
+        return_handler: impl FnOnce(&mut App) -> Result<()> + 'static,
+        cx: &mut App,
+    ) -> Result<()> {
+        let window_id = window.window_id();
+        let source_workspace_to_observe = source_workspace.upgrade();
+        {
+            let manager = cx.default_global::<Self>();
+            if manager.windows.contains_key(&window_id) {
+                return Err(anyhow!("floating window {window_id:?} is already registered"));
+            }
+
+            manager.windows.insert(
+                window_id,
+                FloatingWindow {
+                    source: FloatingWindowSource {
+                        workspace: source_workspace,
+                        pane: source_pane,
+                    },
+                    window,
+                    return_handler: Box::new(return_handler),
+                },
+            );
+        }
+
+        cx.on_window_closed(move |cx, closed_window_id| {
+            if closed_window_id == window_id {
+                Self::unregister(window_id, cx);
+            }
+        })
+        .detach();
+
+        if let Some(source_workspace) = source_workspace_to_observe {
+            cx.observe_release(&source_workspace, move |_, cx| {
+                Self::unregister(window_id, cx);
+            })
+            .detach();
+        }
+
+        Ok(())
+    }
+
+    pub fn is_registered(window_id: WindowId, cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|manager| manager.windows.contains_key(&window_id))
+    }
+
+    pub fn source_for(window_id: WindowId, cx: &App) -> Option<FloatingWindowSource> {
+        cx.try_global::<Self>()
+            .and_then(|manager| manager.windows.get(&window_id))
+            .map(|window| window.source.clone())
+    }
+
+    pub fn window_for(window_id: WindowId, cx: &App) -> Option<WindowHandle<MultiWorkspace>> {
+        cx.try_global::<Self>()
+            .and_then(|manager| manager.windows.get(&window_id))
+            .map(|window| window.window)
+    }
+
+    pub(crate) fn return_to_source(window_id: WindowId, cx: &mut App) -> bool {
+        let Some(floating_window) = cx.default_global::<Self>().windows.remove(&window_id)
+        else {
+            return false;
+        };
+
+        if let Err(error) = (floating_window.return_handler)(cx) {
+            log::error!("failed to return floating window contents before close: {error:#}");
+        }
+
+        true
+    }
+
+    fn unregister(window_id: WindowId, cx: &mut App) {
+        if cx.has_global::<Self>() {
+            cx.global_mut::<Self>().windows.remove(&window_id);
+        }
+    }
+}
+
+/// Every open floating window, each with a label naming what it is showing.
+///
+/// Open windows are scanned rather than read from [`FloatingWindowManager`],
+/// which only knows the windows that registered a way back to a source: a
+/// window opened for an editor registers nothing, and it is still somewhere an
+/// item can be moved to.
+pub fn floating_windows(cx: &App) -> Vec<(WindowHandle<MultiWorkspace>, SharedString)> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<MultiWorkspace>())
+        .filter_map(|window| {
+            let workspace = window.read(cx).ok()?.workspace().read(cx);
+            if !workspace.is_floating() {
+                return None;
+            }
+            let label = workspace
+                .active_item(cx)
+                .map(|item| item.tab_content_text(0, cx))
+                .unwrap_or_else(|| SharedString::from("Empty Window"));
+            Some((window, label))
+        })
+        .collect()
+}
+
+/// The floating windows an item living in `window` can be sent to: those showing
+/// the same project, minus the window it is already in.
+///
+/// Windows of another project are left out. They are someone else's arrangement,
+/// and naming them by whatever file they happen to show would only make the list
+/// harder to read.
+pub fn floating_window_targets(
+    project: &Entity<Project>,
+    window: &Window,
+    cx: &App,
+) -> Vec<(WindowId, SharedString)> {
+    let current_window_id = window.window_handle().window_id();
+    floating_windows(cx)
+        .into_iter()
+        .filter(|(candidate, _)| candidate.window_id() != current_window_id)
+        .filter(|(candidate, _)| {
+            candidate.read(cx).is_ok_and(|multi_workspace| {
+                multi_workspace.workspace().read(cx).project() == project
+            })
+        })
+        .map(|(candidate, label)| (candidate.window_id(), label))
+        .collect()
+}
+
 impl Workspace {
     pub fn new(
         workspace_id: Option<WorkspaceId>,
         project: Entity<Project>,
         app_state: Arc<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_window_kind(
+            workspace_id,
+            project,
+            app_state,
+            WorkspaceWindowKind::Persistent,
+            window,
+            cx,
+        )
+    }
+
+    pub fn new_floating(
+        project: Entity<Project>,
+        app_state: Arc<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_window_kind(
+            None,
+            project,
+            app_state,
+            WorkspaceWindowKind::Floating,
+            window,
+            cx,
+        )
+    }
+
+    pub fn open_active_item_in_new_window(
+        &mut self,
+        _: &OpenActiveItemInNewWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self.active_pane.read(cx).active_item() else {
+            return;
+        };
+        self.open_item_in_new_window(item.boxed_clone(), window, cx);
+    }
+
+    pub(crate) fn open_item_in_new_window(
+        &mut self,
+        item: Box<dyn ItemHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_item_in_window(item, None, window, cx)
+    }
+
+    /// Opens a second view of `item` in a floating window: a new one, or the
+    /// already-open window named by `target`.
+    pub(crate) fn open_item_in_window(
+        &mut self,
+        item: Box<dyn ItemHandle>,
+        target: Option<WindowId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !item.can_open_in_new_window(cx) {
+            return;
+        }
+
+        let item = item.clone_for_new_window(window, cx);
+        let project = self.project.clone();
+        let app_state = self.app_state.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(item) = item.await else {
+                return anyhow::Ok(());
+            };
+
+            let result = match target {
+                // Resolved here rather than when the menu was built: the window
+                // it named may have closed in the meantime.
+                Some(window_id) => {
+                    let target_window = cx.update(|_, cx| {
+                        floating_windows(cx)
+                            .into_iter()
+                            .find(|(candidate, _)| candidate.window_id() == window_id)
+                            .map(|(candidate, _)| candidate)
+                    })?;
+                    match target_window {
+                        Some(target_window) => target_window
+                            .update(cx, |multi_workspace, window, cx| {
+                                multi_workspace.workspace().update(cx, |workspace, cx| {
+                                    workspace.add_item_to_active_pane(item, None, true, window, cx);
+                                });
+                            })
+                            .map(|_| target_window),
+                        None => Err(anyhow!("that window is no longer open")),
+                    }
+                }
+                None => {
+                    let options = cx.update(|_, cx| (app_state.build_window_options)(None, cx))?;
+                    cx.open_window(options, {
+                        let project = project.clone();
+                        let app_state = app_state.clone();
+                        move |window, cx| {
+                            let workspace = cx.new(|cx| {
+                                let mut workspace =
+                                    Workspace::new_floating(project, app_state, window, cx);
+                                workspace.add_item_to_active_pane(item, None, true, window, cx);
+                                workspace
+                            });
+                            cx.new(|cx| MultiWorkspace::new(workspace, window, cx))
+                        }
+                    })
+                }
+            };
+
+            // A window that was just opened does not come to the front on its
+            // own, and one that was already open may be behind this one, so
+            // without this the item lands somewhere the user can only reach
+            // through the Window menu.
+            if let Ok(window_handle) = &result {
+                window_handle
+                    .update(cx, |_, window, _| window.activate_window())
+                    .log_err();
+            }
+
+            if let Err(error) = result {
+                this.update_in(cx, |workspace, _window, cx| {
+                    struct OpenItemInNewWindowFailed;
+
+                    workspace.show_notification(
+                        NotificationId::unique::<OpenItemInNewWindowFailed>(),
+                        cx,
+                        |cx| {
+                            cx.new(|cx| {
+                                MessageNotification::new(
+                                    format!("Could not open item in a window: {error}"),
+                                    cx,
+                                )
+                            })
+                        },
+                    );
+                })?;
+            }
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn new_with_window_kind(
+        workspace_id: Option<WorkspaceId>,
+        project: Entity<Project>,
+        app_state: Arc<AppState>,
+        window_kind: WorkspaceWindowKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -2169,7 +2487,7 @@ impl Workspace {
             debugger_provider: None,
             serializable_items_tx,
             _items_serializer,
-            session_id: Some(session_id),
+            session_id: (window_kind == WorkspaceWindowKind::Persistent).then_some(session_id),
 
             scheduled_tasks: Vec::new(),
             last_open_dock_positions: Vec::new(),
@@ -2187,6 +2505,7 @@ impl Workspace {
             persisted_recent_navigation_history: Vec::new(),
             last_active_project_path: None,
             restoring_workspace: false,
+            window_kind,
         }
     }
 
@@ -7612,6 +7931,10 @@ impl Workspace {
         self.database_id
     }
 
+    pub fn is_floating(&self) -> bool {
+        self.window_kind == WorkspaceWindowKind::Floating
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_database_id(&mut self, id: WorkspaceId) {
         self.database_id = Some(id);
@@ -7622,6 +7945,9 @@ impl Workspace {
     }
 
     fn save_window_bounds(&self, window: &mut Window, cx: &mut App) -> Task<()> {
+        if self.is_floating() {
+            return Task::ready(());
+        }
         let Some(display) = window.display(cx) else {
             return Task::ready(());
         };
@@ -7667,6 +7993,9 @@ impl Workspace {
     /// to the DB immediately. Returns a task the caller can await to ensure the
     /// writes complete before the process exits.
     pub fn flush_serialization(&mut self, window: &mut Window, cx: &mut App) -> Task<()> {
+        if self.is_floating() {
+            return Task::ready(());
+        }
         self._schedule_serialize_workspace.take();
         self._serialize_workspace_task.take();
         self.bounds_save_task_queued.take();
@@ -7949,6 +8278,9 @@ impl Workspace {
         &mut self,
         item: Box<dyn SerializableItemHandle>,
     ) -> Result<()> {
+        if self.is_floating() {
+            return Ok(());
+        }
         self.serializable_items_tx
             .unbounded_send(item)
             .map_err(|err| anyhow!("failed to send serializable item over channel: {err}"))
@@ -8555,6 +8887,7 @@ impl Workspace {
                     }
                 }),
             )
+            .on_action(cx.listener(Workspace::open_active_item_in_new_window))
             .on_action(cx.listener(|workspace, _: &FocusCenterPane, window, cx| {
                 workspace.focus_center_pane(window, cx);
             }))
@@ -12638,6 +12971,427 @@ mod tests {
             render_window_title_format("${projectName}${separator}${branch}", " — ", &context),
             "project — feature/foo"
         );
+    }
+
+    #[gpui::test]
+    async fn test_open_item_in_an_already_open_window(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let item = cx.new(TestItem::new);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
+        });
+
+        // The window the second view will be sent to.
+        let source_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        source_pane.update_in(cx, |pane, window, cx| {
+            pane.open_item_in_new_window(0, window, cx);
+        });
+        cx.executor().run_until_parked();
+        let windows_after_first = cx.update(|_, cx| cx.windows().len());
+        assert_eq!(windows_after_first, 2);
+
+        let target = cx
+            .update(|window, cx| {
+                let project = workspace.read(cx).project().clone();
+                floating_window_targets(&project, window, cx)
+            })
+            .pop()
+            .expect("the floating window should be offered as a target");
+        let (target_window_id, _label) = target;
+
+        source_pane.update_in(cx, |pane, window, cx| {
+            pane.open_item_in_window(0, Some(target_window_id), window, cx);
+        });
+        cx.executor().run_until_parked();
+
+        assert_eq!(
+            cx.update(|_, cx| cx.windows().len()),
+            2,
+            "sending an item to an open window must not open another one"
+        );
+        let target_window = cx
+            .update(|_, cx| {
+                cx.windows()
+                    .into_iter()
+                    .filter_map(|window| window.downcast::<MultiWorkspace>())
+                    .find(|window| window.window_id() == target_window_id)
+            })
+            .expect("the target window should still be open");
+        let target_workspace = target_window
+            .update(cx, |multi_workspace, _, _| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("the target window should have a workspace");
+        assert_eq!(
+            target_workspace
+                .read_with(cx, |workspace, cx| workspace.active_pane().read(cx).items_len()),
+            2,
+            "the window should now hold both views"
+        );
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .active_pane()
+                .read(cx)
+                .items_len()),
+            1,
+            "the item stays put in its own window: it is copied, not moved"
+        );
+        assert_eq!(
+            cx.update(|_, cx| target_window.is_active(cx)),
+            Some(true),
+            "the window the item was sent to should come to the front"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_open_active_item_in_new_window_creates_floating_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |multi_workspace, _| {
+            multi_workspace.workspace().clone()
+        });
+        let item = cx.new(TestItem::new);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
+        });
+        let source_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        source_pane.update_in(cx, |pane, window, cx| {
+            pane.open_item_in_new_window(0, window, cx);
+        });
+        cx.executor().run_until_parked();
+
+        let window_handles = cx.update(|_, cx| cx.windows());
+        assert_eq!(window_handles.len(), 2);
+
+        let floating_workspace = window_handles
+            .into_iter()
+            .filter_map(|window| window.downcast::<MultiWorkspace>())
+            .find_map(|window| {
+                let workspace = window
+                    .update(cx, |multi_workspace, _, _| {
+                        multi_workspace.workspace().clone()
+                    })
+                    .ok()?;
+                workspace
+                    .read_with(cx, |workspace, _| workspace.is_floating())
+                    .then_some((window, workspace))
+            })
+            .expect("expected a floating workspace window");
+        let (floating_window, floating_workspace) = floating_workspace;
+
+        assert!(floating_workspace.read_with(cx, |workspace, _| workspace.database_id().is_none()));
+        assert!(floating_workspace.read_with(cx, |workspace, _| workspace.session_id().is_none()));
+        assert_eq!(
+            cx.update(|_, cx| floating_window.is_active(cx)),
+            Some(true),
+            "the new window should come to the front, not hide behind the source window"
+        );
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace.active_pane().read(cx).items_len()),
+            1
+        );
+        assert_eq!(
+            floating_workspace
+                .read_with(cx, |workspace, cx| workspace.active_pane().read(cx).items_len()),
+            1
+        );
+        assert_ne!(
+            workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .active_pane()
+                    .read(cx)
+                    .active_item()
+                    .expect("source item")
+                    .item_id()
+            }),
+            floating_workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .active_pane()
+                    .read(cx)
+                    .active_item()
+                    .expect("floating item")
+                .item_id()
+            })
+        );
+
+        floating_window
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.close_window(&CloseWindow, window, cx);
+            })
+            .expect("floating workspace window should exist");
+        cx.executor().run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace.active_pane().read(cx).items_len()),
+            1,
+            "closing the floating editor must leave its source tab open"
+        );
+        assert_eq!(cx.update(|_, cx| cx.windows()).len(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_floating_window_manager_returns_contents_before_closing(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let source_window = cx.add_window(|window, cx| {
+            MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let source_workspace = source_window
+            .update(cx, |multi_workspace, _, _| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("source workspace window should exist");
+        let source_pane = source_workspace.read_with(cx, |workspace, _| {
+            workspace.active_pane().clone()
+        });
+        let app_state =
+            source_workspace.read_with(cx, |workspace, _| workspace.app_state().clone());
+        let floating_window = cx.add_window(|window, cx| {
+            let workspace = cx.new(|cx| {
+                Workspace::new_floating(project.clone(), app_state.clone(), window, cx)
+            });
+            MultiWorkspace::new(workspace, window, cx)
+        });
+        let floating_window_id = floating_window.window_id();
+        let returned = Rc::new(Cell::new(false));
+
+        floating_window
+            .update(cx, |multi_workspace, window, cx| {
+                FloatingWindowManager::register(
+                    floating_window,
+                    source_workspace.downgrade(),
+                    source_pane.downgrade(),
+                    {
+                        let returned = returned.clone();
+                        move |_| {
+                            returned.set(true);
+                            Ok(())
+                        }
+                    },
+                    cx,
+                )?;
+
+                let source = FloatingWindowManager::source_for(floating_window_id, cx)
+                    .expect("floating window source should be recorded");
+                assert_eq!(source.workspace().entity_id(), source_workspace.entity_id());
+                assert_eq!(source.pane().entity_id(), source_pane.entity_id());
+                assert_eq!(
+                    FloatingWindowManager::window_for(floating_window_id, cx),
+                    Some(floating_window)
+                );
+
+                multi_workspace.close_window(&CloseWindow, window, cx);
+                Ok::<(), anyhow::Error>(())
+            })
+            .expect("floating window should close")
+            .expect("floating window should register successfully");
+        cx.run_until_parked();
+
+        assert!(returned.get());
+        assert!(!cx.update(|cx| {
+            FloatingWindowManager::is_registered(floating_window_id, cx)
+        }));
+        assert_eq!(cx.update(|cx| cx.windows()).len(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_floating_window_manager_closes_after_return_error(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let source_window = cx.add_window(|window, cx| {
+            MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let source_workspace = source_window
+            .update(cx, |multi_workspace, _, _| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("source workspace window should exist");
+        let source_pane = source_workspace.read_with(cx, |workspace, _| {
+            workspace.active_pane().clone()
+        });
+        let app_state =
+            source_workspace.read_with(cx, |workspace, _| workspace.app_state().clone());
+        let floating_window = cx.add_window(|window, cx| {
+            let workspace = cx.new(|cx| {
+                Workspace::new_floating(project.clone(), app_state.clone(), window, cx)
+            });
+            MultiWorkspace::new(workspace, window, cx)
+        });
+        let floating_window_id = floating_window.window_id();
+
+        floating_window
+            .update(cx, |multi_workspace, window, cx| {
+                FloatingWindowManager::register(
+                    floating_window,
+                    source_workspace.downgrade(),
+                    source_pane.downgrade(),
+                    |_| Err(anyhow!("source pane no longer accepts the floating item")),
+                    cx,
+                )?;
+
+                multi_workspace.close_window(&CloseWindow, window, cx);
+                Ok::<(), anyhow::Error>(())
+            })
+            .expect("floating window should close")
+            .expect("floating window should register successfully");
+        cx.run_until_parked();
+
+        assert!(!cx.update(|cx| {
+            FloatingWindowManager::is_registered(floating_window_id, cx)
+        }));
+        assert_eq!(cx.update(|cx| cx.windows()).len(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_floating_window_manager_keeps_window_open_for_other_items(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let source_window = cx.add_window(|window, cx| {
+            MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let source_workspace = source_window
+            .update(cx, |multi_workspace, _, _| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("source workspace window should exist");
+        let source_pane = source_workspace.read_with(cx, |workspace, _| {
+            workspace.active_pane().clone()
+        });
+        let app_state =
+            source_workspace.read_with(cx, |workspace, _| workspace.app_state().clone());
+        let returned_item = cx.new(TestItem::new);
+        let retained_item = cx.new(TestItem::new);
+        let floating_window = cx.add_window(|window, cx| {
+            let workspace = cx.new(|cx| {
+                let mut workspace =
+                    Workspace::new_floating(project.clone(), app_state.clone(), window, cx);
+                workspace.add_item_to_active_pane(
+                    Box::new(returned_item.clone()),
+                    None,
+                    true,
+                    window,
+                    cx,
+                );
+                workspace.add_item_to_active_pane(
+                    Box::new(retained_item.clone()),
+                    None,
+                    true,
+                    window,
+                    cx,
+                );
+                workspace
+            });
+            MultiWorkspace::new(workspace, window, cx)
+        });
+        let floating_window_id = floating_window.window_id();
+        let returned = Rc::new(Cell::new(false));
+
+        floating_window
+            .update(cx, |multi_workspace, window, cx| {
+                FloatingWindowManager::register(
+                    floating_window,
+                    source_workspace.downgrade(),
+                    source_pane.downgrade(),
+                    {
+                        let returned = returned.clone();
+                        move |_| {
+                            returned.set(true);
+                            Ok(())
+                        }
+                    },
+                    cx,
+                )?;
+
+                multi_workspace.close_window(&CloseWindow, window, cx);
+                Ok::<(), anyhow::Error>(())
+            })
+            .expect("floating window should exist")
+            .expect("floating window should register successfully");
+        cx.run_until_parked();
+
+        assert!(returned.get());
+        assert!(floating_window.update(cx, |_, _, _| ()).is_ok());
+        assert!(!cx.update(|cx| {
+            FloatingWindowManager::is_registered(floating_window_id, cx)
+        }));
+        assert_eq!(cx.update(|cx| cx.windows()).len(), 2);
+    }
+
+    #[gpui::test]
+    async fn test_floating_window_manager_unregisters_when_source_workspace_closes(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let source_window = cx.add_window(|window, cx| {
+            MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let source_workspace = source_window
+            .update(cx, |multi_workspace, _, _| {
+                multi_workspace.workspace().clone()
+            })
+            .expect("source workspace window should exist");
+        let source_pane = source_workspace.read_with(cx, |workspace, _| {
+            workspace.active_pane().clone()
+        });
+        let app_state =
+            source_workspace.read_with(cx, |workspace, _| workspace.app_state().clone());
+        let floating_window = cx.add_window(|window, cx| {
+            let workspace = cx.new(|cx| {
+                Workspace::new_floating(project.clone(), app_state.clone(), window, cx)
+            });
+            MultiWorkspace::new(workspace, window, cx)
+        });
+        let floating_window_id = floating_window.window_id();
+
+        cx.update(|cx| {
+            FloatingWindowManager::register(
+                floating_window,
+                source_workspace.downgrade(),
+                source_pane.downgrade(),
+                |_| Ok(()),
+                cx,
+            )
+        })
+        .expect("floating window should register successfully");
+        drop(source_pane);
+        drop(source_workspace);
+
+        source_window
+            .update(cx, |_, window, _| window.remove_window())
+            .expect("source window should exist");
+        cx.run_until_parked();
+
+        assert!(!cx.update(|cx| {
+            FloatingWindowManager::is_registered(floating_window_id, cx)
+        }));
+        assert_eq!(cx.update(|cx| cx.windows()).len(), 1);
     }
 
     #[test]
