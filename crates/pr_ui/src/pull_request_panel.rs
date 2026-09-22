@@ -376,6 +376,12 @@ impl RepoSection {
         self.updated_since_seen.contains(&number)
     }
 
+    /// Drops the updated indicator from every flagged PR the viewer has already
+    /// ruled on, using the reviewer lists cached so far.
+    fn clear_updated_for_own_verdict(&mut self) {
+        clear_updated_for_own_verdict(&mut self.updated_since_seen, &self.reviewers);
+    }
+
     fn rebuild_rows(&mut self, sort: SortOrder) {
         let mut rows = Vec::new();
         if let LoadState::Loaded(loaded) = &self.state {
@@ -1089,6 +1095,10 @@ impl PullRequestPanel {
                                     .unwrap_or_else(|| SharedString::from(""));
                                 section.reviewers.insert(number, (updated_at, reviewers));
                             }
+                            // Reviewer lists are what tell us the viewer has
+                            // already ruled on a PR, so the indicator can only
+                            // be resolved once they land.
+                            section.clear_updated_for_own_verdict();
                         }
                         cx.notify();
                     })
@@ -2215,6 +2225,31 @@ fn note_updated_pull_requests(
     }
 }
 
+/// Removes from `updated` every PR whose cached reviewer list carries the
+/// viewer's own approval or requested changes.
+///
+/// Submitting a review is itself an update on the host, so a PR the user has
+/// just ruled on comes back with a moved `updated_at` and lights up for the
+/// user's own action. Having a verdict on record also means the row has been
+/// looked at, which is what the indicator is there to say. A comment-only
+/// review is left flagged: it settles nothing, so the row is still worth
+/// returning to.
+fn clear_updated_for_own_verdict(
+    updated: &mut HashSet<u32>,
+    reviewers: &HashMap<u32, (SharedString, Vec<PullRequestReviewer>)>,
+) {
+    updated.retain(|number| {
+        let verdict = reviewers
+            .get(number)
+            .and_then(|(_, reviewers)| reviewers.iter().find(|reviewer| reviewer.is_me))
+            .and_then(|reviewer| reviewer.verdict);
+        !matches!(
+            verdict,
+            Some(PullRequestReviewVerdict::Approve | PullRequestReviewVerdict::RequestChanges)
+        )
+    });
+}
+
 /// Loads `pages` pages and concatenates them into one result, mirroring how
 /// `load_more` extends a section. Used so a background refresh can rebuild a
 /// list the user has paged through at its current length instead of truncating
@@ -2542,6 +2577,99 @@ mod tests {
             &loaded(vec![summary(1, "2026-09-14T12:00:00Z")]),
         );
         assert!(updated.contains(&1));
+    }
+
+    fn reviewer(
+        login: &str,
+        is_me: bool,
+        verdict: Option<PullRequestReviewVerdict>,
+    ) -> PullRequestReviewer {
+        PullRequestReviewer {
+            login: login.into(),
+            verdict,
+            is_me,
+        }
+    }
+
+    fn reviewer_cache(
+        entries: Vec<(u32, Vec<PullRequestReviewer>)>,
+    ) -> HashMap<u32, (SharedString, Vec<PullRequestReviewer>)> {
+        entries
+            .into_iter()
+            .map(|(number, reviewers)| {
+                (
+                    number,
+                    (SharedString::from("2026-09-14T11:00:00Z"), reviewers),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_viewers_own_verdict_clears_the_updated_indicator() {
+        let mut updated: HashSet<u32> = [1, 2, 3, 4, 5].into_iter().collect();
+        let reviewers = reviewer_cache(vec![
+            (
+                1,
+                vec![reviewer(
+                    "me",
+                    true,
+                    Some(PullRequestReviewVerdict::Approve),
+                )],
+            ),
+            (
+                2,
+                vec![reviewer(
+                    "me",
+                    true,
+                    Some(PullRequestReviewVerdict::RequestChanges),
+                )],
+            ),
+            (
+                3,
+                vec![reviewer(
+                    "me",
+                    true,
+                    Some(PullRequestReviewVerdict::Comment),
+                )],
+            ),
+            (4, vec![reviewer("me", true, None)]),
+            (
+                5,
+                vec![reviewer(
+                    "octocat",
+                    false,
+                    Some(PullRequestReviewVerdict::Approve),
+                )],
+            ),
+        ]);
+
+        clear_updated_for_own_verdict(&mut updated, &reviewers);
+
+        assert!(!updated.contains(&1), "our approval clears the indicator");
+        assert!(
+            !updated.contains(&2),
+            "our requested changes clear the indicator"
+        );
+        assert!(
+            updated.contains(&3),
+            "a comment-only review settles nothing"
+        );
+        assert!(updated.contains(&4), "a pending review is not a verdict");
+        assert!(updated.contains(&5), "someone else's approval is not ours");
+    }
+
+    #[test]
+    fn a_pull_request_without_cached_reviewers_stays_flagged() {
+        let mut updated: HashSet<u32> = [1].into_iter().collect();
+        clear_updated_for_own_verdict(&mut updated, &reviewer_cache(vec![(1, Vec::new())]));
+        assert!(updated.contains(&1));
+
+        clear_updated_for_own_verdict(&mut updated, &HashMap::new());
+        assert!(
+            updated.contains(&1),
+            "reviewers that have not loaded yet must not clear the indicator"
+        );
     }
 
     #[gpui::test]
