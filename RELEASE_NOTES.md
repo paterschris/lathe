@@ -2,6 +2,30 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.4.0 - 2026-09-22
+
+The first stable release since 1.2.0. It carries everything from the 1.3.0 beta plus the work below.
+
+### Added
+
+- **Open an editor, or move a terminal, into a window of its own.** "Open in New Window" on an editor tab puts a second view of the file in a window of its own. The terminal tab and context menus gain "Move to New Window", which moves the terminal itself, so its process, scrollback and input state come with it. Closing that window hands the terminal back to the pane it came from rather than killing it.
+- **Send either one to a window that is already open.** With another window open on the same project, the editor tab menu offers "Open in Window" and the terminal menus offer "Move to Window", each listing those windows by what they are showing. An editor is copied, so the original tab stays where it is; a terminal moves, and can still be handed back afterwards. One window can hold terminals from several panes, and each goes back to its own pane on the way out.
+- **Force delete a branch from the git panel.** Deleting an unmerged branch from the Explorer used to fail with a bare error toast and no way forward. `git branch -d` is still what runs first, because its refusal is the only warning that a branch has unmerged work, but that refusal now becomes a prompt offering the force delete. The local half of **Delete on `<remote>` and locally** goes through the same path.
+- **A pull request you have reviewed stops showing as updated.** Submitting a review moves the pull request's timestamp on the host, so reviewing a row lit its updated indicator for your own action and left it lit until you opened the row again. A row carrying your approval or your requested changes now clears it. A comment-only review settles nothing, so it stays flagged.
+
+### Fixed
+
+- **A terminal starting in the background no longer steals focus from a modal.** A terminal took focus whenever its tab was activated, overriding the pane's decision not to focus it, so one finishing its startup while the command palette was open dismissed what you had just opened. Whether an activated item takes focus is the pane's call again.
+- **Handing a terminal back no longer leaves a blank section behind.** When the terminal had a pane to itself in the window it had been moved to, returning it left that pane in the layout holding nothing, drawn as a band you could resize but not close. The pane now closes with the terminal. Returning a terminal that came from the center no longer reveals the terminal panel either, which used to leave an empty dock open.
+
+### Known issues
+
+- This release was verified with `cargo check --workspace --all-targets` and the test suites of the changed crates (`workspace`, `terminal_view`, `pr_ui`, `git_ui`) on macOS. Windows and Linux are untested, and the new window behavior was exercised in a running build on macOS only.
+- Two draft-reload tests in `agent_panel` (`test_draft_promotion_creates_metadata_and_new_session_on_reload` and `test_new_draft_survives_reload_when_real_thread_is_active`) were already failing at the 1.2.0 tag. They were not revisited for this release.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v1.3.0-beta - 2026-09-18
 
 A scoping pass on the agent panel's history, a compact mode for terminal cards, and the experimental notebook editor behind a setting.
