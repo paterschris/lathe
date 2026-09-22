@@ -114,6 +114,8 @@ Homebrew installs stable by default. To try a beta, grab the `-beta` asset from 
 
 To be notified when a new version ships, use **Watch > Custom > Releases** at the top of this repository. Starring bookmarks the project but does not send release notifications.
 
+Release notes also go up at [r/LatheEditor](https://www.reddit.com/r/LatheEditor/), along with feature requests and general discussion. Bugs and pull requests belong here in the repository.
+
 ## Updating
 
 ### Homebrew
