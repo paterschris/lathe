@@ -491,6 +491,76 @@ pub(super) fn run_branch_op(
     .detach();
 }
 
+/// What happened to a branch delete that may have escalated to a force delete.
+enum DeleteBranchOutcome {
+    Deleted,
+    /// The user declined the force delete, so the branch is still there and
+    /// there is nothing to report.
+    Abandoned,
+    Failed {
+        /// The git invocation to name in the error toast, so a failed force
+        /// delete doesn't report itself as a plain delete.
+        action: SharedString,
+        error: anyhow::Error,
+    },
+}
+
+/// Deletes a branch with `git branch -d`, offering `-D` when git refuses
+/// because the branch is not fully merged.
+///
+/// The safe flag is deliberately what every caller tries first: git's refusal
+/// is the only warning that the branch has unmerged work, so it is worth
+/// provoking and then turning into an explicit choice. This mirrors the branch
+/// picker, which recovers from the same refusal the same way.
+async fn delete_branch_prompting_for_force(
+    repo: Entity<Repository>,
+    is_remote: bool,
+    branch_name: SharedString,
+    cx: &mut AsyncWindowContext,
+) -> DeleteBranchOutcome {
+    let name = branch_name.to_string();
+    let receiver = repo.update(cx, |repo, _| repo.delete_branch(is_remote, name, false));
+    let error = match receiver.await {
+        Ok(Ok(())) => return DeleteBranchOutcome::Deleted,
+        Ok(Err(error)) => error,
+        Err(_) => anyhow::anyhow!("operation cancelled"),
+    };
+
+    let Some(prompt) =
+        branch_picker::force_delete_prompt_for_branch_delete_error(&error, &branch_name)
+    else {
+        return DeleteBranchOutcome::Failed {
+            action: "delete branch".into(),
+            error,
+        };
+    };
+    log::warn!("failed to delete branch {branch_name}, offering a force delete: {error}");
+
+    let answer = cx.prompt(
+        PromptLevel::Warning,
+        &prompt,
+        None,
+        &["Force Delete", "Cancel"],
+    );
+    if answer.await != Ok(0) {
+        return DeleteBranchOutcome::Abandoned;
+    }
+
+    let name = branch_name.to_string();
+    let receiver = repo.update(cx, |repo, _| repo.delete_branch(is_remote, name, true));
+    match receiver.await {
+        Ok(Ok(())) => DeleteBranchOutcome::Deleted,
+        Ok(Err(error)) => DeleteBranchOutcome::Failed {
+            action: "force delete branch".into(),
+            error,
+        },
+        Err(_) => DeleteBranchOutcome::Failed {
+            action: "force delete branch".into(),
+            error: anyhow::anyhow!("operation cancelled"),
+        },
+    }
+}
+
 impl super::GitPanel {
     /// Kick off async loads of the things the Explorer tab needs to render
     /// (branches via the git CLI; worktrees and stashes are already cached on
@@ -1119,6 +1189,35 @@ impl super::GitPanel {
         });
     }
 
+    /// Deletes a branch from the Explorer, escalating to a force delete when
+    /// git refuses an unmerged branch and the user confirms.
+    fn delete_branch(
+        &mut self,
+        is_remote: bool,
+        branch_name: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.active_repository.clone() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = delete_branch_prompting_for_force(repo, is_remote, branch_name, cx).await;
+            match outcome {
+                DeleteBranchOutcome::Deleted => {
+                    this.update(cx, |this, cx| this.refresh_explorer_data(cx))
+                        .ok();
+                }
+                DeleteBranchOutcome::Abandoned => {}
+                DeleteBranchOutcome::Failed { action, error } => {
+                    this.update(cx, |this, cx| this.show_error_toast(action, error, cx))
+                        .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Push an empty source refspec (`:<remote_branch>`) to delete the
     /// branch on the upstream remote, then delete the local branch on
     /// success. Errors at either stage surface as the standard git error
@@ -1146,7 +1245,7 @@ impl super::GitPanel {
         let askpass = self.askpass_delegate(format!("git push {remote_name} --delete"), window, cx);
         let push_label: SharedString = format!("delete {branch_name} on {remote_name}").into();
 
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let push = repo.update(cx, |repo, cx| {
                 repo.push(
                     SharedString::default(),
@@ -1166,19 +1265,14 @@ impl super::GitPanel {
                 Err(_) => return anyhow::Ok(()),
             }
 
-            let delete_local = repo.update(cx, |repo, _| {
-                repo.delete_branch(false, branch_name.to_string(), false)
-            });
-            match delete_local.await {
-                Ok(Ok(())) => {
+            match delete_branch_prompting_for_force(repo, false, branch_name, cx).await {
+                DeleteBranchOutcome::Deleted => {
                     this.update(cx, |this, cx| this.refresh_explorer_data(cx))?;
                 }
-                Ok(Err(err)) => {
-                    this.update(cx, |this, cx| {
-                        this.show_error_toast("delete local branch", err, cx)
-                    })?;
+                DeleteBranchOutcome::Abandoned => {}
+                DeleteBranchOutcome::Failed { action, error } => {
+                    this.update(cx, |this, cx| this.show_error_toast(action, error, cx))?;
                 }
-                Err(_) => {}
             }
             anyhow::Ok(())
         })
@@ -1308,20 +1402,14 @@ impl super::GitPanel {
                     "Delete"
                 };
                 let name = branch_name.clone();
-                let repo_del = repo.clone();
-                let workspace_d = workspace.clone();
                 let panel_d = panel.clone();
-                menu = menu.entry(local_label, None, move |_, cx| {
-                    let receiver = repo_del.update(cx, |repo, _| {
-                        repo.delete_branch(is_remote, name.to_string(), false)
-                    });
-                    run_branch_op(
-                        cx,
-                        workspace_d.clone(),
-                        panel_d.clone(),
-                        receiver,
-                        "delete branch",
-                    );
+                menu = menu.entry(local_label, None, move |window, cx| {
+                    let name = name.clone();
+                    panel_d
+                        .update(cx, |panel, cx| {
+                            panel.delete_branch(is_remote, name, window, cx);
+                        })
+                        .ok();
                 });
 
                 if let Some((remote_name, remote_branch_name)) = upstream_for_remote_delete {
