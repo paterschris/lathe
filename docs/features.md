@@ -13,8 +13,9 @@ Ordered by how much each one differentiates Lathe from stock Zed. Upstream alrea
 5. [AI agent integration](#ai-agent-integration) - multi-account sign-in, approval control
 6. [Theme and syntax highlighting](#theme-and-syntax-highlighting) - custom theme, live 200+ color customizer
 7. [Git additions](#git-additions) - explorer tab, branch tree, undo, Git Flow
-8. [AWS profiles](#aws-profiles) - per-window profile selector
-9. [Terminal, windows, and workspaces](#terminal-windows-and-workspaces) - awaiting-input indicator, workspace groups, per-window zoom
+8. [Jupyter notebooks](#jupyter-notebooks) - an ordinary setting in place of upstream's server-side feature flag
+9. [Terminal, windows, and workspaces](#terminal-windows-and-workspaces) - additional windows for editors and terminals, awaiting-input indicator, workspace groups, per-window zoom
+10. [AWS profiles](#aws-profiles) - per-window profile selector
 
 ---
 
@@ -24,7 +25,7 @@ Lathe ships a first-class Mobile panel that auto-detects the kind of mobile proj
 
 ![Mobile Panel, iOS](../assets/screenshots/mobile-panel-ios.png)
 
-Both toolchain sections report their own state, so a missing JDK or an unaccepted SDK license is visible before a build fails rather than after. The action row follows the platform you're targeting: an iOS project offers **Boot simulator** and **Install pods**, while an Android one swaps in **adb reverse** and builds against whichever emulator or device is selected.
+Both toolchain sections report their own state, so a missing JDK or an unaccepted SDK license is visible before a build fails rather than after. The action row follows the platform you're targeting: an iOS project offers **Boot simulator** and **Install pods**, while an Android one swaps in **adb reverse** and builds against whichever emulator or device is selected. Targets aren't exclusive: an Android emulator and an iOS simulator can run at once and take a build and deploy in the same pass, and physically connected devices appear in the same list, so live testing on real hardware doesn't mean leaving the editor either.
 
 ![Mobile Panel, Android](../assets/screenshots/mobile-panel-android.png)
 
@@ -43,7 +44,7 @@ Resolve conflicts with **Take ours** / **Take theirs** / **Take both** per confl
 ![Merge Editor Split View](../assets/screenshots/conflict-split-view.png)
 
 ### Interactive rebase with drag-and-drop
-The interactive rebase modal supports drag-and-drop reordering of commits and per-row pick / squash / edit / drop actions inline. Dragging a commit or branch onto another in the commit graph shows a confirmation modal with a preview of what the rebase will do before anything runs.
+The interactive rebase modal supports drag-and-drop reordering of commits and per-row pick / squash / edit / drop actions inline. Dragging a commit or branch onto another in the commit graph shows a confirmation modal with a preview of what the rebase will do before anything runs. Selecting a range of commits in the graph offers **Squash N commits into one** and **Interactive rebase N commits onto here** from the same context menu, so a history cleanup pass starts from the graph you were already reading rather than from `git rebase -i` and an editor session.
 
 ---
 
@@ -71,18 +72,23 @@ Set `lsp_results_location` to `multi_buffer` or `picker` to go back to a tab or 
 
 ### Prompt history in the composer
 
-Up and down in the agent panel's composer walk the prompts you have already sent, the way a shell walks its command history. The keys only take over at the edges of the text: on the first display row for up, the last for down, so navigating within a multi-line prompt still moves the cursor normally. The editors for past and queued messages deliberately keep plain cursor movement, since swapping their content out from under an edit would be surprising.
+Up and down in the agent panel's composer walk the prompts you have already sent, the way a shell walks its command history. History is scoped per thread and per workspace, so switching threads switches which prompts you are walking rather than pooling every prompt you have ever sent. The keys only take over at the edges of the text: on the first display row for up, the last for down, so navigating within a multi-line prompt still moves the cursor normally. The editors for past and queued messages deliberately keep plain cursor movement, since swapping their content out from under an edit would be surprising.
 
 ### Per-workspace thread history
 
 Archived agent threads appear in Thread History for the current workspace. The history is sorted chronologically, and restoring a thread returns it to that workspace's thread list.
 
 ### Agent accounts and approval control
-Sign in to multiple subscription accounts for the external agents in the Agent Panel (Claude Code, Codex, Gemini) and switch between them from the panel's account chip. Account selection is per-workspace, so a work project and a personal project can each stay on their own identity. An approval selector picks each agent's approval / sandbox level; the level is applied when the agent process spawns, so changes take effect on the next thread. Agents with their own native approval control keep it and skip the selector.
+Sign in to multiple subscription accounts for the external agents in the Agent Panel (Claude Code, Codex, Gemini) and switch between them from the panel's account chip. Account selection is per-workspace and switching takes effect at runtime, so a work project and a personal project can each stay on their own identity and on their own subscription, which keeps plan usage and rate limits from bleeding between them. An approval selector picks each agent's approval / sandbox level; the level is applied when the agent process spawns, so changes take effect on the next thread. Agents with their own native approval control keep it and skip the selector.
 
-**Manage AI Accounts** lists every account for each agent alongside its connection status, lets you nominate a default per agent, and can import existing logins from `claude-account-switcher`. Individual workspaces bind their own account per agent via `ai_accounts` in `.zed/settings.json`.
+**Manage AI Accounts** lists every account for each agent alongside its connection status, lets you nominate a default per agent, and can import existing logins from `claude-account-switcher`. Individual workspaces bind their own account per agent via `ai_accounts` in `.zed/settings.json`, though the account chip's menu covers the same ground without opening it: switch to another account, clear the binding for the current workspace, add an account, or open the manager.
 
 ![Manage AI Accounts](../assets/screenshots/ai-accounts-manager.png)
+
+### Agent settings in the composer
+Each agent's own settings sit inline in the composer, and the row adapts to the agent rather than showing a lowest-common-denominator set. Codex exposes sandbox access, model, reasoning effort, and a fast-mode toggle; Claude Agent exposes permission mode, model, thinking level, and its own fast-mode toggle.
+
+When approval and sandbox level take effect depends on the agent, because the two paths are different. Codex and Gemini receive theirs as launch arguments (`-c approval_policy=` and `-c sandbox_mode=` for Codex, `--approval-mode` for Gemini), so **Full access** and its siblings bind when the thread's agent process spawns and a change applies to the next thread. Claude Agent has native mode support and goes over ACP `session/set_mode` instead, so **Bypass permissions** takes effect on the thread you are already in. Model, thinking level, and fast mode apply as you go rather than waiting for a new thread.
 
 ---
 
@@ -107,7 +113,10 @@ A built-in panel for editing all 200+ theme colors, including syntax token color
 Zed already ships the commit graph, the tabbed git panel, worktree support, and the `git: file history` action. Everything below is what Lathe layers on top.
 
 ### Explorer tab and hierarchical branch folder tree
-Lathe adds a third **Explorer** tab to the git panel, alongside upstream's Changes and History. It lists branches, worktrees, and stashes for the repository in one filterable tree, and renders Local and Remote branches as a collapsible folder tree that splits names on `/`. So `feature/auth/login` and `feature/auth/signup` collapse under a single `feature/auth/` folder you can fold or expand. Folders show counts of contained branches and remember their open/closed state per section. Local branches that exist on the remote get an on-remote indicator. When the filter input is active the tree flattens so filter results stay legible. A multi-repo strip keeps every repository in the workspace one click away, with fetch-all and pull-all actions, plus any external repositories pinned via `repository_dashboard_pinned_repos`.
+Lathe adds a third **Explorer** tab to the git panel, alongside upstream's Changes and History. It lists branches, worktrees, and stashes for the repository in one filterable tree, and renders Local and Remote branches as a collapsible folder tree that splits names on `/`. So `feature/auth/login` and `feature/auth/signup` collapse under a single `feature/auth/` folder you can fold or expand. Folders show counts of contained branches and remember their open/closed state per section. Local branches that exist on the remote get an on-remote indicator. When the filter input is active the tree flattens so filter results stay legible. Clicking a branch opens the commit graph and navigates to that branch, so the tree and the graph stay in step. A multi-repo strip keeps every repository in the workspace one click away, with fetch-all and pull-all actions, plus any external repositories pinned via `repository_dashboard_pinned_repos`.
+
+### Branch and commit context menus
+Right-clicking a branch offers checkout, **Branch from here**, copy branch name, merge into the current branch, rebase the current branch onto it, and delete. Right-clicking a commit adds tag creation, cherry-pick onto the current branch, drop, revert, the three reset modes, rebase onto that commit, and copy of the full or short SHA. Menu labels name the branch they will act on rather than saying "the current branch", so a reset reads as **Reset main to here (hard, discard changes)** before you click it instead of after.
 
 ### Undo for destructive operations
 Branch resets, deletes, renames, and tag creation record an undo entry, and the resulting toast offers a one-click **Undo**. Discards stash defensively first, so they can be restored too. Up to 50 entries are kept per repository.
@@ -141,18 +150,30 @@ The status bar shows the active repository's branch with its push/pull state. A 
 
 ---
 
-## AWS profiles
+## Jupyter notebooks
 
-A status-bar AWS profile selector, scoped per window, so two windows can target different accounts at once. Everything Lathe spawns (terminals, tasks) inherits the selected `AWS_PROFILE`. The menu shows only profiles you've used in this workspace, with the rest behind **Show All Profiles**, and it polls SSO session status so an expired login is visible before a command fails. A project-local `.aws/config` takes over from the global one when present. The whole selector stays hidden unless the machine actually has AWS profiles configured.
+Upstream gates its notebook editor behind the server-side `notebooks` feature flag, so stock Zed opens `.ipynb` files only for accounts that flag has been enabled for. Lathe replaces that gate with an ordinary setting, `jupyter.notebook_enabled`, and surfaces it in the settings UI under **Languages and Tools > Jupyter Notebooks** as **Enable Experimental Notebook Editor**, so turning it on does not mean hand-editing JSON or waiting to be flagged.
 
-The same menu creates a new SSO profile through a wizard, opens the AWS config file for editing, appends a `credential_process` wrapper profile for tooling that still expects SDK v2 credentials, and deactivates the current selection.
+The editor itself is upstream's and still experimental; what changed is who is allowed to switch it on. Disabling it needs a restart.
+
+![Jupyter Notebook Setting](../assets/screenshots/jupyter-notebook-setting.png)
+
 
 ---
 
 ## Terminal, windows, and workspaces
 
+### Additional windows for editors and terminals
+Send an editor tab or a terminal into a second window from its tab context menu. With no second window open the entry is flat: **Open in New Window** for editors, **Move to New Window** for terminals. Once one exists, both become submenus (**Open in Window** and **Move to Window**) that list every open window on the same project, so a tab can be aimed at a specific one instead of always spawning another.
+
+The two surfaces move differently on purpose. An editor opens as another view of the same buffer, so both windows stay in sync. A terminal is transferred rather than copied: the same view moves, and therefore the same process, scrollback, and input state. It leaves its source pane before it is added anywhere else, so it is never mounted in two windows at once.
+
+These windows sit outside workspace persistence by design. They claim no database id, don't save bounds, and don't serialize their items, so they never reappear as ghost windows on restart. `FloatingWindowManager` owns the close path: closing a window hands its terminals back to the panes they came from rather than killing them. One window can hold terminals drawn from several panes, so each transfer records its own source and a close returns them one by one.
+
+The edge cases are handled rather than left to chance. A pane a terminal vacates closes if that empties it, since an empty pane draws no tab bar and would otherwise sit in the surviving window as a blank region with no way to dismiss it. A returning terminal reveals the terminal panel only if it belongs there, and skips a source pane the workspace no longer lays out, so a center terminal cannot reopen an empty dock. A new window does not raise itself and an existing target may be behind the current one, so the destination is activated either way. Activating an item no longer takes focus in `TerminalView`, leaving that to the pane, so a terminal finishing startup in the background cannot pull you out of an open modal.
+
 ### Awaiting-input indicator
-Shows a return icon in the terminal tab and title bar when Claude Code or other interactive prompts are waiting for input, with the tooltip distinguishing a general prompt, a confirmation, and a multiple-choice selection.
+Shows a return icon in the terminal tab and title bar when Claude Code or other interactive prompts are waiting for input, with the tooltip distinguishing a general prompt, a confirmation, and a multiple-choice selection. The agent panel surfaces the same indicator when a thread is waiting on you, so an approval request doesn't sit unnoticed while you work in another tab.
 
 ![Awaiting Input Indicator](../assets/screenshots/awaiting-input-indicator.gif)
 
@@ -182,3 +203,11 @@ Sign into more than one Zed Cloud account and switch between them from the avata
 
 ### Copy collab link dialog
 When generating a shareable collab link, a dialog lets you pick which saved account to link from, which helps when you work across personal and work Zed Cloud accounts.
+
+---
+
+## AWS profiles
+
+A status-bar AWS profile selector, scoped per window, so two windows can target different accounts at once. Everything Lathe spawns (terminals, tasks) inherits the selected `AWS_PROFILE`. The menu shows only profiles you've used in this workspace, with the rest behind **Show All Profiles**, and it polls SSO session status so an expired login is visible before a command fails. A project-local `.aws/config` takes over from the global one when present. The whole selector stays hidden unless the machine actually has AWS profiles configured.
+
+The same menu creates a new SSO profile through a wizard, opens the AWS config file for editing, appends a `credential_process` wrapper profile for tooling that still expects SDK v2 credentials, and deactivates the current selection.

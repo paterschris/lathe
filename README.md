@@ -28,9 +28,10 @@ Ordered by how much each one differentiates Lathe from stock Zed. Upstream alrea
 4. [Code navigation](docs/features.md#code-navigation) - peek view for definitions and references
 5. [AI agent integration](docs/features.md#ai-agent-integration) - multi-account sign-in, approval control, per-workspace thread history
 6. [Theme and syntax highlighting](docs/features.md#theme-and-syntax-highlighting) - custom theme, live 200+ color customizer
-7. [Git additions](docs/features.md#git-additions) - explorer tab, branch tree, undo, Git Flow
-8. [AWS profiles](docs/features.md#aws-profiles) - per-window profile selector
-9. [Terminal, windows, and workspaces](docs/features.md#terminal-windows-and-workspaces) - awaiting-input indicator, workspace groups, per-window zoom
+7. [Git additions](docs/features.md#git-additions) - explorer tab, branch tree, graph context menus, undo, Git Flow
+8. [Jupyter notebooks](docs/features.md#jupyter-notebooks) - an ordinary setting in place of upstream's server-side feature flag
+9. [Terminal, windows, and workspaces](docs/features.md#terminal-windows-and-workspaces) - additional windows for editors and terminals, awaiting-input indicator, workspace groups, per-window zoom
+10. [AWS profiles](docs/features.md#aws-profiles) - per-window profile selector
 
 Each of these is described in full, with screenshots, in **[docs/features.md](docs/features.md)**.
 
