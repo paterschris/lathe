@@ -39,7 +39,7 @@ use collections::{HashMap, HashSet};
 use futures::Future;
 use futures::future::LocalBoxFuture;
 use futures::lock::OwnedMutexGuard;
-use gpui::{App, AsyncApp, Entity, EntityId};
+use gpui::{App, AsyncApp, Entity, EntityId, SharedString};
 use http_client::HttpClient;
 
 pub use language_core::{
@@ -65,13 +65,15 @@ pub use language_registry::{
     LanguageLoader, LanguageName, LanguageServerStatusUpdate, LoadedLanguage, ServerHealth,
 };
 use lsp::{
-    CodeActionKind, InitializeParams, LanguageServerBinary, LanguageServerBinaryOptions, Uri,
+    CodeActionKind, DownloadConsentRequest, InitializeParams, LanguageServerBinary,
+    LanguageServerBinaryOptions, Uri,
 };
 pub use manifest::{ManifestDelegate, ManifestName, ManifestProvider, ManifestQuery};
 pub use modeline::{ModelineSettings, parse_modeline};
 use parking_lot::Mutex;
 use regex::Regex;
 pub use runnable::{ResolvedRunnable, RunnableMatchCapture, RunnableRange, RunnableResolver};
+use http_client::github::GitHubLspBinaryVersion;
 use semver::Version;
 use serde_json::Value;
 use settings::WorktreeId;
@@ -696,8 +698,58 @@ pub trait LspAdapter: 'static + Send + Sync + DynLspInstaller {
     fn process_prompt_response(&self, _context: &PromptResponseContext, _cx: &mut AsyncApp) {}
 }
 
+/// Describes a language server version for the download-consent prompt, so the user can see
+/// exactly what is about to be fetched and so an approval can be recorded against that version.
+///
+/// Adapters whose version type cannot describe itself return `None`, which makes the prompt ask
+/// every time rather than silently reusing an approval for different code.
+pub trait DownloadVersionInfo {
+    /// A short version string, such as `0.3.2000`.
+    fn version_label(&self) -> Option<SharedString> {
+        None
+    }
+
+    /// The URL the bytes will come from, when known.
+    fn download_url(&self) -> Option<SharedString> {
+        None
+    }
+
+    /// Whether the source publishes a checksum that will be verified after download.
+    fn has_checksum(&self) -> bool {
+        false
+    }
+}
+
+impl DownloadVersionInfo for () {}
+
+impl DownloadVersionInfo for semver::Version {
+    fn version_label(&self) -> Option<SharedString> {
+        Some(self.to_string().into())
+    }
+}
+
+impl DownloadVersionInfo for Option<String> {
+    fn version_label(&self) -> Option<SharedString> {
+        self.as_ref().map(|version| version.clone().into())
+    }
+}
+
+impl DownloadVersionInfo for GitHubLspBinaryVersion {
+    fn version_label(&self) -> Option<SharedString> {
+        Some(self.name.clone().into())
+    }
+
+    fn download_url(&self) -> Option<SharedString> {
+        Some(self.url.clone().into())
+    }
+
+    fn has_checksum(&self) -> bool {
+        self.digest.is_some()
+    }
+}
+
 pub trait LspInstaller {
-    type BinaryVersion;
+    type BinaryVersion: DownloadVersionInfo;
     fn check_if_user_installed(
         &self,
         _: &Arc<dyn LspAdapterDelegate>,
@@ -743,7 +795,7 @@ pub trait DynLspInstaller {
         &self,
         delegate: &Arc<dyn LspAdapterDelegate>,
         container_dir: PathBuf,
-        pre_release: bool,
+        binary_options: LanguageServerBinaryOptions,
         cx: &mut AsyncApp,
     ) -> Result<LanguageServerBinary>;
 
@@ -760,14 +812,14 @@ pub trait DynLspInstaller {
 #[async_trait(?Send)]
 impl<LI, BinaryVersion> DynLspInstaller for LI
 where
-    BinaryVersion: Send + Sync,
+    BinaryVersion: Send + Sync + DownloadVersionInfo,
     LI: LspInstaller<BinaryVersion = BinaryVersion> + LspAdapter,
 {
     async fn try_fetch_server_binary(
         &self,
         delegate: &Arc<dyn LspAdapterDelegate>,
         container_dir: PathBuf,
-        pre_release: bool,
+        binary_options: LanguageServerBinaryOptions,
         cx: &mut AsyncApp,
     ) -> Result<LanguageServerBinary> {
         let name = self.name();
@@ -776,7 +828,7 @@ where
         delegate.update_status(name.clone(), BinaryStatus::CheckingForUpdate);
 
         let latest_version = self
-            .fetch_latest_server_version(delegate, pre_release, cx)
+            .fetch_latest_server_version(delegate, binary_options.pre_release, cx)
             .await?;
 
         if let Some(binary) = cx
@@ -788,6 +840,25 @@ where
             delegate.update_status(name.clone(), BinaryStatus::None);
             Ok(binary)
         } else {
+            if let Some(consent) = binary_options.download_consent.as_ref() {
+                let request = DownloadConsentRequest {
+                    name: name.clone(),
+                    version: latest_version.version_label(),
+                    url: latest_version.download_url(),
+                    has_checksum: latest_version.has_checksum(),
+                };
+                if !consent(request).await {
+                    delegate.update_status(name.clone(), BinaryStatus::None);
+                    anyhow::bail!(
+                        "downloading language server {} was not approved",
+                        name.0
+                    );
+                }
+            } else if !binary_options.allow_binary_download {
+                delegate.update_status(name.clone(), BinaryStatus::None);
+                anyhow::bail!("downloading language server {} is disabled", name.0);
+            }
+
             log::debug!("downloading language server {:?}", name.0);
             delegate.update_status(name.clone(), BinaryStatus::Downloading);
             let binary = cx
@@ -840,9 +911,16 @@ where
                 return (Ok(cached_binary.clone()), None);
             }
 
-            if !binary_options.allow_binary_download {
+            if !binary_options.allow_binary_download && binary_options.download_consent.is_none() {
                 return (
-                    Err(anyhow::anyhow!("downloading language servers disabled")),
+                    Err(anyhow::anyhow!(
+                        "no binary for language server {} was found on your system, and \
+                        `allow_binary_downloads` is `false` in settings, so one was not \
+                        downloaded. Install it yourself and put it on your `$PATH`, or set \
+                        `lsp.{}.binary.path` in settings.",
+                        self.name().0,
+                        self.name().0,
+                    )),
                     None,
                 );
             }
@@ -866,7 +944,7 @@ where
                     .try_fetch_server_binary(
                         &delegate,
                         container_dir.to_path_buf(),
-                        binary_options.pre_release,
+                        binary_options.clone(),
                         &mut cx,
                     )
                     .await;

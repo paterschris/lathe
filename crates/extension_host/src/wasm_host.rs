@@ -29,11 +29,16 @@ use moka::sync::Cache;
 use node_runtime::NodeRuntime;
 use release_channel::ReleaseChannel;
 use semver::Version;
-use settings::Settings;
+use project::binary_download_consent::{BinaryDownloadConsent, ConsentRequester};
+use project::project_settings::ProjectSettings;
+use settings::{Settings, SettingsStore};
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock, OnceLock},
+    sync::{
+        Arc, LazyLock, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use task::{DebugScenario, SpawnInTerminal, TaskTemplate, ZedDebugConfig};
@@ -55,6 +60,15 @@ pub struct WasmHost {
     pub work_dir: PathBuf,
     /// The capabilities granted to extensions running on the host.
     pub(crate) granted_capabilities: Vec<ExtensionCapability>,
+    /// Mirrors the `allow_binary_downloads` setting. Held as an atomic rather than read through
+    /// `on_main_thread` because `WasmState` is not `Sync`, so the wasm import futures cannot hold a
+    /// borrow of it across a main-thread round trip.
+    pub(crate) allow_binary_downloads: Arc<AtomicBool>,
+    /// Mirrors `prompt_before_binary_downloads`, alongside the handle used to ask.
+    pub(crate) prompt_before_binary_downloads: Arc<AtomicBool>,
+    /// `ConsentRequester` is `Send + Sync` and answers over a channel, so unlike a context it can
+    /// be awaited from inside a wasm import.
+    pub(crate) download_consent: Option<ConsentRequester>,
     _main_thread_message_task: Task<()>,
     main_thread_message_tx: mpsc::UnboundedSender<MainThreadCall>,
 }
@@ -624,6 +638,25 @@ impl WasmHost {
             }
         });
 
+        let allow_binary_downloads = Arc::new(AtomicBool::new(
+            ProjectSettings::get_global(cx).allow_binary_downloads,
+        ));
+        let prompt_before_binary_downloads = Arc::new(AtomicBool::new(
+            ProjectSettings::get_global(cx).prompt_before_binary_downloads,
+        ));
+        cx.observe_global::<SettingsStore>({
+            let allow_binary_downloads = allow_binary_downloads.clone();
+            let prompt_before_binary_downloads = prompt_before_binary_downloads.clone();
+            move |cx| {
+                let settings = ProjectSettings::get_global(cx);
+                allow_binary_downloads.store(settings.allow_binary_downloads, Ordering::Relaxed);
+                prompt_before_binary_downloads
+                    .store(settings.prompt_before_binary_downloads, Ordering::Relaxed);
+            }
+        })
+        .detach();
+        let download_consent = BinaryDownloadConsent::requester(cx);
+
         let extension_settings = ExtensionSettings::get_global(cx);
 
         Arc::new(Self {
@@ -635,6 +668,9 @@ impl WasmHost {
             proxy,
             release_channel: ReleaseChannel::global(cx),
             granted_capabilities: extension_settings.granted_capabilities.clone(),
+            allow_binary_downloads,
+            prompt_before_binary_downloads,
+            download_consent,
             _main_thread_message_task: task,
             main_thread_message_tx: tx,
         })

@@ -17,6 +17,9 @@ use futures::{AsyncReadExt, lock::Mutex};
 use futures::{FutureExt as _, io::BufReader};
 use gpui::{BackgroundExecutor, SharedString};
 use language::{BinaryStatus, LanguageName, language_settings::AllLanguageSettings};
+use project::binary_download_consent::{
+    BinaryDownloadKind, BinaryDownloadRequest, ConsentOutcome,
+};
 use project::project_settings::ProjectSettings;
 use semver::Version;
 use std::{
@@ -1082,6 +1085,43 @@ impl ExtensionImports for WasmState {
         maybe!(async {
             let parsed_url = Url::parse(&url)?;
             self.capability_granter.grant_download_file(&parsed_url)?;
+
+            if !self
+                .host
+                .allow_binary_downloads
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                let approved = match self.host.download_consent.as_ref() {
+                    Some(requester)
+                        if self
+                            .host
+                            .prompt_before_binary_downloads
+                            .load(std::sync::atomic::Ordering::Relaxed) =>
+                    {
+                        requester
+                            .request(BinaryDownloadRequest {
+                                name: self.manifest.name.clone().into(),
+                                // Extensions request arbitrary URLs, so there is no version to
+                                // pin an approval to; the user is asked each time unless they
+                                // choose to always allow the extension.
+                                version: None,
+                                url: url.clone().into(),
+                                kind: BinaryDownloadKind::Extension,
+                                verified: false,
+                            })
+                            .await
+                            == ConsentOutcome::Granted
+                    }
+                    _ => false,
+                };
+                anyhow::ensure!(
+                    approved,
+                    "extension {} was blocked from downloading {url} because \
+                    `allow_binary_downloads` is `false` in settings and the download was not \
+                    approved",
+                    self.manifest.id,
+                );
+            }
 
             let path = PathBuf::from(path);
             let extension_work_dir = self.host.work_dir.join(self.manifest.id.as_ref());

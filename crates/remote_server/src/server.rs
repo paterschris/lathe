@@ -1247,6 +1247,8 @@ fn initialize_settings(
                 allow_path_lookup: !new_node_settings.ignore_system_version,
                 // TODO: Implement this setting
                 allow_binary_download: true,
+                // The remote server is headless, so there is nobody to show a prompt to.
+                download_consent: None,
                 use_paths: new_node_settings.path.as_ref().map(|node_path| {
                     let node_path = PathBuf::from(shellexpand::tilde(node_path).as_ref());
                     let npm_path = new_node_settings

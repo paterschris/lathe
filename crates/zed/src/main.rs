@@ -499,6 +499,7 @@ fn main() {
             }
         };
         trusted_worktrees::init(db_trusted_paths, cx);
+        project::binary_download_consent::BinaryDownloadConsent::init(cx);
         menu::init();
         zed_actions::init();
 
@@ -545,11 +546,50 @@ fn main() {
         let languages = Arc::new(languages);
         let (mut tx, rx) = watch::channel(None);
         cx.observe_global::<SettingsStore>(move |cx| {
-            let settings = &ProjectSettings::get_global(cx).node;
+            let project_settings = ProjectSettings::get_global(cx);
+            let settings = &project_settings.node;
+            let download_consent = if project_settings.prompt_before_binary_downloads {
+                project::binary_download_consent::BinaryDownloadConsent::requester(cx).map(
+                    |requester| {
+                        Arc::new(move |request: node_runtime::NodeDownloadRequest| {
+                            let requester = requester.clone();
+                            async move {
+                                use project::binary_download_consent::{
+                                    BinaryDownloadKind, BinaryDownloadRequest, ConsentOutcome,
+                                };
+                                let kind = if request.is_npm_package {
+                                    BinaryDownloadKind::NpmPackages
+                                } else {
+                                    BinaryDownloadKind::NodeRuntime
+                                };
+                                let outcome = requester
+                                    .request(BinaryDownloadRequest {
+                                        name: request.name.into(),
+                                        version: request.version.map(Into::into),
+                                        url: if request.is_npm_package {
+                                            "https://registry.npmjs.org".into()
+                                        } else {
+                                            "https://nodejs.org".into()
+                                        },
+                                        kind,
+                                        // npm and the Node.js release archive are fetched over
+                                        // TLS but without a per-artifact checksum Lathe verifies.
+                                        verified: false,
+                                    })
+                                    .await;
+                                outcome == ConsentOutcome::Granted
+                            }
+                            .boxed()
+                        }) as node_runtime::DownloadConsent
+                    },
+                )
+            } else {
+                None
+            };
             let options = NodeBinaryOptions {
                 allow_path_lookup: !settings.ignore_system_version,
-                // TODO: Expose this setting
-                allow_binary_download: true,
+                allow_binary_download: project_settings.allow_binary_downloads,
+                download_consent,
                 use_paths: settings.path.as_ref().map(|node_path| {
                     let node_path = PathBuf::from(shellexpand::tilde(node_path).as_ref());
                     let npm_path = settings

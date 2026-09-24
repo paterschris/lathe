@@ -82,6 +82,8 @@ pub fn init(cx: &mut App) -> EpAppState {
         let options = NodeBinaryOptions {
             allow_path_lookup: !settings.ignore_system_version,
             allow_binary_download: true,
+            // Headless CLI, so there is nobody to prompt.
+            download_consent: None,
             use_paths: settings.path.as_ref().map(|node_path| {
                 let node_path = PathBuf::from(shellexpand::tilde(node_path).as_ref());
                 let npm_path = settings

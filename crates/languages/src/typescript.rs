@@ -661,6 +661,12 @@ pub struct TypeScriptVersions {
     server_version: Version,
 }
 
+impl language::DownloadVersionInfo for TypeScriptVersions {
+    fn version_label(&self) -> Option<gpui::SharedString> {
+        Some(format!("typescript {}, server {}", self.typescript_version, self.server_version).into())
+    }
+}
+
 impl LspInstaller for TypeScriptLspAdapter {
     type BinaryVersion = TypeScriptVersions;
 

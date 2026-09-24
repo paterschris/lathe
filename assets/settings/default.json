@@ -2255,6 +2255,22 @@
     "Markdown": [".rules", ".cursorrules", ".windsurfrules", ".clinerules"],
     "Shell Script": [".env.*"],
   },
+  // Whether Lathe may download executables from the internet on your behalf, such
+  // as its own copy of Node.js or a language server for a file you just opened.
+  // Set this to `false` to keep Lathe from fetching and running anything you did
+  // not install yourself. Lathe will then only use binaries already on your
+  // `$PATH` or configured explicitly via `node.path` or `lsp.<server>.binary.path`,
+  // and will surface an error instead of downloading.
+  "allow_binary_downloads": true,
+  // When `allow_binary_downloads` is `false`, ask before each download instead of refusing it
+  // outright. Approving a download records it in `approved_binary_downloads` below. Has no effect
+  // while `allow_binary_downloads` is `true`.
+  "prompt_before_binary_downloads": false,
+  // Downloads you have already approved, as a map of item name to approved version. A version of
+  // "*" approves that item permanently, including future updates; any other value approves only
+  // that exact version, so an update asks again. Written by the download prompt, and safe to edit
+  // or pre-populate by hand.
+  "approved_binary_downloads": {},
   // Settings for which version of Node.js and NPM to use when installing
   // language servers and Copilot.
   //

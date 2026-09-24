@@ -6,6 +6,10 @@ use super::{
 };
 use remote::Interactive;
 
+use crate::binary_download_consent::{
+    BinaryDownloadConsent, BinaryDownloadKind, BinaryDownloadRequest, ConsentOutcome,
+    ConsentRequester,
+};
 use crate::{
     InlayHint, InlayHintLabel, ProjectEnvironment, ResolveState,
     debugger::session::SessionQuirks,
@@ -628,6 +632,11 @@ impl DapStore {
                 .environment
                 .update(cx, |env, cx| env.worktree_environment(worktree.clone(), cx)),
             local_store.is_headless,
+            ProjectSettings::get_global(cx).allow_binary_downloads,
+            ProjectSettings::get_global(cx)
+                .prompt_before_binary_downloads
+                .then(|| BinaryDownloadConsent::requester(cx))
+                .flatten(),
         ))
     }
 
@@ -959,6 +968,8 @@ pub struct DapAdapterDelegate {
     toolchain_store: Arc<dyn LanguageToolchainStore>,
     load_shell_env_task: Shared<Task<Option<HashMap<String, String>>>>,
     is_headless: bool,
+    allow_binary_downloads: bool,
+    download_consent: Option<ConsentRequester>,
 }
 
 impl DapAdapterDelegate {
@@ -971,6 +982,8 @@ impl DapAdapterDelegate {
         toolchain_store: Arc<dyn LanguageToolchainStore>,
         load_shell_env_task: Shared<Task<Option<HashMap<String, String>>>>,
         is_headless: bool,
+        allow_binary_downloads: bool,
+        download_consent: Option<ConsentRequester>,
     ) -> Self {
         Self {
             fs,
@@ -981,6 +994,8 @@ impl DapAdapterDelegate {
             toolchain_store,
             load_shell_env_task,
             is_headless,
+            allow_binary_downloads,
+            download_consent,
         }
     }
 }
@@ -1047,5 +1062,31 @@ impl dap::adapters::DapDelegate for DapAdapterDelegate {
 
     fn is_headless(&self) -> bool {
         self.is_headless
+    }
+
+    fn allow_binary_downloads(&self) -> bool {
+        self.allow_binary_downloads
+    }
+
+    async fn request_download_consent(
+        &self,
+        adapter_name: &str,
+        version: &str,
+        url: &str,
+        has_checksum: bool,
+    ) -> bool {
+        let Some(requester) = self.download_consent.as_ref() else {
+            return false;
+        };
+        requester
+            .request(BinaryDownloadRequest {
+                name: adapter_name.to_string().into(),
+                version: Some(version.to_string().into()),
+                url: url.to_string().into(),
+                kind: BinaryDownloadKind::DebugAdapter,
+                verified: has_checksum,
+            })
+            .await
+            == ConsentOutcome::Granted
     }
 }

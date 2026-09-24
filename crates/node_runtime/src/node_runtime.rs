@@ -25,11 +25,55 @@ use util::archive::extract_zip;
 
 const NODE_CA_CERTS_ENV_VAR: &str = "NODE_EXTRA_CA_CERTS";
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// Asks the user whether a download may proceed. Supplied by the project layer, which owns the
+/// settings and the prompt; this crate only knows what it is about to fetch.
+pub type DownloadConsent = Arc<
+    dyn Fn(NodeDownloadRequest) -> futures::future::BoxFuture<'static, bool> + Send + Sync,
+>;
+
+/// What the user is being asked to approve.
+#[derive(Debug, Clone)]
+pub struct NodeDownloadRequest {
+    /// Recognizable name, such as `Node.js` or the npm package being installed.
+    pub name: String,
+    /// The version about to be fetched, when known.
+    pub version: Option<String>,
+    /// Whether this is an npm package install rather than the Node.js runtime itself.
+    pub is_npm_package: bool,
+}
+
+#[derive(Clone, Default)]
 pub struct NodeBinaryOptions {
     pub allow_path_lookup: bool,
     pub allow_binary_download: bool,
+    /// When set, consulted before each download even if `allow_binary_download` is `false`.
+    pub download_consent: Option<DownloadConsent>,
     pub use_paths: Option<(PathBuf, PathBuf)>,
+}
+
+// The consent callback is behavior, not configuration, so it is deliberately excluded from
+// equality and debug output: the runtime compares options to decide when to rebuild its cached
+// instance, and a change of closure identity should not invalidate that.
+impl PartialEq for NodeBinaryOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.allow_path_lookup == other.allow_path_lookup
+            && self.allow_binary_download == other.allow_binary_download
+            && self.download_consent.is_some() == other.download_consent.is_some()
+            && self.use_paths == other.use_paths
+    }
+}
+
+impl Eq for NodeBinaryOptions {}
+
+impl std::fmt::Debug for NodeBinaryOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeBinaryOptions")
+            .field("allow_path_lookup", &self.allow_path_lookup)
+            .field("allow_binary_download", &self.allow_binary_download)
+            .field("download_consent", &self.download_consent.is_some())
+            .field("use_paths", &self.use_paths)
+            .finish()
+    }
 }
 
 /// Use this when you need to launch npm as a long-lived process (for example, an agent server),
@@ -147,7 +191,21 @@ impl NodeRuntime {
             None
         };
 
-        let instance = if options.allow_binary_download {
+        // With a consent callback the user still gets a say, so a `false` flag is not the end of it.
+        let may_download = if options.allow_binary_download {
+            true
+        } else if let Some(consent) = options.download_consent.as_ref() {
+            consent(NodeDownloadRequest {
+                name: "Node.js".to_string(),
+                version: Some(ManagedNodeRuntime::VERSION.to_string()),
+                is_npm_package: false,
+            })
+            .await
+        } else {
+            false
+        };
+
+        let instance = if may_download {
             let (log_level, why_using_managed) = match system_node_error {
                 Some(err @ DetectError::Other(_)) => (Level::Warn, err.to_string()),
                 Some(err @ DetectError::NotInPath(_)) => (Level::Info, err.to_string()),
@@ -184,23 +242,21 @@ impl NodeRuntime {
             }
         } else if let Some(system_node_error) = system_node_error {
             // failure case not cached, since it's cheap to check again
-            //
-            // TODO: When support is added for setting `options.allow_binary_download`, update this
-            // error message.
             return Box::new(UnavailableNodeRuntime {
                 error_message: format!(
-                    "failure while checking system Node.js from PATH: {}",
+                    "failure while checking system Node.js from PATH, and \
+                    `allow_binary_downloads` is `false` in settings so a managed copy was not \
+                    downloaded: {}",
                     system_node_error
                 )
                 .into(),
             });
         } else {
             // failure case is cached because it will always happen with these options
-            //
-            // TODO: When support is added for setting `options.allow_binary_download`, update this
-            // error message.
             Box::new(UnavailableNodeRuntime {
-                error_message: "`node` settings do not allow any way to use Node.js"
+                error_message: "`node.ignore_system_version` is `true` but \
+                    `allow_binary_downloads` is `false`, so there is no way to obtain Node.js. \
+                    Set `node.path` to a Node.js binary, or change one of those settings."
                     .to_string()
                     .into(),
             })
@@ -302,6 +358,22 @@ impl NodeRuntime {
         Ok(selected_version)
     }
 
+    /// Whether the current settings permit fetching code from the network. Read separately from
+    /// [`Self::instance`] because npm can install packages through a system Node.js that was never
+    /// itself downloaded, so the runtime being available does not imply downloads are allowed.
+    async fn current_options(&self) -> Option<NodeBinaryOptions> {
+        let mut state = self.0.lock().await;
+
+        loop {
+            if let Some(options) = state.options.borrow().as_ref() {
+                return Some(options.clone());
+            }
+            if state.options.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
+
     pub async fn npm_install_packages(
         &self,
         directory: &Path,
@@ -310,6 +382,42 @@ impl NodeRuntime {
         if packages.is_empty() {
             return Ok(());
         }
+
+        let options = self.current_options().await;
+        let allowed = match options.as_ref() {
+            Some(options) if options.allow_binary_download => true,
+            Some(options) => match options.download_consent.as_ref() {
+                // Ask once for the whole install. The packages are a dependency closure for a
+                // single tool, so approving part of it could not produce a working result.
+                Some(consent) => {
+                    let (name, version) = match packages {
+                        [(name, version)] => ((*name).to_string(), Some((*version).to_string())),
+                        _ => (
+                            packages
+                                .iter()
+                                .map(|(name, _)| *name)
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            None,
+                        ),
+                    };
+                    consent(NodeDownloadRequest {
+                        name,
+                        version,
+                        is_npm_package: true,
+                    })
+                    .await
+                }
+                None => false,
+            },
+            None => false,
+        };
+
+        anyhow::ensure!(
+            allowed,
+            "refusing to install npm packages {packages:?} because `allow_binary_downloads` is \
+            `false` in settings and the download was not approved"
+        );
 
         log::debug!(
             "installing npm packages directory={} packages={packages:?}",

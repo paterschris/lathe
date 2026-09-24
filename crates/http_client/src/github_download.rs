@@ -111,6 +111,11 @@ pub async fn download_server_raw_binary(
                 sha256_matches(&asset_sha_256, expected_sha_256),
                 "{url} asset got SHA-256 mismatch. Expected: {expected_sha_256}, Got: {asset_sha_256}",
             );
+        } else {
+            log::warn!(
+                "{url} was downloaded and will be executed without integrity verification, \
+                because the release did not publish a SHA-256 digest (got {asset_sha_256})"
+            );
         }
 
         util::fs::make_file_executable(&binary_path)
@@ -169,6 +174,10 @@ async fn extract_to_staging(
                 })?;
         }
         None => {
+            log::warn!(
+                "{url} is being extracted and will be executed without integrity verification, \
+                because the release did not publish a SHA-256 digest"
+            );
             stream_response_archive(body, url, staging_path, asset_kind)
                 .await
                 .with_context(|| {

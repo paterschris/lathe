@@ -74,6 +74,15 @@ pub struct ProjectSettings {
     /// Configuration for Node-related features
     pub node: NodeBinarySettings,
 
+    /// Whether Lathe may download executables from the internet on your behalf.
+    pub allow_binary_downloads: bool,
+
+    /// When `allow_binary_downloads` is false, whether to ask instead of refusing outright.
+    pub prompt_before_binary_downloads: bool,
+
+    /// Downloads the user has already approved, as item name to approved version.
+    pub approved_binary_downloads: HashMap<Arc<str>, Arc<str>>,
+
     /// Configuration for how direnv configuration should be loaded
     pub load_direnv: DirenvSettings,
 
@@ -795,6 +804,15 @@ impl Settings for ProjectSettings {
             },
             git: git_settings,
             node: content.node.clone().unwrap().into(),
+            allow_binary_downloads: content.allow_binary_downloads.unwrap(),
+            prompt_before_binary_downloads: content.prompt_before_binary_downloads.unwrap(),
+            approved_binary_downloads: content
+                .approved_binary_downloads
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, version)| (Arc::from(name.as_str()), Arc::from(version.as_str())))
+                .collect(),
             load_direnv: project.load_direnv.clone().unwrap(),
             session: SessionSettings {
                 restore_unsaved_buffers: content.session.unwrap().restore_unsaved_buffers.unwrap(),

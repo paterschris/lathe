@@ -32,6 +32,9 @@ use self::document_symbols::DocumentSymbolsData;
 use self::dynamic_registration::DynamicRegistrations;
 use self::inlay_hints::BufferInlayHints;
 use crate::{
+    binary_download_consent::{
+        BinaryDownloadConsent, BinaryDownloadKind, BinaryDownloadRequest, ConsentOutcome,
+    },
     CodeAction, Completion, CompletionDisplayOptions, CompletionResponse, CompletionSource,
     CoreCompletion, Hover, InlayHint, InlayId, LocationLink, LspAction, LspPullDiagnostics,
     ManifestProvidersStore, Project, ProjectItem, ProjectPath, ProjectTransaction,
@@ -506,7 +509,7 @@ impl LocalLspStore {
             settings,
             toolchain.clone(),
             delegate.clone(),
-            true,
+            ProjectSettings::get_global(cx).allow_binary_downloads,
             wait_until_worktree_trust,
             cx,
         );
@@ -802,6 +805,31 @@ impl LocalLspStore {
             )));
         }
 
+        // Only build a consent callback when the user has asked to be prompted; otherwise the
+        // plain `allow_binary_download` flag stays the final word.
+        let download_consent = if ProjectSettings::get_global(cx).prompt_before_binary_downloads {
+            BinaryDownloadConsent::requester(cx).map(|requester| {
+                Arc::new(move |request: ::lsp::DownloadConsentRequest| {
+                    let requester = requester.clone();
+                    async move {
+                        let outcome = requester
+                            .request(BinaryDownloadRequest {
+                                name: request.name.0.clone(),
+                                version: request.version,
+                                url: request.url.unwrap_or_default(),
+                                kind: BinaryDownloadKind::LanguageServer,
+                                verified: request.has_checksum,
+                            })
+                            .await;
+                        outcome == ConsentOutcome::Granted
+                    }
+                    .boxed()
+                }) as ::lsp::DownloadConsent
+            })
+        } else {
+            None
+        };
+
         let lsp_binary_options = LanguageServerBinaryOptions {
             allow_path_lookup: !settings
                 .binary
@@ -809,6 +837,7 @@ impl LocalLspStore {
                 .and_then(|b| b.ignore_system_version)
                 .unwrap_or_default(),
             allow_binary_download,
+            download_consent,
             pre_release: settings
                 .fetch
                 .as_ref()

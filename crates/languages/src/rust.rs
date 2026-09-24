@@ -611,6 +611,7 @@ impl LspAdapter for RustLspAdapter {
                 LanguageServerBinaryOptions {
                     allow_path_lookup: true,
                     allow_binary_download: false,
+                    download_consent: None,
                     pre_release: false,
                 },
                 cached_binary,

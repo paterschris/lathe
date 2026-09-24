@@ -302,6 +302,31 @@ pub struct SettingsContent {
     /// Default: off
     pub reduce_motion: Option<ReduceMotionMode>,
 
+    /// Whether Lathe may download executables from the internet on your behalf,
+    /// such as its own copy of Node.js or a language server for a file you just
+    /// opened. When `false`, Lathe only uses binaries already on your `$PATH` or
+    /// configured explicitly via `node.path` or `lsp.<server>.binary.path`, and
+    /// reports an error instead of fetching anything.
+    ///
+    /// Default: `true`
+    pub allow_binary_downloads: Option<bool>,
+
+    /// When `allow_binary_downloads` is `false`, whether to ask before each download instead of
+    /// refusing it outright. Approving a download records it in `approved_binary_downloads`.
+    /// Has no effect while `allow_binary_downloads` is `true`.
+    ///
+    /// Default: `false`
+    pub prompt_before_binary_downloads: Option<bool>,
+
+    /// Downloads you have already approved, as a map of item name to the approved version.
+    /// A version of `"*"` approves the item permanently, including future updates; any other
+    /// value only approves that exact version, so an update asks again.
+    ///
+    /// Written by the download prompt, and safe to edit or pre-populate by hand.
+    ///
+    /// Default: `{}`
+    pub approved_binary_downloads: Option<BTreeMap<String, String>>,
+
     /// The URL of the Zed server to connect to.
     pub server_url: Option<String>,
 
@@ -453,7 +478,9 @@ fallible_options::flattened_deserialize!(SettingsContent {
         collaboration_panel, debugger, diagnostics, git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
         journal, log, line_indicator_format, language_models, outline_panel, project_panel,
-        node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
+        node, proxy, reduce_motion, allow_binary_downloads, prompt_before_binary_downloads,
+        approved_binary_downloads, server_url, credentials_url, session,
+        telemetry, terminal,
         title_bar, vim_mode, calls, which_key, vim, modeline_lines, feature_flags,
         instrumentation,
     },

@@ -271,7 +271,7 @@ impl DynLspInstaller for ExtensionLspAdapter {
         &self,
         _: &Arc<dyn LspAdapterDelegate>,
         _: PathBuf,
-        _: bool,
+        _: LanguageServerBinaryOptions,
         _: &mut AsyncApp,
     ) -> Result<LanguageServerBinary> {
         unreachable!("get_language_server_command is overridden")

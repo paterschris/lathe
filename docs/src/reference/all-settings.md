@@ -98,6 +98,76 @@ Non-negative `float` values
 
 `integer` values from `6` to `100` pixels (inclusive)
 
+## Allow Binary Downloads
+
+- Description: Whether Lathe may download executables from the internet on your behalf.
+- Setting: `allow_binary_downloads`
+- Default: `true`
+
+By default, Lathe fetches the binaries it needs as you need them: its own copy of Node.js when no suitable one is on your `$PATH`, a language server the first time you open a file in a language it supports, and a debug adapter the first time you start a debug session. These are downloaded and executed without prompting.
+
+Set this to `false` to stop that. Lathe will then only run binaries that are already on your `$PATH` or that you have pointed it at explicitly, and will report an error in its place rather than fetching anything:
+
+```json [settings]
+{
+  "allow_binary_downloads": false
+}
+```
+
+With downloads disabled, supply binaries yourself using [`node.path`](#node) for Node.js and `lsp.<server>.binary.path` for individual language servers. See [Configuring Languages](../configuring-languages.md) for details.
+
+This covers every path Lathe fetches executable code through: its Node.js runtime, npm package installs, built-in language servers, debug adapters, and files requested by extensions.
+
+Rather than refusing outright, you can be asked each time. See [`prompt_before_binary_downloads`](#ask-before-binary-downloads).
+
+Changing this setting currently requires restarting Lathe.
+
+## Ask Before Binary Downloads
+
+- Description: When `allow_binary_downloads` is `false`, ask before each download instead of refusing it outright.
+- Setting: `prompt_before_binary_downloads`
+- Default: `false`
+
+Has no effect while [`allow_binary_downloads`](#allow-binary-downloads) is `true`. Together the two settings give three behaviors:
+
+| `allow_binary_downloads` | `prompt_before_binary_downloads` | Behavior |
+| --- | --- | --- |
+| `true` | ignored | Download whatever is needed, without asking. The default. |
+| `false` | `false` | Refuse every download and report an error. |
+| `false` | `true` | Ask, listing each item with its version and source. |
+
+When asked, you get one checkbox per item Lathe recognizes, such as `rust-analyzer` or `Node.js`, rather than one per transitive npm dependency. npm installs are a dependency closure for a single tool, so approving part of one could not produce a working result.
+
+Items whose source publishes no checksum are flagged, because their integrity cannot be verified after downloading.
+
+```json [settings]
+{
+  "allow_binary_downloads": false,
+  "prompt_before_binary_downloads": true
+}
+```
+
+## Approved Binary Downloads
+
+- Description: Downloads you have already approved.
+- Setting: `approved_binary_downloads`
+- Default: `{}`
+
+A map of item name to the approved version. Written by the download prompt, and safe to edit or pre-populate by hand, which lets an administrator ship a fixed policy.
+
+```json [settings]
+{
+  "approved_binary_downloads": {
+    "rust-analyzer": "2024-01-15",
+    "Node.js": "*"
+  }
+}
+```
+
+Approvals are scoped to the version shown. An update is code you have not reviewed, so it asks again rather than reusing the earlier answer. A version of `"*"` opts out of that and approves the item permanently, including future updates.
+
+Denials are not recorded here. A refused item is not asked about again for the rest of the session, but the decision does not persist, so a refusal made months ago cannot quietly break a language server later.
+
 ## Allow Rewrap
 
 - Description: Controls where the {#action editor::Rewrap} action is allowed in the current language scope

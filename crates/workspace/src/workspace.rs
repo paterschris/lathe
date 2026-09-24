@@ -18,6 +18,7 @@ pub mod path_link;
 mod persistence;
 pub mod portable_workspace;
 pub mod searchable;
+pub mod binary_download_modal;
 pub mod security_modal;
 pub mod shared_screen;
 pub use shared_screen::SharedScreen;
@@ -106,6 +107,7 @@ use project::{
     git_store::{GitStoreEvent, RepositoryEvent},
     project_settings::ProjectSettings,
     toolchain_store::ToolchainStoreEvent,
+    binary_download_consent::{BinaryDownloadConsent, PendingRequestsChanged},
     trusted_worktrees::{RemoteHostLocation, TrustedWorktrees, TrustedWorktreesEvent},
 };
 use release_channel::ReleaseChannel;
@@ -173,6 +175,7 @@ use crate::{
         SerializedAxis,
         model::{SerializedItem, SerializedPane, SerializedPaneGroup},
     },
+    binary_download_modal::BinaryDownloadModal,
     security_modal::SecurityModal,
 };
 
@@ -2086,6 +2089,17 @@ impl Workspace {
                 }
             })
             .detach();
+
+            if let Some(consent) = BinaryDownloadConsent::try_global(cx) {
+                cx.subscribe_in(
+                    &consent,
+                    window,
+                    |workspace, _, _: &PendingRequestsChanged, window, cx| {
+                        workspace.show_binary_download_modal(window, cx);
+                    },
+                )
+                .detach();
+            }
         }
 
         cx.subscribe_in(&project, window, move |this, _, event, window, cx| {
@@ -9496,6 +9510,33 @@ impl Workspace {
         settings::update_settings_file(fs, cx, move |settings, _cx| {
             theme_settings::set_mode(settings, next_mode);
         });
+    }
+
+    /// Open the download prompt, or refresh it if already open. Closing it denies whatever is
+    /// still pending, so the waiting download paths always get an answer.
+    pub fn show_binary_download_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(consent) = BinaryDownloadConsent::try_global(cx) else {
+            return;
+        };
+        if consent.read(cx).pending().next().is_none() {
+            if let Some(modal) = self.active_modal::<BinaryDownloadModal>(cx) {
+                modal.update(cx, |modal, cx| {
+                    modal.refresh(cx);
+                    if modal.is_empty() {
+                        cx.emit(gpui::DismissEvent);
+                    }
+                });
+            }
+            return;
+        }
+
+        if let Some(modal) = self.active_modal::<BinaryDownloadModal>(cx) {
+            modal.update(cx, |modal, cx| modal.refresh(cx));
+        } else {
+            self.toggle_modal(window, cx, |window, cx| {
+                BinaryDownloadModal::new(consent, window, cx)
+            });
+        }
     }
 
     pub fn show_worktree_trust_security_modal(

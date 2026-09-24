@@ -279,6 +279,8 @@ Language servers are automatically downloaded or launched if found in your path,
   }
 ```
 
+To stop Lathe from downloading any language server binary at all, rather than overriding them one at a time, set [`allow_binary_downloads`](./reference/all-settings.md#allow-binary-downloads) to `false`. Lathe will then use only the servers it finds on your `$PATH` or that you configure explicitly, and report an error instead of fetching one.
+
 ### Enabling or Disabling Language Servers
 
 You can toggle language server support globally or per-language:

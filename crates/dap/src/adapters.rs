@@ -47,6 +47,16 @@ pub trait DapDelegate: Send + Sync + 'static {
     async fn read_text_file(&self, path: &RelPath) -> Result<String>;
     async fn shell_env(&self) -> collections::HashMap<String, String>;
     fn is_headless(&self) -> bool;
+    fn allow_binary_downloads(&self) -> bool;
+    /// Ask the user whether this adapter may be downloaded. Only consulted when
+    /// `allow_binary_downloads` is false; returning false refuses the download.
+    async fn request_download_consent(
+        &self,
+        adapter_name: &str,
+        version: &str,
+        url: &str,
+        has_checksum: bool,
+    ) -> bool;
 }
 
 #[derive(
@@ -283,6 +293,24 @@ pub async fn download_adapter_from_github(
 
     if version_path.exists() {
         return Ok(version_path);
+    }
+
+    if !delegate.allow_binary_downloads() {
+        let approved = delegate
+            .request_download_consent(
+                adapter_name.as_ref(),
+                &github_version.tag_name,
+                &github_version.url,
+                false,
+            )
+            .await;
+        anyhow::ensure!(
+            approved,
+            "no binary for debug adapter {adapter_name} was found on your system, and its \
+            download from {} was not approved. Install it yourself and configure its path in \
+            your debug configuration.",
+            github_version.url,
+        );
     }
 
     if !adapter_path.exists() {

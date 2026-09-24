@@ -298,7 +298,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
         ]
     }
-    fn security_section() -> [SettingsPageItem; 2] {
+    fn security_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader("Security"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -318,6 +318,36 @@ fn general_page(cx: &App) -> SettingsPage {
                             .session
                             .get_or_insert_default()
                             .trust_all_worktrees = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Allow Binary Downloads",
+                description: "Allow Lathe to download and run executables from the internet on your behalf, such as its own copy of Node.js, a language server for a file you just opened, or a debug adapter. When disabled, Lathe only uses binaries already on your PATH or ones you configure explicitly.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("allow_binary_downloads"),
+                    pick: |settings_content| settings_content.allow_binary_downloads.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.allow_binary_downloads = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Ask Before Binary Downloads",
+                description: "When Allow Binary Downloads is off, ask before each download instead of refusing it outright. Approving a download remembers it for that version, so an update asks again.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("prompt_before_binary_downloads"),
+                    pick: |settings_content| {
+                        settings_content.prompt_before_binary_downloads.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.prompt_before_binary_downloads = value;
                     },
                 }),
                 metadata: None,

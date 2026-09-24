@@ -100,5 +100,13 @@ mod test_mocks {
         fn is_headless(&self) -> bool {
             false
         }
+
+        fn allow_binary_downloads(&self) -> bool {
+            true
+        }
+
+        async fn request_download_consent(&self, _: &str, _: &str, _: &str, _: bool) -> bool {
+            true
+        }
     }
 }

@@ -98,15 +98,50 @@ pub struct LanguageServerBinary {
     pub env: Option<HashMap<String, String>>,
 }
 
-/// Configures the search (and installation) of language servers.
+/// Asks the user whether a specific language server download may proceed, resolving to `true` when
+/// it is allowed. Supplied by the project layer, which owns the settings and the prompt UI; the
+/// adapter layer only knows what it is about to download, not how consent is obtained.
+pub type DownloadConsent = Arc<
+    dyn Fn(DownloadConsentRequest) -> futures::future::BoxFuture<'static, bool> + Send + Sync,
+>;
+
+/// What the user is being asked to approve.
 #[derive(Debug, Clone)]
+pub struct DownloadConsentRequest {
+    /// The server name, used as the key an approval is remembered under.
+    pub name: LanguageServerName,
+    /// The version about to be fetched, when the adapter can describe it. `None` means the
+    /// approval cannot be scoped to a version, so the user is asked every time.
+    pub version: Option<SharedString>,
+    /// Where the bytes come from, when known.
+    pub url: Option<SharedString>,
+    /// Whether a checksum will be verified after downloading.
+    pub has_checksum: bool,
+}
+
+/// Configures the search (and installation) of language servers.
+#[derive(Clone)]
 pub struct LanguageServerBinaryOptions {
     /// Whether the adapter should look at the users system
     pub allow_path_lookup: bool,
     /// Whether the adapter should download its own version
     pub allow_binary_download: bool,
+    /// When set, consulted before each download even if `allow_binary_download` is `false`, so the
+    /// user can approve individual servers. `None` makes `allow_binary_download` the final word.
+    pub download_consent: Option<DownloadConsent>,
     /// Whether the adapter should download a pre-release version
     pub pre_release: bool,
+}
+
+impl std::fmt::Debug for LanguageServerBinaryOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LanguageServerBinaryOptions")
+            .field("allow_path_lookup", &self.allow_path_lookup)
+            .field("allow_binary_download", &self.allow_binary_download)
+            .field("download_consent", &self.download_consent.is_some())
+            .field("pre_release", &self.pre_release)
+            .finish()
+    }
 }
 
 struct NotificationSerializer(Box<dyn FnOnce() -> String + Send + Sync>);
