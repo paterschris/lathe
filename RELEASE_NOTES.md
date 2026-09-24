@@ -2,6 +2,31 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.5.0-beta - 2026-09-24
+
+A beta for control over what Lathe downloads, theme customizer edits that persist, and a pull request view that refreshes in place.
+
+### Added
+
+- **Choose whether Lathe downloads binaries for you.** Opening a file can make Lathe fetch Node.js, npm packages, a language server, a debug adapter, or files an extension asks for. Set `allow_binary_downloads` to `false` and Lathe uses only what is on your `$PATH` or configured explicitly, reporting an error instead of downloading. Also set `prompt_before_binary_downloads` to `true` and each download is put to you in one modal instead of refused. Approvals are remembered in `approved_binary_downloads` by name and version, so an update asks again; approve with "always" (a version of `"*"`) to allow future updates too. Downloads are allowed by default, as before.
+- **Refresh a pull request from its tab.** The pull request view has a refresh button at the right of its title row.
+
+### Fixed
+
+- **Clicking a pull request that is already open no longer opens a second tab.** Opening it from the pull request panel or picker focuses the existing tab and reloads it.
+- **Theme customizer changes survive a restart.** Edits are saved to `theme_overrides` for the active theme in settings.json, and the customizer picks up saved overrides when it opens or the theme changes.
+
+### Changed
+
+- The bug and crash report templates now point at Lathe's own issue tracker, discussions, and r/LatheEditor instead of upstream Zed.
+
+### Known issues
+
+- This release was verified with `cargo check --workspace --all-targets` on macOS. None of it has been exercised in a running build, and Windows and Linux are untested.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v1.4.0 - 2026-09-22
 
 The first stable release since 1.2.0. It carries everything from the 1.3.0 beta plus the work below.
