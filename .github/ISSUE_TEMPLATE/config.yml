@@ -2,8 +2,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Feature request
-    url: https://github.com/zed-industries/zed/discussions/new?category=feature-requests
-    about: To request a feature, open a new discussion under one of the appropriate categories.
-  - name: Our Discord community
-    url: https://discord.com/invite/zedindustries
-    about: Join our Discord server for real-time discussion and user support.
+    url: https://www.reddit.com/r/LatheEditor/
+    about: Request features and discuss ideas at r/LatheEditor. Accepted requests get tracked here as issues.
+  - name: Question or support
+    url: https://github.com/paterschris/lathe/discussions/new?category=q-a
+    about: Not sure if it's a bug? Ask in Discussions and we'll sort it out there.
+  - name: Upstream Zed bug
+    url: https://github.com/zed-industries/zed/issues
+    about: If the problem reproduces in stock Zed too, report it upstream so everyone benefits.
