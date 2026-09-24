@@ -1,17 +1,25 @@
 #![allow(missing_docs)]
 
-use gpui::{HighlightStyle, Hsla};
+use std::sync::LazyLock;
+
+use anyhow::{Context as _, Result};
+use collections::HashMap;
+use gpui::{HighlightStyle, Hsla, Rgba};
+use gpui_util::ResultExt as _;
 use palette::FromColor;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use settings::IntoGpui;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use settings::{AccentContent, IntoGpui, PlayerColorContent, ThemeColor};
 pub use settings::{
     FontStyleContent, HighlightStyleContent, StatusColorsContent, ThemeColorsContent,
     ThemeStyleContent,
 };
 pub use settings::{FontWeightContent, WindowBackgroundContent};
 
-use theme::{LatheThemeColorsRefinement, StatusColorsRefinement, ThemeColorsRefinement};
+use theme::{
+    CustomizableColor, LatheThemeColorsRefinement, PlayerColorChannel, StatusColorsRefinement,
+    ThemeColorsRefinement, ThemeStyles,
+};
 
 const LIGHT_DIFF_HUNK_FILLED_OPACITY: f32 = 0.16;
 const LIGHT_DIFF_HUNK_HOLLOW_BACKGROUND_OPACITY: f32 = 0.08;
@@ -1013,14 +1021,243 @@ fn try_parse_color(color: &str) -> anyhow::Result<Hsla> {
     Ok(hsla)
 }
 
+fn color_to_hex(color: Hsla) -> ThemeColor {
+    let rgba = Rgba::from(color);
+    let [r, g, b, a] =
+        [rgba.r, rgba.g, rgba.b, rgba.a].map(|channel| (channel * 255.).round() as u8);
+    format!("#{r:02x}{g:02x}{b:02x}{a:02x}").into()
+}
+
+/// Maps the snake_case name of each flat theme and status color to its key in
+/// theme JSON. Keys replace only some underscores with dots (for example,
+/// `elevated_surface_background` is `elevated_surface.background`), so they're
+/// read from the schema because they can't be derived from the name.
+static FLAT_COLOR_KEYS: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+    [
+        schemars::schema_for!(ThemeColorsContent),
+        schemars::schema_for!(StatusColorsContent),
+    ]
+    .iter()
+    .filter_map(|schema| schema.get("properties")?.as_object())
+    .flat_map(|properties| properties.keys())
+    .map(|key| (key.replace('.', "_"), key.clone()))
+    .collect()
+});
+
+fn flat_color_key(field_name: &str) -> Result<&'static str> {
+    FLAT_COLOR_KEYS
+        .get(field_name)
+        .map(String::as_str)
+        .with_context(|| format!("no theme key for color `{field_name}`"))
+}
+
+/// Edits one color through the struct's JSON form, because the content structs
+/// have no by-name setter and hand-writing one would take an arm per color.
+fn set_flat_color_override<T: Serialize + DeserializeOwned>(
+    content: &mut T,
+    field_name: &str,
+    color: Option<ThemeColor>,
+) -> Result<()> {
+    let key = flat_color_key(field_name)?;
+    let mut value = serde_json::to_value(&*content)?;
+    let colors = value
+        .as_object_mut()
+        .context("theme colors did not serialize to an object")?;
+    match color {
+        Some(color) => {
+            colors.insert(key.to_string(), serde_json::Value::String(color.into()));
+        }
+        None => {
+            colors.remove(key);
+        }
+    }
+    *content = serde_json::from_value(value)?;
+    Ok(())
+}
+
+/// Returns every color in `overrides` that a [`CustomizableColor`] of `styles`
+/// refers to.
+pub fn customizable_color_overrides(
+    overrides: &ThemeStyleContent,
+    styles: &ThemeStyles,
+) -> Vec<(CustomizableColor, Hsla)> {
+    let mut flat_colors = serde_json::Map::new();
+    for content in [
+        serde_json::to_value(&overrides.colors),
+        serde_json::to_value(&overrides.status),
+    ] {
+        if let Some(serde_json::Value::Object(colors)) = content.log_err() {
+            flat_colors.extend(colors);
+        }
+    }
+
+    styles
+        .all_customizable_colors()
+        .into_iter()
+        .filter_map(|field| {
+            let color = match field {
+                CustomizableColor::Theme(theme_field) => flat_colors
+                    .get(flat_color_key(theme_field.as_ref()).ok()?)?
+                    .as_str()?,
+                CustomizableColor::Status(status_field) => flat_colors
+                    .get(flat_color_key(status_field.as_ref()).ok()?)?
+                    .as_str()?,
+                CustomizableColor::Player(index, channel) => {
+                    let player = overrides.players.get(index)?;
+                    match channel {
+                        PlayerColorChannel::Cursor => player.cursor.as_deref()?,
+                        PlayerColorChannel::Background => player.background.as_deref()?,
+                        PlayerColorChannel::Selection => player.selection.as_deref()?,
+                    }
+                }
+                CustomizableColor::Accent(index) => overrides.accents.get(index)?.0.as_deref()?,
+                CustomizableColor::Syntax(index) => overrides
+                    .syntax
+                    .get(styles.syntax.get_capture_name(index)?)?
+                    .color
+                    .as_deref()?,
+            };
+            Some((field, try_parse_color(color).ok()?))
+        })
+        .collect()
+}
+
+/// Sets the override for `field` to `color`, or removes it when `color` is
+/// `None`. `styles` must be the theme's own styles, without overrides applied.
+pub fn set_customizable_color_override(
+    overrides: &mut ThemeStyleContent,
+    field: CustomizableColor,
+    color: Option<Hsla>,
+    styles: &ThemeStyles,
+) -> Result<()> {
+    let color = color.map(color_to_hex);
+    match field {
+        CustomizableColor::Theme(theme_field) => {
+            set_flat_color_override(&mut overrides.colors, theme_field.as_ref(), color)?;
+        }
+        CustomizableColor::Status(status_field) => {
+            set_flat_color_override(&mut overrides.status, status_field.as_ref(), color)?;
+        }
+        CustomizableColor::Player(index, channel) => {
+            if color.is_some() && overrides.players.len() <= index {
+                overrides
+                    .players
+                    .resize_with(index + 1, || PlayerColorContent {
+                        cursor: None,
+                        background: None,
+                        selection: None,
+                    });
+            }
+            if let Some(player) = overrides.players.get_mut(index) {
+                let slot = match channel {
+                    PlayerColorChannel::Cursor => &mut player.cursor,
+                    PlayerColorChannel::Background => &mut player.background,
+                    PlayerColorChannel::Selection => &mut player.selection,
+                };
+                *slot = color;
+            }
+            while overrides.players.last().is_some_and(|player| {
+                player.cursor.is_none() && player.background.is_none() && player.selection.is_none()
+            }) {
+                overrides.players.pop();
+            }
+        }
+        CustomizableColor::Accent(index) => {
+            // Accent overrides replace the theme's whole accent list, so one
+            // edited accent has to be written together with all the others.
+            let originals = styles
+                .accents
+                .0
+                .iter()
+                .map(|accent| color_to_hex(*accent))
+                .collect::<Vec<_>>();
+            let mut accents = originals
+                .iter()
+                .enumerate()
+                .map(|(accent_index, original)| {
+                    overrides
+                        .accents
+                        .get(accent_index)
+                        .and_then(|accent| accent.0.clone())
+                        .unwrap_or_else(|| original.clone())
+                })
+                .collect::<Vec<_>>();
+            let (Some(accent), Some(original)) = (accents.get_mut(index), originals.get(index))
+            else {
+                anyhow::bail!("theme has no accent {index}");
+            };
+            *accent = color.unwrap_or_else(|| original.clone());
+            overrides.accents = if accents == originals {
+                Vec::new()
+            } else {
+                accents
+                    .into_iter()
+                    .map(|accent| AccentContent(Some(accent)))
+                    .collect()
+            };
+        }
+        CustomizableColor::Syntax(index) => {
+            let capture_name = styles
+                .syntax
+                .get_capture_name(index)
+                .with_context(|| format!("theme has no syntax capture {index}"))?;
+            match color {
+                Some(color) => {
+                    overrides
+                        .syntax
+                        .entry(capture_name.to_string())
+                        .or_default()
+                        .color = Some(color);
+                }
+                None => {
+                    if let Some(style) = overrides.syntax.get_mut(capture_name) {
+                        style.color = None;
+                        if style.is_empty() {
+                            overrides.syntax.shift_remove(capture_name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use theme::StatusColorsRefinement;
+    use theme::{DEFAULT_DARK_THEME, StatusColorsRefinement, ThemeRegistry};
 
     use super::{
-        StatusColorsContent, ThemeColorsContent, status_colors_refinement, theme_colors_refinement,
+        StatusColorsContent, ThemeColorsContent, ThemeStyleContent, customizable_color_overrides,
+        set_customizable_color_override, status_colors_refinement, theme_colors_refinement,
         try_parse_color,
     };
+
+    #[test]
+    fn customizable_color_overrides_round_trip() {
+        let registry = ThemeRegistry::new(Box::new(()));
+        let theme = registry.get(DEFAULT_DARK_THEME).unwrap();
+        let styles = &theme.styles;
+        let override_color = try_parse_color("#12345678").unwrap();
+
+        let mut overrides = ThemeStyleContent::default();
+        let fields = styles.all_customizable_colors();
+        for &field in &fields {
+            set_customizable_color_override(&mut overrides, field, Some(override_color), styles)
+                .unwrap_or_else(|error| panic!("setting {field:?} failed: {error}"));
+        }
+
+        let stored = customizable_color_overrides(&overrides, styles);
+        assert_eq!(stored.len(), fields.len());
+        for (field, color) in stored {
+            assert_eq!(color, override_color, "{field:?} did not round trip");
+        }
+
+        for &field in &fields {
+            set_customizable_color_override(&mut overrides, field, None, styles).unwrap();
+        }
+        assert_eq!(overrides, ThemeStyleContent::default());
+    }
 
     #[test]
     fn explicit_diff_hunk_colors_take_precedence_over_fallbacks() {

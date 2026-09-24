@@ -1,16 +1,26 @@
 use std::collections::HashMap;
+use std::mem;
 use std::sync::Arc;
+use std::time::Duration;
 
+use fs::Fs;
 use gpui::{
-    App, ClickEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla, SharedString, Task,
-    Window, actions, hsla, px,
+    App, ClickEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla, SharedString,
+    Subscription, Task, Window, actions, hsla, px,
 };
+use settings::Settings as _;
 use strum::IntoEnumIterator;
-use theme::{ActiveTheme, ColorCategory, CustomizableColor, GlobalTheme, Theme};
+use theme::{ActiveTheme, ColorCategory, CustomizableColor, GlobalTheme, Theme, ThemeRegistry};
+use theme_settings::{ThemeSettings, ThemeStyleContent};
 use ui::prelude::*;
 use ui::{Label, LabelCommon, LabelSize};
+use util::ResultExt as _;
 
 use crate::{Item, Workspace};
+
+/// Slider drags produce a stream of edits, so saving waits for a pause rather
+/// than rewriting settings.json on every step.
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 
 actions!(
     theme_customizer,
@@ -23,7 +33,8 @@ actions!(
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &OpenThemeCustomizer, window, cx| {
-            let customizer = cx.new(|cx| ThemeCustomizer::new(window, cx));
+            let fs = workspace.app_state().fs.clone();
+            let customizer = cx.new(|cx| ThemeCustomizer::new(fs, window, cx));
             workspace.add_item_to_active_pane(Box::new(customizer), None, true, window, cx)
         });
     })
@@ -32,24 +43,68 @@ pub fn init(cx: &mut App) {
 
 struct ThemeCustomizer {
     focus_handle: FocusHandle,
+    fs: Arc<dyn Fs>,
+    /// The active theme as registered, before `theme_overrides` are applied.
     base_theme: Arc<Theme>,
+    /// Colors saved in `theme_overrides`, plus edits that aren't saved yet.
     color_overrides: HashMap<CustomizableColor, Hsla>,
+    /// Edits waiting to be saved; `None` removes the saved override.
+    unsaved_changes: HashMap<CustomizableColor, Option<Hsla>>,
+    save_task: Option<Task<()>>,
     selected_field: Option<CustomizableColor>,
     active_category: Option<ColorCategory>,
     show_lathe_only: bool,
+    _theme_subscription: Subscription,
 }
 
 impl ThemeCustomizer {
-    fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let base_theme = cx.theme().clone();
-        Self {
+    fn new(fs: Arc<dyn Fs>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.on_release(|this, cx| this.save(cx)).detach();
+        let mut this = Self {
             focus_handle: cx.focus_handle(),
-            base_theme,
+            fs,
+            base_theme: registered_theme(cx),
             color_overrides: HashMap::new(),
+            unsaved_changes: HashMap::new(),
+            save_task: None,
             selected_field: None,
             active_category: None,
             show_lathe_only: false,
+            _theme_subscription: cx.observe_global::<GlobalTheme>(Self::sync_with_theme),
+        };
+        this.load_saved_overrides(cx);
+        this
+    }
+
+    /// Runs whenever the global theme changes, which covers switching themes
+    /// and reloading after settings.json changes.
+    fn sync_with_theme(&mut self, cx: &mut Context<Self>) {
+        if cx.theme().name != self.base_theme.name {
+            self.save(cx);
+            self.base_theme = registered_theme(cx);
+            self.selected_field = None;
         }
+        self.load_saved_overrides(cx);
+    }
+
+    fn load_saved_overrides(&mut self, cx: &mut Context<Self>) {
+        let mut color_overrides: HashMap<_, _> = ThemeSettings::get_global(cx)
+            .theme_overrides
+            .get(self.base_theme.name.as_ref())
+            .map(|overrides| {
+                theme_settings::customizable_color_overrides(overrides, &self.base_theme.styles)
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        for (&field, &color) in &self.unsaved_changes {
+            match color {
+                Some(color) => color_overrides.insert(field, color),
+                None => color_overrides.remove(&field),
+            };
+        }
+        self.color_overrides = color_overrides;
+        cx.notify();
     }
 
     fn current_color(&self, field: CustomizableColor) -> Hsla {
@@ -61,27 +116,65 @@ impl ThemeCustomizer {
 
     fn set_color(&mut self, field: CustomizableColor, color: Hsla, cx: &mut Context<Self>) {
         self.color_overrides.insert(field, color);
-        self.apply_overrides(cx);
+        self.unsaved_changes.insert(field, Some(color));
+        self.apply_unsaved_changes(cx);
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_DEBOUNCE).await;
+            this.update(cx, |this, cx| this.save(cx)).log_err();
+        }));
     }
 
     fn reset_color(&mut self, field: CustomizableColor, cx: &mut Context<Self>) {
         self.color_overrides.remove(&field);
-        self.apply_overrides(cx);
+        self.unsaved_changes.insert(field, None);
+        self.apply_unsaved_changes(cx);
+        self.save(cx);
     }
 
     fn reset_all(&mut self, cx: &mut Context<Self>) {
-        self.color_overrides.clear();
-        self.apply_overrides(cx);
+        self.unsaved_changes
+            .extend(self.color_overrides.drain().map(|(field, _)| (field, None)));
+        self.apply_unsaved_changes(cx);
+        self.save(cx);
     }
 
-    fn apply_overrides(&self, cx: &mut Context<Self>) {
-        let mut theme = (*self.base_theme).clone();
-        for (&field, &color) in &self.color_overrides {
+    /// Previews edits right away. Saving them triggers a theme reload from
+    /// settings, which ends up with the same colors.
+    fn apply_unsaved_changes(&self, cx: &mut Context<Self>) {
+        let mut theme = (**cx.theme()).clone();
+        for (&field, &color) in &self.unsaved_changes {
+            let color = color.unwrap_or_else(|| self.base_theme.styles.customizable_color(field));
             theme.styles.set_customizable_color(field, color);
         }
         GlobalTheme::update_theme(cx, Arc::new(theme));
         cx.refresh_windows();
         cx.notify();
+    }
+
+    fn save(&mut self, cx: &App) {
+        self.save_task = None;
+        if self.unsaved_changes.is_empty() {
+            return;
+        }
+        let changes = mem::take(&mut self.unsaved_changes);
+        let theme = self.base_theme.clone();
+        settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
+            let theme_name = theme.name.to_string();
+            let theme_overrides = &mut settings.theme.theme_overrides;
+            let overrides = theme_overrides.entry(theme_name.clone()).or_default();
+            for (field, color) in changes {
+                theme_settings::set_customizable_color_override(
+                    overrides,
+                    field,
+                    color,
+                    &theme.styles,
+                )
+                .log_err();
+            }
+            if *overrides == ThemeStyleContent::default() {
+                theme_overrides.remove(&theme_name);
+            }
+        });
     }
 
     fn filtered_fields(&self) -> Vec<CustomizableColor> {
@@ -608,6 +701,14 @@ impl SliderChannel {
     }
 }
 
+fn registered_theme(cx: &App) -> Arc<Theme> {
+    let active_theme = cx.theme().clone();
+    ThemeRegistry::global(cx)
+        .get(&active_theme.name)
+        .log_err()
+        .unwrap_or(active_theme)
+}
+
 fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
     hsla(
         a.h + (b.h - a.h) * t,
@@ -689,7 +790,8 @@ impl Item for ThemeCustomizer {
     where
         Self: Sized,
     {
-        Task::ready(Some(cx.new(|cx| Self::new(window, cx))))
+        let fs = self.fs.clone();
+        Task::ready(Some(cx.new(|cx| Self::new(fs, window, cx))))
     }
 }
 

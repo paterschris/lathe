@@ -24,7 +24,8 @@ use theme::{
 pub use crate::schema::{
     FontStyleContent, FontWeightContent, HighlightStyleContent, StatusColorsContent,
     ThemeColorsContent, ThemeContent, ThemeFamilyContent, ThemeStyleContent,
-    WindowBackgroundContent, status_colors_refinement, syntax_overrides, theme_colors_refinement,
+    WindowBackgroundContent, customizable_color_overrides, set_customizable_color_override,
+    status_colors_refinement, syntax_overrides, theme_colors_refinement,
 };
 pub use crate::settings::{
     AgentBufferFontSize, AgentUiFontSize, BufferLineHeight, FontFamilyName,
