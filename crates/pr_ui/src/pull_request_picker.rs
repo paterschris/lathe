@@ -291,10 +291,9 @@ impl PickerDelegate for PullRequestPickerDelegate {
 
         workspace
             .update(cx, |workspace, cx| {
-                let view = cx.new(|cx| {
-                    PullRequestView::new(provider, remote, pr_number, workspace.weak_handle(), cx)
-                });
-                workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+                PullRequestView::open_or_refresh(
+                    workspace, provider, remote, pr_number, window, cx,
+                );
             })
             .ok();
         self.dismissed(window, cx);

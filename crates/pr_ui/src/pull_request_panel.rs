@@ -1239,10 +1239,7 @@ impl PullRequestPanel {
         let workspace = self.workspace.clone();
         workspace
             .update(cx, |workspace, cx| {
-                let view = cx.new(|cx| {
-                    PullRequestView::new(provider, remote, number, workspace.weak_handle(), cx)
-                });
-                workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+                PullRequestView::open_or_refresh(workspace, provider, remote, number, window, cx);
             })
             .ok();
     }

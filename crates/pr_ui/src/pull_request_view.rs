@@ -169,6 +169,34 @@ impl PullRequestView {
         this
     }
 
+    /// Opens a pull request in the active pane, or, when this workspace already
+    /// has a tab for it, focuses that tab and reloads it instead of opening a
+    /// duplicate.
+    pub fn open_or_refresh(
+        workspace: &mut Workspace,
+        provider: Arc<dyn GitHostingProvider + Send + Sync>,
+        remote: ParsedGitRemote,
+        number: u32,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let base_url = provider.base_url();
+        let existing = workspace.items_of_type::<Self>(cx).find(|view| {
+            let view = view.read(cx);
+            view.number == number
+                && view.remote.owner == remote.owner
+                && view.remote.repo == remote.repo
+                && view.provider.base_url() == base_url
+        });
+        if let Some(existing) = existing {
+            workspace.activate_item(&existing, true, true, window, cx);
+            existing.update(cx, |view, cx| view.refresh(cx));
+            return;
+        }
+        let view = cx.new(|cx| Self::new(provider, remote, number, workspace.weak_handle(), cx));
+        workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+    }
+
     pub fn number(&self) -> u32 {
         self.number
     }
@@ -2483,7 +2511,22 @@ impl PullRequestView {
                         this.child(Label::new(label).color(color).size(LabelSize::Small))
                     })
                     .when(detail.is_draft, |this| this.child(render_draft_badge(cx)))
-                    .children(render_checks_chip(detail)),
+                    .children(render_checks_chip(detail))
+                    .child(div().flex_1())
+                    .child(
+                        IconButton::new(
+                            "pr-view-refresh",
+                            if self.loading {
+                                IconName::ArrowCircle
+                            } else {
+                                IconName::RotateCw
+                            },
+                        )
+                        .icon_size(IconSize::Small)
+                        .disabled(self.loading)
+                        .tooltip(ui::Tooltip::text("Refresh Pull Request"))
+                        .on_click(cx.listener(|this, _, _window, cx| this.refresh(cx))),
+                    ),
             )
             .child(
                 h_flex()
