@@ -63,7 +63,7 @@ pub(crate) fn render_sandbox_settings_page(
                 "sandbox-enabled",
                 Some("Enable Sandbox"),
                 Some(
-                    "Wrap agent-run terminal commands in an OS-level sandbox. When off, commands run with Zed's own permissions."
+                    "Wrap agent-run terminal commands in an OS-level sandbox. When off, commands run with Lathe's own permissions."
                         .into(),
                 ),
                 sandbox_enabled,

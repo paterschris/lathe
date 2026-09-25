@@ -10,6 +10,7 @@ workspace = true
 
 [lib]
 path = "src/git.rs"
+doctest = false
 
 [features]
 test-support = ["rand", "gpui/test-support"]
@@ -44,7 +45,6 @@ urlencoding.workspace = true
 util.workspace = true
 uuid.workspace = true
 futures.workspace = true
-git2.workspace = true
 ztracing.workspace = true
 
 [dev-dependencies]

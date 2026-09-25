@@ -6,6 +6,7 @@ mod model_selector_components;
 #[allow(dead_code, unused_imports)]
 mod rules_to_skills_modal;
 mod sandbox_status_tooltip;
+mod session_notice;
 mod terminal_tool_header;
 mod undo_reject_toast;
 
@@ -17,6 +18,7 @@ pub use model_selector_components::*;
 #[allow(unused_imports)]
 pub use rules_to_skills_modal::*;
 pub use sandbox_status_tooltip::*;
+pub use session_notice::*;
 pub use terminal_tool_header::*;
 pub use undo_reject_toast::*;
 

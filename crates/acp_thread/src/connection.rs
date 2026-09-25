@@ -945,7 +945,19 @@ mod test_support {
                 return Task::ready(Err(anyhow::Error::msg("Loading sessions is not supported")));
             }
 
+            // Like a real agent, loading a session this connection still hosts
+            // restores its history rather than handing back an empty thread.
+            if let Some(thread) = self
+                .sessions
+                .lock()
+                .get(&session_id)
+                .and_then(|session| session.thread.upgrade())
+            {
+                return Task::ready(Ok(thread));
+            }
+
             let thread = self.create_session(session_id, project, work_dirs, title, cx);
+            thread.update(cx, |thread, _cx| thread.mark_as_restored_session());
             Task::ready(Ok(thread))
         }
 

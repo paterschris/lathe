@@ -710,7 +710,7 @@ impl SkillCreatorPage {
             .child(match &self.url_import_status {
                 UrlImportStatus::Idle => Label::new(
                     "Paste a GitHub .md URL to fetch it and fill out the form. \
-                     For private files, Zed retries using GITHUB_TOKEN, if set.",
+                     For private files, Lathe retries using GITHUB_TOKEN, if set.",
                 )
                 .size(LabelSize::Small)
                 .color(Color::Muted)

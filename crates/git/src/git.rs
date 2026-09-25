@@ -262,13 +262,6 @@ impl Oid {
         &self.bytes[..self.format.byte_len()]
     }
 
-    /// Convert this [`Oid`] to a libgit2 [`git2::Oid`]. The fork's libgit2-backed
-    /// repository implementation still consumes raw libgit2 oids; upstream
-    /// removed git2 from its dependency tree but the fork keeps it.
-    pub fn to_git2(&self) -> git2::Oid {
-        git2::Oid::from_bytes(self.as_bytes()).expect("Oid bytes are a valid SHA")
-    }
-
     pub fn is_zero(&self) -> bool {
         self.as_bytes().iter().all(|byte| *byte == 0)
     }

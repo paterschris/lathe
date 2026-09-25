@@ -8,6 +8,9 @@ license = "GPL-3.0-or-later"
 [lints]
 workspace = true
 
+[lib]
+doctest = false
+
 [features]
 test-support = [
     "load-grammars"
@@ -66,6 +69,7 @@ util.workspace = true
 
 [dev-dependencies]
 fs = { workspace = true, features = ["test-support"] }
+indoc.workspace = true
 pretty_assertions.workspace = true
 settings = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
@@ -73,6 +77,7 @@ theme = { workspace = true, features = ["test-support"] }
 tree-sitter-bash.workspace = true
 tree-sitter-c.workspace = true
 tree-sitter-cpp.workspace = true
+tree-sitter-ini.workspace = true
 tree-sitter-css.workspace = true
 tree-sitter-go.workspace = true
 tree-sitter-python.workspace = true

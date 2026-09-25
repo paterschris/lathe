@@ -29,11 +29,13 @@ pub type ModelSelector = Picker<ModelPickerDelegate>;
 
 pub fn acp_model_selector(
     selector: Rc<dyn AgentModelSelector>,
+    default_model_store: Option<(Rc<dyn agent_servers::AgentServer>, Arc<dyn fs::Fs>)>,
     focus_handle: FocusHandle,
     window: &mut Window,
     cx: &mut Context<ModelSelector>,
 ) -> ModelSelector {
-    let delegate = ModelPickerDelegate::new(selector, focus_handle, window, cx);
+    let delegate =
+        ModelPickerDelegate::new(selector, default_model_store, focus_handle, window, cx);
     Picker::list(delegate, window, cx)
         .show_scrollbar(true)
         .initial_width(rems(20.))
@@ -46,6 +48,7 @@ enum ModelPickerEntry {
 
 pub struct ModelPickerDelegate {
     selector: Rc<dyn AgentModelSelector>,
+    default_model_store: Option<(Rc<dyn agent_servers::AgentServer>, Arc<dyn fs::Fs>)>,
     filtered_entries: Vec<ModelPickerEntry>,
     models: Option<AgentModelList>,
     selected_index: usize,
@@ -60,6 +63,7 @@ pub struct ModelPickerDelegate {
 impl ModelPickerDelegate {
     fn new(
         selector: Rc<dyn AgentModelSelector>,
+        default_model_store: Option<(Rc<dyn agent_servers::AgentServer>, Arc<dyn fs::Fs>)>,
         focus_handle: FocusHandle,
         window: &mut Window,
         cx: &mut Context<ModelSelector>,
@@ -114,6 +118,7 @@ impl ModelPickerDelegate {
 
         Self {
             selector,
+            default_model_store,
             filtered_entries: Vec::new(),
             models: None,
             selected_model: None,
@@ -267,16 +272,19 @@ impl PickerDelegate for ModelPickerDelegate {
         })
     }
 
-    fn confirm(&mut self, _secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
+    fn confirm(&mut self, secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
         if let Some(ModelPickerEntry::Model(model_info, _)) =
             self.filtered_entries.get(self.selected_index)
             && model_info.disabled.is_none()
         {
-            // TODO(merge): Lathe's secondary-click "set default model" behavior
-            // (self.agent_server.set_default_model) was dropped during the upstream
-            // model-selector rewrite, which routes favorites through the selector
-            // trait (selector.favorite_model_ids) instead of a separate agent_server
-            // handle. Re-add the set-default nicety here if still wanted.
+            if secondary && let Some((agent_server, fs)) = &self.default_model_store {
+                let is_default = agent_server.default_model(cx).as_ref() == Some(&model_info.id);
+                agent_server.set_default_model(
+                    (!is_default).then(|| model_info.id.clone()),
+                    fs.clone(),
+                    cx,
+                );
+            }
             self.selector
                 .select_model(model_info.id.clone(), cx)
                 .detach_and_log_err(cx);
@@ -307,11 +315,12 @@ impl PickerDelegate for ModelPickerDelegate {
             }
             ModelPickerEntry::Model(model_info, is_favorite) => {
                 let is_selected = Some(model_info) == self.selected_model.as_ref();
-                // The default-model indicator was driven by the removed
-                // `agent_server` handle (see the confirm() TODO above). The
-                // upstream selector trait does not expose a default model, so
-                // nothing is marked default until that nicety is re-added.
-                let is_default = false;
+                let is_default = self
+                    .default_model_store
+                    .as_ref()
+                    .and_then(|(agent_server, _)| agent_server.default_model(cx))
+                    .as_ref()
+                    == Some(&model_info.id);
 
                 let is_favorite = *is_favorite;
                 let handle_action_click = {
@@ -605,7 +614,7 @@ mod tests {
             let model_selector = model_selector.clone();
             move |window, cx| {
                 let selector: Rc<dyn AgentModelSelector> = model_selector;
-                acp_model_selector(selector, cx.focus_handle(), window, cx)
+                acp_model_selector(selector, None, cx.focus_handle(), window, cx)
             }
         });
         cx.run_until_parked();

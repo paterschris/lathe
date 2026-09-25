@@ -1781,6 +1781,7 @@ mod tests {
                 version: SharedString::from(version.to_string()),
                 repository: None,
                 website: None,
+                license_url: None,
                 icon_path: None,
             },
             package: id,

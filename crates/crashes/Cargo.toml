@@ -33,3 +33,4 @@ workspace = true
 
 [lib]
 path = "src/crashes.rs"
+doctest = false

@@ -90,9 +90,11 @@ pub(super) async fn do_switch_worktree(
         window_handle,
         remote_connection_options,
         WorktreeOperation::Switch,
+        true,
         cx,
     )
     .await
+    .map(|_| ())
 }
 
 pub(super) async fn open_worktree_workspace(
@@ -105,8 +107,9 @@ pub(super) async fn open_worktree_workspace(
     window_handle: Option<gpui::WindowHandle<MultiWorkspace>>,
     remote_connection_options: Option<RemoteConnectionOptions>,
     operation: WorktreeOperation,
+    activate: bool,
     cx: &mut AsyncWindowContext,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Entity<Workspace>> {
     let window_handle = window_handle
         .ok_or_else(|| anyhow!("No window handle available for workspace creation"))?;
 
@@ -114,7 +117,8 @@ pub(super) async fn open_worktree_workspace(
 
     let is_creating_new_worktree = matches!(operation, WorktreeOperation::Create);
 
-    let source_for_transfer = if is_creating_new_worktree {
+    let transfer_state = is_creating_new_worktree && activate;
+    let source_for_transfer = if transfer_state {
         Some(workspace.clone())
     } else {
         None
@@ -131,7 +135,7 @@ pub(super) async fn open_worktree_workspace(
                     dyn FnOnce(&mut Workspace, &mut gpui::Window, &mut gpui::Context<Workspace>)
                         + Send,
                 >,
-            > = if is_creating_new_worktree {
+            > = if transfer_state {
                 let dock_structure = previous_state.dock_structure;
                 Some(Box::new(
                     move |workspace: &mut Workspace,
@@ -200,7 +204,7 @@ pub(super) async fn open_worktree_workspace(
 
     maybe_propagate_worktree_trust(&workspace, &new_workspace, &all_paths, cx);
 
-    if is_creating_new_worktree {
+    if transfer_state {
         window_handle.update(cx, |_multi_workspace, window, cx| {
             new_workspace.update(cx, |workspace, cx| {
                 if has_non_git {
@@ -296,8 +300,9 @@ pub(super) async fn open_worktree_workspace(
         .ok();
 
     window_handle.update(cx, |multi_workspace, window, cx| {
-        multi_workspace.activate(new_workspace.clone(), source_for_transfer, window, cx);
-
+        if activate {
+            multi_workspace.activate(new_workspace.clone(), source_for_transfer, window, cx);
+        }
         new_workspace.update(cx, |workspace, cx| {
             workspace.run_create_worktree_tasks(window, cx);
         });
@@ -316,5 +321,5 @@ pub(super) async fn open_worktree_workspace(
         }
     }
 
-    anyhow::Ok(())
+    Ok(new_workspace)
 }

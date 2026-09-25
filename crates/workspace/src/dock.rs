@@ -773,10 +773,9 @@ impl Dock {
         // writing global settings, so only this window's docks react.
         if let Some(workspace_entity) = workspace_for_placement.upgrade() {
             subscriptions.push(cx.observe_in(&workspace_entity, window, {
-                let workspace = workspace_for_placement.clone();
                 let panel = panel.clone();
                 move |this, _, window, cx| {
-                    this.relocate_panel(&panel, &workspace, window, cx);
+                    this.relocate_panel(&panel, &workspace_for_placement, window, cx);
                 }
             }));
         }

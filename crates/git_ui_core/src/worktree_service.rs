@@ -5,7 +5,8 @@ mod selection;
 use std::path::PathBuf;
 
 use anyhow::anyhow;
-use gpui::{SharedString, TaskExt};
+use gpui::{SharedString, Task, TaskExt};
+use util::ResultExt as _;
 use workspace::{MultiWorkspace, Workspace, dock::DockPosition};
 
 pub use creation::await_and_rollback_on_failure;
@@ -19,6 +20,104 @@ pub use selection::{
     RemoteBranchName, WorktreeCreateTarget, classify_worktrees, resolve_worktree_branch_target,
     worktree_create_targets,
 };
+
+pub struct CreatedWorktreeWorkspace {
+    pub workspace: gpui::Entity<Workspace>,
+    pub consolidated_worktrees: bool,
+}
+
+pub fn create_worktree_workspace(
+    workspace: &mut Workspace,
+    action: &zed_actions::CreateWorktree,
+    window: &mut gpui::Window,
+    fallback_focused_dock: Option<DockPosition>,
+    cx: &mut gpui::Context<Workspace>,
+) -> Task<anyhow::Result<CreatedWorktreeWorkspace>> {
+    let project = workspace.project().clone();
+    if project.read(cx).repositories(cx).is_empty() {
+        return Task::ready(Err(anyhow!(
+            "create_worktree: no git repository in the project"
+        )));
+    }
+    if project.read(cx).is_via_collab() {
+        return Task::ready(Err(anyhow!(
+            "create_worktree: not supported in collab projects"
+        )));
+    }
+    if workspace.active_worktree_creation().label.is_some() {
+        return Task::ready(Err(anyhow!("a worktree operation is already in progress")));
+    }
+
+    let previous_state =
+        workspace.capture_state_for_worktree_switch(window, fallback_focused_dock, cx);
+    let workspace_handle = workspace.weak_handle();
+    let window_handle = window.window_handle().downcast::<MultiWorkspace>();
+    let remote_connection_options = project.read(cx).remote_connection_options(cx);
+    let (git_repos, non_git_paths) = classify_worktrees(project.read(cx), cx);
+    if git_repos.is_empty() {
+        return Task::ready(Err(anyhow!("No git repositories found in the project")));
+    }
+    if remote_connection_options.is_some()
+        && project
+            .read(cx)
+            .remote_client()
+            .is_some_and(|client| client.read(cx).is_disconnected())
+    {
+        return Task::ready(Err(anyhow!(
+            "Cannot create worktree: remote connection is not active"
+        )));
+    }
+
+    let worktree_name = action.worktree_name.clone();
+    let branch_target = action.branch_target.clone();
+    let display_name: SharedString = worktree_name
+        .as_deref()
+        .unwrap_or("worktree")
+        .to_string()
+        .into();
+    workspace.set_active_worktree_creation(Some(display_name), false, cx);
+
+    let fetch_askpass_delegates = if remote_branch_to_fetch(&branch_target).is_some() {
+        let mut delegates = Vec::with_capacity(git_repos.len());
+        for _ in &git_repos {
+            delegates.push(create_worktree_askpass_delegate(
+                workspace_handle.clone(),
+                "git fetch",
+                window,
+                cx,
+            ));
+        }
+        delegates
+    } else {
+        Vec::new()
+    };
+
+    cx.spawn_in(window, async move |_workspace_entity, mut cx| {
+        let result = do_create_worktree(
+            git_repos,
+            non_git_paths,
+            worktree_name,
+            branch_target,
+            previous_state,
+            workspace_handle.clone(),
+            window_handle,
+            remote_connection_options,
+            fetch_askpass_delegates,
+            false,
+            &mut cx,
+        )
+        .await;
+
+        if result.is_err() {
+            workspace_handle
+                .update(cx, |workspace, cx| {
+                    workspace.set_active_worktree_creation(None, false, cx);
+                })
+                .log_err();
+        }
+        result
+    })
+}
 
 pub fn handle_create_worktree(
     workspace: &mut Workspace,
@@ -117,6 +216,7 @@ pub fn handle_create_worktree(
             window_handle,
             remote_connection_options,
             fetch_askpass_delegates,
+            true,
             &mut cx,
         )
         .await;

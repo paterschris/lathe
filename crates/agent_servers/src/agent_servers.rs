@@ -71,6 +71,18 @@ pub trait AgentServer: Send {
     ) {
     }
 
+    fn default_model(&self, _cx: &App) -> Option<acp_thread::AgentModelId> {
+        None
+    }
+
+    fn set_default_model(
+        &self,
+        _model_id: Option<acp_thread::AgentModelId>,
+        _fs: Arc<dyn Fs>,
+        _cx: &mut App,
+    ) {
+    }
+
     /// The approval / sandbox level this agent is launched with, if any.
     ///
     /// Unlike modes and config options, this is applied at process spawn via

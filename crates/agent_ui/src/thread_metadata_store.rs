@@ -1282,6 +1282,9 @@ impl ThreadMetadataStore {
         if thread_ref.project().read(cx).is_via_collab() {
             return;
         }
+        if thread_ref.is_restored_session() {
+            return;
+        }
         let is_draft = thread_ref.is_draft_thread();
         let existing_thread = self.entry(thread_id);
 

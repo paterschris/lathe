@@ -156,6 +156,7 @@
 - [OCaml](./languages/ocaml.md)
 - [OpenTofu](./languages/opentofu.md)
 - [PHP](./languages/php.md)
+- [PlatformIO](./languages/platformio.md)
 - [PowerShell](./languages/powershell.md)
 - [Prisma](./languages/prisma.md)
 - [Proto](./languages/proto.md)

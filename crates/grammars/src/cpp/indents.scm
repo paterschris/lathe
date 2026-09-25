@@ -17,6 +17,14 @@
   "{"
   "}" @end) @indent
 
+(field_declaration_list
+  (access_specifier) @start
+  "}" @end) @indent
+
+(field_declaration_list
+  (access_specifier)
+  (access_specifier) @outdent)
+
 (compound_statement
   (case_statement
     ":" @start)
@@ -25,7 +33,6 @@
 (compound_statement
   (case_statement)
   (case_statement) @outdent)
-
 
 (_
   "("

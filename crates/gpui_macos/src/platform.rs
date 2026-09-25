@@ -679,7 +679,7 @@ impl Platform for MacPlatform {
     fn screen_capture_sources(
         &self,
     ) -> oneshot::Receiver<Result<Vec<Rc<dyn gpui::ScreenCaptureSource>>>> {
-        crate::screen_capture::get_sources()
+        crate::screen_capture::get_sources(self.1)
     }
 
     fn active_window(&self) -> Option<AnyWindowHandle> {

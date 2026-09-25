@@ -1,5 +1,5 @@
 use crate::{AgentServer, AgentServerDelegate, load_proxy_env};
-use acp_thread::AgentConnection;
+use acp_thread::{AgentConnection, AgentModelId};
 use agent_client_protocol::schema::v1 as acp;
 use ai_accounts::{AiAccountsSettings, api_key_keychain_url, load_index};
 use anyhow::{Context as _, Result};
@@ -19,6 +19,8 @@ pub const GEMINI_ID: &str = "gemini";
 pub const CLAUDE_AGENT_ID: &str = "claude-acp";
 pub const CODEX_ID: &str = "codex-acp";
 pub const CURSOR_ID: &str = "cursor";
+
+const DEFAULT_MODEL_CONFIG_OPTION_ID: &str = "lathe.default_model";
 
 /// A generic agent server implementation for custom user-defined agents
 pub struct CustomAgentServer {
@@ -141,6 +143,26 @@ impl AgentServer for CustomAgentServer {
                 }
             }
         });
+    }
+
+    fn default_model(&self, cx: &App) -> Option<AgentModelId> {
+        cx.read_global(|settings: &SettingsStore, _| {
+            settings
+                .get::<AllAgentServersSettings>(None)
+                .get(self.agent_id().0.as_ref())
+                .and_then(|settings| settings.default_config_option(DEFAULT_MODEL_CONFIG_OPTION_ID))
+                .and_then(AgentConfigOptionValue::as_value_id)
+                .map(AgentModelId::from)
+        })
+    }
+
+    fn set_default_model(&self, model_id: Option<AgentModelId>, fs: Arc<dyn Fs>, cx: &mut App) {
+        self.set_default_config_option(
+            DEFAULT_MODEL_CONFIG_OPTION_ID,
+            model_id.map(|model_id| AgentConfigOptionValue::from(model_id.to_string())),
+            fs,
+            cx,
+        );
     }
 
     fn default_approval(&self, cx: &App) -> Option<String> {
@@ -512,6 +534,7 @@ mod tests {
                         version: SharedString::from("1.0.0"),
                         repository: None,
                         website: None,
+                        license_url: None,
                         icon_path: None,
                     },
                     package: id,

@@ -296,7 +296,7 @@ fn render_api_key_providers_item(
                         )
                         .child(
                             Label::new(format!(
-                                "Or set the {env_var_name} env var and restart Zed for it to take effect."
+                                "Or set the {env_var_name} env var and restart Lathe for it to take effect."
                             ))
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),

@@ -497,7 +497,7 @@ impl Agent {
                 Rc::new(agent_servers::CustomAgentServer::new(name.clone()))
             }
             #[cfg(any(test, feature = "test-support"))]
-            Self::Stub => Rc::new(crate::test_support::StubAgentServer::default_response()),
+            Self::Stub => Rc::new(crate::test_support::StubAgentServer::registered_or_default()),
         }
     }
 }
@@ -1041,7 +1041,11 @@ mod tests {
             sandbox_permissions: Default::default(),
             show_turn_stats: false,
             show_merge_conflict_indicator: true,
-            sidebar_side: Default::default(),
+            threads_sidebar: agent_settings::ThreadsSidebarSettings {
+                auto_open: true,
+                default_width: px(300.),
+                position: settings::SidebarDockPosition::Left,
+            },
             thinking_display: Default::default(),
             new_thread_location: Default::default(),
         };

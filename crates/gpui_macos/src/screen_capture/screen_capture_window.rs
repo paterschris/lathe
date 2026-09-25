@@ -1,51 +1,62 @@
-use cocoa::{
-    base::{id, nil},
-    foundation::NSBundle,
-};
-use core_graphics::geometry::CGRect;
 use gpui::{DevicePixels, SharedString, size};
-use objc::{class, msg_send, sel, sel_impl};
+use objc2::rc::Retained;
+use objc2_foundation::{NSBundle, NSString};
+use objc2_screen_capture_kit::SCWindow;
 
-pub(super) unsafe fn ns_string_to_shared(string: id) -> Option<SharedString> {
-    if string == nil {
-        return None;
-    }
-    let cstr: *const std::os::raw::c_char = unsafe { msg_send![string, UTF8String] };
-    if cstr.is_null() {
-        return None;
-    }
-    let rust_str = unsafe { std::ffi::CStr::from_ptr(cstr) }
-        .to_string_lossy()
-        .into_owned();
-    if rust_str.is_empty() {
+use super::{MacCaptureTarget, MacScreenCaptureSource};
+
+fn ns_string_to_shared(string: Option<Retained<NSString>>) -> Option<SharedString> {
+    let string = string?.to_string();
+    if string.is_empty() {
         None
     } else {
-        Some(rust_str.into())
+        Some(string.into())
     }
 }
 
-pub(super) unsafe fn own_bundle_identifier() -> Option<String> {
-    let bundle: id = unsafe { NSBundle::mainBundle() };
-    if bundle == nil {
+pub(super) fn own_bundle_identifier() -> Option<String> {
+    NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|bundle_id| bundle_id.to_string())
+}
+
+pub(super) unsafe fn window_source(
+    sc_window: Retained<SCWindow>,
+    own_bundle: Option<&str>,
+    backing_scale: f64,
+) -> Option<MacScreenCaptureSource> {
+    let window_id = unsafe { sc_window.windowID() };
+    let title = ns_string_to_shared(unsafe { sc_window.title() });
+    let (app_name, is_own_app) = match unsafe { sc_window.owningApplication() } {
+        Some(owning_app) => {
+            let app_name = ns_string_to_shared(Some(unsafe { owning_app.applicationName() }));
+            let bundle_id = unsafe { owning_app.bundleIdentifier() }.to_string();
+            (app_name, own_bundle == Some(bundle_id.as_str()))
+        }
+        None => (None, false),
+    };
+
+    // Skip windows that are both untitled and from an unknown app. They're
+    // usually helper surfaces (popovers, tooltips) the user never wants to share.
+    if title.is_none() && app_name.is_none() {
         return None;
     }
-    let bundle_id: id = unsafe { msg_send![bundle, bundleIdentifier] };
-    unsafe { ns_string_to_shared(bundle_id) }.map(|s| s.to_string())
-}
 
-pub(super) unsafe fn window_resolution(sc_window: id) -> gpui::Size<DevicePixels> {
-    let frame: CGRect = msg_send![sc_window, frame];
     // SCShareableContent exposes frames in points. Multiply by the main
     // screen's backing scale factor to produce a reasonable pixel resolution
-    // for the capture configuration. On non-retina displays this resolves
-    // to the point dimensions; on retina it doubles them.
-    let main_screen: id = msg_send![class!(NSScreen), mainScreen];
-    let scale: f64 = if main_screen == nil {
-        1.0
-    } else {
-        msg_send![main_screen, backingScaleFactor]
-    };
-    let width = (frame.size.width * scale).round().max(1.0) as i32;
-    let height = (frame.size.height * scale).round().max(1.0) as i32;
-    size(DevicePixels(width), DevicePixels(height))
+    // for the capture configuration.
+    let frame = unsafe { sc_window.frame() };
+    let width = (frame.size.width * backing_scale).round().max(1.0) as i32;
+    let height = (frame.size.height * backing_scale).round().max(1.0) as i32;
+
+    Some(MacScreenCaptureSource {
+        target: MacCaptureTarget::Window {
+            sc_window,
+            window_id,
+            title,
+            app_name,
+            is_own_app,
+            resolution: size(DevicePixels(width), DevicePixels(height)),
+        },
+    })
 }

@@ -89,6 +89,7 @@ pub(super) fn tab_icon(
 }
 
 pub(super) fn tab_icon_state(
+    view: &TerminalView,
     task: Option<&TaskState>,
     is_awaiting_input: bool,
 ) -> (IconName, Color, Option<IconButton>) {
@@ -100,15 +101,11 @@ pub(super) fn tab_icon_state(
                 } else {
                     (IconName::PlayFilled, Color::Disabled)
                 };
-                (icon, color, TerminalView::rerun_button(task))
+                (icon, color, view.rerun_button(task))
             }
-            TaskStatus::Unknown => (
-                IconName::Warning,
-                Color::Warning,
-                TerminalView::rerun_button(task),
-            ),
+            TaskStatus::Unknown => (IconName::Warning, Color::Warning, view.rerun_button(task)),
             TaskStatus::Completed { success } => {
-                let rerun_button = TerminalView::rerun_button(task);
+                let rerun_button = view.rerun_button(task);
 
                 if *success {
                     (IconName::Check, Color::Success, rerun_button)

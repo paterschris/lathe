@@ -272,8 +272,9 @@ pub(super) async fn do_create_worktree(
     window_handle: Option<gpui::WindowHandle<MultiWorkspace>>,
     remote_connection_options: Option<RemoteConnectionOptions>,
     fetch_askpass_delegates: Vec<AskPassDelegate>,
+    activate: bool,
     cx: &mut AsyncWindowContext,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<super::CreatedWorktreeWorkspace> {
     let worktree_receivers: Vec<_> = cx.update(|_, cx| {
         git_repos
             .iter()
@@ -356,11 +357,12 @@ pub(super) async fn do_create_worktree(
         )
         .await;
     }
+    let consolidated_worktrees = path_remapping.len() > created_paths.len();
     let mut all_paths = created_paths;
     let has_non_git = !non_git_paths.is_empty();
     all_paths.extend(non_git_paths.iter().cloned());
 
-    open_worktree_workspace(
+    let workspace = open_worktree_workspace(
         all_paths,
         path_remapping,
         non_git_paths,
@@ -370,7 +372,13 @@ pub(super) async fn do_create_worktree(
         window_handle,
         remote_connection_options,
         WorktreeOperation::Create,
+        activate,
         cx,
     )
-    .await
+    .await?;
+
+    Ok(super::CreatedWorktreeWorkspace {
+        workspace,
+        consolidated_worktrees,
+    })
 }

@@ -1,0 +1,10 @@
+name = "PlatformIO"
+code_fence_block_name = "platformio"
+grammar = "ini"
+path_suffixes = ["platformio.ini"]
+line_comments = ["; ", "# "]
+autoclose_before = "]"
+brackets = [
+    { start = "[", end = "]", close = true, newline = false },
+    { start = "\"", end = "\"", close = true, newline = false },
+]

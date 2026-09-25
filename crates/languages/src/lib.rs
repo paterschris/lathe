@@ -24,6 +24,7 @@ mod eslint;
 mod go;
 mod json;
 mod package_json;
+mod platformio;
 mod python;
 mod rust;
 mod tailwind;
@@ -68,6 +69,8 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
     let json_context_provider = Arc::new(JsonTaskProvider);
     let json_lsp_adapter = Arc::new(json::JsonLspAdapter::new(languages.clone(), node.clone()));
     let node_version_lsp_adapter = Arc::new(json::NodeVersionAdapter);
+    let platformio_context_provider =
+        Arc::new(platformio::PlatformIoContextProvider::new(fs.clone()));
     let py_lsp_adapter = Arc::new(python::PyLspAdapter::new());
     let ty_lsp_adapter = Arc::new(python::TyLspAdapter::new(fs.clone()));
     let python_context_provider = Arc::new(python::PythonContextProvider);
@@ -96,11 +99,13 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
         },
         LanguageInfo {
             name: "c",
+            context: Some(platformio_context_provider.clone()),
             adapters: vec![c_lsp_adapter.clone()],
             ..Default::default()
         },
         LanguageInfo {
             name: "cpp",
+            context: Some(platformio_context_provider.clone()),
             adapters: vec![c_lsp_adapter],
             semantic_token_rules: Some(cpp::semantic_token_rules()),
             ..Default::default()
@@ -153,6 +158,12 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
         },
         LanguageInfo {
             name: "markdown-inline",
+            adapters: vec![],
+            ..Default::default()
+        },
+        LanguageInfo {
+            name: "platformio",
+            context: Some(platformio_context_provider),
             adapters: vec![],
             ..Default::default()
         },
