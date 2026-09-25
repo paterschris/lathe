@@ -2,6 +2,37 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.6.0-beta - 2026-09-25
+
+A beta that catches Lathe up with 186 upstream Zed changes, adds PlatformIO support, and brings back several upstream fixes that earlier merges had dropped.
+
+### Added
+
+- **PlatformIO support.** Open a folder with a `platformio.ini` and you get syntax highlighting and an outline for the file, build, upload, monitor, test, check and clean tasks for each environment, and clangd code intelligence from the compilation database PlatformIO generates. Lathe drives the `pio` CLI but doesn't bundle it, so install PlatformIO Core first. See the PlatformIO page in the docs.
+- **Agent panel terminals survive a restart.** Terminals you open in the agent panel are restored, with their titles and working directories, the next time the workspace opens.
+- **Subagents can run on a specific model.** `spawn_agent` takes an optional `model` in `provider/model-id` form. Without it, a subagent uses the configured subagent model, or else its parent's model, as before.
+
+### Fixed
+
+- **Shift+Up, Shift+Down and the other Shift navigation keys reach programs running in the terminal's alternate screen** (vim, less, htop and similar) instead of scrolling Lathe's terminal history.
+- **AltGr characters type correctly in the terminal** when `option_as_meta` is on, instead of being sent as meta sequences.
+- **Edit > Copy and Edit > Paste work when a terminal is focused.**
+- **C++ members under `public:`, `private:` and `protected:` indent one level deeper than the specifier**, including method bodies inside those sections.
+- **Deleted-line markers in the git gutter stay visible** at small custom `git_gutter_width` values.
+- **Right-clicking selected text in an agent message offers "Copy" and "Copy as Markdown"**, matching the rest of the editor.
+- Git no longer depends on libgit2. Repositories are opened lazily, so a folder that becomes a repository after you open it is picked up, and bare repositories are supported.
+
+### Changed
+
+- Merged upstream Zed through `7fdb97cad5`: 186 commits, including ACP session notices, faster incremental diff loading, JSONL and NDJSON tabular preview, and `"..."` inheritance in `hidden_files`, `terminal.path_hyperlink_regexes` and the edit prediction exclusion settings.
+
+### Known issues
+
+- Verified with `cargo check --workspace --all-targets`, `./script/clippy`, and the test suites for the changed crates on macOS. None of it has been exercised in a running build, and Windows and Linux are untested.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v1.5.0-beta - 2026-09-24
 
 A beta for control over what Lathe downloads, theme customizer edits that persist, and a pull request view that refreshes in place.
