@@ -400,6 +400,9 @@ impl EditorElement {
         register_action(editor, window, Editor::select_page_down);
         register_action(editor, window, Editor::select_page_up);
         register_action(editor, window, Editor::cancel);
+        register_action(editor, window, |editor, _: &menu::Confirm, window, cx| {
+            editor.confirm_inline_input(window, cx);
+        });
         register_action(editor, window, Editor::newline);
         register_action(editor, window, Editor::newline_above);
         register_action(editor, window, Editor::newline_below);
@@ -7707,6 +7710,15 @@ impl LineWithInvisibles {
             replacement: None,
         }]) {
             if let Some(replacement) = highlighted_chunk.replacement {
+                if line_exceeded_max_len {
+                    continue;
+                }
+
+                if len + line.len() + highlighted_chunk.text.len() > max_line_len {
+                    line_exceeded_max_len = true;
+                    continue;
+                }
+
                 if !line.is_empty() {
                     let segments = bg_segments_per_row.get(row).map(|v| &v[..]).unwrap_or(&[]);
                     let text_runs: &[TextRun] = if segments.is_empty() {
@@ -7851,13 +7863,18 @@ impl LineWithInvisibles {
                             Cow::Borrowed(text_style)
                         };
 
-                        if line.len() + line_chunk.len() > max_line_len {
-                            let mut chunk_len = max_line_len - line.len();
+                        let current_line_len = len + line.len();
+                        if current_line_len + line_chunk.len() > max_line_len {
+                            let mut chunk_len = max_line_len - current_line_len;
                             while !line_chunk.is_char_boundary(chunk_len) {
                                 chunk_len -= 1;
                             }
                             line_chunk = &line_chunk[..chunk_len];
                             line_exceeded_max_len = true;
+                        }
+
+                        if line_chunk.is_empty() {
+                            continue;
                         }
 
                         styles.push(TextRun {

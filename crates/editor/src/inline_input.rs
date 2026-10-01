@@ -16,6 +16,7 @@ pub struct InlineInputState {
     history_ix: Option<usize>,
     draft: String,
     _subscription: Subscription,
+    _action_subscription: Subscription,
     on_confirm:
         Rc<dyn Fn(&mut Editor, String, &mut Window, &mut Context<Editor>) -> Option<Task<()>>>,
 }
@@ -126,6 +127,7 @@ impl Editor {
     ) {
         self.take_inline_input(window, cx);
 
+        let parent = cx.weak_entity();
         let input = cx.new(|cx| {
             let mut input = Editor::single_line(window, cx);
             input.set_placeholder_text(placeholder, window, cx);
@@ -134,6 +136,15 @@ impl Editor {
                 input.select_all(&SelectAll, window, cx);
             }
             input
+        });
+        let action_subscription = input.update(cx, |input, _| {
+            input.register_action(move |_: &menu::Confirm, window, cx| {
+                if let Err(error) = parent.update(cx, |editor, cx| {
+                    editor.confirm_inline_input(window, cx);
+                }) {
+                    log::error!("failed to confirm inline input: {error:#}");
+                }
+            })
         });
         let subscription = cx.subscribe_in(
             &input,
@@ -191,6 +202,7 @@ impl Editor {
             history,
             draft: String::new(),
             _subscription: subscription,
+            _action_subscription: action_subscription,
             on_confirm: Rc::new(on_confirm),
         });
     }

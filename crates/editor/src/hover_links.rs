@@ -404,6 +404,18 @@ impl Editor {
             return false;
         }
 
+        // A peek shows LSP results, so it has nothing to show for a URL or a plain file
+        // path. Taking those over sent them into a go-to-definition peek instead of
+        // opening them, which meant cmd-clicking a link did nothing at all.
+        let non_lsp_link = self
+            .hovered_link_state
+            .as_ref()
+            .and_then(|state| state.links.first())
+            .is_some_and(|link| matches!(link, HoverLink::Url(_) | HoverLink::File(_)));
+        if non_lsp_link {
+            return false;
+        }
+
         self.hide_hovered_link(cx);
         // The navigation actions read the cursor, so move it under the click
         // first, as the uncached cmd-click path does.
