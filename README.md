@@ -1,39 +1,39 @@
 # Lathe
 
-A customized code editor forked from [Zed](https://zed.dev), focused on mobile development workflows, deeper git tooling, in-editor code review, and theme customization.
+A code editor. It's a fork of [Zed](https://zed.dev) with my own changes stacked on top: a mobile dev panel for React Native and Expo, more git tooling than upstream ships, pull request review inside the editor, and a theme I actually want to look at all day.
 
 ### [Download Lathe](https://github.com/paterschris/lathe/releases/latest)
 
-The latest release for macOS, Linux, and Windows. On macOS you can also install it with Homebrew:
+macOS, Linux, Windows. On macOS, Homebrew works too:
 
 ```sh
 brew install --cask paterschris/tap/lathe
 ```
 
-Per-platform notes, including Windows, are in [Install](#install).
+Per-platform notes are under [Install](#install). Windows needs an extra paragraph of reading.
 
-Lathe is a personal fork of Zed. I maintain it so I can ship small editor tweaks for my own workflow without waiting on upstream review, and without needing each change to fit Zed's product scope. Upstream Zed is the primary project - this fork tracks it closely and layers on my own changes.
+This is a personal fork. I maintain it because I wanted a handful of editor tweaks and didn't want to wait on upstream review for each one, or make the case that every one of them belongs in Zed's product scope. Most of them don't. Zed is still the real project here; Lathe just tracks it and layers my stuff on top.
 
-**Platforms:** macOS (Apple Silicon), Linux (x86_64 and arm64), and Windows (x86_64 and arm64; experimental).
+**Platforms:** macOS (Apple Silicon), Linux (x86_64 and arm64), Windows (x86_64 and arm64, experimental).
 
-**Stability:** Lathe is maintained for my own daily use. Upstream syncs can occasionally introduce breakage; bug reports are welcome.
+**Stability:** I use this as my daily editor, which is most of the QA it gets. Upstream syncs break things now and then. Bug reports welcome.
 
 ## Features
 
-Ordered by how much each one differentiates Lathe from stock Zed. Upstream already ships a commit graph, a tabbed git panel, worktree support, and single-file history; the git section below covers what Lathe adds on top of those rather than restating them.
+Roughly ordered by how far each one is from stock Zed. One caveat on the git entry: upstream already has a commit graph, a tabbed git panel, worktree support, and single-file history, so that section only covers what Lathe puts on top of them.
 
-1. [Mobile development](docs/features.md#mobile-development-expo--react-native) - Expo and bare React Native panel
-2. [Merge conflicts and interactive rebase](docs/features.md#merge-conflicts-and-interactive-rebase) - conflict resolution tab, full-file split view, drag-and-drop rebase
-3. [Pull request reviews](docs/features.md#pull-request-reviews) - GitHub, GitLab, and Bitbucket, in-editor
-4. [Code navigation](docs/features.md#code-navigation) - peek view for definitions and references
-5. [AI agent integration](docs/features.md#ai-agent-integration) - multi-account sign-in, approval control, per-workspace thread history
-6. [Theme and syntax highlighting](docs/features.md#theme-and-syntax-highlighting) - custom theme, live 200+ color customizer
+1. [Mobile development](docs/features.md#mobile-development-expo--react-native) - a panel for Expo and bare React Native projects
+2. [Merge conflicts and interactive rebase](docs/features.md#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, drag-and-drop rebase
+3. [Pull request reviews](docs/features.md#pull-request-reviews) - GitHub, GitLab, Bitbucket, in the editor
+4. [Code navigation](docs/features.md#code-navigation) - definitions and references open in a peek instead of a new tab
+5. [AI agent integration](docs/features.md#ai-agent-integration) - sign into several accounts, control approval levels, per-workspace thread history
+6. [Theme and syntax highlighting](docs/features.md#theme-and-syntax-highlighting) - the default theme, plus a live customizer for all 200+ colors
 7. [Git additions](docs/features.md#git-additions) - explorer tab, branch tree, graph context menus, undo, Git Flow
-8. [Jupyter notebooks](docs/features.md#jupyter-notebooks) - an ordinary setting in place of upstream's server-side feature flag
-9. [Terminal, windows, and workspaces](docs/features.md#terminal-windows-and-workspaces) - additional windows for editors and terminals, awaiting-input indicator, workspace groups, per-window zoom
-10. [AWS profiles](docs/features.md#aws-profiles) - per-window profile selector
+8. [Jupyter notebooks](docs/features.md#jupyter-notebooks) - saving keeps your outputs, cells share one document, and the kernel picker finds your project's venv
+9. [Terminal, windows, and workspaces](docs/features.md#terminal-windows-and-workspaces) - extra windows for editors and terminals, an awaiting-input indicator, workspace groups, per-window zoom
+10. [AWS profiles](docs/features.md#aws-profiles) - a per-window profile selector
 
-Each of these is described in full, with screenshots, in **[docs/features.md](docs/features.md)**.
+Screenshots and the long version live in **[docs/features.md](docs/features.md)**.
 
 ## Install
 
@@ -46,23 +46,23 @@ brew install --cask lathe
 
 ### Manual download
 
-Download the latest release from [Releases](https://github.com/paterschris/lathe/releases):
+From [Releases](https://github.com/paterschris/lathe/releases):
 
-- **macOS**: Download the `.dmg`, open it, and drag **Lathe.app** to `/Applications`. A `.zip` is also available if you prefer. macOS builds are code-signed and notarized by Apple.
-- **Linux**: Download the `.tar.gz` and extract it, or use the install script after building from source (see below). Like upstream Zed, the editor needs the host's ALSA runtime (`libasound2` on Debian/Ubuntu, `alsa-lib` on Fedora/Arch) and working Vulkan drivers; both are preinstalled on typical desktop distros.
-- **Windows**: Download the setup `.exe` or `.zip` for your architecture (x86_64 or arm64). Windows builds are currently unsigned; see [Installing on Windows](#installing-on-windows).
+- **macOS**: grab the `.dmg`, open it, drag **Lathe.app** to `/Applications`. There's a `.zip` too if you'd rather. Both are code-signed and notarized by Apple.
+- **Linux**: the `.tar.gz`, extracted wherever you want it. Or build from source and use the install script below. Runtime requirements are the same as upstream Zed's: the host's ALSA (`libasound2` on Debian/Ubuntu, `alsa-lib` on Fedora/Arch) and working Vulkan drivers. Any normal desktop distro already has both.
+- **Windows**: setup `.exe` or `.zip`, x86_64 or arm64. These builds aren't signed, so read [Installing on Windows](#installing-on-windows) first.
 
 ### Installing on Windows
 
-The setup `.exe` is the simplest option. Because Lathe's Windows builds are unsigned, Microsoft Defender SmartScreen may show a warning. Select **More info**, verify that the file came from the Lathe GitHub release, then select **Run anyway**.
+The setup `.exe` is the easy path. Since Lathe's Windows builds are unsigned, Defender SmartScreen will probably warn you about it. Click **More info**, check that the file came from the Lathe GitHub release, then **Run anyway**.
 
-For the portable path, download the x86_64 `.zip`, open PowerShell in a Lathe source checkout, and run:
+If you'd rather have it portable, download the x86_64 `.zip`, open PowerShell in a Lathe source checkout, and run:
 
 ```powershell
 script/install-fork-windows.ps1 -ArchivePath C:\path\to\Lathe-version-x86_64-windows.zip
 ```
 
-The install script removes Mark-of-the-Web from the extracted files, installs Lathe under `%LOCALAPPDATA%\Programs\Lathe`, adds its CLI to your user `PATH`, and creates a Start Menu shortcut. If Lathe installs but no window appears, run `script/diag-windows.ps1` from the source checkout and include its output in a bug report.
+That strips Mark-of-the-Web off the extracted files, installs Lathe under `%LOCALAPPDATA%\Programs\Lathe`, puts its CLI on your user `PATH`, and adds a Start Menu shortcut. If the install goes fine but no window ever shows up, run `script/diag-windows.ps1` from the checkout and paste the output into a bug report.
 
 ### Build from source
 
@@ -95,9 +95,9 @@ script/package-fork-windows.ps1 -Architecture x86_64
 script/install-fork-windows.ps1
 ```
 
-Installs as **Lathe** and runs alongside stock Zed without conflicts.
+It installs as **Lathe** and runs alongside stock Zed without stepping on it.
 
-To run the build without installing to `/Applications`, launch the bundle directly:
+Want to try a build without installing it to `/Applications`? Launch the bundle where it sits:
 
 ```sh
 open target/release/bundle/osx/Lathe.app
@@ -105,16 +105,16 @@ open target/release/bundle/osx/Lathe.app
 
 ## Release channels
 
-Lathe ships on two channels:
+Two channels:
 
-- **Stable** - tagged `vX.Y.Z`, the recommended build for daily use.
-- **Beta** - tagged `vX.Y.Z-beta`, published as GitHub prereleases with a distinct app icon. Beta builds typically contain the latest upstream Zed sync before it's rolled into stable.
+- **Stable**, tagged `vX.Y.Z`. Use this one.
+- **Beta**, tagged `vX.Y.Z-beta` and published as GitHub prereleases, with a different app icon. Beta usually means the newest upstream Zed sync is in there and hasn't reached stable yet.
 
-Homebrew installs stable by default. To try a beta, grab the `-beta` asset from [Releases](https://github.com/paterschris/lathe/releases).
+Homebrew gives you stable. For a beta, pull the `-beta` asset off [Releases](https://github.com/paterschris/lathe/releases).
 
-To be notified when a new version ships, use **Watch > Custom > Releases** at the top of this repository. Starring bookmarks the project but does not send release notifications.
+Want a ping when a release goes out? **Watch > Custom > Releases** at the top of the repo. Starring won't do it, that just bookmarks the project.
 
-Release notes also go up at [r/LatheEditor](https://www.reddit.com/r/LatheEditor/), along with feature requests and general discussion. Bugs and pull requests belong here in the repository.
+Release notes also go up on [r/LatheEditor](https://www.reddit.com/r/LatheEditor/), which is the place for feature requests and general discussion too. Bugs and pull requests stay here in the repo.
 
 ## Updating
 
@@ -143,9 +143,9 @@ script/install-fork-linux
 
 ## Relationship to Zed
 
-Lathe periodically merges from [upstream Zed](https://github.com/zed-industries/zed) to stay current with new features and fixes. Custom changes are kept in separate commits to make merges straightforward.
+Lathe merges from [upstream Zed](https://github.com/zed-industries/zed) every few weeks to pick up new features and fixes. My changes live in their own commits, which is what keeps those merges manageable.
 
-**Last synced with upstream Zed: 2026-07-14.**
+**Last synced with upstream Zed: 2026-09-25.**
 
 > **2026-04-24:** `main` was rewritten to fix a long-standing ancestry tangle that made the fork display as ~37k commits ahead and ~37k behind upstream. The new history is 9 thematic commits on top of `upstream/main`, and the source tree is unchanged. Original SHAs are preserved on the `archive/pre-rebuild-20260424` branch. Existing clones can recover with:
 >
@@ -161,13 +161,13 @@ Lathe inherits its licensing from upstream Zed:
 - The source is licensed primarily under the [GNU General Public License v3.0 or later](LICENSE-GPL).
 - Some components are licensed under the [Apache License 2.0](LICENSE-APACHE), where marked.
 
-Upstream Zed relicensed from AGPL to GPL in May 2026, and this fork follows it, so there is no longer an AGPL license file.
+Upstream Zed relicensed from AGPL to GPL in May 2026 and this fork followed, so there's no AGPL license file anymore.
 
 All upstream license terms are preserved. See the individual `LICENSE-*` files at the repo root.
 
 ## Contributing
 
-Lathe is primarily a personal fork, but I want to preserve the open-source feel of Zed. If you hit a bug, want a tweak, or have an idea that fits the spirit of the fork, feel free to open an issue or PR. See [CONTRIBUTING.md](CONTRIBUTING.md) for the inherited Zed guidelines; Lathe-specific conventions live in [CLAUDE.md](CLAUDE.md) and `.rules`.
+It's mostly a personal fork, but I'd like it to keep Zed's open-source feel. Hit a bug, want a tweak, have an idea that fits? Open an issue or a PR. [CONTRIBUTING.md](CONTRIBUTING.md) has the inherited Zed guidelines; Lathe-specific conventions are in [CLAUDE.md](CLAUDE.md) and `.rules`.
 
 ## Releasing
 
@@ -175,11 +175,11 @@ Lathe is primarily a personal fork, but I want to preserve the open-source feel 
 script/release-fork
 ```
 
-Builds, packages, and publishes a GitHub release. Requires the [GitHub CLI](https://cli.github.com/).
+Builds, packages, and publishes a GitHub release. Needs the [GitHub CLI](https://cli.github.com/).
 
 ## Notes
 
-- First builds take significantly longer than incremental rebuilds
+- The first build takes a while. Incremental rebuilds are much faster.
 - On macOS, the app shares settings and extensions with stock Zed (`~/Library/Application Support/Zed`)
-- On Linux, the app installs to `~/.local/share/lathe` with the CLI symlinked to `~/.local/bin/lathe`
-- `cargo-bundle` is installed automatically from [zed-industries/cargo-bundle](https://github.com/zed-industries/cargo-bundle)
+- Linux installs land in `~/.local/share/lathe`, CLI symlinked to `~/.local/bin/lathe`
+- `cargo-bundle` gets installed for you from [zed-industries/cargo-bundle](https://github.com/zed-industries/cargo-bundle)

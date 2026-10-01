@@ -1,6 +1,6 @@
 # Mobile development with Lathe
 
-Lathe ships a workflow for building React Native / Expo apps and installing them on an Android device, with no Android Studio install required. Phase 1 (this doc) covers the manual setup and the cheapest path for common workflows. The Mobile panel can now install the whole toolchain for you (see "Toolchain" below), so the manual route is optional. On macOS the panel also covers iOS; see "iOS (macOS only)" below.
+Building React Native / Expo apps and getting them onto an Android device, without installing Android Studio. This doc is Phase 1, the manual route, and the cheapest path through the common workflows. The Mobile panel can install the whole toolchain for you now (see "Toolchain" below), so you don't strictly have to do any of it by hand. On macOS the panel covers iOS as well; that's under "iOS (macOS only)" below.
 
 ## Pick your workflow
 
@@ -10,7 +10,7 @@ Lathe ships a workflow for building React Native / Expo apps and installing them
 | Test persistence / behavior **without your laptop attached**             | **EAS preview**     | No (cloud build)       | ~10 min / build |
 | Production-style local build (no internet, no EAS credits)               | **Local release**   | Yes (plus keystore)    | 1 to 2 min      |
 
-Important: debug builds bundle a `__DEV__` JS payload that **expects to reach the Metro dev server on launch**. They will not work standalone. For "install on phone, close laptop, walk away," you need a release variant. EAS preview is the lowest-friction route because it builds in the cloud, signs the APK, and avoids the entire local Android SDK install.
+Important: debug builds bundle a `__DEV__` JS payload that **expects to reach the Metro dev server on launch**. They will not work standalone. For "install on phone, close laptop, walk away," you need a release variant. EAS preview is the least painful route there: it builds in the cloud and signs the APK for you, and you never install the local Android SDK at all.
 
 ## Debug + Metro (active dev)
 
@@ -59,7 +59,9 @@ See "Toolchain" below for the install. Once set up, generate a release keystore 
 
 ## Toolchain (only needed for local builds)
 
-**The easy way**: when Lathe detects an Expo project whose toolchain is incomplete, it offers the install in a workspace notification; click **Install**. The same flow is always available from the Mobile panel's "Android toolchain" section (**Install missing**) or the `install android toolchain` action. Lathe downloads JDK 17 (Azul Zulu) and the Android SDK into a Lathe-managed directory, accepts the licenses, and injects `JAVA_HOME` / `ANDROID_HOME` / `PATH` into panel-started builds automatically; the shell exports below are then only needed for terminal workflows. The managed toolchain skips the NDK: gradle downloads the project's pinned revision on first build.
+**The easy way**: when Lathe detects an Expo project whose toolchain is incomplete, it offers the install in a workspace notification; click **Install**. The same flow is always available from the Mobile panel's "Android toolchain" section (**Install missing**) or the `install android toolchain` action.
+
+Lathe pulls down JDK 17 (Azul Zulu) and the Android SDK into a directory it manages, accepts the licenses, and injects `JAVA_HOME` / `ANDROID_HOME` / `PATH` into panel-started builds. So after that the shell exports below are only for terminal workflows. The managed toolchain skips the NDK on purpose: gradle fetches the project's pinned revision on first build.
 
 The manual route, for reference. Required components for an Expo 54 build targeting Android 35.
 
@@ -178,7 +180,7 @@ Phase 1 (this doc) remains the reference for the manual, terminal-based workflow
 
 ## Bare React Native projects (not just Expo)
 
-The `mobile_dev` panel now detects **bare React Native** projects too, not only Expo. A worktree qualifies when its `package.json` lists a `react-native` (or `expo`) dependency, or when it has sibling `ios/` and `android/` folders. For a detected project the panel probes and surfaces only the methods that apply:
+The `mobile_dev` panel now detects **bare React Native** projects too, not only Expo. A worktree qualifies when its `package.json` lists a `react-native` (or `expo`) dependency, or when it has sibling `ios/` and `android/` folders. Once it's detected, the panel probes the project and surfaces only what actually applies to it:
 
 - **Package manager** is inferred from the lockfile (`yarn` / `npm` / `pnpm` / `bun`) and used to run scripts and Metro.
 - **Scripts** section: one button per `package.json` script. Scripts that need positional args (for example a `yarn ios <variant> <config>` wrapper) print their own usage into the output pane when run with none.
