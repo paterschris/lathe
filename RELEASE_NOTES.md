@@ -2,6 +2,36 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.7.0-beta - 2026-10-01
+
+Jupyter notebooks. Upstream's editor loses data when you save it, so this is mostly a rewrite of the parts that matter.
+
+### Added
+
+- **Saving doesn't eat your outputs anymore.** This is the one that mattered. Outputs used to be rebuilt from whatever had been drawn on screen, so images, tables, JSON and markdown output vanished on every save. Widgets went with them. Each output now keeps its original nbformat next to the rendered view, and what goes back to disk is what came off it.
+- **An untouched notebook saves to an empty `git diff`.** Key order, indentation, trailing newline, all kept from the file you opened. Opening one and hitting `cmd-s` used to rewrite the whole thing.
+- **Cells share one document.** They're excerpts over a single buffer holding the notebook as a `# %%` script, so `message` defined in cell 1 resolves in cell 2. `cmd-shift-y` flips between the cell list and that script, and you can edit either. Completions inside cells need `jupyter.language_server_sidecar` as well, because Zed only attaches language servers to buffers backed by a real file. That setting writes a hidden `.yourfile.lathe.py` next to the notebook and deletes it when you close the tab.
+- Kernel picking got a lot less dumb. Waits for environment discovery to finish before choosing, so your project's `.venv` doesn't lose a race to a bare `python3`. Prefers an environment inside the worktree over whatever your active Python toolchain happens to point at. Remembers the choice by interpreter path, since half your venvs are named "Python 3.12.13 (venv)". And if the environment you pick has no ipykernel, it offers to install it instead of starting something that can't work.
+- **A kernel log button** in the status bar, next to restart and interrupt. Kernel stdout and stderr were always going to the app log. Now there's a way to get there.
+- Outline (`cmd-shift-o`), breadcrumbs, and `cmd-f` all work across cells.
+
+### Fixed
+
+- **A slow kernel isn't a dead one.** Startup gave up at 45 seconds, dropped the kernel and stamped "cell could not be executed" on whatever was queued. Except the kernel process was already up by then and ran those same cells, so you'd get the correct answer with an error sitting underneath it. 45 seconds now just warns in the log. Only five minutes actually gives up.
+- **Discarding a hunk in the git panel sticks.** The open notebook follows the file on disk. Before, it held onto the pre-discard metadata and the next autosave wrote all of it back, so your discard quietly undid itself as soon as focus changed.
+- **Opening a notebook doesn't dirty it.** Launching a kernel rewrote `metadata.kernelspec`, which then showed up in `git diff` on a file you'd done nothing to.
+- **Save As works.** `cmd-shift-s` did nothing at all. The implementation was there the whole time, the trait just said no.
+- Edit prediction popovers and right-click menus were clipped to the editor's own bounds. Never noticeable in a full-window editor. Very noticeable in a two-line notebook cell. This one affects every editor, not just notebooks.
+
+### Known issues
+
+- Splitting a notebook across two panes is disabled. The two sides diverge.
+- `.ipynb` tabs don't reopen after you quit and come back.
+- LaTeX output shows as source. Widgets show as a placeholder.
+- Tested by hand on macOS against a real notebook and a live Python kernel. Windows and Linux untested.
+
+---
+
 ## v1.6.0-beta - 2026-09-25
 
 A beta that catches Lathe up with 186 upstream Zed changes, adds PlatformIO support, and brings back several upstream fixes that earlier merges had dropped.
@@ -256,7 +286,7 @@ Finding references no longer takes you out of the file you are reading.
 
 ---
 
-## v0.236.34-beta — 2026-08-27
+## v0.236.34-beta - 2026-08-27
 
 Fixes a data-loss class of bug that only shows up when two Lathe channels run at the same time, and finishes the pull request panel's separation between reviewing someone's work and acting on your own.
 
@@ -282,7 +312,7 @@ Fixes a data-loss class of bug that only shows up when two Lathe channels run at
 
 ---
 
-## v0.236.33-beta — 2026-08-26
+## v0.236.33-beta - 2026-08-26
 
 Completes the write side of the pull request panel. Until now it could open, review, comment on and merge a pull request, but every path that did not end in a merge was missing: it listed closed pull requests while offering no way to close one, and showed reviewers with no way to request one.
 
@@ -312,7 +342,7 @@ Requesting a review reads the pull request first and merges into its existing re
 
 ---
 
-## v0.236.32-beta — 2026-08-26
+## v0.236.32-beta - 2026-08-26
 
 A fix release for the pull request panel shipped in v0.236.30-beta. Two of these were dead on arrival and only surfaced once the panel was used against a real repository.
 
@@ -335,7 +365,7 @@ A fix release for the pull request panel shipped in v0.236.30-beta. Two of these
 
 ---
 
-## v0.236.31-beta — 2026-08-25
+## v0.236.31-beta - 2026-08-25
 
 An upstream sync, bringing Lathe up to date with 78 commits from Zed. The pull request panel and Windows code signing shipped in v0.236.30-beta and are unchanged here.
 
@@ -402,7 +432,7 @@ An upstream sync, bringing Lathe up to date with 78 commits from Zed. The pull r
 
 ---
 
-## v0.236.17-beta — 2026-06-16
+## v0.236.17-beta - 2026-06-16
 
 GitKraken-parity push for the Git panel, plus a worktree-aware debug scenario fix.
 
