@@ -81,8 +81,24 @@ pub fn install_ipykernel_and_assign(
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
+    install_ipykernel(kernel_specification, window, cx, move |spec, window, cx| {
+        assign_kernelspec(spec, weak_editor, window, cx)
+    })
+}
+
+/// Installs ipykernel into the environment `kernel_specification` points at, then hands
+/// the updated spec to `on_ready`.
+///
+/// The notebook editor has no `Editor` to assign a session to, so the step that consumes
+/// the installed kernel is left to the caller.
+pub fn install_ipykernel(
+    kernel_specification: KernelSpecification,
+    window: &mut Window,
+    cx: &mut App,
+    on_ready: impl FnOnce(KernelSpecification, &mut Window, &mut App) -> Result<()> + 'static,
+) -> Result<()> {
     let KernelSpecification::PythonEnv(ref env_spec) = kernel_specification else {
-        return assign_kernelspec(kernel_specification, weak_editor, window, cx);
+        return on_ready(kernel_specification, window, cx);
     };
 
     let python_path = env_spec.path.clone();
@@ -171,7 +187,7 @@ pub fn install_ipykernel_and_assign(
                                 has_ipykernel: true,
                                 ..env_spec
                             });
-                        assign_kernelspec(updated_spec, weak_editor, window, cx).ok();
+                        util::ResultExt::log_err(on_ready(updated_spec, window, cx));
                     })
                     .ok();
             }

@@ -1,8 +1,11 @@
 use std::future::Future;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use collections::{HashMap, HashSet};
+use futures::FutureExt;
+use futures::future::Shared;
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::{
     App, Context, Entity, EntityId, Global, SharedString, Subscription, Task, TaskExt, prelude::*,
@@ -30,11 +33,15 @@ pub struct ReplStore {
     sessions: HashMap<EntityId, Entity<Session>>,
     kernel_specifications: Vec<KernelSpecification>,
     kernelspecs_initialized: bool,
+    /// Suppresses kernel discovery. Discovery shells out to probe interpreters, which
+    /// makes any test that renders a kernel selector non-deterministic.
+    discovery_disabled: bool,
     selected_kernel_for_worktree: HashMap<WorktreeId, KernelSpecification>,
     kernel_specifications_for_worktree: HashMap<WorktreeId, Vec<KernelSpecification>>,
     active_python_toolchain_for_worktree: HashMap<WorktreeId, SharedString>,
     remote_worktrees: HashSet<WorktreeId>,
-    fetching_python_kernelspecs: HashSet<WorktreeId>,
+    fetching_python_kernelspecs: HashMap<WorktreeId, Shared<Task<()>>>,
+    worktree_roots: HashMap<WorktreeId, Arc<Path>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -64,12 +71,14 @@ impl ReplStore {
             sessions: HashMap::default(),
             kernel_specifications: Vec::new(),
             kernelspecs_initialized: false,
+            discovery_disabled: false,
             _subscriptions: subscriptions,
             kernel_specifications_for_worktree: HashMap::default(),
             selected_kernel_for_worktree: HashMap::default(),
             active_python_toolchain_for_worktree: HashMap::default(),
             remote_worktrees: HashSet::default(),
-            fetching_python_kernelspecs: HashSet::default(),
+            fetching_python_kernelspecs: HashMap::default(),
+            worktree_roots: HashMap::default(),
         };
         this.on_enabled_changed(cx);
         this
@@ -161,8 +170,18 @@ impl ReplStore {
         project: &Entity<Project>,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
-        if !self.fetching_python_kernelspecs.insert(worktree_id) {
+        if self.discovery_disabled {
             return Task::ready(Ok(()));
+        }
+
+        // An in-flight fetch used to report itself as immediately finished. Callers that
+        // wait for discovery before choosing a kernel then raced it, saw only the global
+        // kernelspecs, and settled for a bare `python3` over the project's environment.
+        if let Some(in_flight) = self.fetching_python_kernelspecs.get(&worktree_id).cloned() {
+            return cx.background_spawn(async move {
+                in_flight.await;
+                Ok(())
+            });
         }
 
         let is_remote = project.read(cx).is_remote();
@@ -174,6 +193,10 @@ impl ReplStore {
             .map_or(false, |opts| {
                 matches!(opts, RemoteConnectionOptions::Wsl(_))
             });
+        let worktree_root = project
+            .read(cx)
+            .worktree_for_id(worktree_id, cx)
+            .map(|worktree| worktree.read(cx).abs_path());
         let kernel_specifications_task = python_env_kernel_specifications(project, worktree_id, cx);
         let active_toolchain = project.read(cx).active_toolchain(
             ProjectPath {
@@ -184,22 +207,30 @@ impl ReplStore {
             cx,
         );
 
-        cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             let kernel_specifications_res = kernel_specifications_task.await;
 
-            this.update(cx, |this, _cx| {
-                this.fetching_python_kernelspecs.remove(&worktree_id);
-            })
-            .ok();
-
             let kernel_specifications =
-                kernel_specifications_res.context("getting python kernelspecs")?;
+                match kernel_specifications_res.context("getting python kernelspecs") {
+                    Ok(kernel_specifications) => kernel_specifications,
+                    Err(error) => {
+                        log::error!("{error:#}");
+                        this.update(cx, |this, _cx| {
+                            this.fetching_python_kernelspecs.remove(&worktree_id);
+                        })
+                        .ok();
+                        return;
+                    }
+                };
 
             let active_toolchain_path = active_toolchain.await.map(|toolchain| toolchain.path);
 
             this.update(cx, |this, cx| {
                 this.kernel_specifications_for_worktree
                     .insert(worktree_id, kernel_specifications);
+                if let Some(worktree_root) = worktree_root {
+                    this.worktree_roots.insert(worktree_id, worktree_root);
+                }
                 if let Some(path) = active_toolchain_path {
                     this.active_python_toolchain_for_worktree
                         .insert(worktree_id, path);
@@ -209,8 +240,21 @@ impl ReplStore {
                 } else {
                     this.remote_worktrees.remove(&worktree_id);
                 }
+                // Cleared only once the specs are in place, so a caller arriving late
+                // never sees "not fetching" alongside an empty result.
+                this.fetching_python_kernelspecs.remove(&worktree_id);
                 cx.notify();
             })
+            .ok();
+        });
+
+        let task = task.shared();
+        self.fetching_python_kernelspecs
+            .insert(worktree_id, task.clone());
+
+        cx.background_spawn(async move {
+            task.await;
+            Ok(())
         })
     }
 
@@ -243,8 +287,18 @@ impl ReplStore {
         }
     }
 
+    /// Turns off kernel discovery for this store.
+    ///
+    /// Discovery runs `python -c "import ipykernel"` per environment it finds, so a test
+    /// that renders a kernel selector otherwise does real subprocess IO and trips the
+    /// scheduler's non-determinism check.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn disable_discovery(&mut self) {
+        self.discovery_disabled = true;
+    }
+
     pub fn ensure_kernelspecs(&mut self, cx: &mut Context<Self>) {
-        if self.kernelspecs_initialized {
+        if self.kernelspecs_initialized || self.discovery_disabled {
             return;
         }
         self.kernelspecs_initialized = true;
@@ -295,8 +349,24 @@ impl ReplStore {
         &mut self,
         worktree_id: WorktreeId,
         kernelspec: KernelSpecification,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        // The in-memory map is the whole of the selection, so a choice made here used to
+        // die with the process and the next launch fell back to auto-detection. Persist
+        // by path rather than name: several environments share the name
+        // "Python 3.12.13 (venv)", and only the path tells them apart.
+        let language = kernelspec.language().to_lowercase();
+        let path = kernelspec.path().to_string();
+        settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
+            settings
+                .editor
+                .jupyter
+                .get_or_insert_default()
+                .kernel_selections
+                .get_or_insert_default()
+                .insert(language, path);
+        });
+
         self.selected_kernel_for_worktree
             .insert(worktree_id, kernelspec);
     }
@@ -309,16 +379,44 @@ impl ReplStore {
         self.selected_kernel_for_worktree.get(&worktree_id)
     }
 
+    fn is_inside_worktree(&self, worktree_id: WorktreeId, spec: &KernelSpecification) -> bool {
+        self.worktree_roots
+            .get(&worktree_id)
+            .is_some_and(|root| Path::new(spec.path().as_ref()).starts_with(root))
+    }
+
+    /// The single environment to present as the project's kernel.
+    ///
+    /// An environment living inside the worktree wins. Zed's active Python toolchain can
+    /// resolve to an interpreter from an unrelated directory, and recommending that sends
+    /// the user's ipykernel install somewhere this project never uses.
+    pub fn recommended_kernel(&self, worktree_id: WorktreeId) -> Option<&KernelSpecification> {
+        let local_with_ipykernel = self
+            .kernel_specifications_for_worktree(worktree_id)
+            .find(|spec| spec.has_ipykernel() && self.is_inside_worktree(worktree_id, spec));
+        if local_with_ipykernel.is_some() {
+            return local_with_ipykernel;
+        }
+
+        let local = self
+            .kernel_specifications_for_worktree(worktree_id)
+            .find(|spec| self.is_inside_worktree(worktree_id, spec));
+        if local.is_some() {
+            return local;
+        }
+
+        let active_path = self.active_python_toolchain_path(worktree_id)?;
+        self.kernel_specifications_for_worktree(worktree_id)
+            .find(|spec| spec.path().as_ref() == active_path.as_ref())
+    }
+
     pub fn is_recommended_kernel(
         &self,
         worktree_id: WorktreeId,
         spec: &KernelSpecification,
     ) -> bool {
-        if let Some(active_path) = self.active_python_toolchain_path(worktree_id) {
-            spec.path().as_ref() == active_path.as_ref()
-        } else {
-            false
-        }
+        self.recommended_kernel(worktree_id)
+            .is_some_and(|recommended| recommended.path() == spec.path())
     }
 
     pub fn active_kernelspec(
@@ -333,19 +431,16 @@ impl ReplStore {
 
         let language_at_cursor = language_at_cursor?;
 
-        // Prefer the recommended (active toolchain) kernel if it has ipykernel
-        if let Some(active_path) = self.active_python_toolchain_path(worktree_id) {
-            let recommended = self
-                .kernel_specifications_for_worktree(worktree_id)
-                .find(|spec| {
-                    spec.has_ipykernel()
-                        && language_at_cursor.matches_kernel_language(spec.language().as_ref())
-                        && spec.path().as_ref() == active_path.as_ref()
-                })
-                .cloned();
-            if recommended.is_some() {
-                return recommended;
-            }
+        // Launch what the picker badges as recommended, so the two cannot disagree.
+        let recommended = self
+            .recommended_kernel(worktree_id)
+            .filter(|spec| {
+                spec.has_ipykernel()
+                    && language_at_cursor.matches_kernel_language(spec.language().as_ref())
+            })
+            .cloned();
+        if recommended.is_some() {
+            return recommended;
         }
 
         // Then try the first PythonEnv with ipykernel matching the language
@@ -390,6 +485,18 @@ impl ReplStore {
 
         if let Some(found_by_name) = found_by_name {
             return Some(found_by_name);
+        }
+
+        // `set_active_kernelspec` records the selection as a path. Matched after the
+        // name lookup so settings written by hand, which name a kernel, still win.
+        if let Some(selected_kernel) = selected_kernel {
+            let found_by_path = self
+                .kernel_specifications_for_worktree(worktree_id)
+                .find(|spec| spec.path().as_ref() == selected_kernel.as_str())
+                .cloned();
+            if found_by_path.is_some() {
+                return found_by_path;
+            }
         }
 
         self.kernel_specifications_for_worktree(worktree_id)
@@ -437,5 +544,98 @@ impl ReplStore {
     ) {
         self.kernel_specifications = specs;
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use project::FakeFs;
+    use std::path::PathBuf;
+
+    fn python_env(name: &str, path: &str, has_ipykernel: bool) -> KernelSpecification {
+        KernelSpecification::PythonEnv(PythonEnvKernelSpecification {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+            kernelspec: jupyter_protocol::JupyterKernelspec {
+                argv: Vec::new(),
+                display_name: name.to_string(),
+                language: "python".to_string(),
+                metadata: None,
+                interrupt_mode: None,
+                env: None,
+            },
+            has_ipykernel,
+            environment_kind: Some("venv".to_string()),
+        })
+    }
+
+    #[gpui::test]
+    fn test_recommends_the_environment_inside_the_project(cx: &mut gpui::TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            ReplStore::init(fs, cx);
+        });
+
+        let worktree_id = WorktreeId::from_usize(1);
+        let outside = python_env("Python (venv)", "/elsewhere/venv/bin/python", true);
+        let inside = python_env("Python (venv)", "/project/.venv/bin/python", true);
+
+        cx.update(|cx| {
+            ReplStore::global(cx).update(cx, |store, _| {
+                store
+                    .worktree_roots
+                    .insert(worktree_id, Arc::from(Path::new("/project")));
+                store.kernel_specifications_for_worktree.insert(
+                    worktree_id,
+                    vec![outside.clone(), inside.clone()],
+                );
+                // Zed's toolchain resolving outside the project is what made the picker
+                // recommend an unrelated environment.
+                store
+                    .active_python_toolchain_for_worktree
+                    .insert(worktree_id, outside.path());
+
+                assert!(store.is_recommended_kernel(worktree_id, &inside));
+                assert!(!store.is_recommended_kernel(worktree_id, &outside));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_falls_back_to_the_toolchain_when_nothing_is_in_the_project(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            ReplStore::init(fs, cx);
+        });
+
+        let worktree_id = WorktreeId::from_usize(1);
+        let outside = python_env("Python (venv)", "/elsewhere/venv/bin/python", true);
+
+        cx.update(|cx| {
+            ReplStore::global(cx).update(cx, |store, _| {
+                store
+                    .worktree_roots
+                    .insert(worktree_id, Arc::from(Path::new("/project")));
+                store
+                    .kernel_specifications_for_worktree
+                    .insert(worktree_id, vec![outside.clone()]);
+                store
+                    .active_python_toolchain_for_worktree
+                    .insert(worktree_id, outside.path());
+
+                assert!(store.is_recommended_kernel(worktree_id, &outside));
+            });
+        });
     }
 }

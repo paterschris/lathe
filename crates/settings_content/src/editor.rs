@@ -1042,7 +1042,30 @@ pub struct JupyterContent {
     /// Default: false
     pub notebook_enabled: Option<bool>,
 
-    /// Default kernels to select for each language.
+    /// Whether to strip cell outputs when saving a notebook.
+    ///
+    /// `.ipynb` files store outputs inline, so committed notebooks carry image data
+    /// and execution results that make diffs unreadable. Turning this on keeps saved
+    /// notebooks diffable at the cost of losing outputs on every save.
+    ///
+    /// Default: false
+    pub clear_outputs_on_save: Option<bool>,
+
+    /// Whether to write a notebook's code cells to a hidden sibling file so that
+    /// language servers can attach to them.
+    ///
+    /// Zed's LSP implementation only talks to buffers backed by a local file, so
+    /// without this the cells of a notebook get syntax highlighting but no
+    /// completions, diagnostics or go-to-definition. With it on, opening `foo.ipynb`
+    /// creates `.foo.lathe.py` beside it, which is removed when the notebook closes.
+    /// Add `.*.lathe.*` to your `.gitignore` if you enable this.
+    ///
+    /// Default: false
+    pub language_server_sidecar: Option<bool>,
+
+    /// Default kernel to select for each language, named either by kernel name or by
+    /// interpreter path. Choosing a kernel in the UI records the path here, since
+    /// several environments can share one name.
     ///
     /// Default: `{}`
     pub kernel_selections: Option<HashMap<String, String>>,

@@ -2,13 +2,19 @@ use crate::KERNEL_DOCS_URL;
 use crate::kernels::KernelSpecification;
 use crate::repl_store::ReplStore;
 
-use gpui::{AnyView, DismissEvent, FontWeight, SharedString, Task};
+use gpui::{
+    AnyView, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, SharedString,
+    Subscription, Task,
+};
 use picker::{Picker, PickerDelegate};
 use project::WorktreeId;
+use std::rc::Rc;
 use std::sync::Arc;
 use ui::{ListItem, ListItemSpacing, PopoverMenu, PopoverMenuHandle, PopoverTrigger, prelude::*};
 
-type OnSelect = Box<dyn Fn(KernelSpecification, &mut Window, &mut App)>;
+/// Reference counted rather than boxed so the menu closure can build a fresh picker on
+/// demand instead of the selector building one on every frame.
+type OnSelect = Rc<dyn Fn(KernelSpecification, &mut Window, &mut App)>;
 
 #[derive(Clone)]
 pub enum KernelPickerEntry {
@@ -125,13 +131,51 @@ fn build_grouped_entries(store: &ReplStore, worktree_id: WorktreeId) -> Vec<Kern
     entries
 }
 
+/// Wraps the kernel picker so that clicking away closes it.
+///
+/// `Picker` registers no outside-click handler, and `PopoverMenu` only dismisses on a
+/// click that lands on its own trigger, so without this the popover stays on screen
+/// until a kernel is chosen.
+pub struct KernelPicker {
+    picker: Entity<Picker<KernelPickerDelegate>>,
+    _subscription: Subscription,
+}
+
+impl KernelPicker {
+    fn new(picker: Entity<Picker<KernelPickerDelegate>>, cx: &mut Context<Self>) -> Self {
+        let _subscription = cx.subscribe(&picker, |_, _, _: &DismissEvent, cx| {
+            cx.emit(DismissEvent);
+        });
+        Self {
+            picker,
+            _subscription,
+        }
+    }
+}
+
+impl EventEmitter<DismissEvent> for KernelPicker {}
+
+impl Focusable for KernelPicker {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.picker.focus_handle(cx)
+    }
+}
+
+impl Render for KernelPicker {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
+            .child(self.picker.clone())
+    }
+}
+
 #[derive(IntoElement)]
 pub struct KernelSelector<T, TT>
 where
     T: PopoverTrigger + ButtonCommon,
     TT: Fn(&mut Window, &mut App) -> AnyView + 'static,
 {
-    handle: Option<PopoverMenuHandle<Picker<KernelPickerDelegate>>>,
+    handle: Option<PopoverMenuHandle<KernelPicker>>,
     on_select: OnSelect,
     trigger: T,
     tooltip: TT,
@@ -163,7 +207,7 @@ where
         }
     }
 
-    pub fn with_handle(mut self, handle: PopoverMenuHandle<Picker<KernelPickerDelegate>>) -> Self {
+    pub fn with_handle(mut self, handle: PopoverMenuHandle<KernelPicker>) -> Self {
         self.handle = Some(handle);
         self
     }
@@ -306,7 +350,11 @@ impl PickerDelegate for KernelPickerDelegate {
         }
     }
 
-    fn dismissed(&mut self, _window: &mut Window, _cx: &mut Context<Picker<Self>>) {}
+    fn dismissed(&mut self, _window: &mut Window, cx: &mut Context<Picker<Self>>) {
+        // `PopoverMenu` closes only when its menu emits this, so leaving the default
+        // empty body here meant escape and clicking away left the picker on screen.
+        cx.emit(DismissEvent);
+    }
 
     fn render_match(
         &self,
@@ -362,7 +410,7 @@ impl PickerDelegate for KernelPickerDelegate {
                             h_flex()
                                 .w_full()
                                 .gap_3()
-                                .when(!has_ipykernel, |flex| flex.opacity(0.5))
+                                .when(!has_ipykernel, |flex| flex.opacity(0.8))
                                 .child(icon.color(Color::Default).size(IconSize::Medium))
                                 .child(
                                     v_flex()
@@ -392,7 +440,7 @@ impl PickerDelegate for KernelPickerDelegate {
                                                 })
                                                 .when(!has_ipykernel, |flex| {
                                                     flex.child(
-                                                        Label::new("ipykernel not installed")
+                                                        Label::new("Select to install ipykernel")
                                                             .size(LabelSize::XSmall)
                                                             .color(Color::Warning),
                                                     )
@@ -452,10 +500,13 @@ where
     T: PopoverTrigger + ButtonCommon,
     TT: Fn(&mut Window, &mut App) -> AnyView + 'static,
 {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let store = ReplStore::global(cx);
-        store.update(cx, |store, cx| store.ensure_kernelspecs(cx));
-        let store = store.read(cx);
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Kernel discovery deliberately does not happen here. It shells out to find
+        // interpreters, and doing that from a render path makes the first paint of a
+        // view spawn subprocesses, which also deadlocks anything trying to paint this
+        // in a test. Call sites call `ReplStore::ensure_kernelspecs` when they are
+        // created instead.
+        let store = ReplStore::global(cx).read(cx);
 
         let all_entries = build_grouped_entries(store, self.worktree_id);
         let selected_kernelspec = store.active_kernelspec(self.worktree_id, None, cx);
@@ -470,22 +521,32 @@ where
             })
             .unwrap_or_else(|| KernelPickerDelegate::first_selectable_index(&all_entries));
 
-        let delegate = KernelPickerDelegate {
-            on_select: self.on_select,
-            all_entries: all_entries.clone(),
-            filtered_entries: all_entries,
-            selected_kernelspec,
-            selected_index,
-        };
+        let on_select = self.on_select;
 
-        let picker_view = cx.new(|cx| {
-            Picker::list(delegate, window, cx)
-                .list_measure_all()
-                .popover()
-        });
-
+        // Built when the menu opens, not here. Creating a `Picker` entity spawns work to
+        // compute its matches, so doing it during render allocated an entity and started
+        // a task on every frame, then dropped both when the frame ended. Besides the
+        // waste, dropping a picker mid-flight blocks on the task it spawned, which
+        // deadlocks anything painting this in a test.
+        let menu_entries = all_entries;
         PopoverMenu::new("kernel-switcher")
-            .menu(move |_window, _cx| Some(picker_view.clone()))
+            .menu(move |window, cx| {
+                let delegate = KernelPickerDelegate {
+                    on_select: on_select.clone(),
+                    all_entries: menu_entries.clone(),
+                    filtered_entries: menu_entries.clone(),
+                    selected_kernelspec: selected_kernelspec.clone(),
+                    selected_index,
+                };
+                Some(cx.new(|cx| {
+                    let picker = cx.new(|cx| {
+                        Picker::list(delegate, window, cx)
+                            .list_measure_all()
+                            .popover()
+                    });
+                    KernelPicker::new(picker, cx)
+                }))
+            })
             .trigger_with_tooltip(self.trigger, self.tooltip)
             .attach(gpui::Anchor::BottomLeft)
             .when_some(self.handle, |menu, handle| menu.with_handle(handle))

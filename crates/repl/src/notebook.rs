@@ -1,4 +1,12 @@
 mod cell;
+mod diff;
+mod outline;
+mod shadow_buffer;
+mod shadow_document;
 mod notebook_ui;
 pub use cell::*;
+pub use diff::*;
+pub use outline::*;
+pub use shadow_buffer::*;
+pub use shadow_document::*;
 pub use notebook_ui::*;

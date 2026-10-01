@@ -1,11 +1,10 @@
 use gpui::ElementId;
 use gpui::TaskExt;
 use gpui::{AnyElement, Entity};
-use picker::Picker;
 use repl::{
     ExecutionState, JupyterSettings, Kernel, KernelSpecification, KernelStatus, Session,
     SessionSupport,
-    components::{KernelPickerDelegate, KernelSelector},
+    components::{KernelPicker, KernelSelector},
     worktree_id_for_editor,
 };
 use ui::{
@@ -315,11 +314,16 @@ impl QuickActionBar {
 
         let current_kernel_name = current_kernelspec.as_ref().map(|spec| spec.name());
 
-        let menu_handle: PopoverMenuHandle<Picker<KernelPickerDelegate>> =
+        // Kernel discovery used to happen inside `KernelSelector`'s render. It is
+        // requested here instead, so rendering stays free of subprocess work. The call
+        // is guarded and runs at most once.
+        repl::ReplStore::global(cx).update(cx, |store, cx| store.ensure_kernelspecs(cx));
+
+        let menu_handle: PopoverMenuHandle<KernelPicker> =
             PopoverMenuHandle::default();
         KernelSelector::new(
             {
-                Box::new(move |kernelspec, window, cx| {
+                std::rc::Rc::new(move |kernelspec, window, cx| {
                     if kernelspec.has_ipykernel() {
                         repl::assign_kernelspec(kernelspec, editor.downgrade(), window, cx).ok();
                     } else {

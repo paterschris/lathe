@@ -64,15 +64,29 @@ use workspace::Workspace;
 use crate::repl_settings::ReplSettings;
 use settings::Settings;
 
+/// Whether an HTML payload carries its content in a `<script>` block rather than in
+/// markup.
+///
+/// Plotly, Bokeh and Altair emit exactly this shape. Rendering it as markdown drops
+/// the script and leaves an empty frame, so such HTML is ranked below the static
+/// image these libraries send alongside it.
+fn html_needs_scripting(html: &str) -> bool {
+    html.to_ascii_lowercase().contains("<script")
+}
+
 /// When deciding what to render from a collection of mediatypes, we need to rank them in order of importance
 fn rank_mime_type(mimetype: &MimeType) -> usize {
     match mimetype {
-        MimeType::DataTable(_) => 7,
-        MimeType::Html(_) => 6,
-        MimeType::Json(_) => 5,
-        MimeType::Png(_) => 4,
-        MimeType::Jpeg(_) => 3,
-        MimeType::Markdown(_) => 2,
+        MimeType::DataTable(_) => 11,
+        MimeType::Html(html) if !html_needs_scripting(html) => 10,
+        MimeType::Json(_) => 9,
+        MimeType::Svg(_) => 8,
+        MimeType::Png(_) => 7,
+        MimeType::Gif(_) => 6,
+        MimeType::Jpeg(_) => 5,
+        MimeType::Html(_) => 4,
+        MimeType::Markdown(_) => 3,
+        MimeType::Latex(_) => 2,
         MimeType::Plain(_) => 1,
         // All other media types are not supported in Zed at this time
         _ => 0,
@@ -139,45 +153,14 @@ pub enum Output {
     ClearOutputWaitMarker,
 }
 
-impl Output {
-    pub fn to_nbformat(&self, cx: &App) -> Option<nbformat::v4::Output> {
-        match self {
-            Output::Stream { content } => {
-                let text = content.read(cx).full_text(cx);
-                Some(nbformat::v4::Output::Stream {
-                    name: "stdout".to_string(),
-                    text: nbformat::v4::MultilineString(text),
-                })
-            }
-            Output::Plain { content, .. } => {
-                let text = content.read(cx).full_text(cx);
-                let mut data = jupyter_protocol::media::Media::default();
-                data.content.push(jupyter_protocol::MediaType::Plain(text));
-                Some(nbformat::v4::Output::DisplayData(
-                    nbformat::v4::DisplayData {
-                        data,
-                        metadata: serde_json::Map::new(),
-                    },
-                ))
-            }
-            Output::ErrorOutput(error_view) => {
-                let traceback_text = error_view.traceback.read(cx).full_text(cx);
-                let traceback_lines: Vec<String> =
-                    traceback_text.lines().map(|s| s.to_string()).collect();
-                Some(nbformat::v4::Output::Error(nbformat::v4::ErrorOutput {
-                    ename: error_view.ename.clone(),
-                    evalue: error_view.evalue.clone(),
-                    traceback: traceback_lines,
-                }))
-            }
-            Output::Image { .. }
-            | Output::Markdown { .. }
-            | Output::Table { .. }
-            | Output::Json { .. } => None,
-            Output::Message(_) => None,
-            Output::ClearOutputWaitMarker => None,
-        }
-    }
+/// Kernels emit traceback entries that already carry their own trailing newline, so
+/// joining them with another one leaves a blank line between every rendered line.
+pub fn join_traceback(traceback: &[String]) -> String {
+    traceback
+        .iter()
+        .map(|line| line.strip_suffix('\n').unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl Output {
@@ -414,12 +397,27 @@ impl Output {
                     display_id,
                 }
             }
-            Some(MimeType::Png(data)) | Some(MimeType::Jpeg(data)) => match ImageView::from(data) {
+            Some(MimeType::Png(data)) | Some(MimeType::Jpeg(data)) | Some(MimeType::Gif(data)) => {
+                match ImageView::from(data) {
+                    Ok(view) => Output::Image {
+                        content: cx.new(|_| view),
+                        display_id,
+                    },
+                    Err(error) => Output::Message(format!("Failed to load image: {}", error)),
+                }
+            }
+            Some(MimeType::Svg(source)) => match ImageView::from_svg(source, cx) {
                 Ok(view) => Output::Image {
                     content: cx.new(|_| view),
                     display_id,
                 },
-                Err(error) => Output::Message(format!("Failed to load image: {}", error)),
+                Err(error) => Output::Message(format!("Failed to render SVG: {}", error)),
+            },
+            // Rendered as monospace text until Zed can typeset math. SymPy and other
+            // symbolic libraries emit this, and showing the source beats showing nothing.
+            Some(MimeType::Latex(source)) => Output::Plain {
+                content: cx.new(|cx| TerminalOutput::from(source, window, cx)),
+                display_id,
             },
             Some(MimeType::DataTable(data)) => Output::Table {
                 content: cx.new(|cx| TableView::new(data, window, cx)),
@@ -581,7 +579,7 @@ impl ExecutionView {
             }
             JupyterMessageContent::ErrorOutput(result) => {
                 let terminal =
-                    cx.new(|cx| TerminalOutput::from(&result.traceback.join("\n"), window, cx));
+                    cx.new(|cx| TerminalOutput::from(&join_traceback(&result.traceback), window, cx));
 
                 Output::ErrorOutput(ErrorView {
                     ename: result.ename.clone(),
@@ -855,36 +853,67 @@ mod tests {
     #[test]
     fn test_rank_mime_type_ordering() {
         let data_table = MimeType::DataTable(Box::default());
-        let html = MimeType::Html(String::new());
+        let html = MimeType::Html("<table><tr><td>1</td></tr></table>".to_string());
         let json = MimeType::Json(serde_json::json!({}));
+        let svg = MimeType::Svg("<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_string());
         let png = MimeType::Png(String::new());
+        let gif = MimeType::Gif(String::new());
         let jpeg = MimeType::Jpeg(String::new());
         let markdown = MimeType::Markdown(String::new());
+        let latex = MimeType::Latex(String::new());
         let plain = MimeType::Plain(String::new());
 
-        assert_eq!(rank_mime_type(&data_table), 7);
-        assert_eq!(rank_mime_type(&html), 6);
-        assert_eq!(rank_mime_type(&json), 5);
-        assert_eq!(rank_mime_type(&png), 4);
-        assert_eq!(rank_mime_type(&jpeg), 3);
-        assert_eq!(rank_mime_type(&markdown), 2);
-        assert_eq!(rank_mime_type(&plain), 1);
+        let ranked_high_to_low = [
+            &data_table,
+            &html,
+            &json,
+            &svg,
+            &png,
+            &gif,
+            &jpeg,
+            &markdown,
+            &latex,
+            &plain,
+        ];
 
-        assert!(rank_mime_type(&data_table) > rank_mime_type(&html));
-        assert!(rank_mime_type(&html) > rank_mime_type(&json));
-        assert!(rank_mime_type(&json) > rank_mime_type(&png));
-        assert!(rank_mime_type(&png) > rank_mime_type(&jpeg));
-        assert!(rank_mime_type(&jpeg) > rank_mime_type(&markdown));
-        assert!(rank_mime_type(&markdown) > rank_mime_type(&plain));
+        for pair in ranked_high_to_low.windows(2) {
+            assert!(
+                rank_mime_type(pair[0]) > rank_mime_type(pair[1]),
+                "expected {:?} to outrank {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        assert!(rank_mime_type(&plain) > rank_mime_type(&MimeType::Javascript(String::new())));
     }
 
     #[test]
-    fn test_rank_mime_type_unsupported_returns_zero() {
-        let svg = MimeType::Svg(String::new());
-        let latex = MimeType::Latex(String::new());
+    fn test_script_driven_html_ranks_below_images() {
+        let plotly_html = MimeType::Html(
+            "<div id=\"chart\"></div><script>Plotly.newPlot('chart', data);</script>".to_string(),
+        );
+        let static_html = MimeType::Html("<table><tr><td>1</td></tr></table>".to_string());
+        let png = MimeType::Png(String::new());
+        let markdown = MimeType::Markdown(String::new());
 
-        assert_eq!(rank_mime_type(&svg), 0);
-        assert_eq!(rank_mime_type(&latex), 0);
+        // Converting script-driven HTML to markdown strips the script and renders
+        // nothing, so the static image the kernel sends alongside must win.
+        assert!(rank_mime_type(&png) > rank_mime_type(&plotly_html));
+        assert!(rank_mime_type(&static_html) > rank_mime_type(&png));
+
+        // With no image in the bundle it should still beat the text fallbacks.
+        assert!(rank_mime_type(&plotly_html) > rank_mime_type(&markdown));
+    }
+
+    #[test]
+    fn test_html_needs_scripting_is_case_insensitive() {
+        assert!(html_needs_scripting("<SCRIPT>x</SCRIPT>"));
+        assert!(html_needs_scripting("<div></div><script src='x.js'></script>"));
+        assert!(!html_needs_scripting("<p>no scripting here</p>"));
+        assert!(!html_needs_scripting(
+            "<table><tr><td>describe your script</td></tr></table>"
+        ));
     }
 
     async fn init_test(
@@ -1284,5 +1313,24 @@ mod tests {
                 "pending_input should be cleared when kernel goes idle"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod traceback_tests {
+    use super::join_traceback;
+
+    #[test]
+    fn joins_traceback_entries_without_blank_lines() {
+        let traceback = vec![
+            "---------".to_string(),
+            "NameError    Traceback (most recent call last)".to_string(),
+            "Cell In[1], line 1\n----> 1 print(message)\n".to_string(),
+            "NameError: name 'message' is not defined".to_string(),
+        ];
+        assert_eq!(
+            join_traceback(&traceback),
+            "---------\nNameError    Traceback (most recent call last)\nCell In[1], line 1\n----> 1 print(message)\nNameError: name 'message' is not defined"
+        );
     }
 }

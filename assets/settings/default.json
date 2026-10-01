@@ -2802,6 +2802,12 @@
     "enabled": true,
     // Enable the experimental .ipynb notebook editor.
     "notebook_enabled": false,
+    // Strip cell outputs when saving a notebook, so committed notebooks stay diffable.
+    "clear_outputs_on_save": false,
+    // Write a notebook's code cells to a hidden sibling file (.foo.lathe.py) so that
+    // language servers can attach and cells get completions and diagnostics. The file
+    // is removed when the notebook closes. Add `.*.lathe.*` to .gitignore if enabled.
+    "language_server_sidecar": false,
     "kernel_selections": {},
     // Specify the language name as the key and the kernel name as the value.
     // "kernel_selections": {

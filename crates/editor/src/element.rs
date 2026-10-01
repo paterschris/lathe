@@ -10384,9 +10384,14 @@ impl Element for EditorElement {
                     self.paint_sticky_headers(layout, window, cx);
                     self.paint_minimap(layout, window, cx);
                     self.paint_scrollbars(layout, window, cx);
-                    self.paint_edit_prediction_popover(layout, window, cx);
-                    self.paint_mouse_context_menu(layout, window, cx);
                 });
+
+                // Painted outside the editor's content mask. These float above the text
+                // and can be taller than the editor itself, so masking them to its
+                // bounds cut them off. Notebook cell editors are only a few lines tall,
+                // which made the edit prediction popover unreadable.
+                self.paint_edit_prediction_popover(layout, window, cx);
+                self.paint_mouse_context_menu(layout, window, cx);
             })
         })
     }

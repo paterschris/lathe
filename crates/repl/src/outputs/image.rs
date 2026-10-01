@@ -70,6 +70,27 @@ impl ImageView {
         })
     }
 
+    /// Renders an SVG payload (`image/svg+xml`, as produced by `_repr_svg_`, graphviz
+    /// and matplotlib's svg backend) to a raster frame for display.
+    pub fn from_svg(source: &str, cx: &App) -> Result<Self> {
+        let bytes = source.as_bytes().to_vec();
+        let image = cx
+            .svg_renderer()
+            .render_single_frame(&bytes, 1.0)
+            .map_err(|error| anyhow::anyhow!("failed to render SVG: {error}"))?;
+
+        let size = image.size(0);
+        let width = u32::try_from(size.width.0).unwrap_or_default();
+        let height = u32::try_from(size.height.0).unwrap_or_default();
+
+        Ok(ImageView {
+            clipboard_image: Arc::new(Image::from_bytes(ImageFormat::Svg, bytes)),
+            height,
+            width,
+            image,
+        })
+    }
+
     fn scaled_size(
         &self,
         line_height: Pixels,

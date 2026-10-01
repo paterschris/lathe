@@ -491,6 +491,14 @@ struct LocalKernelSpecContent {
 pub async fn wsl_kernel_specifications(
     background_executor: BackgroundExecutor,
 ) -> Result<Vec<KernelSpecification>> {
+    // WSL only exists on Windows. Without this, every kernel discovery on macOS and
+    // Linux spawns a `wsl` process that cannot succeed, which is both wasted work and
+    // enough real IO to make any test that triggers discovery non-deterministic.
+    if !cfg!(target_os = "windows") {
+        let _ = background_executor;
+        return Ok(Vec::new());
+    }
+
     let output = util::command::new_command("wsl")
         .arg("-l")
         .arg("-q")

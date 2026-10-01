@@ -975,6 +975,8 @@ pub mod notebook {
         [
             /// Opens a Jupyter notebook file.
             OpenNotebook,
+            /// Switches between the cell view and the notebook's source as a script.
+            ToggleSourceView,
             /// Runs all cells in the notebook.
             RunAll,
             /// Runs the current cell and stays on it.

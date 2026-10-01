@@ -1,16 +1,18 @@
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use editor::{Editor, EditorMode, MultiBuffer, SizingBehavior};
+use editor::{Editor, EditorMode, ExcerptRange, MultiBuffer, PathKey, SizingBehavior};
 use futures::future::Shared;
 use gpui::{
     App, Entity, EventEmitter, Focusable, Hsla, InteractiveElement, RetainAllImageCache,
     StatefulInteractiveElement, Task, prelude::*,
 };
-use language::{Buffer, Language, LanguageRegistry};
+use language::{Buffer, Capability, Language, LanguageRegistry, Point};
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use nbformat::v4::{CellId, CellMetadata, CellType};
-use runtimelib::{JupyterMessage, JupyterMessageContent};
+use project::Project;
+use runtimelib::{JupyterMessage, JupyterMessageContent, Stdio};
 use settings::Settings as _;
 use ui::{CommonAnimationExt, IconButtonShape, prelude::*};
 use util::ResultExt;
@@ -116,14 +118,29 @@ pub(crate) enum MovementDirection {
     End,
 }
 
-fn convert_outputs(
-    outputs: &Vec<nbformat::v4::Output>,
-    window: &mut Window,
-    cx: &mut App,
-) -> Vec<Output> {
-    outputs
-        .iter()
-        .map(|output| match output {
+/// `nbformat` stores a cell's source as a list of lines in which every line but the
+/// last keeps its trailing newline. `str::lines` discards that distinction, so
+/// splitting with it and re-appending `\n` invents a newline the file never had and
+/// rewrites every cell the first time a notebook is saved.
+fn source_to_nbformat_lines(source: &str) -> Vec<String> {
+    source.split_inclusive('\n').map(str::to_owned).collect()
+}
+
+/// A rendered output paired with the `nbformat` output it was built from.
+///
+/// The editor displays a single representation chosen out of a MIME bundle, so
+/// rebuilding the bundle from the rendered view would drop every sibling
+/// representation along with the media types it cannot render at all (widgets,
+/// Vega specs, PDFs). Retaining the original means saving a notebook preserves
+/// outputs the editor never displayed.
+pub(super) struct CellOutput {
+    view: Output,
+    source: nbformat::v4::Output,
+}
+
+impl CellOutput {
+    fn new(source: nbformat::v4::Output, window: &mut Window, cx: &mut App) -> Self {
+        let view = match &source {
             nbformat::v4::Output::Stream { text, .. } => Output::Stream {
                 content: cx.new(|cx| TerminalOutput::from(&text.0, window, cx)),
             },
@@ -137,9 +154,22 @@ fn convert_outputs(
                 ename: error.ename.clone(),
                 evalue: error.evalue.clone(),
                 traceback: cx
-                    .new(|cx| TerminalOutput::from(&error.traceback.join("\n"), window, cx)),
+                    .new(|cx| TerminalOutput::from(&crate::outputs::join_traceback(&error.traceback), window, cx)),
             }),
-        })
+        };
+
+        Self { view, source }
+    }
+}
+
+fn convert_outputs(
+    outputs: &[nbformat::v4::Output],
+    window: &mut Window,
+    cx: &mut App,
+) -> Vec<CellOutput> {
+    outputs
+        .iter()
+        .map(|output| CellOutput::new(output.clone(), window, cx))
         .collect()
 }
 
@@ -176,9 +206,10 @@ impl Cell {
         }
     }
 
-    pub fn load(
+    pub(super) fn load(
         cell: &nbformat::v4::Cell,
         languages: &Arc<LanguageRegistry>,
+        backing: CellBacking,
         notebook_language: Shared<Task<Option<Arc<Language>>>>,
         window: &mut Window,
         cx: &mut App,
@@ -188,7 +219,7 @@ impl Cell {
                 id,
                 metadata,
                 source,
-                ..
+                attachments,
             } => {
                 let source = source.concat();
 
@@ -196,6 +227,7 @@ impl Cell {
                     MarkdownCell::new(
                         id.clone(),
                         metadata.clone(),
+                        attachments.clone(),
                         source,
                         languages.clone(),
                         window,
@@ -224,6 +256,7 @@ impl Cell {
                         id.clone(),
                         metadata.clone(),
                         text,
+                        backing,
                         notebook_language,
                         window,
                         cx,
@@ -331,8 +364,17 @@ pub trait RenderableCell: Render {
         }
     }
 
+    /// Whether this cell differs from the committed version of the notebook.
+    ///
+    /// Cell editors hide their own gutter, so a diff hunk has nowhere to paint. The
+    /// cell's margin line carries the indication instead.
+    fn has_changes(&self) -> bool {
+        false
+    }
+
     fn gutter(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_selected = self.selected();
+        let has_changes = self.has_changes();
 
         div()
             .relative()
@@ -348,10 +390,19 @@ pub trait RenderableCell: Render {
                     .child(
                         div()
                             .flex_none()
-                            .w(px(1.))
+                            // A changed cell gets a wider, coloured line, so an edited
+                            // cell is visible while scrolling past it.
+                            .w(px(if has_changes { 2. } else { 1. }))
                             .h_full()
-                            .when(is_selected, |this| this.bg(cx.theme().colors().icon_accent))
-                            .when(!is_selected, |this| this.bg(cx.theme().colors().border)),
+                            .when(has_changes, |this| {
+                                this.bg(cx.theme().status().modified)
+                            })
+                            .when(!has_changes && is_selected, |this| {
+                                this.bg(cx.theme().colors().icon_accent)
+                            })
+                            .when(!has_changes && !is_selected, |this| {
+                                this.bg(cx.theme().colors().border)
+                            }),
                     ),
             )
             .when_some(self.control(window, cx), |this, control| {
@@ -385,6 +436,10 @@ pub trait RunnableCell: RenderableCell {
 pub struct MarkdownCell {
     id: CellId,
     metadata: CellMetadata,
+    /// Base64 image data referenced by `attachment:` URLs in the source. The editor
+    /// does not render or edit these, so it carries them through verbatim rather
+    /// than dropping them on save.
+    attachments: Option<serde_json::Value>,
     image_cache: Entity<RetainAllImageCache>,
     source: String,
     editor: Entity<Editor>,
@@ -401,6 +456,7 @@ impl MarkdownCell {
     pub fn new(
         id: CellId,
         metadata: CellMetadata,
+        attachments: Option<serde_json::Value>,
         source: String,
         languages: Arc<LanguageRegistry>,
         window: &mut Window,
@@ -457,6 +513,7 @@ impl MarkdownCell {
         Self {
             id,
             metadata,
+            attachments,
             image_cache: RetainAllImageCache::new(cx),
             source,
             editor,
@@ -487,13 +544,13 @@ impl MarkdownCell {
 
     pub fn to_nbformat_cell(&self, cx: &App) -> nbformat::v4::Cell {
         let source = self.current_source(cx);
-        let source_lines: Vec<String> = source.lines().map(|l| format!("{}\n", l)).collect();
+        let source_lines = source_to_nbformat_lines(&source);
 
         nbformat::v4::Cell::Markdown {
             id: self.id.clone(),
             metadata: self.metadata.clone(),
             source: source_lines,
-            attachments: None,
+            attachments: self.attachments.clone(),
         }
     }
 
@@ -651,16 +708,34 @@ pub struct CodeCell {
     execution_count: Option<i32>,
     source: String,
     editor: Entity<editor::Editor>,
-    outputs: Vec<Output>,
+    outputs: Vec<CellOutput>,
     selected: bool,
     cell_position: Option<CellPosition>,
     _language_task: Task<()>,
     execution_start_time: Option<Instant>,
     execution_duration: Option<Duration>,
     is_executing: bool,
+    has_changes: bool,
 }
 
 impl EventEmitter<CellEvent> for CodeCell {}
+
+/// What a code cell's editor is built over.
+///
+/// A detached buffer has no project attached, which is why a cell built that way gets
+/// no completions, diagnostics or edit predictions. An excerpt over the notebook's
+/// shared buffer carries the project, and puts every code cell into one document so a
+/// language server can resolve a name defined in an earlier cell.
+pub(super) enum CellBacking {
+    /// Used when the notebook has no shared buffer, such as a cell created before the
+    /// projection exists.
+    Local,
+    Shared {
+        buffer: Entity<Buffer>,
+        range: Range<Point>,
+        project: Entity<Project>,
+    },
+}
 
 pub(super) enum CellSource {
     /// Crate a new empty cell
@@ -668,12 +743,12 @@ pub(super) enum CellSource {
     /// Backed by an existing notebook cell
     Existing {
         execution_count: Option<i32>,
-        outputs: Vec<Output>,
+        outputs: Vec<CellOutput>,
     },
 }
 
 impl CellSource {
-    fn into_outputs(self) -> (Option<i32>, Vec<Output>) {
+    fn into_outputs(self) -> (Option<i32>, Vec<CellOutput>) {
         match self {
             CellSource::Existing {
                 execution_count,
@@ -690,12 +765,43 @@ impl CodeCell {
         id: CellId,
         metadata: CellMetadata,
         source: String,
+        backing: CellBacking,
         notebook_language: Shared<Task<Option<Arc<Language>>>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let buffer = cx.new(|cx| Buffer::local(source.clone(), cx));
-        let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer.clone(), cx));
+        // A cell backed by the shared buffer takes its language from that buffer, which
+        // the notebook sets once for every cell at a time.
+        let (multi_buffer, project, local_buffer) = match backing {
+            CellBacking::Local => {
+                let buffer = cx.new(|cx| Buffer::local(source.clone(), cx));
+                let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer.clone(), cx));
+                (multi_buffer, None, Some(buffer))
+            }
+            CellBacking::Shared {
+                buffer,
+                range,
+                project,
+            } => {
+                let snapshot = buffer.read(cx).snapshot();
+                let multi_buffer = cx.new(|cx| {
+                    // Without this, each cell renders the shared buffer's path as an
+                    // excerpt header above it, which reads as "untitled" since that
+                    // buffer has no file. A cell is not a file and should not be
+                    // labelled like one.
+                    let mut multi_buffer = MultiBuffer::without_headers(Capability::ReadWrite);
+                    multi_buffer.set_excerpt_ranges_for_path(
+                        PathKey::for_buffer(&buffer, cx),
+                        buffer.clone(),
+                        &snapshot,
+                        vec![ExcerptRange::new(range)],
+                        cx,
+                    );
+                    multi_buffer
+                });
+                (multi_buffer, Some(project), None)
+            }
+        };
 
         let editor = cx.new(|cx| {
             let mut editor = Editor::new(
@@ -705,14 +811,16 @@ impl CodeCell {
                     sizing_behavior: SizingBehavior::SizeByContent,
                 },
                 multi_buffer,
-                None,
+                project,
                 window,
                 cx,
             );
 
             editor.disable_mouse_wheel_zoom();
             editor.disable_scrollbars_and_minimap(window, cx);
-            editor.set_text(source.clone(), window, cx);
+            // The buffer already holds the source. Calling `set_text` here would both
+            // duplicate that and panic on an excerpt-backed editor, which is not a
+            // singleton.
             editor.set_show_gutter(false, cx);
             editor.set_use_modal_editing(true);
             editor
@@ -720,9 +828,11 @@ impl CodeCell {
 
         let language_task = cx.spawn_in(window, async move |_this, cx| {
             let language = notebook_language.await;
-            buffer.update(cx, |buffer, cx| {
-                buffer.set_language(language.clone(), cx);
-            });
+            if let Some(buffer) = local_buffer {
+                buffer.update(cx, |buffer, cx| {
+                    buffer.set_language(language.clone(), cx);
+                });
+            }
         });
 
         let (execution_count, outputs) = cell_source.into_outputs();
@@ -739,8 +849,33 @@ impl CodeCell {
             execution_start_time: None,
             execution_duration: None,
             is_executing: false,
+            has_changes: false,
             _language_task: language_task,
         }
+    }
+
+    /// Re-points this cell's excerpt at `range` in the shared buffer.
+    ///
+    /// Used after a move, which relocates the cell's text. Updating the excerpt in
+    /// place keeps the same `Editor`, so the cell holds its cursor, selection and
+    /// undo history across the move.
+    pub(super) fn set_excerpt_range(&self, range: Range<Point>, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            let multi_buffer = editor.buffer().clone();
+            let Some(buffer) = multi_buffer.read(cx).all_buffers().into_iter().next() else {
+                return;
+            };
+            let snapshot = buffer.read(cx).snapshot();
+            multi_buffer.update(cx, |multi_buffer, cx| {
+                multi_buffer.set_excerpt_ranges_for_path(
+                    PathKey::for_buffer(&buffer, cx),
+                    buffer.clone(),
+                    &snapshot,
+                    vec![ExcerptRange::new(range)],
+                    cx,
+                );
+            });
+        });
     }
 
     pub fn set_language(&mut self, language: Option<Arc<Language>>, cx: &mut Context<Self>) {
@@ -755,17 +890,25 @@ impl CodeCell {
         });
     }
 
+    /// Marks this cell as differing from the committed notebook.
+    pub(super) fn set_has_changes(&mut self, has_changes: bool, cx: &mut Context<Self>) {
+        if self.has_changes != has_changes {
+            self.has_changes = has_changes;
+            cx.notify();
+        }
+    }
+
     pub fn editor(&self) -> &Entity<editor::Editor> {
         &self.editor
     }
 
+    /// The cell's text.
+    ///
+    /// Read through the multibuffer rather than `as_singleton`, because a cell
+    /// backed by an excerpt over the notebook's shared buffer is not a singleton
+    /// and the singleton path silently yields an empty string.
     pub fn current_source(&self, cx: &App) -> String {
-        let editor = self.editor.read(cx);
-        let buffer = editor.buffer().read(cx);
-        buffer
-            .as_singleton()
-            .map(|b| b.read(cx).text())
-            .unwrap_or_default()
+        self.editor.read(cx).text(cx)
     }
 
     pub fn is_dirty(&self, cx: &App) -> bool {
@@ -774,9 +917,9 @@ impl CodeCell {
 
     pub fn to_nbformat_cell(&self, cx: &App) -> nbformat::v4::Cell {
         let source = self.current_source(cx);
-        let source_lines: Vec<String> = source.lines().map(|l| format!("{}\n", l)).collect();
+        let source_lines = source_to_nbformat_lines(&source);
 
-        let outputs = self.outputs_to_nbformat(cx);
+        let outputs = self.outputs_to_nbformat();
 
         nbformat::v4::Cell::Code {
             id: self.id.clone(),
@@ -787,15 +930,30 @@ impl CodeCell {
         }
     }
 
-    fn outputs_to_nbformat(&self, cx: &App) -> Vec<nbformat::v4::Output> {
+    fn outputs_to_nbformat(&self) -> Vec<nbformat::v4::Output> {
         self.outputs
             .iter()
-            .filter_map(|output| output.to_nbformat(cx))
+            .map(|output| output.source.clone())
             .collect()
     }
 
     pub fn has_outputs(&self) -> bool {
         !self.outputs.is_empty()
+    }
+
+    pub fn has_error_output(&self) -> bool {
+        self.outputs
+            .iter()
+            .any(|output| matches!(output.source, nbformat::v4::Output::Error(_)))
+    }
+
+    fn push_output(
+        &mut self,
+        output: nbformat::v4::Output,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.outputs.push(CellOutput::new(output, window, cx));
     }
 
     pub fn clear_outputs(&mut self) {
@@ -829,11 +987,15 @@ impl CodeCell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.outputs.push(Output::ErrorOutput(ErrorView {
-            ename: "Kernel Error".to_string(),
-            evalue: "cell could not be executed".to_string(),
-            traceback: cx.new(|cx| TerminalOutput::from(error_message, window, cx)),
-        }));
+        self.push_output(
+            nbformat::v4::Output::Error(nbformat::v4::ErrorOutput {
+                ename: "Kernel Error".to_string(),
+                evalue: "cell could not be executed".to_string(),
+                traceback: error_message.lines().map(str::to_owned).collect(),
+            }),
+            window,
+            cx,
+        );
         self.execution_start_time = None;
         self.is_executing = false;
         cx.notify();
@@ -864,17 +1026,39 @@ impl CodeCell {
     ) {
         match &message.content {
             JupyterMessageContent::StreamContent(stream) => {
-                self.outputs.push(Output::Stream {
-                    content: cx.new(|cx| TerminalOutput::from(&stream.text, window, cx)),
-                });
+                let name = match stream.name {
+                    Stdio::Stdout => "stdout",
+                    Stdio::Stderr => "stderr",
+                };
+                self.push_output(
+                    nbformat::v4::Output::Stream {
+                        name: name.to_string(),
+                        text: nbformat::v4::MultilineString(stream.text.clone()),
+                    },
+                    window,
+                    cx,
+                );
             }
             JupyterMessageContent::DisplayData(display_data) => {
-                self.outputs
-                    .push(Output::new(&display_data.data, None, window, cx));
+                self.push_output(
+                    nbformat::v4::Output::DisplayData(nbformat::v4::DisplayData {
+                        data: display_data.data.clone(),
+                        metadata: display_data.metadata.clone(),
+                    }),
+                    window,
+                    cx,
+                );
             }
             JupyterMessageContent::ExecuteResult(execute_result) => {
-                self.outputs
-                    .push(Output::new(&execute_result.data, None, window, cx));
+                self.push_output(
+                    nbformat::v4::Output::ExecuteResult(nbformat::v4::ExecuteResult {
+                        execution_count: execute_result.execution_count,
+                        data: execute_result.data.clone(),
+                        metadata: execute_result.metadata.clone(),
+                    }),
+                    window,
+                    cx,
+                );
             }
             JupyterMessageContent::ExecuteInput(input) => {
                 self.execution_count = serde_json::to_value(&input.execution_count)
@@ -886,12 +1070,15 @@ impl CodeCell {
                 self.finish_execution();
             }
             JupyterMessageContent::ErrorOutput(error) => {
-                self.outputs.push(Output::ErrorOutput(ErrorView {
-                    ename: error.ename.clone(),
-                    evalue: error.evalue.clone(),
-                    traceback: cx
-                        .new(|cx| TerminalOutput::from(&error.traceback.join("\n"), window, cx)),
-                }));
+                self.push_output(
+                    nbformat::v4::Output::Error(nbformat::v4::ErrorOutput {
+                        ename: error.ename.clone(),
+                        evalue: error.evalue.clone(),
+                        traceback: error.traceback.clone(),
+                    }),
+                    window,
+                    cx,
+                );
             }
             _ => {}
         }
@@ -942,6 +1129,10 @@ impl CodeCell {
 
 impl RenderableCell for CodeCell {
     const CELL_TYPE: CellType = CellType::Code;
+
+    fn has_changes(&self) -> bool {
+        self.has_changes
+    }
 
     fn id(&self) -> &CellId {
         &self.id
@@ -1001,6 +1192,7 @@ impl RenderableCell for CodeCell {
 
     fn gutter(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_selected = self.selected();
+        let has_changes = self.has_changes();
         let execution_count = self.execution_count;
 
         div()
@@ -1017,10 +1209,17 @@ impl RenderableCell for CodeCell {
                     .child(
                         div()
                             .flex_none()
-                            .w(px(1.))
+                            // A changed cell gets a wider, coloured rule, so an edited cell
+                            // is visible while scrolling past it.
+                            .w(px(if has_changes { 2. } else { 1. }))
                             .h_full()
-                            .when(is_selected, |this| this.bg(cx.theme().colors().icon_accent))
-                            .when(!is_selected, |this| this.bg(cx.theme().colors().border)),
+                            .when(has_changes, |this| this.bg(cx.theme().status().modified))
+                            .when(!has_changes && is_selected, |this| {
+                                this.bg(cx.theme().colors().icon_accent)
+                            })
+                            .when(!has_changes && !is_selected, |this| {
+                                this.bg(cx.theme().colors().border)
+                            }),
                     ),
             )
             .when_some(self.control(window, cx), |this, control| {
@@ -1081,9 +1280,8 @@ impl Render for CodeCell {
             .read(cx)
             .buffer()
             .read(cx)
-            .as_singleton()
-            .and_then(|buffer| buffer.read(cx).language())
-            .map(|lang| lang.name().to_string());
+            .language_at(Point::zero(), cx)
+            .map(|language| language.name().to_string());
 
         v_flex()
             .size_full()
@@ -1186,9 +1384,15 @@ impl Render for CodeCell {
                                                         .gap_1()
                                                         .items_center()
                                                         .child(
-                                                            Icon::new(IconName::Check)
-                                                                .size(IconSize::XSmall)
-                                                                .color(Color::Success),
+                                                            if self.has_error_output() {
+                                                                Icon::new(IconName::Close)
+                                                                    .size(IconSize::XSmall)
+                                                                    .color(Color::Error)
+                                                            } else {
+                                                                Icon::new(IconName::Check)
+                                                                    .size(IconSize::XSmall)
+                                                                    .color(Color::Success)
+                                                            },
                                                         )
                                                         .child(
                                                             div()
@@ -1220,7 +1424,7 @@ impl Render for CodeCell {
                                                     div.max_h(max_height).overflow_y_scroll()
                                                 })
                                                 .children(self.outputs.iter().map(|output| {
-                                                    div().children(output.content(window, cx))
+                                                    div().children(output.view.content(window, cx))
                                                 })),
                                         ),
                                 ),
@@ -1243,7 +1447,7 @@ pub struct RawCell {
 
 impl RawCell {
     pub fn to_nbformat_cell(&self) -> nbformat::v4::Cell {
-        let source_lines: Vec<String> = self.source.lines().map(|l| format!("{}\n", l)).collect();
+        let source_lines = source_to_nbformat_lines(&self.source);
 
         nbformat::v4::Cell::Raw {
             id: self.id.clone(),

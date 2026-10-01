@@ -7,6 +7,8 @@ use settings::{RegisterSetting, Settings};
 #[derive(Debug, Default, RegisterSetting)]
 pub struct JupyterSettings {
     pub kernel_selections: HashMap<String, String>,
+    pub clear_outputs_on_save: bool,
+    pub language_server_sidecar: bool,
 }
 
 impl JupyterSettings {
@@ -27,6 +29,8 @@ impl Settings for JupyterSettings {
         let jupyter = content.editor.jupyter.clone().unwrap();
         Self {
             kernel_selections: jupyter.kernel_selections.unwrap_or_default(),
+            clear_outputs_on_save: jupyter.clear_outputs_on_save.unwrap_or(false),
+            language_server_sidecar: jupyter.language_server_sidecar.unwrap_or(false),
         }
     }
 }

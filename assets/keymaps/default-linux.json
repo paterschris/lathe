@@ -1581,21 +1581,30 @@
     },
   },
   {
+    // Cell reordering only applies to the cell view. In the source view the
+    // notebook is one text buffer, so these keys belong to the editor.
+    "context": "NotebookEditor && notebook_view == cells",
+    "bindings": {
+      "alt-up": "notebook::MoveCellUp",
+      "alt-down": "notebook::MoveCellDown",
+    },
+  },
+  {
     "context": "NotebookEditor",
     "bindings": {
       "shift-enter": "notebook::RunAndAdvance",
       "ctrl-enter": "notebook::Run",
       "ctrl-shift-enter": "notebook::RunAll",
-      "alt-up": "notebook::MoveCellUp",
-      "alt-down": "notebook::MoveCellDown",
       "ctrl-m": "notebook::AddCodeBlock",
       "ctrl-shift-m": "notebook::AddMarkdownBlock",
       "ctrl-shift-r": "notebook::RestartKernel",
+      "ctrl-shift-y": "notebook::ToggleSourceView",
+      "ctrl-shift-backspace": "notebook::ClearOutputs",
       "ctrl-c": "notebook::InterruptKernel",
     },
   },
   {
-    "context": "NotebookEditor && notebook_mode == command",
+    "context": "NotebookEditor && notebook_view == cells && notebook_mode == command",
     "bindings": {
       "enter": "notebook::EnterEditMode",
       "d d": "notebook::DeleteCell",
@@ -1611,11 +1620,11 @@
       "shift-enter": "notebook::RunAndAdvance",
       "ctrl-enter": "notebook::Run",
       "ctrl-shift-enter": "notebook::RunAll",
-      "alt-up": "notebook::MoveCellUp",
-      "alt-down": "notebook::MoveCellDown",
       "ctrl-m": "notebook::AddCodeBlock",
       "ctrl-shift-m": "notebook::AddMarkdownBlock",
       "ctrl-shift-r": "notebook::RestartKernel",
+      "ctrl-shift-y": "notebook::ToggleSourceView",
+      "ctrl-shift-backspace": "notebook::ClearOutputs",
       "escape": "notebook::EnterCommandMode",
     },
   },

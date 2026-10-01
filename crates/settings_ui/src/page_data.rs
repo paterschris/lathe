@@ -3322,7 +3322,7 @@ fn editor_page() -> SettingsPage {
 }
 
 fn languages_and_tools_page(cx: &App) -> SettingsPage {
-    fn jupyter_notebooks_section() -> [SettingsPageItem; 2] {
+    fn jupyter_notebooks_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader("Jupyter Notebooks"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3345,6 +3345,56 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
                             .jupyter
                             .get_or_insert_default()
                             .notebook_enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Clear Outputs On Save",
+                description: "Strip cell outputs when saving a notebook. Notebooks store outputs inline, so this keeps committed notebooks diffable at the cost of losing outputs on every save.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("jupyter.clear_outputs_on_save"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .as_ref()?
+                            .clear_outputs_on_save
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .get_or_insert_default()
+                            .clear_outputs_on_save = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Language Server Support In Cells",
+                description: "Write a notebook's code cells to a hidden sibling file so language servers can attach, giving cells completions and diagnostics. The file is removed when the notebook closes. Add `.*.lathe.*` to your .gitignore if you enable this.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("jupyter.language_server_sidecar"),
+                    pick: |settings_content| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .as_ref()?
+                            .language_server_sidecar
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .editor
+                            .jupyter
+                            .get_or_insert_default()
+                            .language_server_sidecar = value;
                     },
                 }),
                 metadata: None,
