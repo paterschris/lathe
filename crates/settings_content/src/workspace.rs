@@ -125,6 +125,12 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: false
     pub close_on_file_delete: Option<bool>,
+    /// Whether to keep a workspace alive, with its open tabs and terminals, after
+    /// switching the window to another project or worktree, so that switching back
+    /// restores it. When off, the previous workspace is closed on every switch.
+    ///
+    /// Default: true
+    pub keep_inactive_workspaces: Option<bool>,
     /// Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
     ///
     /// Default: false

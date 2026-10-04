@@ -118,7 +118,7 @@ async fn test_sidebar_disabled_when_disable_ai_is_enabled(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppContext) {
+async fn test_disabling_the_agent_keeps_inactive_workspaces(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
@@ -146,9 +146,48 @@ async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppC
     });
     cx.run_until_parked();
 
+    // The sidebar is an agent feature and goes away with it. The workspaces are not:
+    // throwing them away took every tab and terminal with them on the next switch.
     multi_workspace.read_with(cx, |multi_workspace, cx| {
         assert!(!multi_workspace.multi_workspace_enabled(cx));
         assert!(!multi_workspace.sidebar_open());
+        assert_eq!(multi_workspace.workspaces().count(), 2);
+    });
+}
+
+#[gpui::test]
+async fn test_multi_workspace_collapses_when_inactive_workspaces_are_not_kept(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.test_add_workspace(project_b, window, cx);
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |multi_workspace, _cx| {
+        assert_eq!(multi_workspace.workspaces().count(), 2);
+    });
+
+    cx.update(|_window, cx| {
+        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.workspace.keep_inactive_workspaces = Some(false);
+            });
+        });
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |multi_workspace, _cx| {
         assert_eq!(multi_workspace.workspaces().count(), 1);
         assert!(multi_workspace.project_group_keys().is_empty());
     });

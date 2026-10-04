@@ -190,6 +190,10 @@
   "restore_on_file_reopen": true,
   // Whether to automatically close files that have been deleted on disk.
   "close_on_file_delete": false,
+  // Whether to keep a workspace alive, with its open tabs and terminals, after
+  // switching the window to another project or worktree, so that switching back
+  // restores it. When off, the previous workspace is closed on every switch.
+  "keep_inactive_workspaces": true,
   // Whether toggling a panel (e.g. with its keyboard shortcut) also closes
   // the panel when it is already focused, instead of just moving focus back
   // to the editor.

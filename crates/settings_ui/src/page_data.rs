@@ -356,7 +356,7 @@ fn general_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn workspace_restoration_section() -> [SettingsPageItem; 3] {
+    fn workspace_restoration_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader("Workspace Restoration"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -390,6 +390,22 @@ fn general_page(cx: &App) -> SettingsPage {
                     pick: |settings_content| settings_content.workspace.restore_on_startup.as_ref(),
                     write: |settings_content, value, _| {
                         settings_content.workspace.restore_on_startup = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Keep Inactive Workspaces",
+                description: "Keep a project's tabs and terminals alive after switching the window to another project or worktree, so switching back restores them.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("keep_inactive_workspaces"),
+                    pick: |settings_content| {
+                        settings_content.workspace.keep_inactive_workspaces.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.keep_inactive_workspaces = value;
                     },
                 }),
                 metadata: None,

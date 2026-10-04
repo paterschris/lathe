@@ -38,6 +38,7 @@ pub struct WorkspaceSettings {
     pub text_rendering_mode: settings::TextRenderingMode,
     pub resize_all_panels_in_dock: Vec<DockPosition>,
     pub close_on_file_delete: bool,
+    pub keep_inactive_workspaces: bool,
     pub close_panel_on_toggle: bool,
     pub window_title_format: String,
     pub window_title_separator: String,
@@ -143,6 +144,7 @@ impl Settings for WorkspaceSettings {
                 .map(Into::into)
                 .collect(),
             close_on_file_delete: workspace.close_on_file_delete.unwrap(),
+            keep_inactive_workspaces: workspace.keep_inactive_workspaces.unwrap(),
             close_panel_on_toggle: workspace.close_panel_on_toggle.unwrap(),
             window_title_format: workspace.window_title_format.clone().unwrap(),
             window_title_separator: workspace.window_title_separator.clone().unwrap(),
