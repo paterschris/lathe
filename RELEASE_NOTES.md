@@ -2,6 +2,57 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.8.0 - 2026-10-04
+
+The first stable release since 1.4.0. Everything from the 1.5.0, 1.6.0 and 1.7.0 betas is in here, plus a round of fixes that came out of testing them.
+
+### Added
+
+- **Jupyter notebooks you can actually rely on.** The notebook editor is no longer labeled experimental. It's still off by default, so turn on **Enable Notebook Editor** under Languages and Tools > Jupyter Notebooks. Most of the work was making saves safe:
+  - Saving keeps your outputs. Images, tables, JSON and markdown outputs used to be rebuilt from whatever was on screen, so they vanished on every save, widgets included.
+  - An untouched notebook saves to an empty `git diff`. Key order, indentation and the trailing newline all come from the file you opened.
+  - Cells share one document, so a name defined in cell 1 resolves in cell 2. `cmd-shift-y` flips between the cells and the whole notebook as a `# %%` script, and you can edit either. Completions inside cells also need `jupyter.language_server_sidecar`, which writes a hidden `.yourfile.lathe.py` next to the notebook and deletes it on close.
+  - The kernel picker waits for environment discovery before choosing, prefers an environment inside your project over whatever your active Python toolchain points at, and remembers what you picked by interpreter path. Pick an environment without ipykernel and it offers to install it.
+  - A kernel log button sits next to restart and interrupt. Outline (`cmd-shift-o`), breadcrumbs and `cmd-f` work across cells.
+- **PlatformIO support.** Open a folder with a `platformio.ini` and you get syntax highlighting and an outline for that file, build, upload, monitor, test, check and clean tasks per environment, and clangd code intelligence from the compilation database PlatformIO generates. Lathe drives the `pio` CLI but doesn't bundle it, so install PlatformIO Core first.
+- **Choose whether Lathe downloads binaries for you.** Opening a file can make Lathe fetch Node.js, npm packages, a language server, a debug adapter, or files an extension asks for. Set `allow_binary_downloads` to `false` and it only uses what's on your `$PATH` or configured explicitly. Set `prompt_before_binary_downloads` to `true` and each download asks first. Approvals are remembered in `approved_binary_downloads` by name and version; approve with "always" (version `"*"`) to cover future updates. Downloads are still allowed by default.
+- `keep_inactive_workspaces` keeps a project's tabs and terminals alive after you switch the window to another project or worktree, so switching back puts you where you were. On by default. It's also in the settings UI under Workspace Restoration.
+- Agent panel terminals come back after a restart, with their titles and working directories.
+- Subagents can run on a specific model. `spawn_agent` takes an optional `model` in `provider/model-id` form.
+- The pull request view has a refresh button at the right of its title row.
+
+### Fixed
+
+- **Cmd-clicking a link opens it again.** With definitions set to open in a peek, which is the default, cmd-clicking a URL or a file path showed "No definitions found" instead of opening it. Only symbols go to the peek now.
+- **Switching worktrees no longer closes your other projects.** With several repositories open in one window, switching one of them to a worktree dropped all the others. Switching back then landed you in a fresh workspace, so your terminals and tabs were gone. Now only the repository you switched changes, and switching back restores the original workspace.
+- Notebook fixes. A slow kernel isn't treated as a dead one: startup used to give up at 45 seconds and stamp "cell could not be executed" on cells the kernel went on to run anyway. Discarding a hunk in the git panel sticks instead of being written back on the next autosave. Opening a notebook doesn't rewrite its `kernelspec`. Save As works.
+- Edit prediction popovers and right-click menus were clipped to the editor's own bounds. Hard to notice in a full-size editor, obvious in a two-line notebook cell. Fixed everywhere.
+- Hovering a document link shows its tooltip again, and a few text layout fixes from upstream are back: wrapped lines don't start with closing punctuation, text is pixel-snapped, and lines full of invisible characters stay within the line length limit. Earlier upstream merges had quietly dropped all of these.
+- Shift+Up, Shift+Down and the other Shift navigation keys reach programs in the terminal's alternate screen (vim, less, htop) instead of scrolling Lathe's terminal history.
+- AltGr characters type correctly in the terminal when `option_as_meta` is on.
+- Edit > Copy and Edit > Paste work when a terminal is focused.
+- C++ members under `public:`, `private:` and `protected:` indent one level deeper than the specifier, method bodies included.
+- Deleted-line markers in the git gutter stay visible at small `git_gutter_width` values.
+- Right-clicking selected text in an agent message offers "Copy" and "Copy as Markdown".
+- Opening a pull request that's already open focuses its tab and reloads it, instead of opening a second one.
+- Theme customizer changes survive a restart. They're saved to `theme_overrides` for the active theme.
+
+### Changed
+
+- Merged upstream Zed through `7fdb97cad5`: 186 commits, including ACP session notices, faster incremental diff loading, JSONL and NDJSON tabular preview, and `"..."` inheritance in `hidden_files`, `terminal.path_hyperlink_regexes` and the edit prediction exclusion settings.
+- Turning off AI no longer throws away your other workspaces. It used to: with `disable_ai` on or the agent disabled, every project or worktree switch closed the previous workspace with its tabs and terminals. That's now controlled by `keep_inactive_workspaces` alone, and the threads sidebar is the only thing that goes away with AI.
+- Git no longer depends on libgit2. Repositories open lazily, so a folder that becomes a repository after you open it gets picked up, and bare repositories work.
+- Bug and crash report templates point at Lathe's own issue tracker, discussions and r/LatheEditor.
+
+### Known issues
+
+- Three settings currently do nothing: `outline_panel.multi_buffer_hide_symbols`, `instrumentation.performance_profiler.enabled` and `on_new_window`. An audit of past upstream merges turned these up along with other upstream changes that never made it into Lathe. They'll be restored in a later release.
+- Notebooks: splitting one across two panes is disabled, `.ipynb` tabs don't reopen after a restart, LaTeX output shows as source, and widgets show as a placeholder.
+- The notebook and worktree changes were tested by hand on macOS. The editor, workspace, git and notebook test suites pass on macOS. Windows and Linux are untested.
+- Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
+
+---
+
 ## v1.7.0-beta - 2026-10-01
 
 Jupyter notebooks. Upstream's editor loses data when you save it, so this is mostly a rewrite of the parts that matter.
