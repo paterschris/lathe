@@ -64,6 +64,7 @@ fn maybe_propagate_worktree_trust(
 pub(super) async fn do_switch_worktree(
     worktree_path: PathBuf,
     git_repo_work_dirs: Vec<PathBuf>,
+    // Folders carried into the new workspace unchanged, repositories or not.
     non_git_paths: Vec<PathBuf>,
     previous_state: PreviousWorkspaceState,
     workspace: WeakEntity<Workspace>,

@@ -236,6 +236,19 @@ pub fn handle_create_worktree(
     .detach_and_log_err(cx);
 }
 
+/// The open folders a worktree switch keeps as they are: everything outside the
+/// repository being switched.
+fn paths_kept_by_worktree_switch(
+    visible_paths: &[PathBuf],
+    switched_work_dir: &std::path::Path,
+) -> Vec<PathBuf> {
+    visible_paths
+        .iter()
+        .filter(|path| !path.starts_with(switched_work_dir))
+        .cloned()
+        .collect()
+}
+
 pub fn handle_switch_worktree(
     workspace: &mut Workspace,
     action: &zed_actions::SwitchWorktree,
@@ -265,12 +278,25 @@ pub fn handle_switch_worktree(
     let window_handle = window.window_handle().downcast::<MultiWorkspace>();
     let remote_connection_options = project.read(cx).remote_connection_options(cx);
 
-    let (git_repos, non_git_paths) = classify_worktrees(project.read(cx), cx);
-
-    let git_repo_work_dirs: Vec<PathBuf> = git_repos
-        .iter()
-        .map(|repo| repo.read(cx).work_directory_abs_path.to_path_buf())
+    // The picker lists worktrees of the active repository only, so that is the only
+    // folder the switch replaces. Switching used to remap every repository in the
+    // workspace onto the chosen worktree, which dropped the others. The path list then
+    // no longer matched the original workspace on the way back, so a fresh workspace
+    // was created and the original one's tabs and terminals were never restored.
+    let Some(active_repository) = project.read(cx).active_repository(cx) else {
+        log::error!("switch_to_worktree: no active repository");
+        return;
+    };
+    let active_work_dir = active_repository
+        .read(cx)
+        .work_directory_abs_path
+        .to_path_buf();
+    let visible_paths: Vec<PathBuf> = project
+        .read(cx)
+        .visible_worktrees(cx)
+        .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
         .collect();
+    let kept_paths = paths_kept_by_worktree_switch(&visible_paths, &active_work_dir);
 
     let display_name: SharedString = action.display_name.clone().into();
 
@@ -281,8 +307,8 @@ pub fn handle_switch_worktree(
     cx.spawn_in(window, async move |_workspace_entity, mut cx| {
         let result = do_switch_worktree(
             worktree_path,
-            git_repo_work_dirs,
-            non_git_paths,
+            vec![active_work_dir],
+            kept_paths,
             previous_state,
             workspace_handle.clone(),
             window_handle,
@@ -304,4 +330,43 @@ pub fn handle_switch_worktree(
         result
     })
     .detach_and_log_err(cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paths_kept_by_worktree_switch;
+    use std::path::{Path, PathBuf};
+
+    fn paths(items: &[&str]) -> Vec<PathBuf> {
+        items.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn test_switching_one_repo_keeps_the_other_repos() {
+        let visible = paths(&["/code/frontend", "/code/backend", "/code/notes"]);
+        assert_eq!(
+            paths_kept_by_worktree_switch(&visible, Path::new("/code/frontend")),
+            paths(&["/code/backend", "/code/notes"]),
+        );
+    }
+
+    #[test]
+    fn test_folders_inside_the_switched_repo_are_replaced() {
+        let visible = paths(&["/code/frontend/app", "/code/frontend/lib", "/code/backend"]);
+        assert_eq!(
+            paths_kept_by_worktree_switch(&visible, Path::new("/code/frontend")),
+            paths(&["/code/backend"]),
+        );
+    }
+
+    #[test]
+    fn test_sibling_with_a_shared_name_prefix_is_kept() {
+        // `starts_with` on a `Path` compares components, so `frontend-old` is not
+        // mistaken for a folder inside `frontend`.
+        let visible = paths(&["/code/frontend", "/code/frontend-old"]);
+        assert_eq!(
+            paths_kept_by_worktree_switch(&visible, Path::new("/code/frontend")),
+            paths(&["/code/frontend-old"]),
+        );
+    }
 }
