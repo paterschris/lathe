@@ -401,6 +401,13 @@ impl EditorElement {
         register_action(editor, window, Editor::select_page_up);
         register_action(editor, window, Editor::cancel);
         register_action(editor, window, |editor, _: &menu::Confirm, window, cx| {
+            // Registered on every editor, including the ones embedded in prompts such as
+            // the bookmark label prompt. Consuming Confirm when there is no inline input
+            // stopped those prompts from ever confirming.
+            if editor.pending_inline_input.is_none() {
+                cx.propagate();
+                return;
+            }
             editor.confirm_inline_input(window, cx);
         });
         register_action(editor, window, Editor::newline);
