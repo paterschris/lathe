@@ -156,7 +156,7 @@ The status bar shows the active repository's branch and its push/pull state. A s
 
 ## Jupyter notebooks
 
-Upstream gates its notebook editor behind the server-side `notebooks` feature flag, so stock Zed will only open `.ipynb` files for accounts that flag has been enabled for. Lathe swaps that gate for an ordinary setting, `jupyter.notebook_enabled`, and puts it in the settings UI under **Languages and Tools > Jupyter Notebooks** as **Enable Experimental Notebook Editor**. So turning it on doesn't mean hand-editing JSON or waiting to get flagged.
+Upstream gates its notebook editor behind the server-side `notebooks` feature flag, so stock Zed will only open `.ipynb` files for accounts that flag has been enabled for. Lathe swaps that gate for an ordinary setting, `jupyter.notebook_enabled`, and puts it in the settings UI under **Languages and Tools > Jupyter Notebooks** as **Enable Notebook Editor**. So turning it on doesn't mean hand-editing JSON or waiting to get flagged.
 
 Turning it back off needs a restart.
 

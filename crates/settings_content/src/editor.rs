@@ -1037,7 +1037,7 @@ pub struct JupyterContent {
     /// Default: true
     pub enabled: Option<bool>,
 
-    /// Whether to enable the experimental Jupyter notebook editor.
+    /// Whether to enable the Jupyter notebook editor.
     ///
     /// Default: false
     pub notebook_enabled: Option<bool>,

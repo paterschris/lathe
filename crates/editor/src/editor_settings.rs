@@ -92,7 +92,7 @@ pub struct Jupyter {
     ///
     /// Default: true
     pub enabled: bool,
-    /// Whether the experimental Jupyter notebook editor is enabled.
+    /// Whether the Jupyter notebook editor is enabled.
     ///
     /// Default: false
     pub notebook_enabled: bool,

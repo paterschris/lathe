@@ -3326,8 +3326,8 @@ fn languages_and_tools_page(cx: &App) -> SettingsPage {
         [
             SettingsPageItem::SectionHeader("Jupyter Notebooks"),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Enable Experimental Notebook Editor",
-                description: "Open and edit Jupyter (.ipynb) notebooks. This experimental editor may have issues. Restart Lathe after disabling it.",
+                title: "Enable Notebook Editor",
+                description: "Open and edit Jupyter (.ipynb) notebooks. Restart Lathe after disabling it.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("jupyter.notebook_enabled"),

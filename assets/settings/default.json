@@ -2800,7 +2800,7 @@
   // Jupyter settings
   "jupyter": {
     "enabled": true,
-    // Enable the experimental .ipynb notebook editor.
+    // Enable the .ipynb notebook editor.
     "notebook_enabled": false,
     // Strip cell outputs when saving a notebook, so committed notebooks stay diffable.
     "clear_outputs_on_save": false,
