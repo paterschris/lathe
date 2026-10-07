@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use collections::HashMap;
+use gpui::{App, EntityId, Global};
 use serde::{Deserialize, Serialize};
 use settings::{RegisterSetting, Settings, SettingsContent};
 use std::path::{Path, PathBuf};
@@ -341,18 +342,73 @@ impl Settings for AiAccountsSettings {
     }
 }
 
+/// Account bindings made from inside a workspace, keyed by that workspace's
+/// project. The `ai_accounts` setting lives in the user settings file that
+/// every window and every running Lathe instance shares, so a switch recorded
+/// there would move all of them at once.
+#[derive(Default)]
+pub struct WorkspaceAccountBindings(HashMap<EntityId, HashMap<String, String>>);
+
+impl Global for WorkspaceAccountBindings {}
+
+impl WorkspaceAccountBindings {
+    pub fn binding(&self, project: EntityId, agent_id: &str) -> Option<&str> {
+        self.0
+            .get(&project)?
+            .get(agent_id)
+            .map(String::as_str)
+    }
+
+    pub fn binding_for(project: EntityId, agent_id: &str, cx: &App) -> Option<String> {
+        cx.try_global::<Self>()?
+            .binding(project, agent_id)
+            .map(str::to_owned)
+    }
+
+    pub fn set_all(project: EntityId, bindings: HashMap<String, String>, cx: &mut App) {
+        cx.default_global::<Self>().0.insert(project, bindings);
+    }
+
+    /// Binds (`Some`) or unbinds (`None`) `agent_id` for `project`, returning
+    /// the project's full binding map so the caller can persist it.
+    pub fn set(
+        project: EntityId,
+        agent_id: &str,
+        account_id: Option<String>,
+        cx: &mut App,
+    ) -> HashMap<String, String> {
+        let bindings = cx.default_global::<Self>().0.entry(project).or_default();
+        match account_id {
+            Some(account_id) => {
+                bindings.insert(agent_id.to_string(), account_id);
+            }
+            None => {
+                bindings.remove(agent_id);
+            }
+        }
+        bindings.clone()
+    }
+}
+
 impl AiAccountsSettings {
     /// Resolves the active account for an agent in the current workspace.
     /// Order:
-    /// 1. Workspace binding from settings (if it points at an existing account in the registry).
-    /// 2. Index-level default resolution (`AiAccountsIndex::default_for_agent`).
-    /// 3. None.
+    /// 1. `workspace_binding`, from `WorkspaceAccountBindings`.
+    /// 2. Binding from the `ai_accounts` setting.
+    /// 3. Index-level default resolution (`AiAccountsIndex::default_for_agent`).
+    /// 4. None.
+    ///
+    /// A binding only counts when it points at an account in the registry.
     pub fn resolve_account<'a>(
         &self,
         agent_id: &str,
+        workspace_binding: Option<&str>,
         index: &'a AiAccountsIndex,
     ) -> Option<&'a AiAccount> {
-        if let Some(bound_id) = self.bindings.get(agent_id) {
+        let bound_ids = workspace_binding
+            .into_iter()
+            .chain(self.bindings.get(agent_id).map(String::as_str));
+        for bound_id in bound_ids {
             if let Some(account) = index.find(bound_id) {
                 return Some(account);
             }
@@ -1137,6 +1193,29 @@ mod tests {
             Some(&b_id)
         );
         let _ = a_id;
+    }
+
+    #[test]
+    fn resolve_account_prefers_workspace_binding_over_setting() {
+        let mut index = AiAccountsIndex::default();
+        let personal = account("claude-acp", "personal");
+        let work = account("claude-acp", "work");
+        let personal_id = personal.id.clone();
+        let work_id = work.id.clone();
+        index.upsert(personal);
+        index.upsert(work);
+        let settings = AiAccountsSettings {
+            bindings: HashMap::from_iter([("claude-acp".to_string(), work_id.clone())]),
+        };
+
+        let resolve = |workspace_binding| {
+            settings
+                .resolve_account("claude-acp", workspace_binding, &index)
+                .map(|account| account.id.clone())
+        };
+        assert_eq!(resolve(Some(personal_id.as_str())), Some(personal_id.clone()));
+        assert_eq!(resolve(None), Some(work_id.clone()));
+        assert_eq!(resolve(Some("deleted-account")), Some(work_id));
     }
 
     #[test]

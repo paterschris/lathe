@@ -1,11 +1,13 @@
 use crate::{AgentServer, AgentServerDelegate, load_proxy_env};
 use acp_thread::{AgentConnection, AgentModelId};
 use agent_client_protocol::schema::v1 as acp;
-use ai_accounts::{AiAccountsSettings, api_key_keychain_url, load_index};
+use ai_accounts::{
+    AiAccountsSettings, WorkspaceAccountBindings, api_key_keychain_url, load_index,
+};
 use anyhow::{Context as _, Result};
 use collections::HashSet;
 use fs::Fs;
-use gpui::{App, AppContext as _, Entity, Task};
+use gpui::{App, AppContext as _, Entity, EntityId, Task};
 use language_model::{ApiKey, EnvVar};
 use project::{
     Project,
@@ -306,9 +308,13 @@ impl AgentServer for CustomAgentServer {
             Vec::new()
         };
         let store = delegate.store.downgrade();
+        let project_id = project.entity_id();
         cx.spawn(async move |cx| {
             if is_registry_agent && agent_id.as_ref() == GEMINI_ID {
-                match cx.update(api_key_for_gemini_cli).await {
+                match cx
+                    .update(|cx| api_key_for_gemini_cli(project_id, cx))
+                    .await
+                {
                     Ok(api_key) => {
                         // Confirm injection positively (length only, never the
                         // key) so the log distinguishes "key was injected" from
@@ -360,17 +366,18 @@ impl AgentServer for CustomAgentServer {
     }
 }
 
-fn api_key_for_gemini_cli(cx: &mut App) -> Task<Result<String>> {
+fn api_key_for_gemini_cli(project: EntityId, cx: &mut App) -> Task<Result<String>> {
     // Prefer the key the user saved for the workspace-bound Gemini account, so
     // each AI account carries its own AI Studio key. Fall back to an ambient
     // env var, then a legacy global keychain entry, so setups that predate
     // per-account keys keep working.
+    let workspace_binding = WorkspaceAccountBindings::binding_for(project, GEMINI_ID, cx);
     let account_url = cx
         .try_global::<SettingsStore>()
         .map(|store| store.get::<AiAccountsSettings>(None).clone())
         .and_then(|settings| {
             settings
-                .resolve_account(GEMINI_ID, &load_index())
+                .resolve_account(GEMINI_ID, workspace_binding.as_deref(), &load_index())
                 .map(|account| api_key_keychain_url(&account.agent_id, &account.id))
         });
 

@@ -1475,6 +1475,7 @@ impl AgentPanel {
         let language_registry = project.read(cx).languages().clone();
         let client = workspace.client().clone();
         let workspace_id = workspace.database_id();
+        crate::ai_account_chip::load_workspace_ai_accounts(workspace_id, project.entity_id(), cx);
         let workspace_dock_position =
             workspace.panel_dock_position(<AgentPanel as Panel>::panel_key(), cx);
         let workspace = workspace.weak_handle();
@@ -1646,8 +1647,8 @@ impl AgentPanel {
         &self.prompt_store
     }
 
-    pub(crate) fn fs(&self) -> Arc<dyn Fs> {
-        self.fs.clone()
+    pub(crate) fn project_entity_id(&self) -> gpui::EntityId {
+        self.project.entity_id()
     }
 
     pub(crate) fn currently_selected_agent(&self) -> &Agent {

@@ -1,14 +1,17 @@
 use std::rc::Rc;
 
 use ai_accounts::{
-    AgentDescriptor, AiAccountsSettings, BrandAccent, descriptor_for, load_index, mark_account_used,
+    AgentDescriptor, AiAccountsSettings, BrandAccent, WorkspaceAccountBindings, descriptor_for,
+    load_index, mark_account_used,
 };
-use gpui::{Hsla, Rgba, WindowAppearance, prelude::*};
+use collections::HashMap;
+use db::kvp::KeyValueStore;
+use gpui::{EntityId, Hsla, Rgba, WeakEntity, WindowAppearance, prelude::*};
 use project::AgentId;
-use settings::{
-    Settings as _, SettingsContent, update_settings_file, update_settings_file_with_completion,
-};
+use settings::{Settings as _, SettingsContent};
 use ui::{ButtonLike, ButtonStyle, ContextMenu, PopoverMenu, prelude::*};
+use util::ResultExt as _;
+use workspace::{Workspace, WorkspaceId};
 
 use crate::agent_panel::AgentPanel;
 use crate::{AddAiAccount, Agent, ManageAiAccounts, NewExternalAgentThread};
@@ -51,7 +54,10 @@ impl AgentPanel {
 
         let settings = AiAccountsSettings::get_global(cx).clone();
         let index = load_index();
-        let active_account = settings.resolve_account(agent_id_static, &index);
+        let workspace_binding =
+            WorkspaceAccountBindings::binding_for(self.project_entity_id(), agent_id_static, cx);
+        let active_account =
+            settings.resolve_account(agent_id_static, workspace_binding.as_deref(), &index);
 
         let accent = brand_accent_color(&descriptor.brand_accent, window);
         let chip_label: SharedString = active_account
@@ -65,8 +71,7 @@ impl AgentPanel {
             .filter(|account| active_account.map_or(true, |active| active.id != account.id))
             .map(|account| (account.id.clone(), account.display_name.clone()))
             .collect();
-        let active_id = active_account.map(|account| account.id.clone());
-        let fs = self.fs();
+        let has_workspace_binding = workspace_binding.is_some();
         let panel = cx.weak_entity();
         let menu_id = SharedString::from(format!("ai-account-chip-menu-{agent_id_static}"));
         let trigger_id = SharedString::from(format!("ai-account-chip-trigger-{agent_id_static}"));
@@ -91,8 +96,6 @@ impl AgentPanel {
                 .trigger(trigger)
                 .menu(move |window, cx| {
                     let other_accounts = other_accounts.clone();
-                    let fs = fs.clone();
-                    let active_id = active_id.clone();
                     let panel = panel.clone();
                     Some(ContextMenu::build(
                         window,
@@ -107,10 +110,6 @@ impl AgentPanel {
                                     move |_window, cx| {
                                         let agent_id = agent_id_static.to_string();
                                         let account_id = account_id.clone();
-                                        // Bind, wait for the binding to land, then
-                                        // restart the agent's subprocess so the new
-                                        // account's config dir is actually applied
-                                        // (the env is only read at spawn time).
                                         panel
                                             .update(cx, |panel, cx| {
                                                 panel.switch_ai_account(agent_id, account_id, cx);
@@ -119,24 +118,21 @@ impl AgentPanel {
                                     },
                                 );
                             }
-                            if active_id.is_some() {
-                                let fs = fs.clone();
+                            if has_workspace_binding {
+                                let panel = panel.clone();
                                 menu = menu.entry(
                                     SharedString::from("Clear binding for this workspace"),
                                     None,
                                     move |_window, cx| {
-                                        let agent_id = agent_id_static.to_string();
-                                        update_settings_file(
-                                            fs.clone(),
-                                            cx,
-                                            move |settings, _cx| {
-                                                bind_account(settings, &agent_id, None);
-                                            },
-                                        );
+                                        panel
+                                            .update(cx, |panel, cx| {
+                                                panel.clear_ai_account_binding(agent_id_static, cx);
+                                            })
+                                            .ok();
                                     },
                                 );
                             }
-                            if has_alternatives || active_id.is_some() {
+                            if has_alternatives || has_workspace_binding {
                                 menu = menu.separator();
                             }
                             menu = menu.entry(
@@ -180,11 +176,8 @@ impl AgentPanel {
         });
     }
 
-    /// Binds `account_id` for `agent_id`, waits for the binding to apply to the
-    /// global settings store, then restarts the agent connection so the new
-    /// account is actually used. `update_settings_file_with_completion` applies
-    /// `set_user_settings` before resolving, so by the time the restart runs the
-    /// global `AiAccountsSettings` already reflects the binding (no race).
+    /// Binds `account_id` for `agent_id` in this workspace only, then restarts
+    /// the agent connection so the new account is actually used.
     pub(crate) fn switch_ai_account(
         &mut self,
         agent_id: String,
@@ -194,23 +187,31 @@ impl AgentPanel {
         if let Err(error) = mark_account_used(&account_id) {
             log::warn!("ai_accounts: failed to mark {account_id} used: {error:#}");
         }
-        let completion = update_settings_file_with_completion(self.fs(), cx, {
-            let agent_id = agent_id.clone();
-            move |settings, _cx| bind_account(settings, &agent_id, Some(account_id))
-        });
-        cx.spawn(async move |panel, cx| {
-            completion.await.ok();
-            panel
-                .update(cx, |panel, cx| {
-                    panel.restart_ai_agent_connection(&agent_id, cx);
-                })
-                .ok();
-        })
-        .detach();
+        bind_workspace_account(
+            self.workspace_id(),
+            self.project_entity_id(),
+            &agent_id,
+            Some(account_id),
+            cx,
+        );
+        self.restart_ai_agent_connection(&agent_id, cx);
+        cx.notify();
+    }
+
+    fn clear_ai_account_binding(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+        bind_workspace_account(
+            self.workspace_id(),
+            self.project_entity_id(),
+            agent_id,
+            None,
+            cx,
+        );
+        self.restart_ai_agent_connection(agent_id, cx);
+        cx.notify();
     }
 
     /// Connects a freshly added in-thread-login AI account (Claude, Gemini):
-    /// bind, wait for it to apply, restart the agent connection so the new
+    /// bind it to this workspace, restart the agent connection so the new
     /// (empty) config dir is used, then open a thread. Because the config dir
     /// has no credentials yet, the agent reports auth-required and the thread
     /// surfaces the real code-based sign-in. Driven from the panel so it
@@ -222,46 +223,85 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let completion = update_settings_file_with_completion(self.fs(), cx, {
-            let agent_id = agent_id.clone();
-            move |settings, _cx| bind_account(settings, &agent_id, Some(account_id))
-        });
-        cx.spawn_in(window, async move |panel, cx| {
-            completion.await.ok();
-            panel
-                .update_in(cx, |panel, window, cx| {
-                    panel.restart_ai_agent_connection(&agent_id, cx);
-                    window.dispatch_action(
-                        Box::new(NewExternalAgentThread {
-                            agent: AgentId::new(agent_id),
-                        }),
-                        cx,
-                    );
-                })
-                .ok();
-        })
-        .detach();
+        bind_workspace_account(
+            self.workspace_id(),
+            self.project_entity_id(),
+            &agent_id,
+            Some(account_id),
+            cx,
+        );
+        self.restart_ai_agent_connection(&agent_id, cx);
+        window.dispatch_action(
+            Box::new(NewExternalAgentThread {
+                agent: AgentId::new(agent_id),
+            }),
+            cx,
+        );
     }
 }
 
-/// Updates the `ai_accounts` mapping in workspace settings to bind (or unbind)
-/// an agent to a specific account. Called from the chip's switch action and
-/// from the Add Account modal's Connect handler. Pass `Some(id)` to bind,
-/// `None` to clear the binding.
-pub(crate) fn bind_account(
-    settings: &mut SettingsContent,
+const WORKSPACE_AI_ACCOUNTS_KEY: &str = "workspace_ai_accounts";
+
+/// Restores the account bindings a workspace recorded in an earlier session.
+pub(crate) fn load_workspace_ai_accounts(
+    workspace_id: Option<WorkspaceId>,
+    project: EntityId,
+    cx: &mut App,
+) {
+    let Some(workspace_id) = workspace_id else {
+        return;
+    };
+    let bindings = KeyValueStore::global(cx)
+        .scoped(WORKSPACE_AI_ACCOUNTS_KEY)
+        .read(&i64::from(workspace_id).to_string())
+        .log_err()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<HashMap<String, String>>(&json).log_err());
+    if let Some(bindings) = bindings {
+        WorkspaceAccountBindings::set_all(project, bindings, cx);
+    }
+}
+
+pub(crate) fn bind_account_to_workspace(
+    workspace: &WeakEntity<Workspace>,
     agent_id: &str,
     account_id: Option<String>,
+    cx: &mut App,
 ) {
-    let map = settings.ai_accounts.get_or_insert_default();
-    match account_id {
-        Some(id) => {
-            map.0.insert(agent_id.to_string(), id);
+    let Some(workspace) = workspace.upgrade() else {
+        return;
+    };
+    let (workspace_id, project) = workspace.read_with(cx, |workspace, _cx| {
+        (workspace.database_id(), workspace.project().entity_id())
+    });
+    bind_workspace_account(workspace_id, project, agent_id, account_id, cx);
+}
+
+/// Binds (`Some`) or unbinds (`None`) an agent's account for one workspace.
+/// Workspaces that have never been saved have no database id, so their
+/// binding lasts only as long as the window.
+pub(crate) fn bind_workspace_account(
+    workspace_id: Option<WorkspaceId>,
+    project: EntityId,
+    agent_id: &str,
+    account_id: Option<String>,
+    cx: &mut App,
+) {
+    let bindings = WorkspaceAccountBindings::set(project, agent_id, account_id, cx);
+    let Some(workspace_id) = workspace_id else {
+        return;
+    };
+    let kvp = KeyValueStore::global(cx);
+    cx.background_spawn(async move {
+        let scope = kvp.scoped(WORKSPACE_AI_ACCOUNTS_KEY);
+        let key = i64::from(workspace_id).to_string();
+        if bindings.is_empty() {
+            scope.delete(key).await
+        } else {
+            scope.write(key, serde_json::to_string(&bindings)?).await
         }
-        None => {
-            map.0.remove(agent_id);
-        }
-    }
+    })
+    .detach_and_log_err(cx);
 }
 
 /// Drops every binding that points at `account_id`, whichever agent holds it.
@@ -269,8 +309,8 @@ pub(crate) fn bind_account(
 /// account makes `AiAccountsSettings::resolve_account` fall back to some other
 /// account, which silently runs the agent under credentials the user didn't
 /// pick. Only user-level settings are rewritten, so a stale binding in a
-/// workspace `.zed/settings.json` survives; `resolve_account` logs when it
-/// hits one.
+/// workspace `.zed/settings.json` or in `WorkspaceAccountBindings` survives;
+/// `resolve_account` logs when it hits one.
 pub(crate) fn unbind_account(settings: &mut SettingsContent, account_id: &str) {
     let Some(map) = settings.ai_accounts.as_mut() else {
         return;

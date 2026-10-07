@@ -609,6 +609,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "collections",
+ "gpui",
  "log",
  "paths",
  "serde",

@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
 use ai_accounts::{
     AgentDescriptor, BrandAccent, LoginFlow, TIER_A_DESCRIPTORS, api_key_keychain_url,
     create_account, descriptor_for,
 };
 use collections::HashMap;
-use fs::Fs;
 use gpui::{
     ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla, KeyDownEvent,
     Rgba, ScrollHandle, WeakEntity, WindowAppearance, prelude::*,
@@ -13,7 +10,6 @@ use gpui::{
 use notifications::status_toast::StatusToast;
 // FocusHandle is used through the Focusable trait impl below.
 use project::AgentId;
-use settings::update_settings_file;
 use task::{RevealStrategy, RevealTarget, SpawnInTerminal, TaskId};
 use terminal_view::terminal_panel::TerminalPanel;
 use ui::{
@@ -24,7 +20,7 @@ use ui_input::InputField;
 use workspace::{ModalView, Workspace};
 
 use crate::agent_panel::AgentPanel;
-use crate::ai_account_chip::bind_account;
+use crate::ai_account_chip::bind_account_to_workspace;
 use crate::{AddAiAccount, NewExternalAgentThread};
 
 pub struct AddAiAccountModal {
@@ -36,7 +32,6 @@ pub struct AddAiAccountModal {
     selected_agent_id: SharedString,
     last_error: Option<SharedString>,
     scroll_handle: ScrollHandle,
-    fs: Arc<dyn Fs>,
     workspace: WeakEntity<Workspace>,
 }
 
@@ -52,17 +47,15 @@ impl AddAiAccountModal {
                 .clone()
                 .map(SharedString::from)
                 .unwrap_or_else(|| SharedString::from(TIER_A_DESCRIPTORS[0].agent_id));
-            let fs = workspace.app_state().fs.clone();
             let workspace_handle = cx.weak_entity();
             workspace.toggle_modal(window, cx, |window, cx| {
-                Self::new(agent_id, fs, workspace_handle, window, cx)
+                Self::new(agent_id, workspace_handle, window, cx)
             });
         });
     }
 
     pub fn new(
         agent_id: SharedString,
-        fs: Arc<dyn Fs>,
         workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -86,7 +79,6 @@ impl AddAiAccountModal {
             selected_agent_id: agent_id,
             last_error: None,
             scroll_handle: ScrollHandle::new(),
-            fs,
             workspace,
         }
     }
@@ -147,7 +139,7 @@ impl AddAiAccountModal {
                         // In-thread agents (Claude, Gemini) authenticate inside
                         // an ACP thread. Drive the whole bind -> restart -> open
                         // thread sequence from the agent panel: it binds the
-                        // account, waits for the binding to apply, restarts the
+                        // account to this workspace, restarts the
                         // agent's subprocess so the new (empty) config dir is
                         // actually used, then opens a thread. The empty config
                         // dir is unauthenticated, so the agent reports
@@ -170,11 +162,12 @@ impl AddAiAccountModal {
                                 // No agent panel (shouldn't happen): at least
                                 // record the binding so the account becomes the
                                 // workspace default for the next thread.
-                                let agent_id = agent_id.clone();
-                                let account_id = account.id.clone();
-                                update_settings_file(self.fs.clone(), cx, move |settings, _cx| {
-                                    bind_account(settings, &agent_id, Some(account_id));
-                                });
+                                bind_account_to_workspace(
+                                    &self.workspace,
+                                    &agent_id,
+                                    Some(account.id.clone()),
+                                    cx,
+                                );
                             }
                         }
                     }
@@ -183,15 +176,12 @@ impl AddAiAccountModal {
                         // config-dir env injected explicitly, so it does not
                         // depend on the cached ACP connection. Bind for the chip,
                         // then spawn the login terminal.
-                        let agent_id_for_binding = agent_id.clone();
-                        let account_id_for_binding = account.id.clone();
-                        update_settings_file(self.fs.clone(), cx, move |settings, _cx| {
-                            bind_account(
-                                settings,
-                                &agent_id_for_binding,
-                                Some(account_id_for_binding),
-                            );
-                        });
+                        bind_account_to_workspace(
+                            &self.workspace,
+                            &agent_id,
+                            Some(account.id.clone()),
+                            cx,
+                        );
                         self.trigger_login_flow(descriptor, &account.config_dir, window, cx);
                     }
                 }
@@ -237,7 +227,6 @@ impl AddAiAccountModal {
     ) {
         let credentials_provider = zed_credentials_provider::global(cx);
         let keychain_url = api_key_keychain_url(&account.agent_id, &account.id);
-        let fs = self.fs.clone();
         let workspace = self.workspace.clone();
         let agent_id = account.agent_id.clone();
         let account_id = account.id.clone();
@@ -266,9 +255,7 @@ impl AddAiAccountModal {
             }
 
             this.update(cx, |_this, cx| {
-                update_settings_file(fs, cx, move |settings, _cx| {
-                    bind_account(settings, &agent_id, Some(account_id));
-                });
+                bind_account_to_workspace(&workspace, &agent_id, Some(account_id), cx);
                 if let Some(workspace) = workspace.upgrade() {
                     workspace.update(cx, |workspace, cx| {
                         workspace.toggle_status_toast(

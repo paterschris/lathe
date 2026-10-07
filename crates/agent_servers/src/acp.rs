@@ -16,7 +16,9 @@ use agent_client_protocol::schema::{
 use agent_client_protocol::{
     Agent, Builder, Client, ConnectionTo, HandleDispatchFrom, JsonRpcResponse, Lines, Responder,
 };
-use ai_accounts::{AiAccountsSettings, descriptor_for, load_index, mark_account_used};
+use ai_accounts::{
+    AiAccountsSettings, WorkspaceAccountBindings, descriptor_for, load_index, mark_account_used,
+};
 use anyhow::anyhow;
 use async_channel;
 use collections::{HashMap, HashSet};
@@ -42,7 +44,9 @@ use util::path_list::PathList;
 use util::process::Child;
 
 use anyhow::{Context as _, Result};
-use gpui::{App, AppContext as _, AsyncApp, Entity, SharedString, Subscription, Task, WeakEntity};
+use gpui::{
+    App, AppContext as _, AsyncApp, Entity, EntityId, SharedString, Subscription, Task, WeakEntity,
+};
 
 use acp_thread::{AcpThread, AuthRequired, LoadError, TerminalProviderEvent};
 use terminal::TerminalBuilder;
@@ -697,7 +701,12 @@ impl AcpConnection {
         let mut command = command;
         let is_local_project = project.read_with(cx, |project, _| project.is_local());
         let scrub_env = if is_local_project {
-            apply_ai_account_env(&agent_id, command.env.get_or_insert_default(), cx)
+            apply_ai_account_env(
+                &agent_id,
+                project.entity_id(),
+                command.env.get_or_insert_default(),
+                cx,
+            )
         } else {
             &[]
         };
@@ -2017,12 +2026,13 @@ impl acp_thread::AgentSessionTruncate for AcpSessionTruncate {
 }
 
 /// Injects the config-dir env var of the Lathe AI account bound to this agent,
-/// resolved from the workspace `ai_accounts` setting, then the agent's global
-/// default, then an implicit single-account default. Agents without a known
-/// descriptor are left alone. Returns the env var names that must also be
-/// removed from the child's inherited environment.
+/// resolved from the project's workspace binding, then the `ai_accounts`
+/// setting, then the agent's global default, then an implicit single-account
+/// default. Agents without a known descriptor are left alone. Returns the env
+/// var names that must also be removed from the child's inherited environment.
 fn apply_ai_account_env(
     agent_id: &AgentId,
+    project: EntityId,
     env: &mut HashMap<String, String>,
     cx: &AsyncApp,
 ) -> &'static [&'static str] {
@@ -2031,11 +2041,15 @@ fn apply_ai_account_env(
         return &[];
     };
     let mut scrub_env: &'static [&'static str] = &[];
-    let settings = cx.try_read_global::<SettingsStore, _>(|store, _| {
-        store.get::<AiAccountsSettings>(None).clone()
+    let settings_and_binding = cx.try_read_global::<SettingsStore, _>(|store, cx| {
+        (
+            store.get::<AiAccountsSettings>(None).clone(),
+            WorkspaceAccountBindings::binding_for(project, agent_id, cx),
+        )
     });
-    if let Some(settings) = settings
-        && let Some(account) = settings.resolve_account(agent_id, &load_index())
+    if let Some((settings, workspace_binding)) = settings_and_binding
+        && let Some(account) =
+            settings.resolve_account(agent_id, workspace_binding.as_deref(), &load_index())
     {
         env.insert(
             descriptor.config_dir_env_var.to_string(),
