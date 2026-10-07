@@ -9,12 +9,14 @@ use git::{
 };
 use gpui::http_client::HttpClient;
 use gpui::{
-    Action, AppContext as _, AsyncWindowContext, ClipboardItem, Entity, EventEmitter, FocusHandle,
-    Focusable, ScrollHandle, SharedString, Subscription, Task, WeakEntity, actions,
+    Action, AppContext as _, AsyncWindowContext, ClipboardItem, DragMoveEvent, Empty, Entity,
+    EntityId, EventEmitter, FocusHandle, Focusable, MouseButton, MouseUpEvent, Pixels,
+    ScrollHandle, SharedString, Subscription, Task, WeakEntity, actions,
 };
 use project::{
-    Project, repo_identity_path_if_local,
+    Project,
     git_store::{GitStore, GitStoreEvent, Repository, RepositoryId},
+    repo_identity_path_if_local,
 };
 use settings::{Settings, SettingsStore};
 use std::collections::{HashMap, HashSet};
@@ -431,6 +433,10 @@ pub struct PullRequestPanel {
     sections: Vec<RepoSection>,
     /// Repository sections whose pull request lists are hidden.
     collapsed_sections: HashSet<RepositoryId>,
+    /// Heights the user dragged sections to. Sections without one share the
+    /// leftover space, and the last expanded section always takes whatever
+    /// remains so the panel never ends in a gap.
+    section_heights: HashMap<RepositoryId, Pixels>,
     filter: StateFilter,
     sort: SortOrder,
     /// When set, restrict the lists to PRs the connected account is a requested
@@ -494,6 +500,7 @@ impl PullRequestPanel {
                 focus_handle,
                 sections: Vec::new(),
                 collapsed_sections: HashSet::default(),
+                section_heights: HashMap::new(),
                 filter: StateFilter::Open,
                 sort: SortOrder::RecentlyUpdated,
                 reviewing: false,
@@ -621,6 +628,8 @@ impl PullRequestPanel {
         self.sections = sections;
         self.collapsed_sections
             .retain(|id| self.sections.iter().any(|section| section.id == *id));
+        self.section_heights
+            .retain(|id, _| self.sections.iter().any(|section| section.id == *id));
 
         for index in added {
             self.refresh_section(index, RefreshMode::Interactive, cx);
@@ -1692,7 +1701,7 @@ impl PullRequestPanel {
     fn render_section(
         &self,
         section_index: usize,
-        divider: bool,
+        fills_remaining: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(section) = self.sections.get(section_index) else {
@@ -1801,13 +1810,37 @@ impl PullRequestPanel {
             }
         };
 
+        let height = self
+            .section_heights
+            .get(&id)
+            .copied()
+            .filter(|_| !is_collapsed && !fills_remaining);
+
         v_flex()
             .min_h_0()
             .when(is_collapsed, |this| this.flex_none())
-            .when(!is_collapsed, |this| this.flex_1().overflow_hidden())
-            .when(divider, |this| {
-                this.border_b_1().border_color(cx.theme().colors().border)
+            .when(!is_collapsed, |this| match height {
+                // Shrinkable so sections dragged taller than the panel squeeze
+                // back down instead of pushing the ones below out of view.
+                Some(height) => this
+                    .flex_grow_0()
+                    .flex_shrink_1()
+                    .flex_basis(height)
+                    .overflow_hidden(),
+                None => this.flex_1().overflow_hidden(),
             })
+            .on_drag_move(cx.listener(
+                move |this, event: &DragMoveEvent<SectionResizeDrag>, _window, cx| {
+                    // Every section receives every drag; only the one whose
+                    // bottom edge is being dragged reacts.
+                    if event.drag(cx).0 != id {
+                        return;
+                    }
+                    let height = (event.event.position.y - event.bounds.top()).max(px(56.));
+                    this.section_heights.insert(id, height);
+                    cx.notify();
+                },
+            ))
             .child(render_repo_label(
                 id,
                 display_name,
@@ -1820,6 +1853,45 @@ impl PullRequestPanel {
                 this.children(self.render_background_failure(section_index, cx))
                     .child(body)
             })
+            .into_any_element()
+    }
+
+    /// The divider below an expanded section, which doubles as the drag target
+    /// for resizing it. Double-clicking hands the section back to automatic
+    /// sizing.
+    fn render_section_resize_handle(id: RepositoryId, cx: &mut Context<Self>) -> AnyElement {
+        let line = cx.theme().colors().border;
+        let line_hover = cx.theme().colors().border_focused;
+        div()
+            .id(SharedString::from(format!(
+                "pull-request-panel-section-resize-{}",
+                id.0
+            )))
+            .group("pull-request-panel-section-resize")
+            .flex_none()
+            .h(px(5.))
+            .w_full()
+            .flex()
+            .items_center()
+            .cursor_row_resize()
+            .child(
+                div()
+                    .h_px()
+                    .w_full()
+                    .bg(line)
+                    .group_hover("pull-request-panel-section-resize", move |style| {
+                        style.bg(line_hover)
+                    }),
+            )
+            .on_drag(SectionResizeDrag(id), |_, _, _, cx| cx.new(|_| Empty))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseUpEvent, _window, cx| {
+                    if event.click_count == 2 && this.section_heights.remove(&id).is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .into_any_element()
     }
 
@@ -2821,6 +2893,8 @@ mod tests {
     }
 }
 
+struct SectionResizeDrag(RepositoryId);
+
 impl Render for PullRequestPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel_bg = cx.theme().colors().panel_background;
@@ -2835,13 +2909,34 @@ impl Render for PullRequestPanel {
             .into_any_element()
         } else {
             let last = self.sections.len() - 1;
-            let sections: Vec<AnyElement> = (0..self.sections.len())
-                .map(|index| self.render_section(index, index < last, cx))
-                .collect();
+            let last_expanded = self
+                .sections
+                .iter()
+                .rposition(|section| !self.collapsed_sections.contains(&section.id));
+            let mut children = Vec::with_capacity(self.sections.len() * 2);
+            for index in 0..self.sections.len() {
+                children.push(self.render_section(index, Some(index) == last_expanded, cx));
+                if index == last {
+                    continue;
+                }
+                let id = self.sections[index].id;
+                let resizable = !self.collapsed_sections.contains(&id)
+                    && last_expanded.is_some_and(|last_expanded| index < last_expanded);
+                children.push(if resizable {
+                    Self::render_section_resize_handle(id, cx)
+                } else {
+                    div()
+                        .flex_none()
+                        .h_px()
+                        .w_full()
+                        .bg(cx.theme().colors().border)
+                        .into_any_element()
+                });
+            }
             v_flex()
                 .flex_1()
                 .min_h_0()
-                .children(sections)
+                .children(children)
                 .into_any_element()
         };
 
