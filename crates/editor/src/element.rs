@@ -693,6 +693,7 @@ impl EditorElement {
         register_action(editor, window, Editor::copy_file_name_without_extension);
         register_action(editor, window, Editor::copy_highlight_json);
         register_action(editor, window, Editor::copy_permalink_to_line);
+        register_action(editor, window, Editor::pick_color);
         register_action(editor, window, Editor::open_permalink_to_line);
         register_action(editor, window, Editor::copy_file_location);
         register_action(editor, window, Editor::toggle_git_blame);
@@ -3407,6 +3408,7 @@ impl EditorElement {
         editor_width: Pixels,
         is_row_soft_wrapped: impl Copy + Fn(usize) -> bool,
         bg_segments_per_row: &[Vec<(Range<DisplayPoint>, Hsla)>],
+        editor: Option<WeakEntity<Editor>>,
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<LineWithInvisibles> {
@@ -3473,6 +3475,7 @@ impl EditorElement {
                 editor_width,
                 is_row_soft_wrapped,
                 bg_segments_per_row,
+                editor,
                 window,
                 cx,
             )
@@ -7684,6 +7687,7 @@ impl LineWithInvisibles {
         text_width: Pixels,
         is_row_soft_wrapped: impl Copy + Fn(usize) -> bool,
         bg_segments_per_row: &[Vec<(Range<DisplayPoint>, Hsla)>],
+        editor: Option<WeakEntity<Editor>>,
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<Self> {
@@ -7770,6 +7774,7 @@ impl LineWithInvisibles {
                             context: cx,
                             window,
                             max_width: text_width,
+                            editor: editor.clone(),
                         });
                         let line_height = text_style.line_height_in_pixels(window.rem_size());
                         let size = element.layout_as_root(
@@ -9383,6 +9388,7 @@ impl Element for EditorElement {
                         editor_width,
                         is_row_soft_wrapped,
                         &bg_segments_per_row,
+                        Some(self.editor.downgrade()),
                         window,
                         cx,
                     );
@@ -11160,6 +11166,7 @@ pub fn layout_line(
         text_width,
         is_row_soft_wrapped,
         &[],
+        None,
         window,
         cx,
     )
@@ -13300,6 +13307,7 @@ mod tests {
                     px(500.),
                     |_| false,
                     &[],
+                    None,
                     window,
                     cx,
                 );

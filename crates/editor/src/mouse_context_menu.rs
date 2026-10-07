@@ -3,7 +3,7 @@ use crate::{
     EvaluateSelectedText, FindAllReferences, GoToDeclaration, GoToDefinition, GoToImplementation,
     GoToTypeDefinition, Paste, Rename, RevealInFileManager, RunToCursor, SelectMode,
     SelectionEffects, SelectionExt, ToDisplayPoint, ToggleCodeActions,
-    actions::{Format, FormatSelections},
+    actions::{Format, FormatSelections, PickColor},
     selections_collection::SelectionsCollection,
 };
 use gpui::prelude::FluentBuilder;
@@ -217,6 +217,8 @@ pub fn deploy_context_menu(
                         .is_some()
                 });
 
+        let has_color_literal =
+            !editor.read_only(cx) && editor.color_literal_at_cursor(cx).is_some();
         let evaluate_selection = window.is_action_available(&EvaluateSelectedText, cx);
         let run_to_cursor = window.is_action_available(&RunToCursor, cx);
         let format_selections = window.is_action_available(&FormatSelections, cx);
@@ -256,6 +258,11 @@ pub fn deploy_context_menu(
                     run_to_cursor || (evaluate_selection && has_selections),
                     |builder| builder.separator(),
                 )
+                .when(has_color_literal, |builder| {
+                    builder
+                        .action("Pick Color…", Box::new(PickColor))
+                        .separator()
+                })
                 .action("Go to Definition", Box::new(GoToDefinition::default()))
                 .action("Go to Declaration", Box::new(GoToDeclaration::default()))
                 .action(

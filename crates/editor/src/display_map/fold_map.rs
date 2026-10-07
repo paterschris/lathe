@@ -1535,6 +1535,9 @@ pub struct ChunkRendererContext<'a, 'b> {
     pub window: &'a mut Window,
     pub context: &'b mut App,
     pub max_width: Pixels,
+    /// The editor the chunk is drawn in, for renderers that act on it when
+    /// clicked. `None` when a line is laid out outside an editor.
+    pub editor: Option<gpui::WeakEntity<crate::Editor>>,
 }
 
 impl fmt::Debug for ChunkRenderer {

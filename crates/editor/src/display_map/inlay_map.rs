@@ -24,7 +24,9 @@ use std::{
 };
 use sum_tree::{Bias, Cursor, Dimensions, SumTree};
 use text::{ChunkBitmaps, Patch};
-use ui::{ActiveTheme, IntoElement as _, ParentElement as _, Styled as _, div};
+use ui::{
+    ActiveTheme, InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _, div,
+};
 
 use super::{Highlights, custom_highlights::CustomHighlightsChunks, fold_map::ChunkRendererId};
 
@@ -373,12 +375,33 @@ impl<'a> Iterator for InlayChunks<'a> {
                     }
                     InlayId::Color(_) => {
                         if let InlayContent::Color(color) = inlay.content {
+                            let position = inlay.position;
                             renderer = Some(ChunkRenderer {
                                 id: ChunkRendererId::Inlay(inlay.id),
                                 render: Arc::new(move |cx| {
+                                    let editor = cx.editor.clone();
                                     div()
                                         .relative()
                                         .size_3p5()
+                                        .cursor_pointer()
+                                        // Consumed here, as fold placeholders do, so the
+                                        // editor's own click handling doesn't move the
+                                        // cursor or start a selection. The picker opens on
+                                        // the color this swatch sits in front of.
+                                        .on_mouse_down(
+                                            gpui::MouseButton::Left,
+                                            move |_, window, cx| {
+                                                cx.stop_propagation();
+                                                if let Some(editor) = editor.as_ref() {
+                                                    editor
+                                                        .update(cx, |editor, cx| {
+                                                            editor
+                                                                .pick_color_at(position, window, cx)
+                                                        })
+                                                        .ok();
+                                                }
+                                            },
+                                        )
                                         .child(
                                             div()
                                                 .absolute()

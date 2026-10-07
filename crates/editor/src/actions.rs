@@ -748,6 +748,8 @@ actions!(
         PageUp,
         /// Pastes from clipboard.
         Paste,
+        /// Opens a color picker for the color value under the cursor.
+        PickColor,
         /// Navigates to the previous edit prediction.
         PreviousEditPrediction,
         /// Goes to the previous snippet tabstop if one exists.

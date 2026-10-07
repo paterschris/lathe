@@ -90,6 +90,16 @@ impl LspColorData {
         }
     }
 
+    /// Whether the language server is already drawing color swatches in this
+    /// buffer, so the plain-text scanner should stay out of its way.
+    pub(super) fn draws_inlays_for(&self, buffer_id: BufferId) -> bool {
+        self.render_mode == DocumentColorsRenderMode::Inlay
+            && self
+                .buffer_colors
+                .get(&buffer_id)
+                .is_some_and(|buffer_colors| !buffer_colors.colors.is_empty())
+    }
+
     fn set_colors(
         &mut self,
         buffer_id: BufferId,
@@ -369,6 +379,7 @@ impl Editor {
                     }
 
                     if updated {
+                        editor.refresh_color_swatches(cx);
                         cx.notify();
                     }
                 })

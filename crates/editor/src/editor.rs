@@ -17,6 +17,8 @@ mod bracket_colorization;
 mod clangd_ext;
 pub mod code_context_menus;
 mod code_lens;
+mod color_picker;
+mod color_swatches;
 pub mod display_map;
 mod document_colors;
 mod document_links;
@@ -1105,6 +1107,7 @@ pub struct Editor {
     in_leading_whitespace: bool,
     next_inlay_id: usize,
     next_color_inlay_id: usize,
+    color_swatches: color_swatches::ColorSwatches,
     _subscriptions: Vec<Subscription>,
     pixel_position_of_newest_cursor: Option<gpui::Point<Pixels>>,
     gutter_dimensions: GutterDimensions,
@@ -2550,6 +2553,7 @@ impl Editor {
             refresh_folding_ranges_task: Task::ready(()),
             inlay_hints: None,
             next_color_inlay_id: 0,
+            color_swatches: Default::default(),
             post_scroll_update: Task::ready(()),
             linked_edit_ranges: Default::default(),
             in_project_search: false,
@@ -2736,6 +2740,7 @@ impl Editor {
                 editor.register_buffer(buffer.read(cx).remote_id(), cx);
             }
             editor.report_editor_event(ReportEditorEvent::EditorOpened, None, cx);
+            editor.refresh_color_swatches(cx);
         }
 
         editor
@@ -10072,6 +10077,7 @@ impl Editor {
 
                 // Clean up orphaned review comments after edits
                 self.cleanup_orphaned_review_comments(cx);
+                self.refresh_color_swatches(cx);
 
                 if let Some(buffer) = edited_buffer {
                     if buffer.read(cx).file().is_none() {
@@ -10127,6 +10133,7 @@ impl Editor {
                 self.bracket_fetched_tree_sitter_chunks
                     .retain(|range, _| range.start.buffer_id != buffer_id);
                 self.colorize_brackets(false, cx);
+                self.refresh_color_swatches(cx);
                 self.refresh_selected_text_highlights(&self.display_snapshot(cx), true, window, cx);
                 self.semantic_token_state.invalidate_buffer(&buffer_id);
                 cx.emit(EditorEvent::BufferRangesUpdated {
@@ -10160,6 +10167,7 @@ impl Editor {
                 });
 
                 jsx_tag_auto_close::refresh_enabled_in_any_buffer(self, multibuffer, cx);
+                self.refresh_color_swatches(cx);
                 cx.emit(EditorEvent::BuffersRemoved {
                     removed_buffer_ids: removed_buffer_ids.clone(),
                 });
@@ -10200,6 +10208,7 @@ impl Editor {
                     self.refresh_document_highlights(cx);
                 }
                 jsx_tag_auto_close::refresh_enabled_in_any_buffer(self, multibuffer, cx);
+                self.refresh_color_swatches(cx);
                 cx.emit(EditorEvent::Reparsed(*buffer_id));
                 self.update_edit_prediction_settings(cx);
                 cx.notify();
@@ -10406,6 +10415,7 @@ impl Editor {
                     self.splice_inlays(&inlay_splice.to_remove, inlay_splice.to_insert, cx);
                 }
                 self.refresh_document_colors(None, window, cx);
+                self.refresh_color_swatches(cx);
             }
 
             let code_lens_inline =
