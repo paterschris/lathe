@@ -12,8 +12,9 @@ pub use pull_request_panel::PullRequestPanel;
 pub use pull_request_view::PullRequestView;
 
 pub fn init(cx: &mut gpui::App) {
-    cx.observe_new(|workspace: &mut Workspace, _, _cx| {
+    cx.observe_new(|workspace: &mut Workspace, _, cx| {
         register(workspace);
+        connect_modal::load_workspace_accounts(workspace, cx);
     })
     .detach();
 }

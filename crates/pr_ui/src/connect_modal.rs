@@ -1,7 +1,9 @@
 use std::time::Duration;
 
+use collections::HashMap;
+use db::kvp::KeyValueStore;
 use git::GitHostAuthKind;
-use git::git_host_credentials::{self, GitHost};
+use git::git_host_credentials::{self, GitHost, WorkspaceGitHostAccounts};
 use git_hosting_providers::{DeviceTokenPoll, fetch_login, poll_for_token, request_device_code};
 use gpui::{
     ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Task, WeakEntity,
@@ -14,6 +16,73 @@ use workspace::{ModalView, Workspace};
 pub fn register(workspace: &mut Workspace) {
     workspace.register_action(connect);
     workspace.register_action(disconnect);
+    workspace.register_action(switch_account);
+}
+
+const WORKSPACE_GIT_HOST_ACCOUNTS_KEY: &str = "workspace_git_host_accounts";
+
+/// Restores the git host accounts this workspace picked in an earlier session.
+pub fn load_workspace_accounts(workspace: &Workspace, cx: &mut Context<Workspace>) {
+    let Some(database_id) = workspace.database_id() else {
+        return;
+    };
+    let bindings = KeyValueStore::global(cx)
+        .scoped(WORKSPACE_GIT_HOST_ACCOUNTS_KEY)
+        .read(&i64::from(database_id).to_string())
+        .log_err()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<HashMap<String, String>>(&json).log_err());
+    if let Some(bindings) = bindings {
+        WorkspaceGitHostAccounts::set_all(cx.entity_id(), bindings, cx);
+    }
+}
+
+/// Makes this workspace use `account_id` (or, with `None`, the host's default)
+/// for `host`. A workspace that has never been saved has no database id, so its
+/// pick lasts only as long as the window.
+pub(crate) fn bind_workspace_account(
+    workspace: &Workspace,
+    host: &str,
+    account_id: Option<String>,
+    cx: &mut Context<Workspace>,
+) {
+    let bindings = WorkspaceGitHostAccounts::bind(cx.entity_id(), host, account_id, cx);
+    let Some(database_id) = workspace.database_id() else {
+        return;
+    };
+    let kvp = KeyValueStore::global(cx);
+    cx.background_spawn(async move {
+        let scope = kvp.scoped(WORKSPACE_GIT_HOST_ACCOUNTS_KEY);
+        let key = i64::from(database_id).to_string();
+        if bindings.is_empty() {
+            scope.delete(key).await
+        } else {
+            scope.write(key, serde_json::to_string(&bindings)?).await
+        }
+    })
+    .detach_and_log_err(cx);
+}
+
+fn bind_from_modal(
+    workspace: &WeakEntity<Workspace>,
+    host: &str,
+    account_id: String,
+    cx: &mut gpui::AsyncApp,
+) {
+    workspace
+        .update(cx, |workspace, cx| {
+            bind_workspace_account(workspace, host, Some(account_id), cx)
+        })
+        .ok();
+}
+
+fn switch_account(
+    workspace: &mut Workspace,
+    action: &zed_actions::SwitchGitHostAccount,
+    _window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    bind_workspace_account(workspace, &action.host, Some(action.account_id.clone()), cx);
 }
 
 fn connect(
@@ -38,8 +107,14 @@ fn disconnect(
     cx: &mut Context<Workspace>,
 ) {
     let host = action.host.clone();
+    let Some(account_id) = action.account_id.clone().or_else(|| {
+        git_host_credentials::active_account(cx, Some(cx.entity_id()), &host)
+            .map(|account| account.id)
+    }) else {
+        return;
+    };
     cx.spawn(async move |workspace, cx| {
-        if let Err(error) = git_host_credentials::clear(cx, &host).await {
+        if let Err(error) = git_host_credentials::remove_account(cx, &host, &account_id).await {
             workspace
                 .update(cx, |workspace, cx| workspace.show_error(error, cx))
                 .log_err();
@@ -85,13 +160,16 @@ pub struct ConnectGitHostModal {
     verification_uri: Option<SharedString>,
     username_input: Entity<InputField>,
     secret_input: Entity<InputField>,
+    /// The workspace the modal was opened from; the new account becomes the
+    /// one it uses.
+    workspace: WeakEntity<Workspace>,
     _task: Option<Task<()>>,
 }
 
 impl ConnectGitHostModal {
     pub fn new(
         host: GitHost,
-        _workspace: WeakEntity<Workspace>,
+        workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -137,6 +215,7 @@ impl ConnectGitHostModal {
             verification_uri: None,
             username_input,
             secret_input,
+            workspace,
             _task: None,
         };
 
@@ -168,6 +247,7 @@ impl ConnectGitHostModal {
         self.busy = true;
         let http_client = cx.http_client();
         let host = self.host.host().to_string();
+        let workspace = self.workspace.clone();
         let task = cx.spawn(async move |this, cx| {
             let device = match request_device_code(&http_client).await {
                 Ok(device) => device,
@@ -204,7 +284,10 @@ impl ConnectGitHostModal {
                     }
                     Ok(DeviceTokenPoll::Authorized(token)) => {
                         let login = fetch_login(&http_client, &token).await.unwrap_or_default();
-                        let stored = git_host_credentials::set(cx, &host, &login, &token).await;
+                        let stored =
+                            git_host_credentials::add_account(cx, &host, &login, &token).await;
+                        let stored = stored
+                            .map(|account_id| bind_from_modal(&workspace, &host, account_id, cx));
                         this.update(cx, |this, cx| match stored {
                             Ok(()) => cx.emit(DismissEvent),
                             Err(error) => {
@@ -259,6 +342,7 @@ impl ConnectGitHostModal {
         let host = self.host.clone();
         let auth = host.auth(username.clone(), secret.clone());
         let http_client = cx.http_client();
+        let workspace = self.workspace.clone();
         let task = cx.spawn(async move |this, cx| {
             // Resolve the account name from the host so the title-bar menu can
             // show who is connected. Best-effort: a host that cannot report it
@@ -287,7 +371,9 @@ impl ConnectGitHostModal {
             };
 
             let stored =
-                git_host_credentials::set(cx, host.host(), &display_username, &secret).await;
+                git_host_credentials::add_account(cx, host.host(), &display_username, &secret)
+                    .await
+                    .map(|account_id| bind_from_modal(&workspace, host.host(), account_id, cx));
             this.update(cx, |this, cx| match stored {
                 Ok(()) => cx.emit(DismissEvent),
                 Err(error) => {

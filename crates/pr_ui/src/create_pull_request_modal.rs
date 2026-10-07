@@ -101,6 +101,7 @@ impl CreatePullRequestModal {
     fn prepare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let project = self.project.clone();
         let http_client = cx.http_client();
+        let workspace_id = self.workspace.entity_id();
         self._prepare_task = Some(cx.spawn_in(window, async move |this, cx| {
             let resolved = cx.update(|_window, cx| {
                 let git_store = project.read(cx).git_store().clone();
@@ -131,10 +132,12 @@ impl CreatePullRequestModal {
 
             let host = provider.base_url().host_str().map(|host| host.to_string());
             let auth = match host.as_deref() {
-                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(host) => {
+                    git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host)
+                        .await
+                        .ok()
+                        .flatten()
+                }
                 None => None,
             };
             let default_branch = provider
@@ -227,7 +230,16 @@ impl CreatePullRequestModal {
         let workspace = self.workspace.clone();
 
         self._create_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = create(provider.clone(), remote, request, http_client, cx).await;
+            let workspace_id = workspace.entity_id();
+            let result = create(
+                provider.clone(),
+                remote,
+                request,
+                http_client,
+                workspace_id,
+                cx,
+            )
+            .await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
@@ -289,6 +301,7 @@ async fn create(
     remote: ParsedGitRemote,
     request: NewPullRequest,
     http_client: Arc<dyn gpui::http_client::HttpClient>,
+    workspace_id: gpui::EntityId,
     cx: &mut gpui::AsyncApp,
 ) -> Result<(git::PullRequestSummary, ParsedGitRemote)> {
     let host = provider
@@ -296,7 +309,7 @@ async fn create(
         .host_str()
         .map(|host| host.to_string())
         .context("hosting provider has no host")?;
-    let auth = git::git_host_credentials::auth_for_host(cx, &host)
+    let auth = git::git_host_credentials::auth_for_host(cx, Some(workspace_id), &host)
         .await
         .ok()
         .flatten();

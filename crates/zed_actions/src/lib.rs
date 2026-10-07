@@ -46,11 +46,25 @@ pub struct ConnectGitHost {
 
 /// Disconnects a git hosting account, removing its stored credential. `host` is
 /// the canonical hostname, for example `github.com` or `bitbucket.org`.
+/// `account_id` picks which of the host's accounts; without it, the account the
+/// current workspace uses is disconnected.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = git)]
 #[serde(deny_unknown_fields)]
 pub struct DisconnectGitHost {
     pub host: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
+}
+
+/// Makes the current workspace use a different connected account for a git
+/// host. Other workspaces keep the account they were using.
+#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchGitHostAccount {
+    pub host: String,
+    pub account_id: String,
 }
 
 actions!(

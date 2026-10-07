@@ -222,12 +222,15 @@ impl PullRequestView {
         let workspace = self.workspace.clone();
         self.in_flight_action = true;
         cx.notify();
+        let workspace_id = self.workspace.entity_id();
         let task = cx.spawn(async move |this, cx| {
             let auth = match host.as_deref() {
-                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(host) => {
+                    git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host)
+                        .await
+                        .ok()
+                        .flatten()
+                }
                 None => None,
             };
             let result = provider
@@ -269,12 +272,15 @@ impl PullRequestView {
         let workspace = self.workspace.clone();
         self.in_flight_action = true;
         cx.notify();
+        let workspace_id = self.workspace.entity_id();
         let task = cx.spawn(async move |this, cx| {
             let auth = match host.as_deref() {
-                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(host) => {
+                    git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host)
+                        .await
+                        .ok()
+                        .flatten()
+                }
                 None => None,
             };
             let result = provider
@@ -399,12 +405,15 @@ impl PullRequestView {
         let workspace = self.workspace.clone();
         self.in_flight_action = true;
         cx.notify();
+        let workspace_id = self.workspace.entity_id();
         let task = cx.spawn(async move |this, cx| {
             let auth = match host.as_deref() {
-                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(host) => {
+                    git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host)
+                        .await
+                        .ok()
+                        .flatten()
+                }
                 None => None,
             };
             let result = call(provider, remote, number, auth, http_client).await;
@@ -445,12 +454,15 @@ impl PullRequestView {
         let workspace = self.workspace.clone();
         self.in_flight_action = true;
         cx.notify();
+        let workspace_id = self.workspace.entity_id();
         let task = cx.spawn(async move |this, cx| {
             let auth = match host.as_deref() {
-                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(host) => {
+                    git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host)
+                        .await
+                        .ok()
+                        .flatten()
+                }
                 None => None,
             };
             let result = provider
@@ -533,12 +545,15 @@ impl PullRequestView {
         let workspace = self.workspace.clone();
         self.reply_in_flight = true;
         cx.notify();
+        let workspace_id = self.workspace.entity_id();
         let task = cx.spawn(async move |this, cx| {
             let auth = match host.as_deref() {
-                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(host) => {
+                    git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host)
+                        .await
+                        .ok()
+                        .flatten()
+                }
                 None => None,
             };
             let result = provider
@@ -736,12 +751,15 @@ impl PullRequestView {
         let workspace = self.workspace.clone();
         self.new_comment_in_flight = true;
         cx.notify();
+        let workspace_id = self.workspace.entity_id();
         let task = cx.spawn(async move |this, cx| {
             let auth = match host.as_deref() {
-                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(host) => {
+                    git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host)
+                        .await
+                        .ok()
+                        .flatten()
+                }
                 None => None,
             };
             let result = provider
@@ -786,12 +804,15 @@ impl PullRequestView {
         self.error = None;
         self.auth_error_host = None;
         cx.notify();
+        let workspace_id = self.workspace.entity_id();
         let task = cx.spawn(async move |this, cx| {
             let auth = match host.as_deref() {
-                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(host) => {
+                    git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host)
+                        .await
+                        .ok()
+                        .flatten()
+                }
                 None => None,
             };
             let detail_fut =
@@ -2962,10 +2983,18 @@ impl PullRequestView {
         let provider = self.provider.clone();
         let remote = clone_remote(&self.remote);
         let view = cx.entity().downgrade();
+        let workspace_id = self.workspace.entity_id();
         self.workspace
             .update(cx, |workspace, cx| {
                 workspace.toggle_modal(window, cx, |window, cx| {
-                    crate::reviewer_picker::ReviewerPicker::new(provider, remote, view, window, cx)
+                    crate::reviewer_picker::ReviewerPicker::new(
+                        provider,
+                        remote,
+                        view,
+                        workspace_id,
+                        window,
+                        cx,
+                    )
                 });
             })
             .ok();

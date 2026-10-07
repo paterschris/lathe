@@ -1278,11 +1278,21 @@ impl TitleBar {
 
         // Every host the provider registry can authenticate against, so
         // enterprise and self-hosted instances get menu entries too.
+        let workspace_id = self.workspace.entity_id();
         let git_host_entries: Vec<lathe_git_integrations::GitHostMenuEntry> =
             git::git_host_credentials::connectable_hosts(cx)
                 .into_iter()
                 .map(|host| lathe_git_integrations::GitHostMenuEntry {
-                    connected_login: git::git_host_credentials::connected_username(cx, host.host()),
+                    accounts: git::git_host_credentials::accounts(cx, host.host())
+                        .into_iter()
+                        .map(|account| (account.id, account.username))
+                        .collect(),
+                    active_account_id: git::git_host_credentials::active_account(
+                        cx,
+                        Some(workspace_id),
+                        host.host(),
+                    )
+                    .map(|account| account.id),
                     host: host.host().to_string(),
                     display_name: host.display_name().to_string(),
                 })
@@ -1360,7 +1370,8 @@ impl TitleBar {
                     .map(|entry| lathe_git_integrations::GitHostMenuEntry {
                         host: entry.host.clone(),
                         display_name: entry.display_name.clone(),
-                        connected_login: entry.connected_login.clone(),
+                        accounts: entry.accounts.clone(),
+                        active_account_id: entry.active_account_id.clone(),
                     })
                     .collect::<Vec<_>>();
 

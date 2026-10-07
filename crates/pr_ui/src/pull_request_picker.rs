@@ -147,8 +147,9 @@ async fn load_pull_requests(
     ParsedGitRemote,
     Vec<PullRequestSummary>,
 )> {
-    let (provider, remote, http_client) = picker.update(cx, |picker, cx| {
+    let (provider, remote, http_client, workspace_id) = picker.update(cx, |picker, cx| {
         let project = picker.delegate.project.clone();
+        let workspace_id = picker.delegate.workspace.entity_id();
         let git_store = project.read(cx).git_store().clone();
         let active = git_store
             .read(cx)
@@ -164,7 +165,7 @@ async fn load_pull_requests(
         let (provider, parsed) = parse_git_remote_url(registry, &remote_url)
             .context("remote URL did not match any registered hosting provider")?;
         let http_client = cx.http_client();
-        anyhow::Ok((provider, parsed, http_client))
+        anyhow::Ok((provider, parsed, http_client, workspace_id))
     })??;
 
     let filter = PullRequestListFilter {
@@ -183,7 +184,7 @@ async fn load_pull_requests(
     };
     let host = provider.base_url().host_str().map(|host| host.to_string());
     let auth = match host.as_deref() {
-        Some(host) => git::git_host_credentials::auth_for_host(cx, host)
+        Some(host) => git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host)
             .await
             .ok()
             .flatten(),

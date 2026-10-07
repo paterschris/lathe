@@ -711,6 +711,7 @@ impl PullRequestPanel {
         let sort = self.sort;
         let registry = GitHostingProviderRegistry::global(cx);
         let http_client = cx.http_client();
+        let workspace_id = self.workspace.entity_id();
         let Some(section) = self.sections.get_mut(index) else {
             return;
         };
@@ -774,6 +775,7 @@ impl PullRequestPanel {
                 reviewing,
                 pages,
                 http_client,
+                workspace_id,
                 cx,
             )
             .await;
@@ -852,6 +854,7 @@ impl PullRequestPanel {
         let sort = self.sort;
         let registry = GitHostingProviderRegistry::global(cx);
         let http_client = cx.http_client();
+        let workspace_id = self.workspace.entity_id();
         let Some(section) = self.sections.get_mut(index) else {
             return;
         };
@@ -873,6 +876,7 @@ impl PullRequestPanel {
                 reviewing,
                 next_page,
                 http_client,
+                workspace_id,
                 cx,
             )
             .await;
@@ -1019,6 +1023,7 @@ impl PullRequestPanel {
     /// refresh of an unchanged list costs no requests at all.
     fn start_review_enrichment(&mut self, id: RepositoryId, cx: &mut Context<Self>) {
         let http_client = cx.http_client();
+        let workspace_id = self.workspace.entity_id();
         let Some(index) = self.section_index(id) else {
             return;
         };
@@ -1065,10 +1070,12 @@ impl PullRequestPanel {
         let host = provider.base_url().host_str().map(|host| host.to_string());
         section._enrich_task = Some(cx.spawn(async move |this, cx| {
             let auth = match host.as_deref() {
-                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(host) => {
+                    { git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host) }
+                        .await
+                        .ok()
+                        .flatten()
+                }
                 None => None,
             };
             // Process in small chunks so a large list doesn't fire dozens of
@@ -2330,6 +2337,7 @@ async fn load_pull_request_pages(
     reviewing: bool,
     pages: u32,
     http_client: Arc<dyn HttpClient>,
+    workspace_id: EntityId,
     cx: &mut gpui::AsyncApp,
 ) -> Result<LoadOutcome> {
     let mut combined: Option<LoadOutcome> = None;
@@ -2341,6 +2349,7 @@ async fn load_pull_request_pages(
             reviewing,
             page,
             http_client.clone(),
+            workspace_id,
             cx,
         )
         .await?;
@@ -2389,6 +2398,7 @@ async fn load_pull_requests(
     reviewing: bool,
     page: u32,
     http_client: Arc<dyn HttpClient>,
+    workspace_id: EntityId,
     cx: &mut gpui::AsyncApp,
 ) -> Result<LoadOutcome> {
     let mut chosen: Option<(Arc<dyn GitHostingProvider + Send + Sync>, ParsedGitRemote)> = None;
@@ -2407,7 +2417,7 @@ async fn load_pull_requests(
         // credential surfaces a connect prompt instead of an empty GitHub result.
         let host = provider.base_url().host_str().map(|host| host.to_string());
         let auth = match host.as_deref() {
-            Some(host) => git::git_host_credentials::auth_for_host(cx, host)
+            Some(host) => git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host)
                 .await
                 .ok()
                 .flatten(),

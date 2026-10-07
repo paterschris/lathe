@@ -27,6 +27,7 @@ impl ReviewerPicker {
         provider: Arc<dyn GitHostingProvider + Send + Sync>,
         remote: ParsedGitRemote,
         view: WeakEntity<PullRequestView>,
+        workspace_id: gpui::EntityId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -48,7 +49,7 @@ impl ReviewerPicker {
             picker: picker.clone(),
             width: ui::rems(34.),
         };
-        Self::load(provider, remote, picker, cx);
+        Self::load(provider, remote, workspace_id, picker, cx);
         this
     }
 
@@ -56,6 +57,7 @@ impl ReviewerPicker {
     fn load(
         provider: Arc<dyn GitHostingProvider + Send + Sync>,
         remote: ParsedGitRemote,
+        workspace_id: gpui::EntityId,
         picker: Entity<Picker<ReviewerPickerDelegate>>,
         cx: &mut Context<Self>,
     ) {
@@ -63,10 +65,12 @@ impl ReviewerPicker {
         let host = provider.base_url().host_str().map(|host| host.to_string());
         cx.spawn(async move |_, cx| {
             let auth = match host.as_deref() {
-                Some(host) => git::git_host_credentials::auth_for_host(cx, host)
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(host) => {
+                    { git::git_host_credentials::auth_for_host(cx, Some(workspace_id), host) }
+                        .await
+                        .ok()
+                        .flatten()
+                }
                 None => None,
             };
             let result = provider
