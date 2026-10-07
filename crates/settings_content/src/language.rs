@@ -733,6 +733,9 @@ pub struct LanguageSettingsContent {
     pub use_on_type_format: Option<bool>,
     /// Which code actions to run on save before the formatter.
     /// These are not run if formatting is off.
+    /// On autosave and agent edits, "source.organizeImports" runs as
+    /// "source.sortImports" and "source.removeUnused*" actions are skipped, so
+    /// imports that aren't used yet are never removed.
     ///
     /// Default: {} (or {"source.organizeImports": true} for Go).
     pub code_actions_on_format: Option<HashMap<String, bool>>,

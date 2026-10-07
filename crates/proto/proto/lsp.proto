@@ -890,6 +890,7 @@ message RegisterBufferWithLanguageServers {
 enum FormatTrigger {
   Save = 0;
   Manual = 1;
+  AutoSave = 2;
 }
 
 message OpenBufferForSymbol {

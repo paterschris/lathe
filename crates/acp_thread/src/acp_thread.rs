@@ -4979,7 +4979,7 @@ impl AcpThread {
                         HashSet::from_iter([buffer.clone()]),
                         LspFormatTarget::Buffers,
                         false,
-                        FormatTrigger::Save,
+                        FormatTrigger::AutoSave,
                         cx,
                     )
                 });

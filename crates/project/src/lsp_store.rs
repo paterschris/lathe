@@ -245,6 +245,10 @@ impl ProgressToken {
 pub enum FormatTrigger {
     Save,
     Manual,
+    /// A save the user didn't explicitly ask for (autosave, agent edits). Code
+    /// actions that delete code are not run, since the buffer may hold an import
+    /// or declaration that was just added and isn't used yet.
+    AutoSave,
 }
 
 pub enum LspFormatTarget {
@@ -262,8 +266,39 @@ impl FormatTrigger {
         match value {
             0 => FormatTrigger::Save,
             1 => FormatTrigger::Manual,
+            2 => FormatTrigger::AutoSave,
             _ => FormatTrigger::Save,
         }
+    }
+
+    pub fn is_save(self) -> bool {
+        matches!(self, FormatTrigger::Save | FormatTrigger::AutoSave)
+    }
+}
+
+/// Maps a configured on-format code action kind to the kind that is safe to run
+/// for `trigger`, or `None` if it should be skipped.
+///
+/// On autosave, organizing imports is downgraded to sorting them (both
+/// `typescript-language-server` and vtsls expose `source.sortImports`, which
+/// sorts and merges without removing anything), and actions that only exist to
+/// remove unused code are skipped.
+fn code_action_kind_for_trigger(kind: &str, trigger: FormatTrigger) -> Option<String> {
+    if trigger != FormatTrigger::AutoSave {
+        return Some(kind.to_string());
+    }
+    let is_kind = |prefix: &str| {
+        kind == prefix
+            || kind
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+    };
+    if is_kind("source.organizeImports") {
+        Some(kind.replacen("source.organizeImports", "source.sortImports", 1))
+    } else if is_kind("source.removeUnused") || is_kind("source.removeUnusedImports") {
+        None
+    } else {
+        Some(kind.to_string())
     }
 }
 
@@ -1780,10 +1815,8 @@ impl LocalLspStore {
         // Formatter for `code_actions_on_format` that runs before
         // the rest of the formatters
         let mut code_actions_on_format_formatters = None;
-        let should_run_code_actions_on_format = !matches!(
-            (trigger, &settings.format_on_save),
-            (FormatTrigger::Save, &FormatOnSave::Off)
-        );
+        let should_run_code_actions_on_format =
+            !(trigger.is_save() && settings.format_on_save == FormatOnSave::Off);
         if should_run_code_actions_on_format {
             let have_code_actions_to_run_on_format = settings
                 .code_actions_on_format
@@ -1804,10 +1837,10 @@ impl LocalLspStore {
         }
 
         let formatters = match (trigger, &settings.format_on_save) {
-            (FormatTrigger::Save, FormatOnSave::Off) => &[],
+            (FormatTrigger::Save | FormatTrigger::AutoSave, FormatOnSave::Off) => &[],
             (FormatTrigger::Manual, _)
             | (
-                FormatTrigger::Save,
+                FormatTrigger::Save | FormatTrigger::AutoSave,
                 FormatOnSave::On
                 | FormatOnSave::Modifications
                 | FormatOnSave::ModificationsIfAvailable,
@@ -2020,7 +2053,7 @@ impl LocalLspStore {
                                         });
                                     if range_formatter.is_some() {
                                         range_formatter
-                                    } else if trigger == FormatTrigger::Save
+                                    } else if trigger.is_save()
                                         && settings.format_on_save
                                             == FormatOnSave::ModificationsIfAvailable
                                     {
@@ -2088,7 +2121,7 @@ impl LocalLspStore {
                     match range_edits {
                         Some(edits) => edits,
                         None => {
-                            if trigger == FormatTrigger::Save
+                            if trigger.is_save()
                                 && settings.format_on_save == FormatOnSave::ModificationsIfAvailable
                             {
                                 zlog::debug!(
@@ -2154,7 +2187,13 @@ impl LocalLspStore {
                     return Ok(());
                 };
 
-                let code_action_kind: CodeActionKind = code_action_name.clone().into();
+                let Some(code_action_name) =
+                    code_action_kind_for_trigger(code_action_name, trigger)
+                else {
+                    zlog::debug!(logger => "Skipping code action {code_action_name:?} on autosave because it removes code");
+                    return Ok(());
+                };
+                let code_action_kind: CodeActionKind = code_action_name.into();
                 zlog::trace!(logger => "Attempting to resolve code actions {:?}", &code_action_kind);
 
                 let mut actions_and_servers = Vec::new();
@@ -16876,6 +16915,40 @@ mod tests {
             "Get diagnostics via rust-analyzer failed: Server reset the connection"
         ));
         assert!(should_log_lsp_request_failure("something else entirely"));
+    }
+
+    #[test]
+    fn autosave_code_actions_never_remove_code() {
+        let on_autosave = |kind| code_action_kind_for_trigger(kind, FormatTrigger::AutoSave);
+        assert_eq!(
+            on_autosave("source.organizeImports").as_deref(),
+            Some("source.sortImports")
+        );
+        assert_eq!(
+            on_autosave("source.organizeImports.ts").as_deref(),
+            Some("source.sortImports.ts")
+        );
+        assert_eq!(on_autosave("source.removeUnusedImports"), None);
+        assert_eq!(on_autosave("source.removeUnused.ts"), None);
+        assert_eq!(
+            on_autosave("source.organizeImportsCustom").as_deref(),
+            Some("source.organizeImportsCustom")
+        );
+        assert_eq!(
+            on_autosave("source.fixAll.eslint").as_deref(),
+            Some("source.fixAll.eslint")
+        );
+
+        for trigger in [FormatTrigger::Save, FormatTrigger::Manual] {
+            assert_eq!(
+                code_action_kind_for_trigger("source.organizeImports", trigger).as_deref(),
+                Some("source.organizeImports")
+            );
+            assert_eq!(
+                code_action_kind_for_trigger("source.removeUnusedImports", trigger).as_deref(),
+                Some("source.removeUnusedImports")
+            );
+        }
     }
     #[test]
     fn synced_server_capabilities_wire_format_is_compatible_with_plain_capabilities() {

@@ -108,6 +108,35 @@ impl VsCodeSettings {
             .filter(|template| !template.trim().is_empty())
     }
 
+    fn read_code_actions_on_save(&self) -> Option<HashMap<String, bool>> {
+        let code_actions = match self.read_value("editor.codeActionsOnSave")? {
+            // The legacy array form lists kinds that run on explicit saves.
+            Value::Array(kinds) => kinds
+                .iter()
+                .filter_map(|kind| Some((kind.as_str()?.to_string(), true)))
+                .collect::<HashMap<_, _>>(),
+            Value::Object(kinds) => kinds
+                .iter()
+                .filter_map(|(kind, trigger)| {
+                    // "explicit" and "always" both enable the action. Autosave never runs
+                    // the code-removing variants regardless, which matches "explicit".
+                    let enabled = match trigger {
+                        Value::Bool(enabled) => *enabled,
+                        Value::String(trigger) => match trigger.as_str() {
+                            "explicit" | "always" => true,
+                            "never" => false,
+                            _ => return None,
+                        },
+                        _ => return None,
+                    };
+                    Some((kind.clone(), enabled))
+                })
+                .collect(),
+            _ => return None,
+        };
+        (!code_actions.is_empty()).then_some(code_actions)
+    }
+
     fn read_bool(&self, setting: &str) -> Option<bool> {
         self.read_value(setting).and_then(|v| v.as_bool())
     }
@@ -563,7 +592,7 @@ impl VsCodeSettings {
             always_treat_brackets_as_autoclosed: None,
             auto_indent: None,
             auto_indent_on_paste: self.read_bool("editor.formatOnPaste"),
-            code_actions_on_format: None,
+            code_actions_on_format: self.read_code_actions_on_save(),
             completions: skip_default(CompletionSettingsContent {
                 words: self.read_bool("editor.suggest.showWords").map(|b| {
                     if b {
@@ -1542,6 +1571,51 @@ mod tests {
             None
         );
         assert_eq!(imported_reduce_motion("{}"), None);
+    }
+
+    #[test]
+    fn test_import_code_actions_on_save() {
+        let imported_code_actions = |content: &str| {
+            VsCodeSettings::from_str(content, VsCodeSettingsSource::VsCode)
+                .unwrap()
+                .settings_content()
+                .project
+                .all_languages
+                .defaults
+                .code_actions_on_format
+        };
+
+        assert_eq!(
+            imported_code_actions(
+                r#"{
+                    "editor.codeActionsOnSave": {
+                        "source.organizeImports": "explicit",
+                        "source.fixAll.eslint": "always",
+                        "source.sortImports": "never",
+                        "source.removeUnusedImports": true,
+                        "source.addMissingImports": "unknown"
+                    }
+                }"#
+            ),
+            Some(HashMap::from_iter([
+                ("source.organizeImports".to_string(), true),
+                ("source.fixAll.eslint".to_string(), true),
+                ("source.sortImports".to_string(), false),
+                ("source.removeUnusedImports".to_string(), true),
+            ]))
+        );
+        assert_eq!(
+            imported_code_actions(r#"{ "editor.codeActionsOnSave": ["source.organizeImports"] }"#),
+            Some(HashMap::from_iter([(
+                "source.organizeImports".to_string(),
+                true
+            )]))
+        );
+        assert_eq!(
+            imported_code_actions(r#"{ "editor.codeActionsOnSave": {} }"#),
+            None
+        );
+        assert_eq!(imported_code_actions("{}"), None);
     }
 
     #[test]

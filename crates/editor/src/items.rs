@@ -1003,6 +1003,8 @@ impl Item for Editor {
 
         let format_trigger = if options.force_format {
             FormatTrigger::Manual
+        } else if options.autosave {
+            FormatTrigger::AutoSave
         } else {
             FormatTrigger::Save
         };

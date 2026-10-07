@@ -9425,6 +9425,8 @@ fn network_page() -> SettingsPage {
     }
 }
 
+const ORGANIZE_IMPORTS_CODE_ACTION: &str = "source.organizeImports";
+
 fn language_settings_field<T>(
     settings_content: &SettingsContent,
     get_language_setting_field: fn(&LanguageSettingsContent) -> Option<&T>,
@@ -9786,7 +9788,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
         ]
     }
 
-    fn formatting_section() -> [SettingsPageItem; 8] {
+    fn formatting_section() -> [SettingsPageItem; 9] {
         [
             SettingsPageItem::SectionHeader("Formatting"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -9813,6 +9815,44 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                         },
                     },
                 ),
+                metadata: None,
+                files: USER | PROJECT,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Organize Imports On Save",
+                description: "Run the language server's \"Organize Imports\" code action (sorts imports and removes unused ones) before formatting on an explicit save. Autosave and agent edits only sort imports, so nothing you just added is removed. Only runs when Format On Save is not off.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some(
+                        "languages.$(language).code_actions_on_format.source.organizeImports",
+                    ),
+                    pick: |settings_content| {
+                        language_settings_field(settings_content, |language| {
+                            language
+                                .code_actions_on_format
+                                .as_ref()
+                                .and_then(|actions| actions.get(ORGANIZE_IMPORTS_CODE_ACTION))
+                        })
+                    },
+                    write: |settings_content, value, _| {
+                        language_settings_field_mut(settings_content, value, |language, value| {
+                            match value {
+                                Some(enabled) => {
+                                    language
+                                        .code_actions_on_format
+                                        .get_or_insert_default()
+                                        .insert(ORGANIZE_IMPORTS_CODE_ACTION.to_string(), enabled);
+                                }
+                                None => {
+                                    if let Some(actions) = language.code_actions_on_format.as_mut()
+                                    {
+                                        actions.remove(ORGANIZE_IMPORTS_CODE_ACTION);
+                                    }
+                                }
+                            }
+                        })
+                    },
+                }),
                 metadata: None,
                 files: USER | PROJECT,
             }),

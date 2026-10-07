@@ -21800,6 +21800,90 @@ async fn test_formatter_failure_does_not_abort_subsequent_formatters(cx: &mut Te
 }
 
 #[gpui::test]
+async fn test_autosave_sorts_imports_without_removing_them(cx: &mut TestAppContext) {
+    init_test(cx, |settings| {
+        settings.defaults.formatter = Some(FormatterList::Single(Formatter::None));
+        settings.defaults.code_actions_on_format = Some(HashMap::from_iter([
+            ("source.organizeImports".to_string(), true),
+            ("source.removeUnusedImports".to_string(), true),
+        ]));
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_file(path!("/file.rs"), "fn main() {}\n".into())
+        .await;
+
+    let project = Project::test(fs, [path!("/").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+
+    let mut fake_servers = language_registry.register_fake_lsp(
+        "Rust",
+        FakeLspAdapter {
+            capabilities: lsp::ServerCapabilities {
+                code_action_provider: Some(lsp::CodeActionProviderCapability::Simple(true)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer(path!("/file.rs"), cx)
+        })
+        .await
+        .unwrap();
+
+    let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        build_editor_with_project(project.clone(), buffer, window, cx)
+    });
+
+    let fake_server = fake_servers.next().await.unwrap();
+    let requested_kinds = Arc::new(Mutex::new(Vec::new()));
+    fake_server.set_request_handler::<lsp::request::CodeActionRequest, _, _>({
+        let requested_kinds = requested_kinds.clone();
+        move |params, _| {
+            requested_kinds.lock().extend(
+                params
+                    .context
+                    .only
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|kind| kind.as_str().to_string()),
+            );
+            async move { Ok(None) }
+        }
+    });
+
+    for (trigger, expected_kinds) in [
+        (FormatTrigger::AutoSave, vec!["source.sortImports"]),
+        (
+            FormatTrigger::Save,
+            vec!["source.organizeImports", "source.removeUnusedImports"],
+        ),
+    ] {
+        requested_kinds.lock().clear();
+        editor
+            .update_in(cx, |editor, window, cx| {
+                editor.perform_format(
+                    project.clone(),
+                    trigger,
+                    FormatTarget::Buffers(editor.buffer().read(cx).all_buffers()),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let mut kinds = requested_kinds.lock().clone();
+        kinds.sort();
+        assert_eq!(kinds, expected_kinds, "code action kinds for {trigger:?}");
+    }
+}
+
+#[gpui::test]
 async fn test_explicit_formatter_failure_is_recorded(cx: &mut TestAppContext) {
     init_test(cx, |settings| {
         settings.defaults.formatter = Some(FormatterList::Vec(vec![Formatter::LanguageServer(
