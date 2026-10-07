@@ -1553,6 +1553,62 @@ async fn test_root_rescan_reconciles_stale_state(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_manual_rescan_picks_up_changes_the_watcher_missed(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/root",
+        json!({
+            "old.txt": "",
+            "dir": { "kept.txt": "" },
+        }),
+    )
+    .await;
+
+    let tree = Worktree::local(
+        Path::new("/root"),
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    fs.pause_events();
+    fs.remove_file(Path::new("/root/old.txt"), RemoveOptions::default())
+        .await
+        .unwrap();
+    fs.insert_tree("/root/dir/nested", json!({ "new.txt": "" }))
+        .await;
+    fs.clear_buffered_events();
+    fs.unpause_events_and_flush();
+
+    let mut rescan = tree.read_with(cx, |tree, _| tree.as_local().unwrap().rescan());
+    rescan.recv().await;
+
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(true, 0)
+                .map(|entry| entry.path.as_ref())
+                .collect::<Vec<_>>(),
+            vec![
+                rel_path(""),
+                rel_path("dir"),
+                rel_path("dir/kept.txt"),
+                rel_path("dir/nested"),
+                rel_path("dir/nested/new.txt"),
+            ]
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_root_rescan_keeps_root_watcher_registered(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.background_executor.clone());

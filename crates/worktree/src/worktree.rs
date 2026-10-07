@@ -166,6 +166,9 @@ pub struct PathPrefixScanRequest {
 struct ScanRequest {
     relative_paths: Vec<Arc<RelPath>>,
     done: SmallVec<[barrier::Sender; 1]>,
+    /// Re-read each path's whole subtree from disk instead of only the paths
+    /// themselves.
+    recursive: bool,
 }
 
 pub struct RemoteWorktree {
@@ -2124,6 +2127,22 @@ impl LocalWorktree {
             .try_send(ScanRequest {
                 relative_paths: paths,
                 done: smallvec![tx],
+                recursive: false,
+            })
+            .ok();
+        rx
+    }
+
+    /// Re-reads the whole worktree from disk, for when the file watcher missed
+    /// changes. Entries are diffed against the current snapshot, so only what
+    /// actually changed is reported as updated.
+    pub fn rescan(&self) -> barrier::Receiver {
+        let (tx, rx) = barrier::channel();
+        self.scan_requests_tx
+            .try_send(ScanRequest {
+                relative_paths: vec![RelPath::empty().into()],
+                done: smallvec![tx],
+                recursive: true,
             })
             .ok();
         rx
@@ -4580,7 +4599,12 @@ impl BackgroundScanner {
                 // these before handling changes reported by the filesystem.
                 request = self.next_scan_request().fuse() => {
                     let Ok(request) = request else { break };
-                    if !self.process_scan_request(request, false).await {
+                    let keep_running = if request.recursive {
+                        self.process_recursive_scan_request(request).await
+                    } else {
+                        self.process_scan_request(request, false).await
+                    };
+                    if !keep_running {
                         return;
                     }
                 }
@@ -4644,6 +4668,28 @@ impl BackgroundScanner {
                 }
             }
         }
+    }
+
+    /// Handled like the watcher reporting that it lost sync for these paths,
+    /// which already re-reads their subtrees and reloads any git repositories
+    /// inside them. Only served from the event loop: during the initial scan a
+    /// recursive request is redundant, and `scan_dirs` falls back to treating it
+    /// as a plain one.
+    async fn process_recursive_scan_request(&self, request: ScanRequest) -> bool {
+        log::debug!("recursively rescanning paths {:?}", request.relative_paths);
+        let events = {
+            let state = self.state.lock().await;
+            request
+                .relative_paths
+                .iter()
+                .map(|path| PathEvent {
+                    path: state.snapshot.absolutize(path),
+                    kind: Some(fs::PathEventKind::Rescan),
+                })
+                .collect()
+        };
+        self.process_events(events).await;
+        self.send_status_update(false, request.done, &[]).await
     }
 
     async fn process_scan_request(&self, mut request: ScanRequest, scanning: bool) -> bool {
@@ -6257,6 +6303,7 @@ impl BackgroundScanner {
         while let Ok(next_request) = self.scan_requests_rx.try_recv() {
             request.relative_paths.extend(next_request.relative_paths);
             request.done.extend(next_request.done);
+            request.recursive |= next_request.recursive;
         }
         Ok(request)
     }

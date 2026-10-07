@@ -381,6 +381,9 @@ actions!(
         CollapseAllEntries,
         /// Expands all entries in the project tree.
         ExpandAllEntries,
+        /// Re-reads the project tree from disk, picking up changes the file
+        /// watcher missed.
+        Refresh,
         /// Creates a new directory.
         NewDirectory,
         /// Creates a new file.
@@ -543,6 +546,10 @@ pub fn init(cx: &mut App) {
             }
         });
 
+        workspace.register_action(|workspace, _: &Refresh, _window, cx| {
+            refresh_project_tree(workspace.project(), cx);
+        });
+
         workspace.register_action(|workspace, action: &ExpandAllEntries, window, cx| {
             if let Some(panel) = workspace.panel::<ProjectPanel>(cx) {
                 panel.update(cx, |panel, cx| {
@@ -652,6 +659,17 @@ struct ItemColors {
     drag_over: Hsla,
     marked: Hsla,
     focused: Hsla,
+}
+
+/// Rescans every local worktree in the project from disk. Remote worktrees are
+/// skipped: their host owns the scan, and the host's watcher is the one that
+/// would have missed anything.
+fn refresh_project_tree(project: &Entity<Project>, cx: &App) {
+    for worktree in project.read(cx).worktrees(cx) {
+        if let Some(local) = worktree.read(cx).as_local() {
+            drop(local.rescan());
+        }
+    }
 }
 
 fn get_item_color(is_sticky: bool, cx: &App) -> ItemColors {
@@ -1223,6 +1241,9 @@ impl ProjectPanel {
                             .when(should_show_compare, |menu| {
                                 menu.separator()
                                     .action("Compare Marked Files", Box::new(CompareMarkedFiles))
+                            })
+                            .when(!is_remote && !is_collab, |menu| {
+                                menu.separator().action("Refresh", Box::new(Refresh))
                             })
                             .separator()
                             .action("Cut", Box::new(Cut))
