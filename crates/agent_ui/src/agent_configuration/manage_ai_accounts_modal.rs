@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ai_accounts::{
     AccountState, AgentDescriptor, AiAccount, AiAccountsIndex, BrandAccent, CLAUDE_CODE_DESCRIPTOR,
@@ -9,7 +9,7 @@ use ai_accounts::{
 use fs::RemoveOptions;
 use gpui::{
     AnyElement, DismissEvent, EventEmitter, FocusHandle, Focusable, Hsla, Rgba, ScrollHandle,
-    WeakEntity, WindowAppearance, prelude::*, px,
+    Task, WeakEntity, WindowAppearance, prelude::*, px,
 };
 use notifications::status_toast::StatusToast;
 use settings::update_settings_file;
@@ -23,6 +23,11 @@ pub struct ManageAiAccountsModal {
     focus_handle: FocusHandle,
     index: AiAccountsIndex,
     expanded_accounts: HashSet<String>,
+    /// Conversation listings per expanded account. Listing walks and parses the
+    /// agent's transcript files, so it runs in the background on expand rather
+    /// than during render. `None` while loading.
+    conversations: HashMap<String, Option<Vec<ConversationSummary>>>,
+    _conversation_tasks: Vec<Task<()>>,
     workspace: WeakEntity<Workspace>,
     scroll_handle: ScrollHandle,
 }
@@ -44,6 +49,8 @@ impl ManageAiAccountsModal {
             focus_handle: cx.focus_handle(),
             index: load_index(),
             expanded_accounts: HashSet::new(),
+            conversations: HashMap::new(),
+            _conversation_tasks: Vec::new(),
             workspace,
             scroll_handle: ScrollHandle::new(),
         }
@@ -61,13 +68,39 @@ impl ManageAiAccountsModal {
 
     fn toggle_expand(&mut self, account_id: String, cx: &mut Context<Self>) {
         if !self.expanded_accounts.remove(&account_id) {
+            self.load_conversations(&account_id, cx);
             self.expanded_accounts.insert(account_id);
         }
         cx.notify();
     }
 
+    fn load_conversations(&mut self, account_id: &str, cx: &mut Context<Self>) {
+        let Some(account) = self.index.find(account_id).cloned() else {
+            return;
+        };
+        self.conversations.insert(account.id.clone(), None);
+        let task = cx.spawn(async move |this, cx| {
+            let account_id = account.id.clone();
+            let conversations = cx
+                .background_spawn(async move { list_conversations(&account) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.conversations.insert(account_id, Some(conversations));
+                cx.notify();
+            })
+            .ok();
+        });
+        self._conversation_tasks.push(task);
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.index = load_index();
+        self.conversations.clear();
+        self._conversation_tasks.clear();
+        let expanded: Vec<String> = self.expanded_accounts.iter().cloned().collect();
+        for account_id in expanded {
+            self.load_conversations(&account_id, cx);
+        }
         cx.notify();
     }
 
@@ -382,10 +415,22 @@ fn brand_accent_color(accent: &BrandAccent, window: &Window) -> Option<Hsla> {
 
 fn render_conversations(
     account: &AiAccount,
+    conversations: Option<&[ConversationSummary]>,
     workspace: WeakEntity<Workspace>,
     _cx: &mut Context<ManageAiAccountsModal>,
 ) -> impl IntoElement {
-    let conversations: Vec<ConversationSummary> = list_conversations(account);
+    let Some(conversations) = conversations else {
+        return v_flex()
+            .pl_8()
+            .pr_3()
+            .pb_2()
+            .child(
+                Label::new("Loading conversations…")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .into_any_element();
+    };
     let supported_agent = matches!(
         account.agent_id.as_str(),
         "claude-acp" | "codex-acp" | "gemini"
@@ -415,7 +460,7 @@ fn render_conversations(
         .pr_3()
         .pb_2()
         .gap_0p5()
-        .children(conversations.into_iter().take(20).map(|conv| {
+        .children(conversations.iter().take(20).map(|conv| {
             let title = SharedString::from(conv.title.clone());
             let project_hint = conv.project_hint.clone().map(SharedString::from);
             let row_id = SharedString::from(format!("conv-{}-{}", agent_id_for_rows, conv.id));
@@ -571,8 +616,15 @@ impl ManageAiAccountsModal {
                 );
                 if is_expanded {
                     rows.push(
-                        render_conversations(&account, self.workspace.clone(), cx)
-                            .into_any_element(),
+                        render_conversations(
+                            &account,
+                            self.conversations
+                                .get(&account.id)
+                                .and_then(|conversations| conversations.as_deref()),
+                            self.workspace.clone(),
+                            cx,
+                        )
+                        .into_any_element(),
                     );
                 }
             }

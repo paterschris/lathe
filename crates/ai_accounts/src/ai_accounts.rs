@@ -5,6 +5,8 @@ use gpui::{App, EntityId, Global};
 use serde::{Deserialize, Serialize};
 use settings::{RegisterSetting, Settings, SettingsContent};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -148,9 +150,34 @@ fn accounts_path() -> PathBuf {
     paths::config_dir().join("ai_accounts.json")
 }
 
+/// The parsed index, keyed by the file's modification time. The agent panel's
+/// account chip reads the index on every render (continuously while a reply
+/// streams), so this turns a read and JSON parse into a `stat` while still
+/// picking up edits made by hand or by other Lathe instances.
+static INDEX_CACHE: Mutex<Option<(SystemTime, AiAccountsIndex)>> = Mutex::new(None);
+
+fn index_cache() -> MutexGuard<'static, Option<(SystemTime, AiAccountsIndex)>> {
+    INDEX_CACHE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 pub fn load_index() -> AiAccountsIndex {
     let path = accounts_path();
-    let bytes = match std::fs::read(&path) {
+    let modified = std::fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    if let Some(modified) = modified
+        && let Some((cached_modified, index)) = index_cache().as_ref()
+        && *cached_modified == modified
+    {
+        return index.clone();
+    }
+    let index = read_index(&path);
+    *index_cache() = modified.map(|modified| (modified, index.clone()));
+    index
+}
+
+fn read_index(path: &Path) -> AiAccountsIndex {
+    let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         // No file yet is the normal first-run case — an empty index is correct
         // and not worth logging.
@@ -181,6 +208,7 @@ pub fn save_index(index: &AiAccountsIndex) -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     let bytes = serde_json::to_vec_pretty(index).context("serialize ai accounts index")?;
+    *index_cache() = None;
     std::fs::write(&path, bytes).context("write ai_accounts.json")
 }
 

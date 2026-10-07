@@ -744,32 +744,15 @@ impl LineLayoutCache {
             wrap_width: None,
             force_width,
         };
+        let key = &key_ref as &dyn AsHashedCacheKeyRef;
 
         let current_frame = self.current_frame.read();
-        if let Some((_, layout)) = current_frame.lines_by_hash.iter().find(|(key, _)| {
-            HashedCacheKeyRef {
-                text_hash: key.text_hash,
-                text_len: key.text_len,
-                font_size: key.font_size,
-                runs: key.runs.as_slice(),
-                wrap_width: key.wrap_width,
-                force_width: key.force_width,
-            } == key_ref
-        }) {
+        if let Some(layout) = current_frame.lines_by_hash.get(key) {
             return Some(layout.clone());
         }
 
         let previous_frame = self.previous_frame.lock();
-        if let Some((_, layout)) = previous_frame.lines_by_hash.iter().find(|(key, _)| {
-            HashedCacheKeyRef {
-                text_hash: key.text_hash,
-                text_len: key.text_len,
-                font_size: key.font_size,
-                runs: key.runs.as_slice(),
-                wrap_width: key.wrap_width,
-                force_width: key.force_width,
-            } == key_ref
-        }) {
+        if let Some(layout) = previous_frame.lines_by_hash.get(key) {
             return Some(layout.clone());
         }
 
@@ -802,49 +785,22 @@ impl LineLayoutCache {
             wrap_width: None,
             force_width,
         };
+        let key = &key_ref as &dyn AsHashedCacheKeyRef;
 
-        // Fast path: already cached (no allocation).
         let current_frame = self.current_frame.upgradable_read();
-        if let Some((_, layout)) = current_frame.lines_by_hash.iter().find(|(key, _)| {
-            HashedCacheKeyRef {
-                text_hash: key.text_hash,
-                text_len: key.text_len,
-                font_size: key.font_size,
-                runs: key.runs.as_slice(),
-                wrap_width: key.wrap_width,
-                force_width: key.force_width,
-            } == key_ref
-        }) {
+        if let Some(layout) = current_frame.lines_by_hash.get(key) {
             return layout.clone();
         }
 
         let mut current_frame = RwLockUpgradableReadGuard::upgrade(current_frame);
 
-        // Try to reuse from previous frame without allocating; do a linear scan to find a matching key.
-        // (We avoid `drain()` here because it would eagerly move all entries.)
         let mut previous_frame = self.previous_frame.lock();
-        if let Some(existing_key) = previous_frame
-            .used_lines_by_hash
-            .iter()
-            .find(|key| {
-                HashedCacheKeyRef {
-                    text_hash: key.text_hash,
-                    text_len: key.text_len,
-                    font_size: key.font_size,
-                    runs: key.runs.as_slice(),
-                    wrap_width: key.wrap_width,
-                    force_width: key.force_width,
-                } == key_ref
-            })
-            .cloned()
-        {
-            if let Some((key, layout)) = previous_frame.lines_by_hash.remove_entry(&existing_key) {
-                current_frame
-                    .lines_by_hash
-                    .insert(key.clone(), layout.clone());
-                current_frame.used_lines_by_hash.push(key);
-                return layout;
-            }
+        if let Some((key, layout)) = previous_frame.lines_by_hash.remove_entry(key) {
+            current_frame
+                .lines_by_hash
+                .insert(key.clone(), layout.clone());
+            current_frame.used_lines_by_hash.push(key);
+            return layout;
         }
 
         let text = materialize_text();
@@ -933,6 +889,10 @@ trait AsCacheKeyRef {
     fn as_cache_key_ref(&self) -> CacheKeyRef<'_>;
 }
 
+trait AsHashedCacheKeyRef {
+    fn as_hashed_cache_key_ref(&self) -> HashedCacheKeyRef<'_>;
+}
+
 #[derive(Clone, Debug, Eq)]
 struct CacheKey {
     text: SharedString,
@@ -988,6 +948,12 @@ impl PartialEq for HashedCacheKey {
     }
 }
 
+impl PartialEq for dyn AsHashedCacheKeyRef + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_hashed_cache_key_ref() == other.as_hashed_cache_key_ref()
+    }
+}
+
 impl Eq for HashedCacheKey {}
 
 impl Hash for HashedCacheKey {
@@ -998,6 +964,14 @@ impl Hash for HashedCacheKey {
         self.runs.as_slice().hash(state);
         self.wrap_width.hash(state);
         self.force_width.hash(state);
+    }
+}
+
+impl Eq for dyn AsHashedCacheKeyRef + '_ {}
+
+impl Hash for dyn AsHashedCacheKeyRef + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_hashed_cache_key_ref().hash(state);
     }
 }
 
@@ -1022,6 +996,31 @@ impl Hash for HashedCacheKeyRef<'_> {
         self.runs.hash(state);
         self.wrap_width.hash(state);
         self.force_width.hash(state);
+    }
+}
+
+impl AsHashedCacheKeyRef for HashedCacheKey {
+    fn as_hashed_cache_key_ref(&self) -> HashedCacheKeyRef<'_> {
+        HashedCacheKeyRef {
+            text_hash: self.text_hash,
+            text_len: self.text_len,
+            font_size: self.font_size,
+            runs: self.runs.as_slice(),
+            wrap_width: self.wrap_width,
+            force_width: self.force_width,
+        }
+    }
+}
+
+impl AsHashedCacheKeyRef for HashedCacheKeyRef<'_> {
+    fn as_hashed_cache_key_ref(&self) -> HashedCacheKeyRef<'_> {
+        *self
+    }
+}
+
+impl<'a> Borrow<dyn AsHashedCacheKeyRef + 'a> for Arc<HashedCacheKey> {
+    fn borrow(&self) -> &(dyn AsHashedCacheKeyRef + 'a) {
+        self.as_ref() as &dyn AsHashedCacheKeyRef
     }
 }
 
@@ -1103,6 +1102,38 @@ mod tests {
             .iter()
             .map(|g| f32::from(g.position.x))
             .collect()
+    }
+
+    #[test]
+    fn hashed_cache_key_ref_retrieves_owned_key() {
+        let cache_key = Arc::new(HashedCacheKey {
+            text_hash: 42,
+            text_len: 4,
+            font_size: px(16.),
+            runs: SmallVec::from_slice(&[FontRun {
+                len: 4,
+                font_id: FontId(0),
+            }]),
+            wrap_width: None,
+            force_width: None,
+        });
+        let mut cache = FxHashMap::default();
+        cache.insert(cache_key, "layout");
+
+        let key_ref = HashedCacheKeyRef {
+            text_hash: 42,
+            text_len: 4,
+            font_size: px(16.),
+            runs: &[FontRun {
+                len: 4,
+                font_id: FontId(0),
+            }],
+            wrap_width: None,
+            force_width: None,
+        };
+        let key = &key_ref as &dyn AsHashedCacheKeyRef;
+
+        assert_eq!(cache.get(key), Some(&"layout"));
     }
 
     #[test]

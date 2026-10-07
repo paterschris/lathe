@@ -17,6 +17,7 @@ pub mod toolchain;
 
 pub use device_picker::MobileDeviceSelector;
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -399,7 +400,7 @@ struct LogcatUiState {
     /// Android package id, or the iOS process-name filter.
     target: SharedString,
     pid: Option<u32>,
-    lines: Vec<SharedString>,
+    lines: VecDeque<SharedString>,
     error: Option<SharedString>,
     _forwarder: Task<()>,
 }
@@ -461,9 +462,11 @@ pub struct MobileDevPanel {
     /// workspace notification (once per workspace session, so a dismissal
     /// isn't nagged).
     toolchain_offer_made: bool,
-    _device_tracker: Task<()>,
-    _apple_device_tracker: Task<()>,
-    _avd_tracker: Task<()>,
+    panel_active: bool,
+    /// adb, simctl/devicectl and AVD polling. Each poll spawns subprocesses, and
+    /// this panel exists in every workspace, so it only runs while the panel is
+    /// open or the project is a mobile project (which shows the status-bar picker).
+    device_trackers: Option<[Task<()>; 3]>,
     _project_detector: Task<()>,
     _toolchain_detector: Task<()>,
     _apple_toolchain_detector: Task<()>,
@@ -484,39 +487,6 @@ impl MobileDevPanel {
     fn new(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let project = workspace.project().clone();
-
-        let device_tracker = cx.spawn(async move |this, cx| {
-            let stream = adb::track_devices(DEVICE_POLL_INTERVAL, cx.background_executor().clone());
-            pin_mut!(stream);
-            while let Some(result) = stream.next().await {
-                let Ok(_) = this.update(cx, |panel, cx| {
-                    panel.apply_device_poll(result);
-                    cx.notify();
-                }) else {
-                    break;
-                };
-            }
-        });
-
-        let apple_device_tracker = if cfg!(target_os = "macos") {
-            cx.spawn(async move |this, cx| {
-                let stream = apple::track_devices(
-                    APPLE_DEVICE_POLL_INTERVAL,
-                    cx.background_executor().clone(),
-                );
-                pin_mut!(stream);
-                while let Some(result) = stream.next().await {
-                    let Ok(_) = this.update(cx, |panel, cx| {
-                        panel.apply_apple_device_poll(result);
-                        cx.notify();
-                    }) else {
-                        break;
-                    };
-                }
-            })
-        } else {
-            Task::ready(())
-        };
 
         let project_detector = cx.spawn({
             let project = project.clone();
@@ -553,32 +523,11 @@ impl MobileDevPanel {
                         .map(SharedString::from);
                     panel.mobile_project = detected;
                     panel.project_scanned = true;
+                    panel.update_device_tracking(cx);
                     panel.maybe_offer_toolchain_install(cx);
                     cx.notify();
                 })
                 .ok();
-            }
-        });
-
-        let avd_tracker = cx.spawn(async move |this, cx| {
-            loop {
-                let env = this
-                    .read_with(cx, |panel, _| {
-                        toolchain::build_env(panel.toolchain_status.as_ref())
-                    })
-                    .unwrap_or_default();
-                let avds = cx
-                    .background_spawn(async move { emulator::list_avds(&env).await })
-                    .await;
-                let Ok(_) = this.update(cx, |panel, cx| {
-                    if let Ok(avds) = avds {
-                        panel.avds = avds.into_iter().map(SharedString::from).collect();
-                        cx.notify();
-                    }
-                }) else {
-                    break;
-                };
-                cx.background_executor().timer(AVD_POLL_INTERVAL).await;
             }
         });
 
@@ -604,14 +553,81 @@ impl MobileDevPanel {
             apple_toolchain_status: None,
             apple_install: None,
             toolchain_offer_made: false,
-            _device_tracker: device_tracker,
-            _apple_device_tracker: apple_device_tracker,
-            _avd_tracker: avd_tracker,
+            panel_active: false,
+            device_trackers: None,
             _project_detector: project_detector,
             _toolchain_detector: Self::spawn_toolchain_detection(cx),
             _apple_toolchain_detector: Self::spawn_apple_toolchain_detection(cx),
             _subscriptions: Vec::new(),
         }
+    }
+
+    fn update_device_tracking(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.panel_active || self.mobile_project.is_some();
+        if wanted == self.device_trackers.is_some() {
+            return;
+        }
+        if !wanted {
+            self.device_trackers = None;
+            return;
+        }
+
+        let device_tracker = cx.spawn(async move |this, cx| {
+            let stream = adb::track_devices(DEVICE_POLL_INTERVAL, cx.background_executor().clone());
+            pin_mut!(stream);
+            while let Some(result) = stream.next().await {
+                let Ok(_) = this.update(cx, |panel, cx| {
+                    panel.apply_device_poll(result);
+                    cx.notify();
+                }) else {
+                    break;
+                };
+            }
+        });
+
+        let apple_device_tracker = if cfg!(target_os = "macos") {
+            cx.spawn(async move |this, cx| {
+                let stream = apple::track_devices(
+                    APPLE_DEVICE_POLL_INTERVAL,
+                    cx.background_executor().clone(),
+                );
+                pin_mut!(stream);
+                while let Some(result) = stream.next().await {
+                    let Ok(_) = this.update(cx, |panel, cx| {
+                        panel.apply_apple_device_poll(result);
+                        cx.notify();
+                    }) else {
+                        break;
+                    };
+                }
+            })
+        } else {
+            Task::ready(())
+        };
+
+        let avd_tracker = cx.spawn(async move |this, cx| {
+            loop {
+                let env = this
+                    .read_with(cx, |panel, _| {
+                        toolchain::build_env(panel.toolchain_status.as_ref())
+                    })
+                    .unwrap_or_default();
+                let avds = cx
+                    .background_spawn(async move { emulator::list_avds(&env).await })
+                    .await;
+                let Ok(_) = this.update(cx, |panel, cx| {
+                    if let Ok(avds) = avds {
+                        panel.avds = avds.into_iter().map(SharedString::from).collect();
+                        cx.notify();
+                    }
+                }) else {
+                    break;
+                };
+                cx.background_executor().timer(AVD_POLL_INTERVAL).await;
+            }
+        });
+
+        self.device_trackers = Some([device_tracker, apple_device_tracker, avd_tracker]);
     }
 
     fn spawn_toolchain_detection(cx: &mut Context<Self>) -> Task<()> {
@@ -858,7 +874,7 @@ impl MobileDevPanel {
             device_label: device.serial,
             target: SharedString::from(package),
             pid: None,
-            lines: Vec::new(),
+            lines: VecDeque::new(),
             error: None,
             _forwarder: forwarder,
         });
@@ -907,7 +923,7 @@ impl MobileDevPanel {
             device_label: device.name,
             target: SharedString::from(project.display_name),
             pid: None,
-            lines: Vec::new(),
+            lines: VecDeque::new(),
             error: None,
             _forwarder: forwarder,
         });
@@ -920,10 +936,9 @@ impl MobileDevPanel {
         };
         match item {
             Ok(line) => {
-                state.lines.push(SharedString::from(line));
+                state.lines.push_back(SharedString::from(line));
                 if state.lines.len() > LOGCAT_LINE_CAP {
-                    let overflow = state.lines.len() - LOGCAT_LINE_CAP;
-                    state.lines.drain(..overflow);
+                    state.lines.pop_front();
                 }
             }
             Err(err) => {
@@ -1761,7 +1776,7 @@ impl MobileDevPanel {
 
         let visible_lines: Vec<SharedString> =
             state.lines.iter().rev().take(80).rev().cloned().collect();
-        let copy_text = state.lines.join("\n");
+        let panel = cx.weak_entity();
 
         // The pid annotation only means something for logcat; the iOS log
         // stream is filtered by process name instead.
@@ -1801,7 +1816,32 @@ impl MobileDevPanel {
                         .color(Color::Muted),
                 )
             })
-            .child(CopyButton::new("mobile-logcat-copy", copy_text).tooltip_label("Copy log"));
+            .child(
+                // The log streams, so join it only when copied rather than on
+                // every render.
+                CopyButton::new("mobile-logcat-copy", "")
+                    .tooltip_label("Copy log")
+                    .custom_on_click(move |_, cx| {
+                        cx.stop_propagation();
+                        let Some(panel) = panel.upgrade() else {
+                            return;
+                        };
+                        let text = panel
+                            .read(cx)
+                            .logcat_state
+                            .as_ref()
+                            .map(|state| {
+                                state
+                                    .lines
+                                    .iter()
+                                    .map(|line| line.as_ref())
+                                    .collect::<Vec<&str>>()
+                                    .join("\n")
+                            })
+                            .unwrap_or_default();
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    }),
+            );
 
         let error_line = state.error.as_ref().map(|err| {
             Label::new(err.clone())
@@ -2663,6 +2703,11 @@ impl Panel for MobileDevPanel {
 
     fn toggle_action(&self) -> Box<dyn gpui::Action> {
         Box::new(ToggleFocus)
+    }
+
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        self.panel_active = active;
+        self.update_device_tracking(cx);
     }
 
     fn activation_priority(&self) -> u32 {

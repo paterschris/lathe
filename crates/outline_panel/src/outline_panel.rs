@@ -140,6 +140,8 @@ pub struct OutlinePanel {
     fs_entries_update_pending: bool,
     cached_entries_update_task: Task<()>,
     cached_entries_update_pending: bool,
+    buffer_edit_update_task: Task<()>,
+    buffer_edit_update_pending: bool,
     reveal_selection_task: Task<anyhow::Result<()>>,
     outline_fetch_tasks: HashMap<BufferId, Task<()>>,
     buffers: HashMap<BufferId, BufferOutlines>,
@@ -904,6 +906,8 @@ impl OutlinePanel {
                 fs_entries_update_pending: false,
                 cached_entries_update_task: Task::ready(()),
                 cached_entries_update_pending: false,
+                buffer_edit_update_task: Task::ready(()),
+                buffer_edit_update_pending: false,
                 reveal_selection_task: Task::ready(Ok(())),
                 outline_fetch_tasks: HashMap::default(),
                 buffers: HashMap::default(),
@@ -3199,6 +3203,8 @@ impl OutlinePanel {
         self.outline_fetch_tasks.clear();
         self.cached_entries_update_task = Task::ready(());
         self.cached_entries_update_pending = false;
+        self.buffer_edit_update_task = Task::ready(());
+        self.buffer_edit_update_pending = false;
         self.reveal_selection_task = Task::ready(Ok(()));
         self.filter_editor
             .update(cx, |editor, cx| editor.clear(window, cx));
@@ -4225,6 +4231,28 @@ impl OutlinePanel {
             }) => CollapsedEntry::Dir(*worktree_id, entry.id),
         };
         !self.collapsed_entries.contains(&entry_to_check)
+    }
+
+    /// Batches the search-match diff and outline refetch that follow buffer
+    /// edits, which otherwise run on every keystroke. Like
+    /// `update_cached_entries`, a pending update is not rescheduled so steady
+    /// typing can't starve it.
+    fn schedule_buffer_edit_update(&mut self, window: &mut Window, cx: &mut Context<OutlinePanel>) {
+        if self.buffer_edit_update_pending {
+            return;
+        }
+        self.buffer_edit_update_pending = true;
+        self.buffer_edit_update_task = cx.spawn_in(window, async move |outline_panel, cx| {
+            cx.background_executor().timer(UPDATE_DEBOUNCE).await;
+            outline_panel
+                .update_in(cx, |outline_panel, window, cx| {
+                    outline_panel.buffer_edit_update_pending = false;
+                    if outline_panel.update_non_fs_items(window, cx) {
+                        outline_panel.update_cached_entries(None, window, cx);
+                    }
+                })
+                .ok();
+        });
     }
 
     fn update_non_fs_items(&mut self, window: &mut Window, cx: &mut Context<OutlinePanel>) -> bool {
@@ -5258,10 +5286,7 @@ fn subscribe_for_editor_events(
                 }
                 EditorEvent::BuffersEdited { buffer_ids } => {
                     outline_panel.invalidate_outlines(buffer_ids);
-                    let update_cached_items = outline_panel.update_non_fs_items(window, cx);
-                    if update_cached_items {
-                        outline_panel.update_cached_entries(Some(UPDATE_DEBOUNCE), window, cx);
-                    }
+                    outline_panel.schedule_buffer_edit_update(window, cx);
                 }
                 EditorEvent::BufferFoldToggled { ids, .. } => {
                     outline_panel.invalidate_outlines(ids);

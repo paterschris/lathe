@@ -2905,8 +2905,8 @@ impl Pane {
 
         let project_path = item.project_path(cx);
 
-        let tab_text_color_override =
-            pane_tab_status::text_color_override(&self.project, project_path.as_ref(), cx);
+        let git_status = pane_tab_status::git_status(&self.project, project_path.as_ref(), cx);
+        let tab_text_color_override = pane_tab_status::text_color_override(git_status, cx);
 
         let label = item.tab_content(
             TabContentParams {
@@ -2926,8 +2926,7 @@ impl Pane {
             .and_then(|project_path| self.diagnostics.get(project_path));
 
         let tab_bg_override = pane_tab_status::background_override(
-            &self.project,
-            project_path.as_ref(),
+            git_status,
             item_diagnostic,
             item.is_dirty(cx),
             cx,

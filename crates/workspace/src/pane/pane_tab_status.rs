@@ -5,24 +5,30 @@ use project::{Project, ProjectPath};
 use settings::Settings;
 use ui::prelude::*;
 
-enum GitTabStatus {
+#[derive(Clone, Copy)]
+pub(crate) enum GitTabStatus {
     Conflict,
     Deleted,
     Modified,
     Created,
 }
 
-pub(crate) fn text_color_override(
+/// Looked up once per tab per render and shared by the text and background
+/// overrides; each lookup resolves the path to its repository.
+pub(crate) fn git_status(
     project: &WeakEntity<Project>,
     project_path: Option<&ProjectPath>,
     cx: &App,
-) -> Option<Color> {
+) -> Option<GitTabStatus> {
     if !ItemSettings::get_global(cx).git_status {
         return None;
     }
+    git_tab_status(project, project_path?, cx)
+}
 
+pub(crate) fn text_color_override(git_status: Option<GitTabStatus>, cx: &App) -> Option<Color> {
     let colors = cx.theme().colors();
-    let color = match git_tab_status(project, project_path?, cx)? {
+    let color = match git_status? {
         GitTabStatus::Conflict => colors.lathe.tab_conflict_foreground,
         GitTabStatus::Deleted => colors.lathe.tab_deleted_foreground,
         GitTabStatus::Modified => colors.lathe.tab_modified_foreground,
@@ -32,8 +38,7 @@ pub(crate) fn text_color_override(
 }
 
 pub(crate) fn background_override(
-    project: &WeakEntity<Project>,
-    project_path: Option<&ProjectPath>,
+    git_status: Option<GitTabStatus>,
     item_diagnostic: Option<&DiagnosticSeverity>,
     item_dirty: bool,
     cx: &App,
@@ -50,7 +55,7 @@ pub(crate) fn background_override(
         } else if let Some(&DiagnosticSeverity::WARNING) = item_diagnostic {
             colors.lathe.tab_warning_background
         } else {
-            match git_tab_status(project, project_path?, cx)? {
+            match git_status? {
                 GitTabStatus::Conflict => colors.lathe.tab_conflict_background,
                 GitTabStatus::Deleted => colors.lathe.tab_deleted_background,
                 GitTabStatus::Modified => colors.lathe.tab_modified_background,

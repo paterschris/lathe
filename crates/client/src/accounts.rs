@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use gpui::AsyncApp;
 use util::ResultExt as _;
@@ -60,11 +62,32 @@ fn accounts_path() -> PathBuf {
     paths::config_dir().join("collab_accounts.json")
 }
 
+/// The parsed index, keyed by the file's modification time. The title bar reads
+/// the index on every render, so this turns a read and JSON parse into a `stat`
+/// while still picking up writes from other Lathe instances.
+static INDEX_CACHE: Mutex<Option<(SystemTime, CollabAccountsIndex)>> = Mutex::new(None);
+
 pub fn load_index() -> CollabAccountsIndex {
-    std::fs::read(accounts_path())
+    let path = accounts_path();
+    let Some(modified) = std::fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+    else {
+        *INDEX_CACHE.lock() = None;
+        return CollabAccountsIndex::default();
+    };
+    let mut cache = INDEX_CACHE.lock();
+    if let Some((cached_modified, index)) = cache.as_ref()
+        && *cached_modified == modified
+    {
+        return index.clone();
+    }
+    let index: CollabAccountsIndex = std::fs::read(&path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    *cache = Some((modified, index.clone()));
+    index
 }
 
 pub fn save_index(index: &CollabAccountsIndex) -> Result<()> {
@@ -73,6 +96,7 @@ pub fn save_index(index: &CollabAccountsIndex) -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     let bytes = serde_json::to_vec_pretty(index).context("serialize collab accounts index")?;
+    *INDEX_CACHE.lock() = None;
     std::fs::write(&path, bytes).context("write collab_accounts.json")
 }
 

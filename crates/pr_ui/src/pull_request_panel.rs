@@ -561,11 +561,9 @@ impl PullRequestPanel {
             let (identity, is_main, label) = {
                 let repo = repository.read(cx);
                 let snapshot = repo.snapshot();
-                let identity = repo_identity_path_if_local(
-                    &snapshot.common_dir_abs_path,
-                    snapshot.path_style,
-                )
-                .map(Path::to_path_buf);
+                let identity =
+                    repo_identity_path_if_local(&snapshot.common_dir_abs_path, snapshot.path_style)
+                        .map(Path::to_path_buf);
                 let label = identity
                     .as_deref()
                     .and_then(|identity| {

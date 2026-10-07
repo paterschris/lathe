@@ -46,7 +46,10 @@ impl TitleBar {
                     "titlebar-awaiting-pulse",
                     Animation::new(Duration::from_secs(2))
                         .repeat()
-                        .with_easing(pulsating_between(0.4, 1.0)),
+                        .with_easing(pulsating_between(0.4, 1.0))
+                        // The pulse can run for hours while an agent waits, and every
+                        // frame re-renders the whole title bar.
+                        .with_max_fps(15.0),
                     |element, delta| element.opacity(delta),
                 )
                 .into_any_element(),

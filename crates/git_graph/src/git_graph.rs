@@ -40,7 +40,7 @@ use project::{
 };
 use smallvec::{SmallVec, smallvec};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     ops::Range,
     rc::Rc,
     sync::{Arc, OnceLock},
@@ -1252,6 +1252,10 @@ pub struct GitGraph {
     focus_handle: FocusHandle,
     search_state: SearchState,
     graph_data: GraphData,
+    /// Filter-mode rows, cached because render and every navigation action
+    /// need them and building them scans every commit. Cleared whenever the
+    /// commits, the search matches, or `filter_mode` change.
+    visible_indices: RefCell<Option<Rc<Vec<usize>>>>,
     git_store: Entity<GitStore>,
     workspace: WeakEntity<Workspace>,
     context_menu: Option<GitGraphContextMenuState>,
@@ -1283,6 +1287,7 @@ pub struct GitGraph {
 
 impl GitGraph {
     fn invalidate_state(&mut self, cx: &mut Context<Self>) {
+        self.visible_indices.take();
         self.graph_data.clear();
         self.search_state.matches.clear();
         self.search_state.selected_index = None;
@@ -1484,6 +1489,7 @@ impl GitGraph {
             },
             workspace,
             graph_data: graph,
+            visible_indices: RefCell::default(),
             _commit_diff_task: None,
             context_menu: None,
             table_interaction_state,
@@ -1549,6 +1555,7 @@ impl GitGraph {
                                     cx,
                                 );
                                 self.graph_data.add_commits(commits);
+                                self.visible_indices.take();
 
                                 let pending_sha_index = self.pending_select_sha.and_then(|oid| {
                                     repository.get_graph_data(source.clone(), *order).and_then(
@@ -1598,6 +1605,7 @@ impl GitGraph {
                     .graph_data(self.log_source.clone(), self.log_order, 0..usize::MAX, cx)
                     .commits;
                 self.graph_data.add_commits(commits);
+                self.visible_indices.take();
             });
         }
     }
@@ -2007,6 +2015,7 @@ impl GitGraph {
         };
 
         self.search_state.matches.clear();
+        self.visible_indices.take();
         self.search_state.selected_index = None;
         self.search_state.editor.update(cx, |editor, _cx| {
             editor.set_text_style_refinement(Default::default());
@@ -2055,6 +2064,7 @@ impl GitGraph {
                     }
 
                     this.search_state.matches.extend(pending_oids);
+                    this.visible_indices.take();
                     cx.notify();
                 })
                 .ok();
@@ -2084,23 +2094,30 @@ impl GitGraph {
     /// When filter mode is on, returns the list of absolute commit indices
     /// that match the current search. Returns `None` when filter mode is off
     /// (callers should treat the row index as already absolute).
-    fn visible_indices(&self) -> Option<Vec<usize>> {
+    fn visible_indices(&self) -> Option<Rc<Vec<usize>>> {
         if !self.filter_mode {
             return None;
         }
-        Some(
-            self.graph_data
-                .commits
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, commit)| {
-                    self.search_state
-                        .matches
-                        .contains(&commit.data.sha)
-                        .then_some(idx)
-                })
-                .collect(),
-        )
+        let indices = self
+            .visible_indices
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                Rc::new(
+                    self.graph_data
+                        .commits
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, commit)| {
+                            self.search_state
+                                .matches
+                                .contains(&commit.data.sha)
+                                .then_some(idx)
+                        })
+                        .collect(),
+                )
+            })
+            .clone();
+        Some(indices)
     }
 
     fn visible_filtered_row_count(&self, total: usize) -> usize {
@@ -2123,6 +2140,7 @@ impl GitGraph {
         cx: &mut Context<Self>,
     ) {
         self.filter_mode = !self.filter_mode;
+        self.visible_indices.take();
         // If the currently selected commit is hidden by the new filter view,
         // scrolling to its (now invalid) display index would jump to the top
         // anyway; leave the absolute selection in place so toggling filter
@@ -4369,6 +4387,7 @@ impl Render for GitGraph {
                             cx,
                         );
                         self.graph_data.add_commits(&commits);
+                        self.visible_indices.take();
                         (commits.len(), is_loading)
                     })
                 } else {
@@ -4469,19 +4488,11 @@ impl Render for GitGraph {
                             let weak_self = cx.weak_entity();
                             let focus_handle = self.focus_handle.clone();
                             let row_repo_id = self.repo_id;
-                            let row_shas: Rc<Vec<Oid>> = Rc::new(
-                                self.graph_data
-                                    .commits
-                                    .iter()
-                                    .map(|c| c.data.sha)
-                                    .collect(),
-                            );
                             // When filter mode is on, the table widget hands us
                             // display-row indices; translate them to absolute
                             // commit indices so every downstream lookup matches
                             // the unfiltered behavior.
-                            let visible_indices: Rc<Option<Vec<usize>>> =
-                                Rc::new(self.visible_indices());
+                            let visible_indices = self.visible_indices();
 
                             bind_redistributable_columns(
                                 div()
@@ -4579,7 +4590,16 @@ impl Render for GitGraph {
                                                                     cx.theme().colors().element_hover
                                                                 };
 
-                                                                let row_sha = row_shas.get(index).copied();
+                                                                // Read lazily per visible row; collecting every sha up
+                                                                // front made each render O(total commits).
+                                                                let row_sha = weak_self.upgrade().and_then(|graph| {
+                                                                    graph
+                                                                        .read(cx)
+                                                                        .graph_data
+                                                                        .commits
+                                                                        .get(index)
+                                                                        .map(|commit| commit.data.sha)
+                                                                });
 
                                                                 let marked_bg = cx
                                                                     .theme()

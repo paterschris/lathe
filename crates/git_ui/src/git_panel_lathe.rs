@@ -16,7 +16,7 @@ use super::*;
 
 /// One rendered row in the Explorer's flat row list. Headers are interleaved
 /// with their section's entries, indexed back into `explorer_entries`.
-enum ExplorerRow {
+pub(super) enum ExplorerRow {
     Header {
         section: ExplorerSection,
         count: usize,
@@ -148,16 +148,8 @@ struct ExplorerFolderNode {
     full_path: SharedString,
     children: BTreeMap<SharedString, ExplorerFolderNode>,
     entry_ix: Option<usize>,
-}
-
-impl ExplorerFolderNode {
-    fn leaf_count(&self) -> usize {
-        let mut total = if self.entry_ix.is_some() { 1 } else { 0 };
-        for child in self.children.values() {
-            total += child.leaf_count();
-        }
-        total
-    }
+    /// Number of entries at or below this node, maintained while building.
+    leaf_count: usize,
 }
 
 fn build_explorer_folder_tree(
@@ -192,7 +184,9 @@ fn build_explorer_folder_tree(
                     full_path: path,
                     children: BTreeMap::new(),
                     entry_ix: None,
+                    leaf_count: 0,
                 });
+            node.leaf_count += 1;
             if i == last {
                 node.entry_ix = Some(ix);
             }
@@ -228,7 +222,7 @@ fn flatten_folder_tree(
             name: folder.name.clone(),
             depth,
             collapsed: is_collapsed,
-            count: folder.leaf_count(),
+            count: folder.leaf_count,
         });
         if !is_collapsed {
             flatten_folder_tree(folder, section, depth + 1, rows, collapsed_folders);
@@ -562,28 +556,21 @@ async fn delete_branch_prompting_for_force(
 }
 
 impl super::GitPanel {
-    /// Kick off async loads of the things the Explorer tab needs to render
-    /// (branches via the git CLI; worktrees and stashes are already cached on
-    /// the repository). Results land in `explorer_entries` on the foreground
-    /// thread.
+    /// Rebuild `explorer_entries` from the repository snapshot. Branches come
+    /// from the snapshot's cached branch list rather than a fresh `git
+    /// for-each-ref`, since this runs on every status change and the snapshot
+    /// scan already lists branches; `BranchListChanged` triggers a refresh when
+    /// that list moves.
     pub(super) fn refresh_explorer_data(&mut self, cx: &mut Context<Self>) {
+        self.explorer_rows.take();
         let Some(repo) = self.active_repository.clone() else {
             self.explorer_entries.clear();
             return;
         };
         self.populate_cached_explorer_entries(cx);
+        let branches = repo.read(cx).branch_list.to_vec();
+        self.merge_branches_into_explorer(branches);
         cx.notify();
-        let branches_rx = repo.update(cx, |repo, _| repo.branches());
-        self.explorer_load_task = Some(cx.spawn(async move |this, cx| {
-            let Ok(Ok(branches)) = branches_rx.await else {
-                return;
-            };
-            this.update(cx, |this, cx| {
-                this.merge_branches_into_explorer(branches.branches);
-                cx.notify();
-            })
-            .ok();
-        }));
     }
 
     /// Toggle the collapsed state for one folder path within a section.
@@ -593,6 +580,7 @@ impl super::GitPanel {
         path: SharedString,
         cx: &mut Context<Self>,
     ) {
+        self.explorer_rows.take();
         let key = (section, path);
         if self.explorer_collapsed_folders.contains(&key) {
             self.explorer_collapsed_folders.remove(&key);
@@ -602,11 +590,8 @@ impl super::GitPanel {
         cx.notify();
     }
 
-    /// Populate `explorer_entries` from data already on the cached repository
-    /// snapshot (linked worktrees, stash entries) so the tab renders
-    /// immediately while the async branch fetch is in flight. Existing branch
-    /// rows are kept as-is until that fetch lands, so a refresh never blanks
-    /// the branch sections.
+    /// Replace the worktree and stash rows in `explorer_entries` with those on
+    /// the cached repository snapshot, leaving branch rows in place.
     fn populate_cached_explorer_entries(&mut self, cx: &App) {
         self.explorer_entries.retain(|entry| {
             matches!(
@@ -707,8 +692,7 @@ impl super::GitPanel {
         self.explorer_filter.read(cx).text(cx).to_lowercase()
     }
 
-    fn explorer_visible_entries(&self, cx: &App) -> Vec<(ExplorerSection, Vec<usize>)> {
-        let filter = self.explorer_filter_text(cx);
+    fn explorer_visible_entries(&self, filter: &str) -> Vec<(ExplorerSection, Vec<usize>)> {
         let needle = filter.trim();
         let sections = [
             ExplorerSection::Local,
@@ -734,22 +718,21 @@ impl super::GitPanel {
             .collect()
     }
 
-    pub(super) fn render_explorer_tab(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let sections = self.explorer_visible_entries(cx);
-        let collapsed = self.explorer_collapsed_sections.clone();
-        let collapsed_folders = self.explorer_collapsed_folders.clone();
-        let filter_active = !self.explorer_filter_text(cx).trim().is_empty();
+    fn explorer_rows(&self, filter: &str) -> Arc<Vec<ExplorerRow>> {
+        if let Some((cached_filter, rows)) = self.explorer_rows.borrow().as_ref()
+            && cached_filter == filter
+        {
+            return rows.clone();
+        }
+        let sections = self.explorer_visible_entries(filter);
+        let filter_active = !filter.trim().is_empty();
 
         // Build a flat list of rows: alternating section-header rows and
         // entry rows. We track each row's kind in a parallel vector so the
         // uniform_list closure can dispatch.
         let mut rows: Vec<ExplorerRow> = Vec::new();
         for (section, indices) in &sections {
-            let is_collapsed = collapsed.contains(section);
+            let is_collapsed = self.explorer_collapsed_sections.contains(section);
             rows.push(ExplorerRow::Header {
                 section: *section,
                 count: indices.len(),
@@ -762,7 +745,13 @@ impl super::GitPanel {
                 && !filter_active;
             if tree_eligible {
                 let tree = build_explorer_folder_tree(&self.explorer_entries, indices);
-                flatten_folder_tree(&tree, *section, 0, &mut rows, &collapsed_folders);
+                flatten_folder_tree(
+                    &tree,
+                    *section,
+                    0,
+                    &mut rows,
+                    &self.explorer_collapsed_folders,
+                );
             } else {
                 for ix in indices {
                     rows.push(ExplorerRow::Entry {
@@ -772,6 +761,18 @@ impl super::GitPanel {
                 }
             }
         }
+        let rows = Arc::new(rows);
+        *self.explorer_rows.borrow_mut() = Some((filter.to_string(), rows.clone()));
+        rows
+    }
+
+    pub(super) fn render_explorer_tab(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let filter = self.explorer_filter_text(cx);
+        let entries = self.explorer_rows(&filter);
 
         let total_count = self.explorer_entries.len();
         let viewing_label = if total_count == 0 {
@@ -780,9 +781,7 @@ impl super::GitPanel {
             format!("Viewing {}", total_count)
         };
 
-        let entries = std::sync::Arc::new(rows);
         let entries_for_list = entries.clone();
-        let explorer_entries = self.explorer_entries.clone();
 
         v_flex()
             .flex_1()
@@ -815,7 +814,12 @@ impl super::GitPanel {
                         let mut elements = Vec::with_capacity(range.end - range.start);
                         for ix in range {
                             let row = &entries_for_list[ix];
-                            elements.push(this.render_explorer_row(ix, row, &explorer_entries, cx));
+                            elements.push(this.render_explorer_row(
+                                ix,
+                                row,
+                                &this.explorer_entries,
+                                cx,
+                            ));
                         }
                         elements
                     }),
@@ -870,6 +874,7 @@ impl super::GitPanel {
                             .color(Color::Muted),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.explorer_rows.take();
                         if this.explorer_collapsed_sections.contains(&section) {
                             this.explorer_collapsed_sections.remove(&section);
                         } else {

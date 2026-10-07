@@ -30,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use task::TaskId;
 use terminal::{
@@ -132,6 +132,8 @@ pub struct TerminalView {
     awaiting_input: Option<InteractivePromptKind>,
     has_had_input: bool,
     idle_timer: Task<()>,
+    idle_timer_pending: bool,
+    last_output_at: Instant,
     context_menu: Option<(Entity<ContextMenu>, GpuiPoint<Pixels>, Subscription)>,
     cursor_shape: CursorShape,
     blink_manager: Entity<BlinkManager>,
@@ -284,6 +286,8 @@ impl TerminalView {
             awaiting_input: None,
             has_had_input: false,
             idle_timer: Task::ready(()),
+            idle_timer_pending: false,
+            last_output_at: cx.background_executor().now(),
             focus_handle,
             context_menu: None,
             cursor_shape,
@@ -1301,6 +1305,7 @@ impl TerminalView {
         self.awaiting_input = None;
         self.has_had_input = false;
         self.idle_timer = Task::ready(());
+        self.idle_timer_pending = false;
         self._terminal_subscriptions =
             subscribe_for_terminal_events(&terminal, self.workspace.clone(), window, cx);
         self.terminal = terminal;

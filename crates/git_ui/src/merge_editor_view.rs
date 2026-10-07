@@ -212,10 +212,15 @@ impl MergeEditorView {
 
         let subscriptions = vec![
             cx.subscribe(&conflict_set, Self::on_conflict_set_update),
-            cx.observe(&buffer, |this, _, cx| {
-                this.refresh_split_content(cx);
-                this.refresh_split_highlights(cx);
-                cx.notify();
+            // Only text edits change the split panes. Observing the buffer also
+            // fired on reparses and other non-edit notifies, each of which
+            // rebuilt all three whole-file panes.
+            cx.subscribe(&buffer, |this, _, event, cx| {
+                if matches!(event, language::BufferEvent::Edited { .. }) {
+                    this.refresh_split_content(cx);
+                    this.refresh_split_highlights(cx);
+                    cx.notify();
+                }
             }),
         ];
 

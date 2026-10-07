@@ -1117,7 +1117,11 @@ pub struct GitPanel {
     explorer_collapsed_folders: HashSet<(lathe::ExplorerSection, SharedString)>,
     explorer_selected_row: Option<usize>,
     explorer_scroll_handle: UniformListScrollHandle,
-    explorer_load_task: Option<Task<()>>,
+    /// Flattened Explorer rows plus the filter text they were built for.
+    /// Rebuilding means lowercasing every label and building a folder tree,
+    /// so it's cached across renders and cleared whenever entries or
+    /// collapsed state change.
+    explorer_rows: std::cell::RefCell<Option<(String, Arc<Vec<lathe::ExplorerRow>>)>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1330,6 +1334,11 @@ impl GitPanel {
                 &git_store,
                 window,
                 move |this, _git_store, event, window, cx| match event {
+                    GitStoreEvent::RepositoryUpdated(_, RepositoryEvent::BranchListChanged, true)
+                        if this.active_tab == GitPanelTab::Explorer =>
+                    {
+                        this.refresh_explorer_data(cx);
+                    }
                     GitStoreEvent::RepositoryUpdated(
                         _,
                         RepositoryEvent::StatusesChanged | RepositoryEvent::HeadChanged,
@@ -1435,7 +1444,7 @@ impl GitPanel {
                 explorer_collapsed_folders: HashSet::default(),
                 explorer_selected_row: None,
                 explorer_scroll_handle: UniformListScrollHandle::new(),
-                explorer_load_task: None,
+                explorer_rows: Default::default(),
             };
 
             this.schedule_update(window, cx);
@@ -4694,6 +4703,7 @@ impl GitPanel {
                 // while the branch fetch is in flight.
                 self.explorer_selected_row = None;
                 self.explorer_entries.clear();
+                self.explorer_rows.take();
             }
             self.refresh_explorer_data(cx);
         }

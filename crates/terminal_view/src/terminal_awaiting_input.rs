@@ -14,12 +14,32 @@ pub(super) fn start_idle_timer(terminal_view: &mut TerminalView, cx: &mut Contex
     if threshold_secs == 0 {
         return;
     }
+    terminal_view.last_output_at = cx.background_executor().now();
+    // Wakeups arrive up to ~250 times a second while output streams, so rather than
+    // respawning a timer per wakeup, one pending timer re-arms itself until output
+    // has actually been quiet for the full threshold.
+    if terminal_view.idle_timer_pending {
+        return;
+    }
+    terminal_view.idle_timer_pending = true;
     let threshold = Duration::from_secs(threshold_secs);
     let awaiting_sound =
         awaiting_input_sound(TerminalSettings::get_global(cx).sound_on_awaiting_input);
     terminal_view.idle_timer = cx.spawn(async move |this, cx| {
-        cx.background_executor().timer(threshold).await;
+        let mut remaining = threshold;
+        loop {
+            cx.background_executor().timer(remaining).await;
+            let Ok(last_output_at) = this.read_with(cx, |this, _| this.last_output_at) else {
+                return;
+            };
+            let quiet_for = cx.background_executor().now() - last_output_at;
+            if quiet_for >= threshold {
+                break;
+            }
+            remaining = threshold - quiet_for;
+        }
         this.update(cx, |this, cx| {
+            this.idle_timer_pending = false;
             if !this.has_had_input {
                 return;
             }
@@ -79,7 +99,10 @@ pub(super) fn tab_icon(
             "tab-awaiting-pulse",
             Animation::new(Duration::from_secs(2))
                 .repeat()
-                .with_easing(pulsating_between(0.4, 1.0)),
+                .with_easing(pulsating_between(0.4, 1.0))
+                // The pulse can run for hours while an agent waits, and every
+                // frame re-renders the whole pane.
+                .with_max_fps(15.0),
             |element, delta| element.opacity(delta),
         )
         .into_any_element()
