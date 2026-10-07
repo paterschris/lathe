@@ -2,6 +2,40 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.9.0-beta - 2026-10-06
+
+Mostly about layout and accounts. Docks can hold two panels now, every panel can live in the bottom dock, and the AI and git accounts you pick stay with the workspace you picked them in.
+
+### Added
+
+- **Two panels per dock.** Cmd-click a second panel's button and it opens under the first (or beside it, in the bottom dock), with a divider you can drag. Double-click the divider for 50/50. Clicking a button that shares the dock closes just that panel, and clicking it again puts it back where it was, same divider and all. The split is saved per workspace.
+- **Drag panels where you want them.** Drag a panel's button off the status bar and drop zones show up for each half of each dock. Right-click a button for the same thing under **Move to**. The old Dock Left / Right / Bottom entries are still there.
+- Every panel can go in the bottom dock now, including Project, Git, Outline, Pull Requests, Collab and Agent. Mobile Dev only goes in the bottom dock, since device logs need the width.
+- A close button sits next to each open dock's panel buttons, and every button's right-click menu has **Close Left Panels** (or Right, Bottom). Reopening brings back the same panels in the same sizes.
+- **Several accounts per git host.** Add a second GitHub, GitLab or Bitbucket account from the account menu and pick which one each workspace uses. Pull requests, reviews and the reviewer picker all follow that choice. Your existing connection carries over as the first account without signing in again.
+- **Color swatches and a color picker.** Hex, `0x` hex and `rgb()` / `hsl()` values get a swatch in front of them, language server or not. Click it (or right-click and choose **Pick Color**) to adjust the color. The new value is written back in the same notation, as one undo step. An all-digit `#123` in Markdown or a commit message is left alone, since that's usually an issue number.
+- **Refresh** in the project panel's right-click menu re-reads the tree from disk, for the times the file watcher misses something.
+- Pull request panel sections can be dragged to the height you want. Double-click the divider to reset one.
+
+### Fixed
+
+- **Switching AI accounts only affects that workspace.** It used to change the account for every window and every running Lathe instance, because the choice was written to the shared settings file. It's now remembered per workspace, and the setting is just the default.
+- "My reviews" keeps pull requests you've already approved or requested changes on. They used to disappear once you voted, because GitHub drops you from the requested reviewers list when you submit.
+- Autosave and agent edits don't remove imports anymore. "Organize Imports" still sorts on those saves but skips the remove-unused step, so an import that was just added doesn't get deleted before anything uses it. Saving with `cmd-s` works as before.
+- Folders symlinked from outside the project pick up file changes, and filesystems that need a polling watcher get one.
+- A soft-wrap state that never settled, which left stale ranges on the scrollbar.
+
+### Changed
+
+- A round of performance work aimed at things that ran on every frame or keystroke. The account menus stopped re-reading their files on every render. The git panel, git graph and outline cache what they build instead of rebuilding it per keystroke. Mobile Dev only polls for devices while it's open or the project is a mobile one. And the terminal's awaiting-input pulse no longer re-renders the whole pane on every frame, which mattered with an agent waiting for hours.
+
+### Known issues
+
+- Panels can't go in the editor area as tabs yet.
+- Tested by hand on macOS. Windows and Linux untested.
+
+---
+
 ## v1.8.0 - 2026-10-04
 
 The first stable release since 1.4.0. Everything from the 1.5.0, 1.6.0 and 1.7.0 betas is in here, plus a round of fixes that came out of testing them.
