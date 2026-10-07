@@ -211,28 +211,44 @@ impl GitHostingProvider for Gitlab {
             };
             query.push(format!("state={state}"));
         }
+        let mut variants = vec![Vec::new()];
         if let Some(username) = &username {
-            if filter.reviewer_is_me {
-                query.push(format!("reviewer_username={}", encode(username)));
-            }
             if filter.author_is_me {
                 query.push(format!("author_username={}", encode(username)));
             }
+            if filter.reviewer_is_me {
+                // Approving doesn't require being an assigned reviewer, so MRs the
+                // viewer approved come from a second query and are merged in.
+                variants = vec![
+                    vec![format!("reviewer_username={}", encode(username))],
+                    vec![format!("approved_by_usernames[]={}", encode(username))],
+                ];
+            }
         }
-        let url = format!(
-            "{api}/projects/{project}/merge_requests?{}",
-            query.join("&")
-        );
-        let request = gitlab_request(GitlabMethod::Get, &url, &auth, None)?;
-        let bytes = gitlab_send(
-            &http_client,
-            request,
-            &self.api_host(),
-            "listing GitLab merge requests",
-        )
-        .await?;
-        let raw: Vec<GitlabMergeRequest> =
-            serde_json::from_slice(&bytes).context("parsing GitLab merge request list")?;
+        let mut raw: Vec<GitlabMergeRequest> = Vec::new();
+        for variant in variants {
+            let url = format!(
+                "{api}/projects/{project}/merge_requests?{}",
+                query.iter().chain(&variant).cloned().collect::<Vec<_>>().join("&")
+            );
+            let request = gitlab_request(GitlabMethod::Get, &url, &auth, None)?;
+            let bytes = gitlab_send(
+                &http_client,
+                request,
+                &self.api_host(),
+                "listing GitLab merge requests",
+            )
+            .await?;
+            let batch: Vec<GitlabMergeRequest> =
+                serde_json::from_slice(&bytes).context("parsing GitLab merge request list")?;
+            for merge_request in batch {
+                if !raw.iter().any(|existing| existing.iid == merge_request.iid) {
+                    raw.push(merge_request);
+                }
+            }
+        }
+        // Each query comes back newest first; restore that order across both.
+        raw.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
         let mut summaries = Vec::new();
         for merge_request in raw {
@@ -1137,6 +1153,71 @@ mod tests {
                 repo: "zed".into(),
             }
         );
+    }
+
+    #[test]
+    fn test_gitlab_reviewer_filter_includes_merge_requests_i_approved() -> anyhow::Result<()> {
+        // Approving doesn't make someone an assigned reviewer, so "my reviews"
+        // merges the reviewer query with the approved-by query, without
+        // duplicates and newest first.
+        let client: Arc<dyn HttpClient> =
+            http_client::FakeHttpClient::create(|request| async move {
+                let path = request.uri().path();
+                let query = request.uri().query().unwrap_or_default().to_string();
+                let merge_request = |iid: u32, updated_at: &str| {
+                    format!(
+                        r#"{{"iid":{iid},"title":"MR {iid}","state":"opened",
+                            "web_url":"https://gitlab.com/owner/repo/-/merge_requests/{iid}",
+                            "updated_at":"{updated_at}"}}"#
+                    )
+                };
+                let body = if path == "/api/v4/user" {
+                    r#"{"username":"me"}"#.to_string()
+                } else if path == "/api/v4/projects/owner%2Frepo/merge_requests"
+                    && query.contains("reviewer_username=me")
+                {
+                    format!(
+                        "[{},{}]",
+                        merge_request(1, "2026-01-01T00:00:00.000Z"),
+                        merge_request(2, "2026-01-03T00:00:00.000Z")
+                    )
+                } else if path == "/api/v4/projects/owner%2Frepo/merge_requests"
+                    && query.contains("approved_by_usernames[]=me")
+                {
+                    format!(
+                        "[{},{}]",
+                        merge_request(3, "2026-01-02T00:00:00.000Z"),
+                        merge_request(2, "2026-01-03T00:00:00.000Z")
+                    )
+                } else {
+                    return Err(anyhow::anyhow!("unexpected GitLab request: {path}?{query}"));
+                };
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(body.into())?)
+            });
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let filter = PullRequestListFilter {
+            states: Some(vec![PullRequestState::Open]),
+            author: None,
+            reviewer_is_me: true,
+            author_is_me: false,
+            limit: Some(50),
+            page: None,
+        };
+        let summaries = futures::executor::block_on(Gitlab::public_instance().list_pull_requests(
+            &remote,
+            filter,
+            Some(GitHostAuth::Bearer("token".into())),
+            client,
+        ))?;
+
+        let numbers: Vec<u32> = summaries.iter().map(|summary| summary.number).collect();
+        assert_eq!(numbers, vec![2, 3, 1]);
+        Ok(())
     }
 
     #[test]

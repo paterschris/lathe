@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 
@@ -387,6 +388,33 @@ impl GitHostingProvider for Github {
             page += 1;
         }
 
+        let reviewed_by_me = match authenticated_login.as_ref() {
+            Some(login) if filter.reviewer_is_me => {
+                let not_requested: HashSet<u32> = raw
+                    .iter()
+                    .filter(|pr| {
+                        !pr.requested_reviewers
+                            .iter()
+                            .any(|reviewer| reviewer.login.eq_ignore_ascii_case(login.as_ref()))
+                    })
+                    .map(|pr| pr.number)
+                    .collect();
+                // Best effort: if the search fails (it has its own, tighter rate
+                // limit), still show the PRs awaiting review.
+                self.fetch_numbers_with_my_verdict(
+                    remote,
+                    login.as_ref(),
+                    &not_requested,
+                    &auth,
+                    &http_client,
+                )
+                .await
+                .log_err()
+                .unwrap_or_default()
+            }
+            _ => HashSet::default(),
+        };
+
         let mut summaries = Vec::new();
         for pr in raw {
             let pr_state = pr.pull_request_state();
@@ -415,6 +443,7 @@ impl GitHostingProvider for Github {
                 continue;
             }
             if filter.reviewer_is_me
+                && !reviewed_by_me.contains(&pr.number)
                 && !pr.requested_reviewers.iter().any(|reviewer| {
                     authenticated_login
                         .as_ref()

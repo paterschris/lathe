@@ -35,6 +35,84 @@ impl Github {
         Ok(Some(user.login.into()))
     }
 
+    /// Numbers of the PRs among `candidates` where `login`'s latest review
+    /// approved or requested changes. GitHub removes a reviewer from
+    /// `requested_reviewers` once they submit, and someone who reviews without
+    /// being asked is never there, so the "my reviews" list needs this to keep
+    /// showing PRs the viewer has already voted on.
+    ///
+    /// The search API narrows the candidates to PRs `login` has reviewed at all,
+    /// and each hit's reviews are then read to drop comment-only reviews and
+    /// verdicts that were dismissed.
+    pub(super) async fn fetch_numbers_with_my_verdict(
+        &self,
+        remote: &ParsedGitRemote,
+        login: &str,
+        candidates: &HashSet<u32>,
+        auth: &Option<GitHostAuth>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<HashSet<u32>> {
+        if candidates.is_empty() {
+            return Ok(HashSet::default());
+        }
+        let api = self.api_base()?;
+        let query = format!(
+            "repo:{owner}/{repo} is:pr reviewed-by:{login}",
+            owner = remote.owner,
+            repo = remote.repo,
+        );
+        let url = format!(
+            "{api}/search/issues?q={}&sort=updated&order=desc&per_page=100",
+            encode(&query)
+        );
+        let request = github_request(
+            GithubMethod::Get,
+            &url,
+            "application/vnd.github+json",
+            auth,
+            None,
+        )?;
+        let bytes = github_send(http_client, request, "searching GitHub pull requests").await?;
+        let results: GithubSearchResults =
+            serde_json::from_slice(&bytes).context("parsing GitHub search results")?;
+        let reviewed: Vec<u32> = results
+            .items
+            .iter()
+            .map(|item| item.number)
+            .filter(|number| candidates.contains(number))
+            .collect();
+
+        let mut numbers = HashSet::default();
+        for chunk in reviewed.chunks(8) {
+            let fetches = chunk.iter().map(|&number| async move {
+                let reviews = self.fetch_reviews(remote, number, auth, http_client).await?;
+                let has_verdict = build_github_reviewers(&reviews, &[], Some(login))
+                    .iter()
+                    .any(|reviewer| {
+                        reviewer.is_me
+                            && matches!(
+                                reviewer.verdict,
+                                Some(
+                                    PullRequestReviewVerdict::Approve
+                                        | PullRequestReviewVerdict::RequestChanges
+                                )
+                            )
+                    });
+                anyhow::Ok((number, has_verdict))
+            });
+            for (number, has_verdict) in futures::future::join_all(fetches)
+                .await
+                .into_iter()
+                .filter_map(|result| result.log_err())
+            {
+                if has_verdict {
+                    numbers.insert(number);
+                }
+            }
+        }
+        Ok(numbers)
+    }
+
     /// Best-effort lookup of the authenticated user's current review verdict on a
     /// PR, so the detail view can reflect what they've already done. Returns
     /// `Ok(None)` when they have no approving or blocking review; the caller logs
@@ -623,6 +701,17 @@ pub(super) struct GithubComparison {
 /// A submitted review on a pull request. The author and state resolve the
 /// authenticated user's current verdict; the id lets us dismiss (retract) it.
 #[derive(Deserialize)]
+pub(super) struct GithubSearchResults {
+    #[serde(default)]
+    items: Vec<GithubSearchItem>,
+}
+
+#[derive(Deserialize)]
+struct GithubSearchItem {
+    number: u32,
+}
+
+#[derive(Deserialize)]
 pub(super) struct GithubReview {
     #[serde(default)]
     id: u64,
@@ -904,6 +993,82 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].number, 1);
         assert_eq!(summaries[0].title.to_string(), "Mine to review");
+    }
+
+    #[test]
+    fn test_github_reviewer_filter_includes_prs_i_already_voted_on() {
+        // Submitting a review removes the viewer from `requested_reviewers`, and
+        // reviewing unasked never puts them there, so PRs the viewer approved or
+        // blocked come from the reviewed-by search instead. A comment-only review
+        // and a dismissed approval don't count.
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(|request| async move {
+            let path = request.uri().path();
+            let body = if path == "/user" {
+                r#"{"login":"octocat"}"#
+            } else if path == "/search/issues" {
+                r#"{"items":[{"number":2},{"number":3},{"number":4},{"number":99}]}"#
+            } else if path.ends_with("/pulls/2/reviews") {
+                r#"[{"id":1,"user":{"login":"octocat"},"state":"COMMENTED"},
+                    {"id":2,"user":{"login":"OctoCat"},"state":"APPROVED"}]"#
+            } else if path.ends_with("/pulls/3/reviews") {
+                r#"[{"id":3,"user":{"login":"octocat"},"state":"COMMENTED"}]"#
+            } else if path.ends_with("/pulls/4/reviews") {
+                r#"[{"id":4,"user":{"login":"octocat"},"state":"APPROVED"},
+                    {"id":5,"user":{"login":"octocat"},"state":"DISMISSED"}]"#
+            } else if path.ends_with("/pulls") {
+                r#"[
+                    {"number":1,"title":"Awaiting me","state":"open",
+                     "user":{"login":"alice"},
+                     "requested_reviewers":[{"login":"octocat"}],
+                     "head":{"ref":"a","sha":"a1"},"base":{"ref":"main","sha":"b1"},
+                     "html_url":"https://github.com/owner/repo/pull/1","updated_at":"2026-01-04T00:00:00Z"},
+                    {"number":2,"title":"Approved unasked","state":"open",
+                     "user":{"login":"bob"},
+                     "requested_reviewers":[],
+                     "head":{"ref":"c","sha":"c1"},"base":{"ref":"main","sha":"b2"},
+                     "html_url":"https://github.com/owner/repo/pull/2","updated_at":"2026-01-03T00:00:00Z"},
+                    {"number":3,"title":"Only commented","state":"open",
+                     "user":{"login":"bob"},
+                     "requested_reviewers":[],
+                     "head":{"ref":"d","sha":"d1"},"base":{"ref":"main","sha":"b3"},
+                     "html_url":"https://github.com/owner/repo/pull/3","updated_at":"2026-01-02T00:00:00Z"},
+                    {"number":4,"title":"Approval dismissed","state":"open",
+                     "user":{"login":"bob"},
+                     "requested_reviewers":[],
+                     "head":{"ref":"e","sha":"e1"},"base":{"ref":"main","sha":"b4"},
+                     "html_url":"https://github.com/owner/repo/pull/4","updated_at":"2026-01-01T00:00:00Z"}
+                ]"#
+            } else {
+                "[]"
+            };
+            Ok(http_client::Response::builder()
+                .status(200)
+                .body(body.into())
+                .unwrap())
+        });
+
+        let remote = ParsedGitRemote {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let filter = PullRequestListFilter {
+            states: Some(vec![PullRequestState::Open]),
+            author: None,
+            reviewer_is_me: true,
+            author_is_me: false,
+            limit: Some(50),
+            page: None,
+        };
+        let summaries = futures::executor::block_on(Github::public_instance().list_pull_requests(
+            &remote,
+            filter,
+            Some(GitHostAuth::Bearer("token".into())),
+            client,
+        ))
+        .unwrap();
+
+        let numbers: Vec<u32> = summaries.iter().map(|summary| summary.number).collect();
+        assert_eq!(numbers, vec![1, 2]);
     }
 
     #[test]

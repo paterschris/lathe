@@ -54,13 +54,12 @@ pub struct PullRequestListFilter {
     pub states: Option<Vec<PullRequestState>>,
     /// Restrict to PRs authored by this login (substring match).
     pub author: Option<SharedString>,
-    /// When `true`, restrict to PRs where the authenticated user is a requested
-    /// reviewer. The provider resolves "me" itself (GitHub matches the login in
-    /// `requested_reviewers`; Bitbucket queries `reviewers.uuid`). Note the
-    /// semantics differ slightly per host: GitHub drops a reviewer from
-    /// `requested_reviewers` once they submit a review, so this surfaces PRs
-    /// still awaiting your review, whereas Bitbucket keeps you in `reviewers`
-    /// regardless of whether you have already reviewed.
+    /// When `true`, restrict to PRs where the authenticated user is a reviewer:
+    /// either asked to review, or already approved or requested changes, whether
+    /// or not they were asked. The provider resolves "me" itself. GitHub drops a
+    /// reviewer from `requested_reviewers` once they submit, so it also searches
+    /// for PRs the user reviewed; Bitbucket records an unrequested voter as a
+    /// plain participant; GitLab separately queries the MRs the user approved.
     pub reviewer_is_me: bool,
     /// When `true`, restrict to PRs authored by the authenticated user. The
     /// provider resolves "me" itself (GitHub matches `user.login`; Bitbucket

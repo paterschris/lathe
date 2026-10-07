@@ -489,12 +489,13 @@ impl GitHostingProvider for Bitbucket {
                 }
             }
             // "My reviews": keep every PR where I'm a reviewer, whether or not I
-            // have already voted. The panel distinguishes approved /
+            // have already voted, plus any I approved or requested changes on
+            // without being a reviewer. The panel distinguishes approved /
             // changes-requested / still-pending from each reviewer's verdict.
             if filter.reviewer_is_me
                 && let Some(uuid) = &viewer_uuid
             {
-                if !pr.is_reviewer(uuid) {
+                if !pr.is_reviewer(uuid) && pr.viewer_review(uuid).is_none() {
                     continue;
                 }
             }
@@ -1534,8 +1535,9 @@ mod tests {
     #[test]
     fn test_bitbucket_reviewer_is_me_includes_already_voted() {
         // A PR the viewer has already approved must still surface in "my open
-        // reviews" mode (distinguished later by verdict); a PR the viewer does
-        // not review is excluded.
+        // reviews" mode (distinguished later by verdict), as must one they
+        // approved or requested changes on without being a reviewer. A PR the viewer does
+        // not review, or only commented on, is excluded.
         let client: Arc<dyn HttpClient> =
             http_client::FakeHttpClient::create(|request| async move {
                 let path = request.uri().path();
@@ -1562,6 +1564,36 @@ mod tests {
                      "participants":[
                          {"role":"REVIEWER","approved":false,
                           "user":{"display_name":"Someone","uuid":"{other}"}}
+                     ]},
+                    {"id":3,"title":"Blocked by me, unasked","state":"OPEN",
+                     "author":{"display_name":"Author","uuid":"{author}"},
+                     "source":{"branch":{"name":"feature3"},"commit":{"hash":"d1"}},
+                     "destination":{"branch":{"name":"main"},"commit":{"hash":"b3"}},
+                     "links":{"html":{"href":"https://bitbucket.org/owner/repo/pull-requests/3"}},
+                     "updated_on":"2026-01-01T00:00:00Z",
+                     "participants":[
+                         {"role":"PARTICIPANT","approved":false,"state":"changes_requested",
+                          "user":{"display_name":"Me","uuid":"{viewer}"}}
+                     ]},
+                    {"id":5,"title":"Approved by me, unasked","state":"OPEN",
+                     "author":{"display_name":"Author","uuid":"{author}"},
+                     "source":{"branch":{"name":"feature5"},"commit":{"hash":"f1"}},
+                     "destination":{"branch":{"name":"main"},"commit":{"hash":"b5"}},
+                     "links":{"html":{"href":"https://bitbucket.org/owner/repo/pull-requests/5"}},
+                     "updated_on":"2026-01-01T00:00:00Z",
+                     "participants":[
+                         {"role":"PARTICIPANT","approved":true,"state":"approved",
+                          "user":{"display_name":"Me","uuid":"{viewer}"}}
+                     ]},
+                    {"id":4,"title":"Only commented","state":"OPEN",
+                     "author":{"display_name":"Author","uuid":"{author}"},
+                     "source":{"branch":{"name":"feature4"},"commit":{"hash":"e1"}},
+                     "destination":{"branch":{"name":"main"},"commit":{"hash":"b4"}},
+                     "links":{"html":{"href":"https://bitbucket.org/owner/repo/pull-requests/4"}},
+                     "updated_on":"2026-01-01T00:00:00Z",
+                     "participants":[
+                         {"role":"PARTICIPANT","approved":false,
+                          "user":{"display_name":"Me","uuid":"{viewer}"}}
                      ]}
                 ]}"#
                 } else {
@@ -1597,8 +1629,8 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].number, 1);
+        let numbers: Vec<u32> = summaries.iter().map(|summary| summary.number).collect();
+        assert_eq!(numbers, vec![1, 3, 5]);
     }
 
     #[test]
@@ -1624,6 +1656,18 @@ mod tests {
                         {"role":"PARTICIPANT","approved":true,
                          "user":{"display_name":"Participant","uuid":"{participant}"}}
                     ]}"#
+                } else if path.ends_with("/pullrequests/8") {
+                    r#"{"id":8,"title":"Voted unasked","state":"OPEN",
+                    "author":{"display_name":"Author","uuid":"{author}"},
+                    "source":{"branch":{"name":"feature"},"commit":{"hash":"a1"}},
+                    "destination":{"branch":{"name":"main"},"commit":{"hash":"b1"}},
+                    "links":{"html":{"href":"https://bitbucket.org/owner/repo/pull-requests/8"}},
+                    "participants":[
+                        {"role":"REVIEWER","approved":false,
+                         "user":{"display_name":"Pending","uuid":"{pending}"}},
+                        {"role":"PARTICIPANT","approved":false,"state":"changes_requested",
+                         "user":{"display_name":"Me","uuid":"{viewer}"}}
+                    ]}"#
                 } else {
                     r#"{"values":[]}"#
                 };
@@ -1637,17 +1681,19 @@ mod tests {
             owner: "owner".into(),
             repo: "repo".into(),
         };
-        let reviewers =
-            futures::executor::block_on(Bitbucket::public_instance().pull_request_reviewers(
+        let auth = Some(GitHostAuth::Basic {
+            username: "user".into(),
+            secret: "secret".into(),
+        });
+        let reviewers = futures::executor::block_on(
+            Bitbucket::public_instance().pull_request_reviewers(
                 &remote,
                 7,
-                Some(GitHostAuth::Basic {
-                    username: "user".into(),
-                    secret: "secret".into(),
-                }),
-                client,
-            ))
-            .unwrap();
+                auth.clone(),
+                client.clone(),
+            ),
+        )
+        .unwrap();
 
         assert_eq!(reviewers.len(), 3);
         assert_eq!(reviewers[0].login.to_string(), "Me");
@@ -1663,6 +1709,19 @@ mod tests {
         assert_eq!(reviewers[2].login.to_string(), "Pending");
         assert_eq!(reviewers[2].verdict, None);
         assert!(!reviewers[2].is_me);
+
+        // The viewer's own unrequested verdict is listed so the PR list can show
+        // it; another participant's (PR 7's "Participant") is not.
+        let reviewers = futures::executor::block_on(
+            Bitbucket::public_instance().pull_request_reviewers(&remote, 8, auth, client),
+        )
+        .unwrap();
+        assert_eq!(reviewers.len(), 2);
+        assert!(reviewers[1].is_me);
+        assert_eq!(
+            reviewers[1].verdict,
+            Some(PullRequestReviewVerdict::RequestChanges)
+        );
     }
 
     #[test]

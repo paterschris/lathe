@@ -623,15 +623,21 @@ impl BitbucketPullRequest {
 
     /// All reviewers (participants with the REVIEWER role) and their verdicts, in
     /// the order Bitbucket returns them. `viewer_uuid` marks the authenticated
-    /// user's own entry.
+    /// user's own entry. The viewer is also included when they approved or
+    /// requested changes without being a reviewer (Bitbucket records them as a
+    /// plain PARTICIPANT), so the PR list can show their verdict.
     pub(super) fn reviewers(&self, viewer_uuid: Option<&str>) -> Vec<PullRequestReviewer> {
         self.participants
             .iter()
             .filter(|participant| {
-                participant
+                let is_reviewer = participant
                     .role
                     .as_deref()
-                    .is_some_and(|role| role.eq_ignore_ascii_case("REVIEWER"))
+                    .is_some_and(|role| role.eq_ignore_ascii_case("REVIEWER"));
+                let is_viewer = viewer_uuid.is_some()
+                    && participant.user.as_ref().and_then(|user| user.uuid.as_deref())
+                        == viewer_uuid;
+                is_reviewer || (is_viewer && participant_verdict(participant).is_some())
             })
             .map(|participant| {
                 let user = participant.user.as_ref();
