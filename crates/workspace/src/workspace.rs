@@ -3286,6 +3286,7 @@ impl Workspace {
                 });
 
         dock.update(cx, |dock, cx| {
+            dock.load_persisted_split(self, cx);
             let index = dock.add_panel(panel.clone(), self.weak_self.clone(), window, cx);
             if let Some(size_state) = persisted_size_state {
                 dock.set_panel_size_state(&panel, size_state, cx);
@@ -5169,7 +5170,8 @@ impl Workspace {
                 panel = dock.update(cx, |dock, cx| {
                     dock.activate_panel(panel_index, window, cx);
                     dock.set_open(true, window, cx);
-                    dock.active_panel().cloned()
+                    // Not `active_panel`: the panel may be in the split half.
+                    dock.panel_at(panel_index).cloned()
                 });
                 break;
             }
@@ -5198,7 +5200,8 @@ impl Workspace {
                 let panel = dock.update(cx, |dock, cx| {
                     dock.activate_panel(panel_index, window, cx);
 
-                    let panel = dock.active_panel().cloned();
+                    // Not `active_panel`: the panel may be in the split half.
+                    let panel = dock.panel_at(panel_index).cloned();
                     if let Some(panel) = panel.as_ref() {
                         if should_focus(&**panel, window, cx) {
                             dock.set_open(true, window, cx);
@@ -5255,8 +5258,12 @@ impl Workspace {
     pub fn close_panel<T: Panel>(&self, window: &mut Window, cx: &mut Context<Self>) {
         for dock in self.all_docks().iter() {
             dock.update(cx, |dock, cx| {
-                if dock.panel::<T>().is_some() {
-                    dock.set_open(false, window, cx)
+                if let Some(panel_index) = dock.panel_index_for_type::<T>() {
+                    if dock.split_panel_index() == Some(panel_index) {
+                        dock.close_split(window, cx)
+                    } else {
+                        dock.set_open(false, window, cx)
+                    }
                 }
             })
         }
@@ -10545,6 +10552,7 @@ impl Render for Workspace {
                                     }
                                 })
                             }))
+                            .children(self.render_panel_drop_zones(cx))
                             .children(self.render_notifications(window, cx)),
                     )
                     .when(self.status_bar_visible(cx), |parent| {
@@ -12953,7 +12961,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        dock::{PanelEvent, test::TestPanel},
+        dock::{DockSlot, PanelEvent, test::TestPanel},
         invalid_item_view::InvalidItemView,
         item::{
             ItemBufferKind, ItemEvent,
@@ -17685,6 +17693,204 @@ mod tests {
         workspace_a.update(cx, |workspace, cx| {
             workspace.clear_panel_dock_position(TestPanel::panel_key(), cx);
             assert_eq!(workspace.panel_dock_position(TestPanel::panel_key(), cx), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_dock_split_shows_two_panels(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let (top, bottom, other) = workspace.update_in(cx, |workspace, window, cx| {
+            let top = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let bottom = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
+            let other = cx.new(|cx| TestPanel::new(DockPosition::Left, 102, cx));
+            workspace.add_panel(top.clone(), window, cx);
+            workspace.add_panel(bottom.clone(), window, cx);
+            workspace.add_panel(other.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            (top, bottom, other)
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let dock = workspace.left_dock().clone();
+            dock.update(cx, |dock, cx| dock.open_split(1, window, cx));
+            let dock = dock.read(cx);
+            assert_eq!(dock.active_panel().unwrap().panel_id(), top.panel_id());
+            assert_eq!(dock.split_panel().unwrap().panel_id(), bottom.panel_id());
+            assert!(dock.is_panel_visible(top.panel_id()));
+            assert!(dock.is_panel_visible(bottom.panel_id()));
+            assert!(!dock.is_panel_visible(other.panel_id()));
+            assert!(bottom.read(cx).active, "the split panel is told it is active");
+        });
+
+        // Activating the split panel leaves the layout alone.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let dock = workspace.left_dock().clone();
+            dock.update(cx, |dock, cx| dock.activate_panel(1, window, cx));
+            assert_eq!(
+                dock.read(cx).split_panel().unwrap().panel_id(),
+                bottom.panel_id()
+            );
+            assert_eq!(
+                dock.read(cx).active_panel().unwrap().panel_id(),
+                top.panel_id()
+            );
+        });
+
+        // Closing the top panel hands the whole dock to the split panel
+        // instead of closing the dock.
+        top.update_in(cx, |_, _, cx| cx.emit(PanelEvent::Close));
+        workspace.update_in(cx, |workspace, _, cx| {
+            let dock = workspace.left_dock().read(cx);
+            assert!(dock.is_open());
+            assert_eq!(dock.active_panel().unwrap().panel_id(), bottom.panel_id());
+            assert!(dock.split_panel().is_none());
+        });
+
+        // Removing the panel in the split clears the split.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let dock = workspace.left_dock().clone();
+            dock.update(cx, |dock, cx| dock.open_split(2, window, cx));
+            assert_eq!(
+                dock.read(cx).split_panel().unwrap().panel_id(),
+                other.panel_id()
+            );
+            workspace.remove_panel(&other, window, cx);
+            let dock = workspace.left_dock().read(cx);
+            assert!(dock.split_panel().is_none());
+            assert_eq!(dock.active_panel().unwrap().panel_id(), bottom.panel_id());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_dock_stack_close_and_restore(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let (top, bottom) = workspace.update_in(cx, |workspace, window, cx| {
+            let top = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let bottom = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(top.clone(), window, cx);
+            workspace.add_panel(bottom.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            let dock = workspace.left_dock().clone();
+            dock.update(cx, |dock, cx| dock.open_split(1, window, cx));
+            (top, bottom)
+        });
+        workspace.update_in(cx, |workspace, _, cx| {
+            let dock = workspace.left_dock().clone();
+            dock.update(cx, |dock, cx| dock.set_split_fraction(0.3, cx));
+        });
+
+        // Closing the top half leaves the bottom panel the whole dock...
+        workspace.update_in(cx, |workspace, window, cx| {
+            let dock = workspace.left_dock().clone();
+            assert!(dock.update(cx, |dock, cx| dock.close_in_stack(0, window, cx)));
+            let dock = dock.read(cx);
+            assert!(dock.is_open());
+            assert_eq!(dock.slot_of(bottom.panel_id()), Some(DockSlot::Primary));
+            assert_eq!(dock.slot_of(top.panel_id()), None);
+            assert!(!top.read(cx).active);
+        });
+        // ...and clicking it again puts it back on top, with the same division.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let dock = workspace.left_dock().clone();
+            assert!(dock.update(cx, |dock, cx| dock.reopen_in_stack(0, window, cx)));
+            let dock = dock.read(cx);
+            assert_eq!(dock.slot_of(top.panel_id()), Some(DockSlot::Primary));
+            assert_eq!(dock.slot_of(bottom.panel_id()), Some(DockSlot::Secondary));
+            assert_eq!(dock.split_fraction(), Some(0.3));
+        });
+
+        // The same for the bottom half.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let dock = workspace.left_dock().clone();
+            dock.update(cx, |dock, cx| {
+                assert!(dock.close_in_stack(1, window, cx));
+                assert!(dock.split_panel().is_none());
+                assert!(dock.reopen_in_stack(1, window, cx));
+            });
+            let dock = dock.read(cx);
+            assert_eq!(dock.slot_of(top.panel_id()), Some(DockSlot::Primary));
+            assert_eq!(dock.slot_of(bottom.panel_id()), Some(DockSlot::Secondary));
+            assert_eq!(dock.split_fraction(), Some(0.3));
+        });
+
+        // Closing the whole dock keeps the stack for when it reopens.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            assert!(!workspace.left_dock().read(cx).is_open());
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            let dock = workspace.left_dock().read(cx);
+            assert_eq!(dock.slot_of(top.panel_id()), Some(DockSlot::Primary));
+            assert_eq!(dock.slot_of(bottom.panel_id()), Some(DockSlot::Secondary));
+            assert_eq!(dock.split_fraction(), Some(0.3));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_dock_corner_placement(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let (left_a, left_b, right_a, mover) = workspace.update_in(cx, |workspace, window, cx| {
+            let left_a = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let left_b = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
+            let right_a = cx.new(|cx| TestPanel::new(DockPosition::Right, 102, cx));
+            let mover = cx.new(|cx| TestPanel::new(DockPosition::Left, 103, cx));
+            for panel in [&left_a, &left_b, &right_a, &mover] {
+                workspace.add_panel(panel.clone(), window, cx);
+            }
+            (left_a, left_b, right_a, mover)
+        });
+
+        // "Top Left" then "Bottom Left" on two panels of a closed dock.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let left = workspace.left_dock().clone();
+            left.update(cx, |dock, cx| {
+                dock.place_panel(0, DockSlot::Primary, window, cx);
+                dock.place_panel(1, DockSlot::Secondary, window, cx);
+            });
+            let left = left.read(cx);
+            assert!(left.is_open());
+            assert_eq!(left.slot_of(left_a.panel_id()), Some(DockSlot::Primary));
+            assert_eq!(left.slot_of(left_b.panel_id()), Some(DockSlot::Secondary));
+        });
+
+        // Asking for the top half of a panel in the bottom half swaps them.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let left = workspace.left_dock().clone();
+            left.update(cx, |dock, cx| dock.place_panel(1, DockSlot::Primary, window, cx));
+            let left = left.read(cx);
+            assert_eq!(left.slot_of(left_b.panel_id()), Some(DockSlot::Primary));
+            assert_eq!(left.slot_of(left_a.panel_id()), Some(DockSlot::Secondary));
+        });
+
+        // "Bottom Right" on a panel from the left dock moves it under the
+        // right dock's panel once the move lands.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.move_panel_to(right_a.panel_id(), DockPosition::Right, DockSlot::Primary, window, cx);
+            workspace.move_panel_to(mover.panel_id(), DockPosition::Right, DockSlot::Secondary, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _, cx| {
+            let right = workspace.right_dock().read(cx);
+            assert_eq!(right.slot_of(right_a.panel_id()), Some(DockSlot::Primary));
+            assert_eq!(right.slot_of(mover.panel_id()), Some(DockSlot::Secondary));
+            assert!(workspace.left_dock().read(cx).panel::<TestPanel>().is_some());
         });
     }
 

@@ -11556,6 +11556,86 @@ async fn test_preserve_temporary_unfolded_active_index_on_blur_from_context_menu
 }
 
 #[gpui::test]
+async fn test_project_panel_moves_to_bottom_dock_and_back(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let (panel, mut cx) = open_panel_with_files(3, DockSide::Left, cx).await;
+    let cx = &mut cx;
+    let workspace = cx.update(|window, cx| {
+        window
+            .root::<MultiWorkspace>()
+            .flatten()
+            .map(|multi_workspace| multi_workspace.read(cx).workspace().clone())
+    });
+    let workspace = workspace.expect("test window holds a workspace");
+    let panel_id = panel.entity_id();
+
+    // Moved the way a drag onto the bottom dock does it.
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.move_panel_to(
+            panel_id,
+            DockPosition::Bottom,
+            workspace::dock::DockSlot::Primary,
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    workspace.update(cx, |workspace, cx| {
+        assert!(
+            workspace
+                .bottom_dock()
+                .read(cx)
+                .panel::<ProjectPanel>()
+                .is_some()
+        );
+        assert!(
+            workspace
+                .left_dock()
+                .read(cx)
+                .panel::<ProjectPanel>()
+                .is_none()
+        );
+        assert_eq!(
+            workspace.panel_dock_position(<ProjectPanel as Panel>::panel_key(), cx),
+            Some(DockPosition::Bottom),
+            "the bottom dock is recorded for this workspace only"
+        );
+    });
+
+    // Back to a side dock: the placement is cleared and the setting applies.
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.move_panel_to(
+            panel_id,
+            DockPosition::Left,
+            workspace::dock::DockSlot::Primary,
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    workspace.update(cx, |workspace, cx| {
+        assert!(
+            workspace
+                .left_dock()
+                .read(cx)
+                .panel::<ProjectPanel>()
+                .is_some()
+        );
+        assert!(
+            workspace
+                .bottom_dock()
+                .read(cx)
+                .panel::<ProjectPanel>()
+                .is_none()
+        );
+        assert_eq!(
+            workspace.panel_dock_position(<ProjectPanel as Panel>::panel_key(), cx),
+            None
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_context_menu_opens_at_mouse_position(cx: &mut gpui::TestAppContext) {
     init_test(cx);
     let (panel, mut cx) = open_panel_with_files(3, DockSide::Left, cx).await;

@@ -2629,12 +2629,15 @@ impl Panel for MobileDevPanel {
         PANEL_KEY
     }
 
-    fn position(&self, _: &Window, cx: &App) -> DockPosition {
-        MobileDevPanelSettings::get_global(cx).dock
+    // Device logs and build output are wide, so the panel only lives in the
+    // bottom dock. A `dock` setting from before is ignored rather than
+    // honored, since a side dock would cramp it.
+    fn position(&self, _: &Window, _: &App) -> DockPosition {
+        DockPosition::Bottom
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Bottom | DockPosition::Right)
+        position == DockPosition::Bottom
     }
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {

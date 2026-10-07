@@ -1753,11 +1753,10 @@ impl AgentPanel {
             .map(|panel| {
                 let panel_id = Entity::entity_id(&panel);
 
-                workspace_read.all_docks().iter().any(|dock| {
-                    dock.read(cx)
-                        .visible_panel()
-                        .is_some_and(|visible_panel| visible_panel.panel_id() == panel_id)
-                })
+                workspace_read
+                    .all_docks()
+                    .iter()
+                    .any(|dock| dock.read(cx).is_panel_visible(panel_id))
             })
             .unwrap_or(false)
     }
@@ -5003,9 +5002,7 @@ fn agent_panel_dock_position_in(
     workspace_dock_position: Option<DockPosition>,
     cx: &App,
 ) -> DockPosition {
-    workspace_dock_position
-        .filter(|position| *position != DockPosition::Bottom)
-        .unwrap_or_else(|| agent_panel_dock_position(cx))
+    workspace_dock_position.unwrap_or_else(|| agent_panel_dock_position(cx))
 }
 
 pub enum AgentPanelEvent {
@@ -5042,8 +5039,8 @@ impl Panel for AgentPanel {
         agent_panel_dock_position_in(self.workspace_dock_position, cx)
     }
 
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        position != DockPosition::Bottom
+    fn position_is_valid(&self, _: DockPosition) -> bool {
+        true
     }
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {

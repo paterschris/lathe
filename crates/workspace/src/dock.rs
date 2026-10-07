@@ -10,8 +10,7 @@ use db::kvp::KeyValueStore;
 use gpui::{
     Action, Anchor, AnyView, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, deferred, div,
-    px,
+    Render, SharedString, Styled, Subscription, WeakEntity, Window, deferred, div, px,
 };
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore, TerminalDockPosition};
@@ -21,6 +20,10 @@ use ui::{
     right_click_menu,
 };
 use util::ResultExt as _;
+
+mod dock_split;
+pub use dock_split::DockSlot;
+pub(crate) use dock_split::{ActivePanelDrag, DraggedPanel};
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
 
@@ -320,6 +323,14 @@ pub struct Dock {
     restoration: DockRestoreState,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
+    split: Option<dock_split::DockSplit>,
+    pending_split: Option<dock_split::PersistedDockSplit>,
+    split_workspace_id: Option<crate::WorkspaceId>,
+    pending_placement: Option<(EntityId, DockSlot)>,
+    /// Panels closed out of a two-panel stack: the half each was in and the
+    /// division at the time, for putting them back.
+    closed_from_stack: collections::HashMap<EntityId, (DockSlot, f32)>,
+    _persist_split_task: Option<gpui::Task<()>>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -497,6 +508,12 @@ impl Dock {
                 restoration: DockRestoreState::Restoring { pending: None },
                 zoom_layer_open: false,
                 modal_layer,
+                split: None,
+                pending_split: None,
+                split_workspace_id: None,
+                pending_placement: None,
+                closed_from_stack: Default::default(),
+                _persist_split_task: None,
             }
         });
 
@@ -506,10 +523,10 @@ impl Dock {
                 let Some(dock) = dock.upgrade() else {
                     return;
                 };
-                let Some(panel) = dock.read(cx).active_panel() else {
+                if dock.read(cx).active_panel().is_none() {
                     return;
-                };
-                if panel.is_zoomed(window, cx) {
+                }
+                if let Some(panel) = dock.read(cx).zoomed_panel(window, cx) {
                     workspace.zoomed = Some(panel.to_any().downgrade());
                     workspace.zoomed_position = Some(position);
                 } else {
@@ -524,10 +541,7 @@ impl Dock {
         .detach();
 
         cx.observe_in(&dock, window, move |workspace, dock, window, cx| {
-            if dock.read(cx).is_open()
-                && let Some(panel) = dock.read(cx).active_panel()
-                && panel.is_zoomed(window, cx)
-            {
+            if let Some(panel) = dock.read(cx).zoomed_panel(window, cx) {
                 workspace.zoomed = Some(panel.to_any().downgrade());
                 workspace.zoomed_position = Some(position);
                 cx.emit(Event::ZoomChanged);
@@ -633,6 +647,9 @@ impl Dock {
             self.is_open = open;
             if let Some(active_panel) = self.active_panel_entry() {
                 active_panel.panel.set_active(open, window, cx);
+            }
+            if let Some(split_panel) = self.split_panel() {
+                split_panel.set_active(open, window, cx);
             }
 
             cx.notify();
@@ -758,9 +775,13 @@ impl Dock {
                         }
                     }
                     PanelEvent::Close => {
-                        if this
+                        let panel_id = Entity::entity_id(panel);
+                        if this.split_panel().is_some_and(|p| p.panel_id() == panel_id) {
+                            this.close_split(window, cx);
+                        } else if this
                             .visible_panel()
-                            .is_some_and(|p| p.panel_id() == Entity::entity_id(panel))
+                            .is_some_and(|p| p.panel_id() == panel_id)
+                            && !this.promote_split(window, cx)
                         {
                             this.set_open(false, window, cx);
                         }
@@ -802,6 +823,7 @@ impl Dock {
         {
             *active_index += 1;
         }
+        self.split_panel_inserted(index);
         let size_state = panel.read(cx).initial_size_state(window, cx);
 
         self.panel_entries.insert(
@@ -819,6 +841,7 @@ impl Dock {
             self.activate_panel_internal(index, window, cx);
             self.set_open_internal(true, window, cx);
         }
+        self.apply_pending_split(window, cx);
 
         cx.notify();
         index
@@ -885,6 +908,7 @@ impl Dock {
             panel.set_zoomed(true, window, cx)
         }
         self.set_open_internal(serialized.visible, window, cx);
+        self.apply_pending_split(window, cx);
     }
 
     pub(crate) fn finish_restoration(&mut self) {
@@ -902,6 +926,12 @@ impl Dock {
             .iter()
             .position(|entry| entry.panel.panel_id() == Entity::entity_id(panel))
         {
+            self.forget_closed_from_stack(Entity::entity_id(panel));
+            if self.split_panel_index() == Some(panel_ix) {
+                self.split_panel_removed(panel_ix, cx);
+            } else if Some(panel_ix) == self.active_panel_index {
+                self.promote_split(window, cx);
+            }
             if let Some(active_panel_index) = self.active_panel_index.as_mut() {
                 match panel_ix.cmp(active_panel_index) {
                     std::cmp::Ordering::Less => {
@@ -915,6 +945,7 @@ impl Dock {
                 }
             }
 
+            self.split_panel_removed(panel_ix, cx);
             self.panel_entries.remove(panel_ix);
             cx.notify();
 
@@ -954,6 +985,10 @@ impl Dock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Already on screen in the split half; leave the layout alone.
+        if self.split_panel_index() == Some(panel_ix) {
+            return;
+        }
         if Some(panel_ix) != self.active_panel_index {
             if let Some(active_panel) = self.active_panel_entry() {
                 active_panel.panel.set_active(false, window, cx);
@@ -991,7 +1026,9 @@ impl Dock {
         if entry.panel.is_zoomed(window, cx) {
             Some(entry.panel.clone())
         } else {
-            None
+            self.split_panel()
+                .filter(|panel| panel.is_zoomed(window, cx))
+                .cloned()
         }
     }
 
@@ -1280,7 +1317,9 @@ impl Dock {
         // Database id only. `session_id` is shared by every workspace in the
         // process, so falling back to it would let two unsaved workspaces read
         // each other's placement. See `Workspace::set_panel_dock_position`.
-        let workspace_id = workspace.database_id().map(|id| i64::from(id).to_string())?;
+        let workspace_id = workspace
+            .database_id()
+            .map(|id| i64::from(id).to_string())?;
         let kvp = KeyValueStore::global(cx);
         let scope = kvp.scoped(PANEL_DOCK_POSITION_KEY);
         scope
@@ -1321,10 +1360,7 @@ impl Dock {
         };
 
         let panel_id = Entity::entity_id(panel);
-        let was_visible = self.is_open()
-            && self
-                .visible_panel()
-                .is_some_and(|active_panel| active_panel.panel_id() == panel_id);
+        let was_visible = self.is_panel_visible(panel_id);
         let size_state = self
             .panel_entries
             .iter()
@@ -1350,7 +1386,9 @@ impl Dock {
             if let Some(added_panel) = new_dock.panel_for_id(panel_id).cloned() {
                 new_dock.set_panel_size_state(added_panel.as_ref(), size_state, cx);
             }
-            if was_visible {
+            if new_dock.has_pending_placement(panel_id) {
+                new_dock.apply_pending_placement(panel_id, window, cx);
+            } else if was_visible {
                 new_dock.set_open(true, window, cx);
                 new_dock.activate_panel(index, window, cx);
             }
@@ -1367,7 +1405,8 @@ impl Dock {
 impl Render for Dock {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
-        if let Some(entry) = self.visible_entry() {
+        if let Some(active_view) = self.visible_entry().map(|entry| entry.panel.to_any()) {
+            let panels = self.render_panels(active_view, cx);
             let position = self.position;
             let create_resize_handle = || {
                 let handle = div()
@@ -1454,12 +1493,7 @@ impl Render for Dock {
                             Axis::Horizontal => this.w_full().h_full(),
                             Axis::Vertical => this.h_full().w_full(),
                         })
-                        .child(
-                            entry
-                                .panel
-                                .to_any()
-                                .cached(StyleRefinement::default().v_flex().size_full()),
-                        ),
+                        .child(panels),
                 )
                 .when(self.resizable(cx), |this| {
                     this.child(create_resize_handle())
@@ -1488,6 +1522,7 @@ impl Render for PanelButtons {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dock = self.dock.read(cx);
         let active_index = dock.active_panel_index;
+        let split_index = dock.split_panel_index();
         let is_open = dock.is_open;
         let dock_position = dock.position;
 
@@ -1517,9 +1552,30 @@ impl Render for PanelButtons {
                 let currently_flexible = panel.has_flexible_size(window, cx);
                 let dock_for_menu = dock_entity.clone();
                 let workspace_for_menu = workspace.clone();
+                let dock_for_button = dock_entity.clone();
+                let panel_id_for_drag = entry.panel.panel_id();
 
-                let is_active_button = Some(i) == active_index && is_open;
-                let (action, tooltip) = if is_active_button {
+                let is_split_button = Some(i) == split_index && is_open;
+                let can_open_in_split =
+                    is_open && active_index.is_some_and(|active| active != i) && !is_split_button;
+                let is_active_button = (Some(i) == active_index && is_open) || is_split_button;
+                let close_dock_action = dock.toggle_action();
+                let close_dock_label: SharedString =
+                    format!("Close {} Panels", dock_position.label()).into();
+                let current_slot = if is_split_button {
+                    Some(DockSlot::Secondary)
+                } else if is_active_button {
+                    Some(DockSlot::Primary)
+                } else {
+                    None
+                };
+                let is_split = split_index.is_some() && is_open;
+                let (action, tooltip) = if is_active_button && is_split {
+                    (
+                        entry.panel.toggle_action(window, cx),
+                        format!("Close {icon_tooltip}").into(),
+                    )
+                } else if is_active_button {
                     let action = dock.toggle_action();
 
                     let tooltip: SharedString =
@@ -1545,7 +1601,37 @@ impl Render for PanelButtons {
                             ];
 
                             let panel_hide = panel.hide_button_setting(cx);
+                            let dock_for_split = dock_for_menu.clone();
                             ContextMenu::build(window, cx, |mut menu, _, cx| {
+                                if can_open_in_split {
+                                    menu = menu
+                                        .entry("Open in Split", None, move |window, cx| {
+                                            dock_for_split.update(cx, |dock, cx| {
+                                                dock.open_split(i, window, cx)
+                                            });
+                                        })
+                                        .separator();
+                                } else if is_active_button && is_split {
+                                    menu = menu.entry(
+                                        format!("Close {icon_tooltip}"),
+                                        None,
+                                        move |window, cx| {
+                                            dock_for_split.update(cx, |dock, cx| {
+                                                dock.close_in_stack(i, window, cx)
+                                            });
+                                        },
+                                    );
+                                }
+                                // Offered for every panel, so the whole dock can be put away
+                                // from any of its buttons; reopening restores the same
+                                // panels and sizes.
+                                menu = menu
+                                    .action_disabled_when(
+                                        !is_open,
+                                        close_dock_label.clone(),
+                                        close_dock_action.boxed_clone(),
+                                    )
+                                    .separator();
                                 let mut has_position_entries = false;
                                 for position in POSITIONS {
                                     if panel.position_is_valid(position, cx) {
@@ -1564,6 +1650,40 @@ impl Render for PanelButtons {
                                         );
                                         has_position_entries = true;
                                     }
+                                }
+                                if has_position_entries {
+                                    let panel = panel.clone();
+                                    let workspace = workspace_for_menu.clone();
+                                    menu = menu.submenu("Move to", move |mut submenu, _, cx| {
+                                        for position in POSITIONS {
+                                            if !panel.position_is_valid(position, cx) {
+                                                continue;
+                                            }
+                                            for slot in [DockSlot::Primary, DockSlot::Secondary] {
+                                                let is_current = position == dock_position
+                                                    && current_slot == Some(slot);
+                                                let panel_id = panel.panel_id();
+                                                let workspace = workspace.clone();
+                                                submenu = submenu.toggleable_entry(
+                                                    slot.label(position),
+                                                    is_current,
+                                                    IconPosition::Start,
+                                                    None,
+                                                    move |window, cx| {
+                                                        workspace
+                                                            .update(cx, |workspace, cx| {
+                                                                workspace.move_panel_to(
+                                                                    panel_id, position, slot,
+                                                                    window, cx,
+                                                                )
+                                                            })
+                                                            .ok();
+                                                    },
+                                                );
+                                            }
+                                        }
+                                        submenu
+                                    });
                                 }
 
                                 // Only offered once this workspace has its own
@@ -1666,7 +1786,39 @@ impl Render for PanelButtons {
                                 .aria_label(icon_tooltip)
                                 .on_click({
                                     let action = action.boxed_clone();
-                                    move |_, window, cx| {
+                                    let dock = dock_for_button.clone();
+                                    move |event, window, cx| {
+                                        // Clicking a panel that shares the dock closes just
+                                        // that half; clicking it again puts it back where it
+                                        // was.
+                                        if is_active_button && is_split {
+                                            dock.update(cx, |dock, cx| {
+                                                dock.close_in_stack(i, window, cx)
+                                            });
+                                            return;
+                                        }
+                                        if can_open_in_split
+                                            && !event.modifiers().secondary()
+                                            && dock.update(cx, |dock, cx| {
+                                                dock.reopen_in_stack(i, window, cx)
+                                            })
+                                        {
+                                            if let Some(panel) = dock.read(cx).panel_at(i) {
+                                                window
+                                                    .focus(&panel.activation_focus_handle(cx), cx);
+                                            }
+                                            return;
+                                        }
+                                        if can_open_in_split && event.modifiers().secondary() {
+                                            dock.update(cx, |dock, cx| {
+                                                dock.open_split(i, window, cx)
+                                            });
+                                            if let Some(panel) = dock.read(cx).panel_at(i) {
+                                                window
+                                                    .focus(&panel.activation_focus_handle(cx), cx);
+                                            }
+                                            return;
+                                        }
                                         window.focus(&focus_handle, cx);
                                         window.dispatch_action(action.boxed_clone(), cx)
                                     }
@@ -1677,13 +1829,26 @@ impl Render for PanelButtons {
                                     })
                                 });
 
-                            div().relative().child(button).when_some(
-                                icon_label
-                                    .clone()
-                                    .filter(|_| !is_active_button)
-                                    .and_then(|label| label.parse::<usize>().ok()),
-                                |this, count| this.child(CountBadge::new(count)),
-                            )
+                            let dragged = DraggedPanel {
+                                panel_id: panel_id_for_drag,
+                                icon,
+                                label: icon_tooltip.into(),
+                            };
+                            div()
+                                .id(SharedString::from(format!("panel-button-drag-{name}")))
+                                .relative()
+                                .on_drag(dragged, |dragged, _, _, cx| {
+                                    ActivePanelDrag::start(dragged.panel_id, cx);
+                                    cx.new(|_| dragged.clone())
+                                })
+                                .child(button)
+                                .when_some(
+                                    icon_label
+                                        .clone()
+                                        .filter(|_| !is_active_button)
+                                        .and_then(|label| label.parse::<usize>().ok()),
+                                    |this, count| this.child(CountBadge::new(count)),
+                                )
                         }),
                 )
             })
@@ -1692,6 +1857,28 @@ impl Render for PanelButtons {
         if dock_position == DockPosition::Right {
             buttons.reverse();
         }
+
+        // Shown whenever the dock is open, split or not, so closing the whole
+        // dock never depends on which panel's button is the active one.
+        let close_stack_button = is_open.then(|| {
+            let toggle_action = dock.toggle_action();
+            let tooltip: SharedString = format!("Close {} Panels", dock_position.label()).into();
+            let focus_handle = dock.focus_handle(cx);
+            let close_button = IconButton::new("close-dock-stack", IconName::Close)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .on_click({
+                    let toggle_action = toggle_action.boxed_clone();
+                    move |_, window, cx| {
+                        window.focus(&focus_handle, cx);
+                        window.dispatch_action(toggle_action.boxed_clone(), cx)
+                    }
+                })
+                .tooltip(move |_window, cx| {
+                    Tooltip::for_action(tooltip.clone(), &*toggle_action, cx)
+                });
+            close_button
+        });
 
         let has_buttons = !buttons.is_empty();
 
@@ -1704,6 +1891,7 @@ impl Render for PanelButtons {
                 |this| this.child(Divider::vertical().color(DividerColor::Border)),
             )
             .children(buttons)
+            .children(close_stack_button)
             .when(has_buttons && dock.position == DockPosition::Left, |this| {
                 this.child(Divider::vertical().color(DividerColor::Border))
             })

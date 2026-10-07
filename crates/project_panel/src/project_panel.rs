@@ -136,6 +136,11 @@ impl State {
 }
 
 pub struct ProjectPanel {
+    /// Set when this workspace put the panel in the bottom dock. The panel's
+    /// `dock` setting can only say left or right, so the bottom dock is
+    /// recorded as a per-workspace placement and mirrored here, since
+    /// `position` can't read the workspace while it is being updated.
+    bottom_docked: bool,
     project: Entity<Project>,
     fs: Arc<dyn Fs>,
     focus_handle: FocusHandle,
@@ -733,9 +738,22 @@ impl ProjectPanel {
         let project = workspace.project().clone();
         let git_store = project.read(cx).git_store().clone();
         let path_style = project.read(cx).path_style(cx);
+        let bottom_docked = workspace.panel_dock_position(<Self as Panel>::panel_key(), cx)
+            == Some(DockPosition::Bottom);
+        let workspace_entity = cx.entity();
         let project_panel = cx.new(|cx| {
             let focus_handle = cx.focus_handle();
             cx.on_focus(&focus_handle, window, Self::focus_in).detach();
+            // Picks up "Use Default Position", which clears the placement on
+            // the workspace. Registered before the dock's own workspace
+            // observer, so the dock relocates with the updated value.
+            cx.observe(&workspace_entity, |this: &mut Self, workspace, cx| {
+                this.bottom_docked = workspace
+                    .read(cx)
+                    .panel_dock_position(<Self as Panel>::panel_key(), cx)
+                    == Some(DockPosition::Bottom);
+            })
+            .detach();
 
             cx.subscribe_in(
                 &git_store,
@@ -918,6 +936,7 @@ impl ProjectPanel {
                 clipboard: None,
                 _dragged_entry_destination: None,
                 workspace: workspace.weak_handle(),
+                bottom_docked,
                 diagnostics: Default::default(),
                 diagnostic_counts: Default::default(),
                 diagnostic_summary_update: Task::ready(()),
@@ -8080,23 +8099,44 @@ impl EventEmitter<PanelEvent> for ProjectPanel {}
 
 impl Panel for ProjectPanel {
     fn position(&self, _: &Window, cx: &App) -> DockPosition {
+        if self.bottom_docked {
+            return DockPosition::Bottom;
+        }
         match ProjectPanelSettings::get_global(cx).dock {
             DockSide::Left => DockPosition::Left,
             DockSide::Right => DockPosition::Right,
         }
     }
 
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
+    fn position_is_valid(&self, _: DockPosition) -> bool {
+        true
     }
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
+        let panel_key = <Self as Panel>::panel_key();
+        let side = match position {
+            DockPosition::Bottom => {
+                self.bottom_docked = true;
+                self.workspace
+                    .update(cx, |workspace, cx| {
+                        workspace.set_panel_dock_position(panel_key, position, cx)
+                    })
+                    .log_err();
+                return;
+            }
+            DockPosition::Left => DockSide::Left,
+            DockPosition::Right => DockSide::Right,
+        };
+        if self.bottom_docked {
+            self.bottom_docked = false;
+            self.workspace
+                .update(cx, |workspace, cx| {
+                    workspace.clear_panel_dock_position(panel_key, cx)
+                })
+                .log_err();
+        }
         settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
-            let dock = match position {
-                DockPosition::Left | DockPosition::Bottom => DockSide::Left,
-                DockPosition::Right => DockSide::Right,
-            };
-            settings.project_panel.get_or_insert_default().dock = Some(dock);
+            settings.project_panel.get_or_insert_default().dock = Some(side);
         });
     }
 
