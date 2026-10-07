@@ -1367,7 +1367,8 @@ impl LocalWorktree {
             let abs_path = snapshot.abs_path.as_path().to_path_buf();
             let background = cx.background_executor().clone();
             async move {
-                let defer_watch = force_defer_watch;
+                let defer_watch =
+                    force_defer_watch || (scanning_enabled && fs.requires_poll_watcher(&abs_path));
 
                 let (events, watcher) = if scanning_enabled && !defer_watch {
                     fs.watch(&abs_path, FS_WATCH_LATENCY).await
@@ -4830,47 +4831,47 @@ impl BackgroundScanner {
         root_path: &Arc<SanitizedPath>,
         canonicalize_error: &anyhow::Error,
     ) {
-            let new_path = self
-                .state
-                .lock()
-                .await
-                .snapshot
-                .root_file_handle
-                .clone()
-                .and_then(|handle| match handle.current_path(&self.fs) {
-                    Ok(new_path) => Some(new_path),
-                    Err(e) => {
-                        log::error!("Failed to refresh worktree root path: {e:#}");
-                        None
-                    }
-                })
-                .map(|path| SanitizedPath::new_arc(&path))
-                .filter(|new_path| new_path != root_path);
+        let new_path = self
+            .state
+            .lock()
+            .await
+            .snapshot
+            .root_file_handle
+            .clone()
+            .and_then(|handle| match handle.current_path(&self.fs) {
+                Ok(new_path) => Some(new_path),
+                Err(e) => {
+                    log::error!("Failed to refresh worktree root path: {e:#}");
+                    None
+                }
+            })
+            .map(|path| SanitizedPath::new_arc(&path))
+            .filter(|new_path| new_path != root_path);
 
-            if let Some(new_path) = new_path {
+        if let Some(new_path) = new_path {
+            log::info!(
+                "root renamed from {:?} to {:?}",
+                root_path.as_path(),
+                new_path.as_path(),
+            );
+            self.status_updates_tx
+                .unbounded_send(ScanState::RootUpdated { new_path })
+                .ok();
+        } else {
+            log::error!("root path could not be canonicalized: {canonicalize_error:#}");
+
+            // For single-file worktrees, if we can't canonicalize and the file handle
+            // fallback also failed, the file is gone - close the worktree
+            if self.is_single_file {
                 log::info!(
-                    "root renamed from {:?} to {:?}",
-                    root_path.as_path(),
-                    new_path.as_path(),
+                    "single-file worktree root {:?} no longer exists, marking as deleted",
+                    root_path.as_path()
                 );
                 self.status_updates_tx
-                    .unbounded_send(ScanState::RootUpdated { new_path })
+                    .unbounded_send(ScanState::RootDeleted)
                     .ok();
-            } else {
-                log::error!("root path could not be canonicalized: {canonicalize_error:#}");
-
-                // For single-file worktrees, if we can't canonicalize and the file handle
-                // fallback also failed, the file is gone - close the worktree
-                if self.is_single_file {
-                    log::info!(
-                        "single-file worktree root {:?} no longer exists, marking as deleted",
-                        root_path.as_path()
-                    );
-                    self.status_updates_tx
-                        .unbounded_send(ScanState::RootDeleted)
-                        .ok();
-                }
             }
+        }
     }
 
     async fn process_events(&self, mut events: Vec<PathEvent>) {
@@ -5666,17 +5667,49 @@ impl BackgroundScanner {
         }
 
         state.populate_dir(job.path.clone(), new_entries, new_ignore);
+        // For external entries, watch the canonical (resolved) path so OS-level
+        // FS events on the real filesystem location are observed. The same
+        // canonical path is stored in both `external_canonical_to_relative`
+        // (for translating canonical-path FS events back to worktree-relative
+        // paths) and `watched_dir_abs_paths_by_entry_id` (used by `remove_path`
+        // to know which abs path to unwatch), so both cleanup paths agree on
+        // the path the watcher was actually registered on.
+        //
+        // `canonicalize` is an async filesystem operation that may suspend, so
+        // the lock must not be held across the await point below.
+        drop(state);
+        let watched_abs_path: Option<Arc<Path>> = if job.is_external {
+            self.fs
+                .canonicalize(job.abs_path.as_ref())
+                .await
+                .ok()
+                .map(|canonical| {
+                    let canonical: Arc<Path> = canonical.into();
+                    self.watcher.add(&canonical).log_err();
+                    canonical
+                })
+        } else {
+            self.watcher.add(job.abs_path.as_ref()).log_err();
+            Some(job.abs_path.clone())
+        };
 
-        self.watcher.add(job.abs_path.as_ref()).log_err();
-
-        let entry_id = state
-            .snapshot
-            .entry_for_path(&job.path)
-            .map(|entry| entry.id);
-        if let Some(entry_id) = entry_id {
-            state
-                .watched_dir_abs_paths_by_entry_id
-                .insert(entry_id, job.abs_path.clone());
+        let mut state = self.state.lock().await;
+        if let Some(watched_abs_path) = &watched_abs_path {
+            if job.is_external {
+                state
+                    .snapshot
+                    .external_canonical_to_relative
+                    .insert(watched_abs_path.clone(), job.path.clone());
+            }
+            if let Some(entry_id) = state
+                .snapshot
+                .entry_for_path(&job.path)
+                .map(|entry| entry.id)
+            {
+                state
+                    .watched_dir_abs_paths_by_entry_id
+                    .insert(entry_id, watched_abs_path.clone());
+            }
         }
 
         for new_job in new_jobs.into_iter().flatten() {
