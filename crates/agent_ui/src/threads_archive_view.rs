@@ -688,6 +688,8 @@ impl ThreadsArchiveView {
                 highlight_positions,
             } => {
                 let id = SharedString::from(format!("archive-entry-{}", ix));
+                let color = cx.theme().colors();
+                let button_hover_bg = color.element_background;
 
                 let is_focused = self.selection == Some(ix);
                 let is_hovered = self.hovered_index == Some(ix);
@@ -730,6 +732,7 @@ impl ThreadsArchiveView {
                 let archived_color = Color::Custom(cx.theme().colors().icon_muted.opacity(0.6));
 
                 let base = ThreadItem::new(id, thread.display_title())
+                    .base_bg(cx.theme().colors().panel_background)
                     .icon(icon)
                     .when(is_archived, |this| {
                         this.archived(true)
@@ -761,6 +764,7 @@ impl ThreadsArchiveView {
                     base.status(AgentThreadStatus::Running)
                         .action_slot(
                             IconButton::new("cancel-restore", IconName::Close)
+                                .hover_background(button_hover_bg)
                                 .icon_size(IconSize::Small)
                                 .icon_color(Color::Muted)
                                 .tooltip(Tooltip::text("Cancel Restore"))
@@ -779,6 +783,7 @@ impl ThreadsArchiveView {
                 } else if is_archived {
                     base.action_slot(
                         IconButton::new("delete-thread", IconName::Trash)
+                            .hover_background(button_hover_bg)
                             .icon_size(IconSize::Small)
                             .icon_color(Color::Muted)
                             .tooltip({
@@ -817,6 +822,7 @@ impl ThreadsArchiveView {
                 } else {
                     base.action_slot(
                         IconButton::new("archive-thread", IconName::Archive)
+                            .hover_background(button_hover_bg)
                             .icon_size(IconSize::Small)
                             .icon_color(Color::Muted)
                             .tooltip({

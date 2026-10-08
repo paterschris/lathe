@@ -523,9 +523,11 @@ message Envelope {
     ExecuteLspCommand execute_lsp_command = 491;
     ExecuteLspCommandResponse execute_lsp_command_response = 492;
     RefreshDocumentHighlights refresh_document_highlights = 493;
-    GitFileHistory git_file_history = 494;
-    GitFileHistoryResponse git_file_history_response = 495;
-    GitChangeToCommit git_change_to_commit = 496; // current max
+    GetTerminalShell get_terminal_shell = 494;
+    GetTerminalShellResponse get_terminal_shell_response = 495;
+    GitFileHistory git_file_history = 496;
+    GitFileHistoryResponse git_file_history_response = 497;
+    GitChangeToCommit git_change_to_commit = 498; // current max
   }
 
   reserved 87 to 88;

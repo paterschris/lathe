@@ -2011,23 +2011,21 @@ impl super::GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        maybe!({
-            let entry = self.entries.get(self.selected_entry?)?.status_entry()?;
-            let active_repo = self.active_repository.as_ref()?;
-            let repo_path = entry.repo_path.clone();
-            let git_store = self.project.read(cx).git_store();
-
+        let Some(active_repo) = self.active_repository.as_ref() else {
+            return;
+        };
+        let git_store = self.project.read(cx).git_store().downgrade();
+        let active_repo = active_repo.downgrade();
+        for entry in self.effective_status_entries() {
             FileHistoryView::open(
-                repo_path,
-                git_store.downgrade(),
-                active_repo.downgrade(),
+                entry.repo_path,
+                git_store.clone(),
+                active_repo.clone(),
                 self.workspace.clone(),
                 window,
                 cx,
             );
-
-            Some(())
-        });
+        }
     }
 
     pub(super) fn open_file(

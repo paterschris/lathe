@@ -1690,7 +1690,7 @@ impl NotebookEditor {
             let language = notebook_language.await;
             let extension = language
                 .as_ref()
-                .and_then(|language| language.path_suffixes().first().cloned())
+                .and_then(|language| language.path_suffixes().first().map(ToString::to_string))
                 .unwrap_or_else(|| "txt".to_string());
 
             let Some(sidecar) = ShadowBuffer::sidecar_path(&notebook_path, &extension) else {

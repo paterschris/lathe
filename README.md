@@ -145,7 +145,7 @@ script/install-fork-linux
 
 Lathe merges from [upstream Zed](https://github.com/zed-industries/zed) every few weeks to pick up new features and fixes. My changes live in their own commits, which is what keeps those merges manageable.
 
-**Last synced with upstream Zed: 2026-09-25.**
+**Last synced with upstream Zed: 2026-10-08.**
 
 > **2026-04-24:** `main` was rewritten to fix a long-standing ancestry tangle that made the fork display as ~37k commits ahead and ~37k behind upstream. The new history is 9 thematic commits on top of `upstream/main`, and the source tree is unchanged. Original SHAs are preserved on the `archive/pre-rebuild-20260424` branch. Existing clones can recover with:
 >

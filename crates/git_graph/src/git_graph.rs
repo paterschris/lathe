@@ -2294,10 +2294,10 @@ impl GitGraph {
             return;
         };
 
-        let diff_receiver = repository.update(cx, |repo, _| repo.load_commit_diff(sha, false));
+        let diff_task = repository.update(cx, |repo, cx| repo.load_commit_diff(sha, false, cx));
 
         self._commit_diff_task = Some(cx.spawn(async move |this, cx| {
-            if let Ok(Ok(diff)) = diff_receiver.await {
+            if let Ok(diff) = diff_task.await {
                 this.update(cx, |this, cx| {
                     let stats = compute_diff_stats(&diff);
                     this.selected_commit_diff = Some(diff);
