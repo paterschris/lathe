@@ -2,6 +2,53 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.10.0-beta - 2026-10-08
+
+Synced with upstream Zed (225 commits), and the git graph finally caught up. It had quietly missed every upstream graph change since April. That's fixed, and Lathe's own graph features are all still there.
+
+### Added
+
+- **The git graph got a lot of upstream work back.** Ref badges sit in a gutter beside the lanes. Columns can be hidden from the header's right-click menu. Commit details and the message collapse. Changed files show as a tree or a flat list. And the graph remembers its state across restarts. Dragging branches and commits still works, now on the new badges.
+- **File history in the graph.** "View History in Git Graph" in the git panel's right-click menu. The old "View File History" view is still there, both work.
+- The commit right-click menu has **View Diff**, **Copy Tag** and a **Custom Commands** section for your git tasks. Same on branch badges, plus Copy Ref Name.
+- Create a tag at HEAD or on any commit from the graph.
+- **Multi-select in the git panel.** Shift-click and Cmd-click to mark files, then stage, unstage, discard, stash or open them together. An earlier merge had dropped this before it ever shipped.
+- File counts on the git panel's section headers. The commit editor can collapse.
+- Folders in the git panel's tree view get their own right-click menu.
+- Gitiles and self-hosted Gerrit work as git hosts, permalinks included.
+- The file finder prefills with your selected text.
+- `soft_wrap_indent` setting for how wrapped lines indent.
+- `alt-/` shows which bindings can finish a half-typed key chord.
+- `markdown_preview.heading_font_weight`, and a font family setting for Mermaid diagrams.
+- Markdown preview tabs have **Show Source**.
+
+### Fixed
+
+- Creating a tag didn't show up in an open git graph until something else reloaded it.
+- Commit templates that changed on disk stopped getting overwritten by a stale saved draft.
+- Commit details and diffs no longer wait behind a fetch that's still running.
+- Emoji, symbol and non-Latin fonts rendering as empty boxes.
+- Crashes when pasting multiple selections at the end of a file, when typing a partial key chord at end of file, and when editing while an inlay hint request was in flight.
+- Cmd-click doing nothing on a symbol named the same as its file.
+- Auto-closing brackets got inserted inside comments and strings.
+- Prompts to external agents could be slow to send, or not send at all.
+- Remote project search could hang. SSH reconnects reuse what they already know about the remote OS.
+- `.env` files were highlighted as shell scripts.
+- A bunch of smaller Markdown Preview fixes: images in tables and HTML blocks, task list checkboxes, nested code block copying, search highlights covering the text.
+
+### Changed
+
+- Faster startup, a smaller binary, and better multi-cursor and project search performance, all from upstream.
+- The outline panel picked up upstream's batched updates and file expand/collapse in place of Lathe's older copy.
+- Title bar menus open on click now, not on hover. Set `title_bar.open_menus_on_hover` to get the old behavior back.
+
+### Known issues
+
+- Only the main branch badge on a commit can be dragged. Others are behind the "+N" chip, which has a right-click menu but isn't a drag source.
+- Tested by hand on macOS. Windows and Linux untested.
+
+---
+
 ## v1.9.0-beta - 2026-10-06
 
 Mostly about layout and accounts. Docks can hold two panels now, every panel can live in the bottom dock, and the AI and git accounts you pick stay with the workspace you picked them in.
