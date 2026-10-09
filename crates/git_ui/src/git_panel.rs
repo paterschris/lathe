@@ -185,6 +185,8 @@ actions!(
     [
         /// Opens the Git Graph Tab.
         Open,
+        /// Opens the history of the selected file in the Git Graph.
+        OpenFileHistory,
     ]
 );
 
@@ -1457,9 +1459,11 @@ impl GitPanel {
                 &git_store,
                 window,
                 move |this, _git_store, event, window, cx| match event {
-                    GitStoreEvent::RepositoryUpdated(_, RepositoryEvent::BranchListChanged, true)
-                        if this.active_tab == GitPanelTab::Explorer =>
-                    {
+                    GitStoreEvent::RepositoryUpdated(
+                        _,
+                        RepositoryEvent::BranchListChanged,
+                        true,
+                    ) if this.active_tab == GitPanelTab::Explorer => {
                         this.refresh_explorer_data(cx);
                     }
                     GitStoreEvent::RepositoryUpdated(
@@ -6885,32 +6889,33 @@ impl GitPanel {
                         cx.theme().colors().border
                     })
                     .when(!collapsed, |this| {
-                        this.cursor_text().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            window.focus(&this.commit_editor.focus_handle(cx), cx);
-                        }))
-                        .child(
-                            h_flex()
-                                .size_full()
-                                .child(
-                                    div()
-                                        .pt_2()
-                                        .px_2()
-                                        .h_full()
-                                        .flex_grow_1()
-                                        .cursor_text()
-                                        .on_action(|&zed_actions::editor::MoveUp, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .on_action(|&zed_actions::editor::MoveDown, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .child(EditorElement::new(
-                                            &self.commit_editor,
-                                            panel_editor_style,
-                                        )),
-                                )
-                                .child(vertical_buttons),
-                        )
+                        this.cursor_text()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                window.focus(&this.commit_editor.focus_handle(cx), cx);
+                            }))
+                            .child(
+                                h_flex()
+                                    .size_full()
+                                    .child(
+                                        div()
+                                            .pt_2()
+                                            .px_2()
+                                            .h_full()
+                                            .flex_grow_1()
+                                            .cursor_text()
+                                            .on_action(|&zed_actions::editor::MoveUp, _, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .on_action(|&zed_actions::editor::MoveDown, _, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .child(EditorElement::new(
+                                                &self.commit_editor,
+                                                panel_editor_style,
+                                            )),
+                                    )
+                                    .child(vertical_buttons),
+                            )
                     })
                     .child(
                         h_flex()
@@ -8474,6 +8479,10 @@ impl GitPanel {
                     context_menu
                         .separator()
                         .action(view_file_history_title, Box::new(git::FileHistory))
+                        .when(!plural, |context_menu| {
+                            context_menu
+                                .action("View History in Git Graph", Box::new(OpenFileHistory))
+                        })
                 })
         })
     }

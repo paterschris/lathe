@@ -239,7 +239,7 @@ fn build_git_graph(
     let workspace = workspace.downgrade();
 
     cx.new_window_entity(|window, cx| {
-        GitGraph::new(repository_id, git_store, workspace, window, cx)
+        GitGraph::new(repository_id, git_store, workspace, None, window, cx)
     })
 }
 

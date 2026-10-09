@@ -6541,21 +6541,7 @@ impl Repository {
 
         let (job_sender, state) = (refetch_repo_state)(cx);
 
-        cx.subscribe_self(move |this, event: &RepositoryEvent, _| match event {
-            RepositoryEvent::HeadChanged | RepositoryEvent::BranchListChanged => {
-                if this.scan_id > 1 {
-                    this.initial_graph_data.clear();
-                }
-            }
-            RepositoryEvent::StashEntriesChanged => {
-                if this.scan_id > 1 {
-                    this.initial_graph_data
-                        .retain(|(log_source, _), _| *log_source != LogSource::All);
-                }
-            }
-            _ => {}
-        })
-        .detach();
+        cx.subscribe_self(Self::handle_subscribe_self).detach();
 
         Repository {
             this: cx.weak_entity(),
