@@ -731,6 +731,9 @@ pub(super) struct GithubReviewComment {
     path: Option<String>,
     #[serde(default)]
     line: Option<u32>,
+    /// `LEFT` when `line` is in the original file, `RIGHT` in the changed one.
+    #[serde(default)]
+    side: Option<String>,
     /// Present on replies; references the top-level comment of the thread.
     #[serde(default)]
     in_reply_to_id: Option<u64>,
@@ -750,6 +753,11 @@ impl GithubReviewComment {
             body: self.body.into(),
             path: self.path.unwrap_or_default().into(),
             line: self.line,
+            side: self.line.and(match self.side.as_deref() {
+                Some("LEFT") => Some(DiffCommentSide::Left),
+                Some("RIGHT") => Some(DiffCommentSide::Right),
+                _ => None,
+            }),
             parent_id: self.in_reply_to_id,
             // GitHub's REST review-comment API does not report thread resolution.
             is_resolved: false,
@@ -972,11 +980,13 @@ mod tests {
             "body": "Nit: rename this",
             "path": "src/main.rs",
             "line": 120,
+            "side": "LEFT",
             "created_at": "2026-01-04T05:06:07Z",
             "html_url": "https://github.com/owner/repo/pull/7#discussion_r9001"
         }"#;
         let comment: GithubReviewComment = serde_json::from_str(json).unwrap();
         let mapped = comment.into_comment().unwrap();
+        assert_eq!(mapped.side, Some(DiffCommentSide::Left));
 
         assert_eq!(mapped.id, 9001);
         assert_eq!(mapped.author_login.to_string(), "reviewer");

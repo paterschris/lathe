@@ -667,6 +667,18 @@ impl PullRequestView {
             }
         };
 
+        // The click anchors to the start of the row, which a removed hunk right
+        // above it shares, so the composer would open above the line. Anchor a
+        // line that exists in the buffer to its end instead, like posted threads.
+        let anchor = if is_deleted {
+            anchor
+        } else {
+            let buffer_snapshot = map.buffer.read(cx).snapshot();
+            mb_snapshot
+                .anchor_in_buffer(line_end_anchor(&buffer_snapshot, row))
+                .unwrap_or(anchor)
+        };
+
         // Replace any composer that is already open.
         self.cancel_new_comment(cx);
 
@@ -1273,6 +1285,7 @@ async fn add_patch_file(
     );
     let buffer = build_buffer(new_text, blob, language_registry, cx).await?;
     let buffer_diff = build_buffer_diff(old_text, &buffer, language_registry, cx).await?;
+    let file_diff = buffer_diff.clone();
 
     let excerpt_buffer = buffer.clone();
     multibuffer.update(cx, |multibuffer, cx| {
@@ -1290,6 +1303,7 @@ async fn add_patch_file(
     Ok(Some(DiffFileMap {
         path: file.path.clone(),
         buffer,
+        diff: Some(file_diff),
         line_to_row,
         old_line_to_row,
         full_content: false,
@@ -1322,9 +1336,16 @@ async fn add_changed_file_full(
             build_context.http_client.clone(),
         )
         .await?;
-    // Base content lets the diff highlight the change. A file added in this PR has
-    // no base, so a fetch failure there is non-fatal.
-    let base_text = match build_context.base_sha.as_deref() {
+    // The base is the file as the PR's patch says it was: the head with the
+    // patch's hunks undone. The patch is diffed against the merge base, while
+    // `base_sha` is the target branch's tip, so diffing against that would show
+    // every change the target gained since the branch was cut as if this PR made
+    // it. Only when the patch doesn't fit the head (it went stale under us) does
+    // it fall back to fetching the target's copy. A file added in this PR has no
+    // base, so a fetch failure there is non-fatal.
+    let base_text = match base_from_patch(&head_text, &file.hunks) {
+        Some(base) => base,
+        None => match build_context.base_sha.as_deref() {
         Some(base_sha) => build_context
             .provider
             .get_file_content(
@@ -1336,7 +1357,8 @@ async fn add_changed_file_full(
             )
             .await
             .ok(),
-        None => None,
+            None => None,
+        },
     };
 
     let Ok(rel_path) = RelPath::from_unix_str(&file.path) else {
@@ -1346,6 +1368,7 @@ async fn add_changed_file_full(
     let blob = pr_diff_file(rel_path.clone(), worktree_id, false, &file.path);
     let buffer = build_buffer(head_text, blob, language_registry, cx).await?;
     let buffer_diff = build_buffer_diff(base_text, &buffer, language_registry, cx).await?;
+    let file_diff = buffer_diff.clone();
 
     let excerpt_buffer = buffer.clone();
     multibuffer.update(cx, |multibuffer, cx| {
@@ -1375,6 +1398,7 @@ async fn add_changed_file_full(
     Ok(Some(DiffFileMap {
         path: file.path.clone(),
         buffer,
+        diff: Some(file_diff),
         line_to_row: HashMap::default(),
         old_line_to_row: HashMap::default(),
         full_content: true,
@@ -1435,6 +1459,7 @@ async fn add_unchanged_file(
     Ok(Some(DiffFileMap {
         path: path.to_string(),
         buffer,
+        diff: None,
         line_to_row: HashMap::default(),
         old_line_to_row: HashMap::default(),
         full_content: true,
@@ -1499,6 +1524,9 @@ struct DiffFileMap {
     /// Repo-relative path of the file, as it appears in the diff.
     path: String,
     buffer: Entity<Buffer>,
+    /// The diff shown for the file, whose base text holds the deleted lines a
+    /// comment on the old side anchors to. `None` for an unchanged file.
+    diff: Option<Entity<BufferDiff>>,
     /// New-file line (1-indexed) -> buffer row (0-indexed). Only populated for
     /// patch-reconstructed files; full-content files map line N to row N-1.
     line_to_row: HashMap<u32, u32>,
@@ -1644,7 +1672,29 @@ fn resolve_comment_threads(
         let matched_file = file_maps
             .iter()
             .find(|file| paths_match(&file.path, root.path.as_ref()));
+        // A comment on a removed line anchors into the diff's base text, where
+        // that line lives; it has no row in the head buffer.
+        if root.side == Some(DiffCommentSide::Left)
+            && let Some(file) = matched_file
+            && let Some(line) = root.line
+            && let Some(anchor) = deleted_line_anchor(file, line, &snapshot, cx)
+        {
+            if let Some(root_card) = thread_comments.first_mut() {
+                root_card.location = format!("line {line} (removed)").into();
+            }
+            threads.push(CommentThread {
+                anchor,
+                root_id,
+                resolved: root.is_resolved,
+                comments: thread_comments,
+            });
+            continue;
+        }
         let exact_row = matched_file.and_then(|file| {
+            // An old-side line number means nothing on the new side.
+            if root.side == Some(DiffCommentSide::Left) {
+                return None;
+            }
             let line = root.line?;
             if file.full_content {
                 // Full-content files hold every line, so line N is row N-1.
@@ -1664,8 +1714,7 @@ fn resolve_comment_threads(
         let row = exact_row.unwrap_or(0);
 
         let buffer_snapshot = file.buffer.read(cx).snapshot();
-        let point = Point::new(row, 0).min(buffer_snapshot.max_point());
-        let text_anchor = buffer_snapshot.anchor_before(point);
+        let text_anchor = line_end_anchor(&buffer_snapshot, row);
         let Some(anchor) = snapshot.anchor_in_buffer(text_anchor) else {
             continue;
         };
@@ -1677,6 +1726,100 @@ fn resolve_comment_threads(
         });
     }
     threads
+}
+
+/// An anchor at the end of `row`, for a block placed below that line. The start
+/// of a line is also where a removed hunk directly above it is shown, so a block
+/// anchored there renders under the removed lines instead of under this one.
+fn line_end_anchor(buffer: &language::BufferSnapshot, row: u32) -> language::Anchor {
+    let max = buffer.max_point();
+    let row = row.min(max.row);
+    buffer.anchor_after(Point::new(row, buffer.line_len(row)))
+}
+
+/// The multibuffer anchor of old-file line `line` of `file`, which shows only
+/// as part of a deleted hunk: the head-buffer position the hunk sits at,
+/// pointed into the base text at that line.
+fn deleted_line_anchor(
+    file: &DiffFileMap,
+    line: u32,
+    snapshot: &multi_buffer::MultiBufferSnapshot,
+    cx: &App,
+) -> Option<Anchor> {
+    let diff = file.diff.as_ref()?.read(cx);
+    let base_row = if file.full_content {
+        line.checked_sub(1)?
+    } else {
+        *file.old_line_to_row.get(&line)?
+    };
+    let base_text = diff.base_text(cx);
+    if base_row > base_text.max_point().row {
+        return None;
+    }
+    let base_offset = base_text.point_to_offset(Point::new(base_row, 0));
+    let buffer = file.buffer.read(cx).snapshot();
+    let hunk = diff
+        .snapshot(cx)
+        .hunks(&buffer)
+        .find(|hunk| hunk.diff_base_byte_range.contains(&base_offset))?;
+    let anchor = snapshot.anchor_in_buffer(hunk.buffer_range.start)?;
+    Some(anchor.with_diff_base_anchor(base_text.anchor_before(Point::new(base_row, 0))))
+}
+
+/// The file as it was before the PR: `head` with `hunks` undone. `None` when
+/// the hunks don't line up with `head` (the patch and the head disagree), so
+/// the caller can fall back to fetching it. A file the patch adds has no base,
+/// which is `Some(None)`.
+fn base_from_patch(head: &str, hunks: &[ParsedDiffHunk]) -> Option<Option<String>> {
+    if hunks.is_empty() {
+        return None;
+    }
+    if hunks.iter().all(|hunk| hunk.old_start == 0)
+        && hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .all(|line| matches!(line, ParsedDiffLine::Addition(_)))
+    {
+        return Some(None);
+    }
+    let head_lines: Vec<&str> = head.lines().collect();
+    let same = |a: &str, b: &str| a.trim_end_matches('\r') == b.trim_end_matches('\r');
+    let mut base: Vec<&str> = Vec::with_capacity(head_lines.len());
+    let mut next = 0usize;
+    for hunk in hunks {
+        // A hunk that adds to an empty file starts at 0; every other starts at
+        // its 1-based first line.
+        let start = (hunk.new_start as usize).saturating_sub(1);
+        if start < next || start > head_lines.len() {
+            return None;
+        }
+        base.extend_from_slice(&head_lines[next..start]);
+        next = start;
+        for line in &hunk.lines {
+            match line {
+                ParsedDiffLine::Context(text) => {
+                    if !same(head_lines.get(next)?, text) {
+                        return None;
+                    }
+                    base.push(head_lines[next]);
+                    next += 1;
+                }
+                ParsedDiffLine::Addition(text) => {
+                    if !same(head_lines.get(next)?, text) {
+                        return None;
+                    }
+                    next += 1;
+                }
+                ParsedDiffLine::Deletion(text) => base.push(text),
+            }
+        }
+    }
+    base.extend_from_slice(&head_lines[next..]);
+    let mut text = base.join("\n");
+    if head.ends_with('\n') && !text.is_empty() {
+        text.push('\n');
+    }
+    Some(Some(text))
 }
 
 fn paths_match(diff_path: &str, comment_path: &str) -> bool {
@@ -3128,8 +3271,8 @@ impl PullRequestView {
 #[cfg(test)]
 mod tests {
     use super::{
-        ParsedDiffLine, iso_calendar_date, parse_hunk_new_start, parse_hunk_old_start,
-        parse_unified_diff, reconstruct_file_texts,
+        ParsedDiffLine, base_from_patch, iso_calendar_date, parse_hunk_new_start,
+        parse_hunk_old_start, parse_unified_diff, reconstruct_file_texts,
     };
 
     /// Renders a parsed hunk back into marker-prefixed lines, so assertions read
@@ -3276,6 +3419,36 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].hunks.len(), 1);
         assert_eq!(files[1].hunks.len(), 0);
+    }
+
+    #[test]
+    fn base_comes_from_the_patch_not_the_target_tip() {
+        // The PR keeps postgis 13 while the target branch moved to 16 since the
+        // branch was cut. The patch, diffed against the merge base, doesn't touch
+        // the image line, so the base rebuilt from it doesn't either.
+        let head = "version: \"3.5\"\n\nservices:\n  postgres:\n    image: postgis/postgis:13-3.1-alpine\n    command: postgres -c config_file=/etc/postgresql/postgresql.conf\n    ports:\n";
+        let patch = "diff --git a/docker-compose.dev.yml b/docker-compose.dev.yml\n--- a/docker-compose.dev.yml\n+++ b/docker-compose.dev.yml\n@@ -1,8 +1,7 @@\n-version: '3.5'\n+version: \"3.5\"\n \n services:\n-\n   postgres:\n     image: postgis/postgis:13-3.1-alpine\n-    command: postgres -c 'max_connections=200'\n+    command: postgres -c config_file=/etc/postgresql/postgresql.conf\n     ports:\n";
+        let files = parse_unified_diff(patch);
+        let base = base_from_patch(head, &files[0].hunks).unwrap().unwrap();
+        assert_eq!(
+            base,
+            "version: '3.5'\n\nservices:\n\n  postgres:\n    image: postgis/postgis:13-3.1-alpine\n    command: postgres -c 'max_connections=200'\n    ports:\n"
+        );
+    }
+
+    #[test]
+    fn base_from_patch_handles_added_files_and_mismatches() {
+        let added = parse_unified_diff("diff --git a/n.rs b/n.rs\n--- /dev/null\n+++ b/n.rs\n@@ -0,0 +1,2 @@\n+a\n+b\n");
+        assert_eq!(base_from_patch("a\nb\n", &added[0].hunks), Some(None));
+        // A patch that no longer matches the head gives up, so the caller can fetch.
+        let stale = parse_unified_diff("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n");
+        assert_eq!(base_from_patch("keep\nsomething else\n", &stale[0].hunks), None);
+        // Lines outside the hunks are carried over; a later hunk keeps its offset.
+        let two = parse_unified_diff("diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-a\n+A\n@@ -4,2 +4,3 @@\n d\n+D\n e\n");
+        assert_eq!(
+            base_from_patch("A\nb\nc\nd\nD\ne\nf", &two[0].hunks),
+            Some(Some("a\nb\nc\nd\ne\nf".to_string()))
+        );
     }
 
     #[test]

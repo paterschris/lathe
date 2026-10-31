@@ -513,7 +513,15 @@ impl GitHostingProvider for Gitlab {
                     .unwrap_or_default();
                 // Only positioned notes anchor to the diff; an unpositioned one
                 // is a general MR comment, which the view renders at file top.
-                let line = position.and_then(|position| position.new_line.or(position.old_line));
+                let (line, side) = match position {
+                    Some(GitlabNotePosition { new_line: Some(line), .. }) => {
+                        (Some(*line), Some(DiffCommentSide::Right))
+                    }
+                    Some(GitlabNotePosition { old_line: Some(line), .. }) => {
+                        (Some(*line), Some(DiffCommentSide::Left))
+                    }
+                    _ => (None, None),
+                };
                 comments.push(PullRequestReviewComment {
                     id: note.id,
                     author_login: note
@@ -524,6 +532,7 @@ impl GitHostingProvider for Gitlab {
                     body: note.body.into(),
                     path: path.into(),
                     line,
+                    side,
                     parent_id: root_id,
                     is_resolved: root_id.is_none() && note.resolved,
                     created_at: note.created_at.into(),

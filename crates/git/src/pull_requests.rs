@@ -262,6 +262,9 @@ pub struct PullRequestReviewComment {
     /// 1-indexed line in the file the comment is anchored to, when the host
     /// reports one. `None` for file-level comments that don't pin a line.
     pub line: Option<u32>,
+    /// Which side of the diff `line` counts on: `Left` for a removed line,
+    /// `Right` for an added or unchanged one. `None` when there is no `line`.
+    pub side: Option<crate::hosting_provider::DiffCommentSide>,
     /// For threaded review replies, the id of the comment this one replies to
     /// (`in_reply_to_id` on GitHub, `parent.id` on Bitbucket). `None` for the
     /// top-level comment of a thread. Used to group comments into threads and

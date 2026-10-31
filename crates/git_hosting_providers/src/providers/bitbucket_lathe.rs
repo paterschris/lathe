@@ -865,10 +865,15 @@ impl BitbucketComment {
             .and_then(|inline| inline.path.clone())
             .unwrap_or_default()
             .into();
-        let line = self
-            .inline
-            .as_ref()
-            .and_then(|inline| inline.to.or(inline.from));
+        // `to` is a line in the changed file, `from` in the original; an
+        // unchanged line has both.
+        let (line, side) = match self.inline.as_ref() {
+            Some(BitbucketInline { to: Some(to), .. }) => (Some(*to), Some(DiffCommentSide::Right)),
+            Some(BitbucketInline { from: Some(from), .. }) => {
+                (Some(*from), Some(DiffCommentSide::Left))
+            }
+            _ => (None, None),
+        };
         let created_at: SharedString = self.created_on.clone().unwrap_or_default().into();
         let url = match self
             .links
@@ -885,6 +890,7 @@ impl BitbucketComment {
             body,
             path,
             line,
+            side,
             parent_id: self.parent.as_ref().map(|parent| parent.id),
             is_resolved: self.resolution.is_some(),
             created_at,
@@ -1122,8 +1128,22 @@ mod tests {
         assert_eq!(mapped.author_login.to_string(), "reviewer");
         assert_eq!(mapped.body.to_string(), "Nit: rename this");
         assert_eq!(mapped.path.to_string(), "src/main.rs");
-        // `to` is preferred over `from`.
+        // `to` is preferred over `from`: an unchanged line counts in the changed file.
         assert_eq!(mapped.line, Some(120));
+        assert_eq!(mapped.side, Some(DiffCommentSide::Right));
+    }
+
+    #[test]
+    fn test_bitbucket_comment_on_removed_line_is_on_the_left() {
+        let json = r#"{
+            "id": 9002,
+            "content": { "raw": "Why drop this?" },
+            "inline": { "path": "src/main.rs", "from": 110 }
+        }"#;
+        let comment: BitbucketComment = serde_json::from_str(json).unwrap();
+        let mapped = comment.into_comment().unwrap();
+        assert_eq!(mapped.line, Some(110));
+        assert_eq!(mapped.side, Some(DiffCommentSide::Left));
     }
 
     #[test]
@@ -1141,6 +1161,7 @@ mod tests {
         assert_eq!(mapped.author_login.to_string(), "Someone");
         assert_eq!(mapped.path.to_string(), "");
         assert_eq!(mapped.line, None);
+        assert_eq!(mapped.side, None);
         assert_eq!(mapped.url.as_str(), "https://bitbucket.org/");
     }
 }
