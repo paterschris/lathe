@@ -6,7 +6,7 @@ use crate::{
     crypto::encode_url_safe,
     entries,
     protocol::{
-        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, PROTOCOL_VERSION, PhoneEnvelope,
+        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_PULL_REQUESTS, PROTOCOL_VERSION, PhoneEnvelope,
         PhoneMessage, ThreadStatus, ThreadSummary, WorkspaceSummary,
     },
 };
@@ -213,6 +213,7 @@ impl Bridge {
             lathe_version: release_channel::AppVersion::global(cx).to_string(),
             channel: channel.dev_name().to_string(),
             desktop_name: crate::companion::desktop_name(channel),
+            features: vec![FEATURE_PULL_REQUESTS.to_string()],
         };
         self.send(device_id, &hello, cx);
         self.send_lists(device_id, cx);
@@ -644,6 +645,30 @@ impl Bridge {
                     Ok(()) => return,
                     Err(error) => Err(error),
                 }
+            }
+            message @ (PhoneMessage::ListPullRequests { .. }
+            | PhoneMessage::GetPullRequest { .. }
+            | PhoneMessage::GetPullRequestDiff { .. }
+            | PhoneMessage::SubmitReview { .. }
+            | PhoneMessage::ReplyReviewComment { .. }
+            | PhoneMessage::CreateReviewComment { .. }) => {
+                // Acked once the host has answered, after any replies.
+                let task = crate::pull_requests::handle(message, cx);
+                let device_id = device_id.to_string();
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    this.update(cx, |this, cx| {
+                        let result = result.map(|messages| {
+                            for message in &messages {
+                                this.send(&device_id, message, cx);
+                            }
+                        });
+                        this.ack(&device_id, &client_msg_id, result, cx);
+                    })
+                    .log_err();
+                })
+                .detach();
+                return;
             }
             PhoneMessage::Unpair {} => {
                 self.ack(device_id, &client_msg_id, Ok(()), cx);
@@ -1240,6 +1265,14 @@ fn open_workspace_paths(cx: &App) -> Vec<(PathList, WeakEntity<workspace::Worksp
         .collect()
 }
 
+/// The open workspace with this id, if any window shows it.
+pub(crate) fn open_workspace(workspace_id: &str, cx: &App) -> Option<Entity<workspace::Workspace>> {
+    open_workspace_paths(cx)
+        .into_iter()
+        .find(|(paths, _, _)| self::workspace_id(paths) == workspace_id)
+        .and_then(|(_, workspace, _)| workspace.upgrade())
+}
+
 /// The external agents a new thread from the phone can use in this
 /// workspace's project. Lathe's built-in agent isn't offered there.
 fn available_agents(workspace: &Entity<workspace::Workspace>, cx: &App) -> Vec<(Agent, String)> {
@@ -1527,6 +1560,7 @@ mod tests {
         let received = harness.received();
         assert_eq!(received[0]["type"], "hello");
         assert_eq!(received[0]["lathe_version"], "1.2.3");
+        assert_eq!(received[0]["features"], json!(["pull_requests"]));
         let workspaces = of_type(&received, "workspaces");
         assert_eq!(workspaces[0]["list"][0]["name"], "test");
         let listed = &of_type(&received, "threads")[0]["list"][0];
@@ -1650,6 +1684,25 @@ mod tests {
         harness.say(json!({ "type": "new_thread", "client_msg_id": "m2", "workspace_id": "w", "agent_id": "a", "text": "hi" }), cx);
         harness.say(json!({ "type": "new_thread", "client_msg_id": "m4", "workspace_id": "w", "agent_id": "a", "text": "   " }), cx);
         harness.say(json!({ "type": "launch_missiles", "client_msg_id": "m3" }), cx);
+        harness.say(json!({ "type": "list_pull_requests", "client_msg_id": "p1", "workspace_id": "w", "filter": "open", "reviewing": false }), cx);
+        harness.say(json!({ "type": "get_pull_request_diff", "client_msg_id": "p2", "workspace_id": "w", "repo_id": "r", "number": 1 }), cx);
+        harness.say(
+            json!({ "type": "reply_review_comment", "client_msg_id": "p3", "workspace_id": "w", "repo_id": "r", "number": 1, "comment_id": "x", "body": "hi" }),
+            cx,
+        );
+        harness.say(json!({ "type": "submit_review", "client_msg_id": "p4", "workspace_id": "w", "repo_id": "r", "number": 1, "verdict": "merge" }), cx);
+        harness.say(
+            json!({ "type": "create_review_comment", "client_msg_id": "p5", "workspace_id": "w", "repo_id": "r", "number": 1, "path": "src/a.rs", "line": 3, "side": "new", "body": "Why?" }),
+            cx,
+        );
+        harness.say(
+            json!({ "type": "create_review_comment", "client_msg_id": "p6", "workspace_id": "w", "repo_id": "r", "number": 1, "path": "src/a.rs", "line": 3, "side": "new", "body": "  " }),
+            cx,
+        );
+        harness.say(
+            json!({ "type": "create_review_comment", "client_msg_id": "p7", "workspace_id": "w", "repo_id": "r", "number": 1, "path": "src/a.rs", "line": 3, "side": "middle", "body": "Why?" }),
+            cx,
+        );
         let codes = harness
             .received()
             .iter()
@@ -1662,6 +1715,13 @@ mod tests {
                 (json!("m2"), json!("workspace_not_open")),
                 (json!("m4"), json!("bad_message")),
                 (json!("m3"), json!("bad_message")),
+                (json!("p1"), json!("workspace_not_open")),
+                (json!("p2"), json!("workspace_not_open")),
+                (json!("p3"), json!("bad_message")),
+                (json!("p4"), json!("bad_message")),
+                (json!("p5"), json!("workspace_not_open")),
+                (json!("p6"), json!("bad_message")),
+                (json!("p7"), json!("bad_message")),
             ]
         );
     }

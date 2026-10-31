@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Optional parts of the protocol, listed in `hello.features` so an app can
+/// tell what this Lathe supports without a version bump.
+pub const FEATURE_PULL_REQUESTS: &str = "pull_requests";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DesktopMessage {
@@ -17,6 +21,8 @@ pub enum DesktopMessage {
         lathe_version: String,
         channel: String,
         desktop_name: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     Workspaces {
         list: Vec<WorkspaceSummary>,
@@ -75,6 +81,34 @@ pub enum DesktopMessage {
     ElicitationResolved {
         thread_id: String,
         elicitation_id: String,
+    },
+    /// Reply to `list_pull_requests`, in parts numbered from 0 so many
+    /// repositories fit in frames. The ack follows the `last` one.
+    PullRequests {
+        workspace_id: String,
+        filter: PullRequestFilter,
+        reviewing: bool,
+        part: u32,
+        last: bool,
+        repos: Vec<PullRequestRepo>,
+    },
+    /// Reply to `get_pull_request`.
+    PullRequest {
+        workspace_id: String,
+        repo_id: String,
+        detail: PullRequestDetail,
+        comments: Vec<ReviewComment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        comments_truncated: bool,
+    },
+    /// Reply to `get_pull_request_diff`, in parts numbered from 0.
+    PullRequestDiff {
+        workspace_id: String,
+        repo_id: String,
+        number: u32,
+        part: u32,
+        last: bool,
+        files: Vec<PullRequestFile>,
     },
     Ack {
         client_msg_id: String,
@@ -151,6 +185,63 @@ pub enum PhoneMessage {
         text: String,
     },
     Unpair {},
+    /// Without `repo_id`, page 1 of every repository in the workspace; with
+    /// `repo_id` and `page`, that page of that repository.
+    ListPullRequests {
+        workspace_id: String,
+        filter: PullRequestFilter,
+        reviewing: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<u32>,
+    },
+    GetPullRequest {
+        workspace_id: String,
+        repo_id: String,
+        number: u32,
+    },
+    GetPullRequestDiff {
+        workspace_id: String,
+        repo_id: String,
+        number: u32,
+    },
+    SubmitReview {
+        workspace_id: String,
+        repo_id: String,
+        number: u32,
+        verdict: ReviewVerdict,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+    },
+    ReplyReviewComment {
+        workspace_id: String,
+        repo_id: String,
+        number: u32,
+        comment_id: String,
+        body: String,
+    },
+    /// A new inline comment on one line of the diff, anchored to the pull
+    /// request's current head commit.
+    CreateReviewComment {
+        workspace_id: String,
+        repo_id: String,
+        number: u32,
+        path: String,
+        /// 1-based line in the file on `side`.
+        line: u32,
+        side: DiffSide,
+        body: String,
+    },
+}
+
+/// Which file a diff line belongs to: the changed file (added and unchanged
+/// lines) or the original (removed lines).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffSide {
+    New,
+    Old,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -178,6 +269,10 @@ pub enum ErrorCode {
     UnsupportedVersion,
     AgentNotFound,
     Unsupported,
+    /// The repository isn't in that workspace any more.
+    RepoNotFound,
+    /// The git host refused or failed; the message says how.
+    HostError,
     Internal,
 }
 
@@ -357,6 +452,146 @@ pub enum PermissionOptionKind {
     RejectAlways,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestFilter {
+    Open,
+    Closed,
+    Merged,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestState {
+    Open,
+    Closed,
+    Merged,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewVerdict {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoStatus {
+    Loaded,
+    /// No remote matched a known host, or no account is connected for it.
+    NoHost,
+    AuthExpired,
+    Failed,
+}
+
+/// One repository's pull requests. Anything but `Loaded` carries a `message`
+/// instead of a list.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PullRequestRepo {
+    pub repo_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub status: RepoStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub authored: Vec<PullRequestSummary>,
+    pub others: Vec<PullRequestSummary>,
+    pub page: u32,
+    pub may_have_more: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PullRequestSummary {
+    pub number: u32,
+    pub title: String,
+    pub author: String,
+    pub state: PullRequestState,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub url: String,
+    pub updated_at: String,
+    pub is_draft: bool,
+    /// Who reviewed or was asked to, in lists. Best effort: absent when the
+    /// host didn't say in time. Always absent inside a `PullRequestDetail`,
+    /// which carries its own `reviewers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewers: Option<Vec<PullRequestReviewer>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PullRequestDetail {
+    #[serde(flatten)]
+    pub summary: PullRequestSummary,
+    pub body: String,
+    pub created_at: String,
+    pub head_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_mergeable: Option<bool>,
+    pub additions: u32,
+    pub deletions: u32,
+    pub changed_files: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind_by: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_review: Option<ReviewVerdict>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_is_author: Option<bool>,
+    pub reviewers: Vec<PullRequestReviewer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<PullRequestChecks>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PullRequestReviewer {
+    pub login: String,
+    /// Absent while a requested review is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<ReviewVerdict>,
+    pub is_me: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PullRequestChecks {
+    pub succeeded: u32,
+    pub failed: u32,
+    pub pending: u32,
+    pub neutral: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReviewComment {
+    /// Hosts use 64-bit ids, which JavaScript numbers can't hold exactly.
+    pub comment_id: String,
+    pub author: String,
+    pub body: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    /// Which file `line` is in: `old` for a removed line, `new` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<DiffSide>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub is_resolved: bool,
+    pub created_at: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PullRequestFile {
+    pub path: String,
+    /// The file's hunks, from its first `@@` line.
+    pub unified_diff: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,7 +743,7 @@ mod tests {
             Entry::Plan { items: vec![PlanItem { text: "Step".into(), status: PlanItemStatus::InProgress }] },
         ];
         let messages = vec![
-            DesktopMessage::Hello { protocol_version: 1, lathe_version: "1.13.0".into(), channel: "beta".into(), desktop_name: "Lathe Beta on Mac".into() },
+            DesktopMessage::Hello { protocol_version: 1, lathe_version: "1.13.0".into(), channel: "beta".into(), desktop_name: "Lathe Beta on Mac".into(), features: vec![FEATURE_PULL_REQUESTS.into()] },
             DesktopMessage::Workspaces { list: vec![WorkspaceSummary { workspace_id: "w".into(), name: "lathe".into(), paths: vec!["/code/lathe".into()], is_open: true, agents: Some(vec![AgentSummary { agent_id: "claude-acp".into(), name: "Claude Code".into() }]), default_agent_id: Some("claude-acp".into()) }] },
             DesktopMessage::Threads { list: vec![ThreadSummary { thread_id: "t".into(), session_id: Some("s".into()), agent_id: "claude-acp".into(), title: "T".into(), workspace_id: "w".into(), updated_at: "2026-10-21T10:00:00+00:00".into(), status: ThreadStatus::Running, needs_attention: false, is_loaded: true }] },
             DesktopMessage::ThreadSnapshot { thread_id: "t".into(), seq: 0, start_index: 0, entries: entries.clone(), has_more_before: false, config_options: Some(sample_config_options()) },

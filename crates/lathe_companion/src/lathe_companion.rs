@@ -6,6 +6,7 @@ mod companion;
 mod companion_modal;
 mod connection;
 mod entries;
+mod pull_requests;
 pub mod crypto;
 pub mod protocol;
 
