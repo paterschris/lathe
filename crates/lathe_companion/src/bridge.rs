@@ -38,6 +38,11 @@ const MAX_LISTED_THREADS: usize = 100;
 /// relay traffic to about ten frames a second per thread.
 const ENTRY_FLUSH_DELAY: Duration = Duration::from_millis(100);
 const LIST_FLUSH_DELAY: Duration = Duration::from_millis(500);
+/// Entries at the end of a thread compared on every flush, whether or not an
+/// event marked them. Lathe reveals streamed agent text gradually, appending to
+/// the message after the update that brought it, and that reveal raises no
+/// event of its own.
+const TAIL_ENTRIES: usize = 2;
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
 /// External agents launch a process before their first turn.
 const NEW_THREAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -487,6 +492,8 @@ impl Bridge {
         let thread = thread.read(cx);
         let current = thread.entries();
         let mut ops = Vec::new();
+        let tail_start = current.len().saturating_sub(TAIL_ENTRIES);
+        stream.dirty.extend(tail_start..current.len().min(stream.sent.len()));
 
         if let Some(from) = stream.removed_from.take()
             && from < stream.sent.len()
@@ -512,9 +519,18 @@ impl Bridge {
             stream.sent.push(entry.clone());
             ops.push(DeltaOp::NewEntry { entry });
         }
+        // Keep looking while the agent works or its text is still being
+        // revealed (which can run past the turn's last event), and once more
+        // after anything changed.
+        let keep_looking = !ops.is_empty()
+            || thread.is_revealing_text()
+            || thread.foreground_activity().is_active();
 
         for op in ops {
             self.send_delta(session_id, op, cx);
+        }
+        if keep_looking {
+            self.mark_dirty(session_id, |_| {}, cx);
         }
     }
 
@@ -789,7 +805,13 @@ impl Bridge {
             );
         } else {
             // Bring the cache up to date so this phone's snapshot matches the
-            // deltas the others are about to get.
+            // deltas the others are about to get. Every entry is compared, not
+            // just the marked ones, so a resubscribe (the phone's Refresh) also
+            // repairs anything the cache missed.
+            if let Some(stream) = self.streams.get_mut(session_id) {
+                let sent = stream.sent.len();
+                stream.dirty.extend(0..sent);
+            }
             self.flush_entries(session_id, cx);
         }
         let Some(stream) = self.streams.get_mut(session_id) else {
@@ -1487,6 +1509,124 @@ mod tests {
 
     fn of_type<'a>(messages: &'a [Value], kind: &str) -> Vec<&'a Value> {
         messages.iter().filter(|message| message["type"] == kind).collect()
+    }
+
+    /// Lathe reveals streamed agent text gradually, appending to the message
+    /// after the update that brought it, without an event. The phone must still
+    /// end up with all of it, and a resubscribe (Refresh) must repair a cache
+    /// that missed some.
+    #[gpui::test]
+    async fn text_revealed_without_an_event_reaches_the_phone(cx: &mut TestAppContext) {
+        let (companion, outgoing, identity) = connected_companion(cx);
+        cx.update(|cx| {
+            crate::tests::enable_companion_for_test(cx);
+            crate::init_threads(cx);
+            ThreadMetadataStore::init_global(cx);
+            release_channel::init_test(semver::Version::new(1, 2, 3), ReleaseChannel::Dev, cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+
+        let connection = Rc::new(StubAgentConnection::new());
+        let folders = PathList::new(&[Path::new(path!("/test"))]);
+        let thread = cx
+            .update(|cx| connection.clone().new_session(project, folders.clone(), cx))
+            .await
+            .unwrap();
+        let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread_id = ThreadId::new();
+        // The store reloads from disk on startup, which would replace a thread
+        // saved before the reload finishes.
+        cx.update(|cx| ThreadMetadataStore::global(cx).read(cx).reload_task()).await;
+        cx.update(|cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    ThreadMetadata {
+                        thread_id,
+                        session_id: Some(session_id.clone()),
+                        agent_id: project::AgentId("claude-acp".into()),
+                        title: Some("Fix the relay".into()),
+                        title_override: None,
+                        updated_at: chrono::Utc::now(),
+                        created_at: None,
+                        interacted_at: None,
+                        workspace_id: None,
+                        worktree_paths: WorktreePaths::from_folder_paths(&folders),
+                        remote_connection: None,
+                        archived: false,
+                    },
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+
+        let threads = cx.update(|cx| CompanionThreads::global(cx).unwrap());
+        let bridge = cx.new(|cx| Bridge::new(companion.clone(), threads, cx));
+        let phone = FakePhone::new();
+        add_paired(&companion, &phone, cx);
+        let mut harness = Harness { bridge, companion, outgoing, identity, phone, seq: 0 };
+        drain(&mut harness.outgoing);
+
+        let device_id = harness.phone.device_id();
+        harness.companion.update(cx, |companion, cx| {
+            companion.handle_relay_message(json!({ "type": "presence", "device_id": device_id, "online": true }), cx)
+        });
+        cx.run_until_parked();
+        let thread_key = thread_id.to_key_string();
+        harness.say(json!({ "type": "subscribe", "client_msg_id": "m1", "thread_id": thread_key }), cx);
+        drain(&mut harness.outgoing);
+
+        // A message long enough that Lathe reveals it over several flushes.
+        let full = "Hello, this reply is revealed a little at a time, the way Lathe streams agent text.";
+        connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::AgentMessageChunk(
+            acp_v1::ContentChunk::new(full.into()),
+        )]);
+        harness.say(json!({ "type": "send_message", "client_msg_id": "m2", "thread_id": thread_key, "text": "Hi" }), cx);
+        let last_text = |messages: &[Value]| {
+            messages
+                .iter()
+                .rev()
+                .find_map(|message| match message["type"].as_str() {
+                    Some("thread_delta") => message["op"]["entry"]["markdown"].as_str().map(str::to_string),
+                    Some("thread_snapshot") => message["entries"]
+                        .as_array()?
+                        .iter()
+                        .rev()
+                        .find_map(|entry| entry["markdown"].as_str().map(str::to_string)),
+                    _ => None,
+                })
+        };
+        // The rest of the reveal raises no event; the phone still gets all of it.
+        for _ in 0..20 {
+            cx.executor().advance_clock(ENTRY_FLUSH_DELAY);
+            cx.run_until_parked();
+        }
+        let received = harness.received();
+        assert_eq!(last_text(&received).as_deref(), Some(full));
+
+        // Text that changes with no event and no reveal running isn't seen by a
+        // flush; a resubscribe (the phone's Refresh) repairs it anyway.
+        thread.update(cx, |thread, cx| {
+            let markdown = thread
+                .entries()
+                .iter()
+                .rev()
+                .find_map(|entry| match entry {
+                    acp_thread::AgentThreadEntry::AssistantMessage(message) => message.chunks.last().and_then(|chunk| match chunk {
+                        acp_thread::AssistantMessageChunk::Message { block, .. } => block.markdowns().last().cloned(),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .expect("an agent message");
+            markdown.update(cx, |markdown, cx| markdown.append(" Done.", cx));
+        });
+        cx.executor().advance_clock(ENTRY_FLUSH_DELAY * 4);
+        cx.run_until_parked();
+        harness.say(json!({ "type": "subscribe", "client_msg_id": "m3", "thread_id": thread_key, "since_seq": 0 }), cx);
+        let received = harness.received();
+        assert_eq!(last_text(&received), Some(format!("{full} Done.")));
     }
 
     #[gpui::test]

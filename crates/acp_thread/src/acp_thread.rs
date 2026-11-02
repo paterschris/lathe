@@ -5805,6 +5805,13 @@ impl AcpThread {
     }
 
     /// Flush all buffered streaming text into the Markdown entity immediately.
+    /// Whether streamed agent text is still being revealed into its message.
+    /// The reveal appends to the message's markdown on a timer, without an
+    /// event, so a reader mirroring the text has to look again until it ends.
+    pub fn is_revealing_text(&self) -> bool {
+        self.streaming_text_buffer.is_some()
+    }
+
     fn flush_streaming_text(&mut self, cx: &mut Context<Self>) {
         if let Some(mut buffer) = self.streaming_text_buffer.take() {
             buffer.reveal(&self.entries, usize::MAX, cx);
