@@ -1,23 +1,26 @@
 use std::collections::{HashMap, HashSet};
 
 use ai_accounts::{
-    AccountState, AgentDescriptor, AiAccount, AiAccountsIndex, BrandAccent, CLAUDE_CODE_DESCRIPTOR,
-    ConversationSummary, LoginFlow, TIER_A_DESCRIPTORS, api_key_keychain_url, claude_profiles_dir,
-    delete_account, descriptor_for, import_from_claude_profiles, is_managed_config_dir,
-    list_conversations, load_index, resume_command, save_index, verify_account,
+    AccountState, AccountSupport, AiAccount, AiAccountsIndex, AiAccountsSettings,
+    CLAUDE_CODE_AGENT_ID, CatalogEntry, ConversationSummary, VerifyStrategy, api_key_keychain_url,
+    builtin_descriptor, claude_profiles_dir, delete_account, has_conversation_history,
+    import_from_claude_profiles, is_managed_config_dir, list_conversations, load_index,
+    resume_command, save_index, verify_account,
 };
 use fs::RemoveOptions;
 use gpui::{
-    AnyElement, DismissEvent, EventEmitter, FocusHandle, Focusable, Hsla, Rgba, ScrollHandle, Task,
-    WeakEntity, WindowAppearance, prelude::*, px,
+    AnyElement, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, Task,
+    WeakEntity, prelude::*, px,
 };
 use notifications::status_toast::StatusToast;
-use settings::update_settings_file;
+use project::{AgentId, Project};
+use settings::{Settings as _, update_settings_file};
 use ui::{ListItem, ListItemSpacing, ListSeparator, Tooltip, WithScrollbar, prelude::*};
 use workspace::{ModalView, Workspace};
 
-use crate::ai_account_chip::unbind_account;
-use crate::{AddAiAccount, ManageAiAccounts};
+use super::add_ai_account_modal::SetAiAccountKeyModal;
+use crate::ai_account_chip::{account_catalog, brand_accent_color, unbind_account};
+use crate::{AddAiAccount, ManageAiAccounts, NewExternalAgentThread};
 
 pub struct ManageAiAccountsModal {
     focus_handle: FocusHandle,
@@ -29,6 +32,7 @@ pub struct ManageAiAccountsModal {
     conversations: HashMap<String, Option<Vec<ConversationSummary>>>,
     _conversation_tasks: Vec<Task<()>>,
     workspace: WeakEntity<Workspace>,
+    project: Entity<Project>,
     scroll_handle: ScrollHandle,
 }
 
@@ -40,11 +44,18 @@ impl ManageAiAccountsModal {
     ) {
         workspace.register_action(|workspace, _: &ManageAiAccounts, window, cx| {
             let workspace_handle = cx.weak_entity();
-            workspace.toggle_modal(window, cx, |_window, cx| Self::new(workspace_handle, cx));
+            let project = workspace.project().clone();
+            workspace.toggle_modal(window, cx, |_window, cx| {
+                Self::new(workspace_handle, project, cx)
+            });
         });
     }
 
-    pub fn new(workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: WeakEntity<Workspace>,
+        project: Entity<Project>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             index: load_index(),
@@ -52,6 +63,7 @@ impl ManageAiAccountsModal {
             conversations: HashMap::new(),
             _conversation_tasks: Vec::new(),
             workspace,
+            project,
             scroll_handle: ScrollHandle::new(),
         }
     }
@@ -121,8 +133,9 @@ impl ManageAiAccountsModal {
         // For API-key accounts, capture the keychain location now (while the
         // account still exists in the index) so we can clean up the stored key
         // after the registry entry is removed.
-        let keychain_url = descriptor_for(&account.agent_id)
-            .filter(|descriptor| matches!(descriptor.login_flow, LoginFlow::ApiKey { .. }))
+        let keychain_url = AiAccountsSettings::get_global(cx)
+            .descriptor_for(&account.agent_id)
+            .filter(|descriptor| descriptor.profile.api_key.is_some())
             .map(|_| api_key_keychain_url(&account.agent_id, &account.id));
         let credentials_provider = zed_credentials_provider::global(cx);
         let fs = self
@@ -256,6 +269,20 @@ impl ManageAiAccountsModal {
         let Some(account) = self.index.find(&account_id).cloned() else {
             return;
         };
+        let Some(descriptor) = AiAccountsSettings::get_global(cx).descriptor_for(&account.agent_id)
+        else {
+            return;
+        };
+        if descriptor.profile.verify == VerifyStrategy::OnConnect {
+            self.toast(
+                format!(
+                    "{} checks its sign-in when a thread connects. Open a thread to verify \"{}\".",
+                    descriptor.display_name, account.display_name
+                ),
+                cx,
+            );
+            return;
+        }
         // Optimistic UI: flip the row to Pending immediately so the user
         // sees something happen. The async verify resolves it to
         // Authenticated or Failed.
@@ -270,9 +297,9 @@ impl ManageAiAccountsModal {
 
         // API-key agents have no CLI status command; "verified" means a key is
         // present in the keychain for this account.
-        let is_api_key = descriptor_for(&account.agent_id)
-            .is_some_and(|descriptor| matches!(descriptor.login_flow, LoginFlow::ApiKey { .. }));
-        if is_api_key {
+        if descriptor.profile.verify == VerifyStrategy::StoredApiKey {
+            let previous_state = account.state;
+            let agent_display_name = descriptor.display_name;
             let credentials_provider = zed_credentials_provider::global(cx);
             let keychain_url = api_key_keychain_url(&account.agent_id, &account.id);
             cx.spawn(async move |this, cx| {
@@ -289,10 +316,14 @@ impl ManageAiAccountsModal {
                             format!("API key present for \"{display_name}\""),
                         )
                     } else {
+                        // Without a key the account signs in through the agent,
+                        // which only reports on that when a thread connects, so
+                        // leave the state as it was.
                         (
-                            AccountState::Failed,
+                            previous_state,
                             format!(
-                                "No API key saved for \"{display_name}\" — reconnect to add one"
+                                "\"{display_name}\" has no API key. {agent_display_name} checks \
+                                 its own sign-in when a thread connects."
                             ),
                         )
                     };
@@ -310,7 +341,7 @@ impl ManageAiAccountsModal {
         }
 
         cx.spawn(async move |this, cx| {
-            let result = verify_account(&account).await;
+            let result = verify_account(&account, &descriptor).await;
             this.update(cx, |this, cx| {
                 let (state, message) = match result {
                     Ok(true) => (
@@ -341,6 +372,30 @@ impl ManageAiAccountsModal {
             .ok();
         })
         .detach();
+    }
+
+    fn set_api_key(&mut self, account_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(account) = self.index.find(&account_id).cloned() else {
+            return;
+        };
+        let Some(descriptor) = AiAccountsSettings::get_global(cx).descriptor_for(&account.agent_id)
+        else {
+            return;
+        };
+        let workspace = self.workspace.clone();
+        cx.emit(DismissEvent);
+        // Opening the next modal replaces this one, which updates this modal
+        // while it is still handling the click, so wait for the click to finish.
+        window.defer(cx, move |window, cx| {
+            let Some(workspace_entity) = workspace.upgrade() else {
+                return;
+            };
+            workspace_entity.update(cx, |workspace_ref, cx| {
+                workspace_ref.toggle_modal(window, cx, |window, cx| {
+                    SetAiAccountKeyModal::new(account, descriptor, workspace, window, cx)
+                });
+            });
+        });
     }
 
     fn import_claude_profiles(&mut self, cx: &mut Context<Self>) {
@@ -404,15 +459,6 @@ impl Focusable for ManageAiAccountsModal {
 impl EventEmitter<DismissEvent> for ManageAiAccountsModal {}
 impl ModalView for ManageAiAccountsModal {}
 
-fn brand_accent_color(accent: &BrandAccent, window: &Window) -> Option<Hsla> {
-    let is_dark = matches!(
-        window.appearance(),
-        WindowAppearance::Dark | WindowAppearance::VibrantDark
-    );
-    let hex = if is_dark { accent.dark } else { accent.light };
-    Rgba::try_from(hex).ok().map(Hsla::from)
-}
-
 fn render_conversations(
     account: &AiAccount,
     conversations: Option<&[ConversationSummary]>,
@@ -431,10 +477,7 @@ fn render_conversations(
             )
             .into_any_element();
     };
-    let supported_agent = matches!(
-        account.agent_id.as_str(),
-        "claude-acp" | "codex-acp" | "gemini"
-    );
+    let supported_agent = has_conversation_history(&account.agent_id);
 
     if conversations.is_empty() {
         let message = if supported_agent {
@@ -501,6 +544,50 @@ fn render_conversations(
         .into_any_element()
 }
 
+const NO_PROFILE_EXPLANATION: &str = "These agents don't declare a profile directory, so Lathe \
+     can't keep separate accounts for them. If one has, describe it under \"ai_account_profiles\" \
+     in your settings.";
+
+/// Splits the catalog into agents that get a full section (they can hold
+/// separate accounts, or still have accounts from before) and the rest, which
+/// are listed together under one explanation.
+fn partition_catalog<'a>(
+    catalog: &'a [CatalogEntry],
+    index: &AiAccountsIndex,
+) -> (Vec<&'a CatalogEntry>, Vec<&'a CatalogEntry>) {
+    catalog.iter().partition(|entry| {
+        entry.descriptor().is_some() || index.for_agent(&entry.agent_id).next().is_some()
+    })
+}
+
+/// The note under an agent's header, if it needs one: why accounts can't be
+/// added, or that the agent is gone but its accounts were kept.
+fn section_explanation(entry: &CatalogEntry, no_accounts: bool) -> Option<SharedString> {
+    let name = &entry.display_name;
+    let text = match &entry.support {
+        AccountSupport::IsolatedProfile(_) if !entry.installed && !no_accounts => {
+            if builtin_descriptor(&entry.agent_id).is_some() {
+                return None;
+            }
+            format!(
+                "{name} is not installed. Its accounts are kept so their bindings and data aren't lost."
+            )
+        }
+        AccountSupport::IsolatedProfile(_) if no_accounts => {
+            format!("No accounts yet. Add one to use {name} in this workspace.")
+        }
+        AccountSupport::IsolatedProfile(_) => return None,
+        AccountSupport::AgentManaged { auth_methods } => format!(
+            "{name} signs in through its own authentication ({}). It doesn't declare a profile directory, so Lathe can't keep separate accounts for it.",
+            auth_methods.join(", ")
+        ),
+        AccountSupport::Unsupported => format!(
+            "{name} doesn't declare a profile directory, so Lathe can't keep separate accounts for it. If it has one, describe it under \"ai_account_profiles\" in your settings."
+        ),
+    };
+    Some(text.into())
+}
+
 fn state_label(state: AccountState) -> (&'static str, Color) {
     match state {
         AccountState::Created => ("Not signed in", Color::Muted),
@@ -514,16 +601,21 @@ fn state_label(state: AccountState) -> (&'static str, Color) {
 impl ManageAiAccountsModal {
     fn render_section(
         &mut self,
-        descriptor: &'static AgentDescriptor,
+        entry: &CatalogEntry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let agent_id = descriptor.agent_id;
+        let agent_id = entry.agent_id.clone();
+        let descriptor = entry.descriptor();
+        let can_manage = descriptor.is_some();
+        let accepts_api_key =
+            descriptor.is_some_and(|descriptor| descriptor.profile.api_key.is_some());
+        let can_add = can_manage && (entry.installed || builtin_descriptor(&agent_id).is_some());
         let mut accounts: Vec<AiAccount> =
-            self.index.for_agent(agent_id).cloned().collect::<Vec<_>>();
+            self.index.for_agent(&agent_id).cloned().collect::<Vec<_>>();
         // Most-used first (last_used_at desc), ties broken by created_at desc,
         // then case-insensitive display_name asc. None values for both
-        // timestamps sort to the bottom — newly created/never-used accounts
+        // timestamps sort to the bottom: newly created/never-used accounts
         // appear after used ones until they're touched.
         accounts.sort_by(|a, b| {
             b.last_used_at
@@ -537,12 +629,15 @@ impl ManageAiAccountsModal {
         });
         let default_id = self
             .index
-            .default_for_agent(agent_id)
+            .default_for_agent(&agent_id)
             .map(|account| account.id.clone());
-        let accent = brand_accent_color(&descriptor.brand_accent, window);
+        let accent = brand_accent_color(
+            descriptor.and_then(|descriptor| descriptor.brand_accent.as_ref()),
+            window,
+        );
 
         let add_button_id = SharedString::from(format!("add-account-{agent_id}"));
-        let is_claude_code = agent_id == CLAUDE_CODE_DESCRIPTOR.agent_id;
+        let is_claude_code = agent_id.as_ref() == CLAUDE_CODE_AGENT_ID;
         let claude_profiles_present = is_claude_code
             && claude_profiles_dir()
                 .map(|path| path.exists())
@@ -552,14 +647,21 @@ impl ManageAiAccountsModal {
             .pt_2()
             .pb_1()
             .gap_2()
-            .child(
-                div()
-                    .w_2()
-                    .h_2()
-                    .rounded_full()
-                    .when_some(accent, |this, color| this.bg(color)),
+            .child(div().w_2().h_2().rounded_full().map(|this| match accent {
+                Some(color) => this.bg(color),
+                None => this.bg(Color::Muted.color(cx)),
+            }))
+            .child(Label::new(entry.display_name.clone()).size(LabelSize::Default))
+            .when(
+                !entry.installed && builtin_descriptor(&agent_id).is_none(),
+                |this| {
+                    this.child(
+                        Label::new("Not installed")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                },
             )
-            .child(Label::new(SharedString::from(descriptor.display_name)).size(LabelSize::Default))
             .child(div().flex_1())
             .when(claude_profiles_present, |this| {
                 this.child(
@@ -576,73 +678,113 @@ impl ManageAiAccountsModal {
                     })),
                 )
             })
-            .child(
-                Button::new(add_button_id, "Add account")
-                    .label_size(LabelSize::XSmall)
-                    .on_click(cx.listener(move |_, _, window, cx| {
-                        // Close this modal first, then dispatch — toggle_modal
-                        // for AddAiAccountModal would otherwise stack on top.
-                        cx.emit(DismissEvent);
-                        window.dispatch_action(
-                            Box::new(AddAiAccount {
-                                agent_id: Some(agent_id.to_string()),
-                            }),
-                            cx,
-                        );
-                    })),
+            .when(can_add, |this| {
+                let agent_id = agent_id.clone();
+                this.child(
+                    Button::new(add_button_id, "Add account")
+                        .label_size(LabelSize::XSmall)
+                        .on_click(cx.listener(move |_, _, window, cx| {
+                            // Close this modal first, then dispatch. toggle_modal
+                            // for AddAiAccountModal would otherwise stack on top.
+                            cx.emit(DismissEvent);
+                            window.dispatch_action(
+                                Box::new(AddAiAccount {
+                                    agent_id: Some(agent_id.to_string()),
+                                }),
+                                cx,
+                            );
+                        })),
+                )
+            })
+            .when(
+                entry.installed && matches!(entry.support, AccountSupport::AgentManaged { .. }),
+                |this| {
+                    let agent_id = agent_id.clone();
+                    this.child(
+                        Button::new(
+                            SharedString::from(format!("open-thread-{agent_id}")),
+                            "Open thread",
+                        )
+                        .label_size(LabelSize::XSmall)
+                        .tooltip(Tooltip::text(
+                            "Sign in through the agent's own authentication",
+                        ))
+                        .on_click(cx.listener(move |_, _, window, cx| {
+                            cx.emit(DismissEvent);
+                            window.dispatch_action(
+                                Box::new(NewExternalAgentThread {
+                                    agent: AgentId::new(agent_id.to_string()),
+                                }),
+                                cx,
+                            );
+                        })),
+                    )
+                },
             );
 
-        let body = if accounts.is_empty() {
-            v_flex()
-                .px_2()
-                .pb_2()
-                .child(
-                    Label::new(SharedString::from(format!(
-                        "No accounts yet. Add one to use {} in this workspace.",
-                        descriptor.display_name
-                    )))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
+        let explanation = section_explanation(entry, accounts.is_empty());
+        let mut body: Vec<AnyElement> = Vec::with_capacity(accounts.len() * 2 + 1);
+        if let Some(explanation) = explanation {
+            body.push(
+                div()
+                    .px_2()
+                    .pb_2()
+                    .child(
+                        Label::new(explanation)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element(),
+            );
+        }
+        for account in accounts {
+            let is_default = default_id.as_deref() == Some(account.id.as_str());
+            let is_expanded = self.expanded_accounts.contains(&account.id);
+            body.push(
+                self.render_account_row(
+                    agent_id.clone(),
+                    &account,
+                    is_default,
+                    is_expanded,
+                    can_manage,
+                    accepts_api_key,
+                    cx,
                 )
-                .into_any_element()
-        } else {
-            let mut rows: Vec<AnyElement> = Vec::with_capacity(accounts.len() * 2);
-            for account in accounts {
-                let is_default = default_id.as_deref() == Some(account.id.as_str());
-                let is_expanded = self.expanded_accounts.contains(&account.id);
-                rows.push(
-                    self.render_account_row(agent_id, &account, is_default, is_expanded, cx)
-                        .into_any_element(),
+                .into_any_element(),
+            );
+            if is_expanded {
+                body.push(
+                    render_conversations(
+                        &account,
+                        self.conversations
+                            .get(&account.id)
+                            .and_then(|conversations| conversations.as_deref()),
+                        self.workspace.clone(),
+                        cx,
+                    )
+                    .into_any_element(),
                 );
-                if is_expanded {
-                    rows.push(
-                        render_conversations(
-                            &account,
-                            self.conversations
-                                .get(&account.id)
-                                .and_then(|conversations| conversations.as_deref()),
-                            self.workspace.clone(),
-                            cx,
-                        )
-                        .into_any_element(),
-                    );
-                }
             }
-            v_flex().children(rows).into_any_element()
-        };
+        }
 
-        v_flex().child(header).child(body)
+        v_flex().child(header).children(body)
     }
 
+    /// `can_manage` is false for accounts whose agent no longer has a
+    /// profile contract. Those can still be inspected and removed, but not
+    /// verified or made the default.
     fn render_account_row(
         &mut self,
-        agent_id: &'static str,
+        agent_id: SharedString,
         account: &AiAccount,
         is_default: bool,
         is_expanded: bool,
+        can_manage: bool,
+        accepts_api_key: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let only_one_account = self.index.for_agent(agent_id).count() <= 1;
+        let account_id_for_key = account.id.clone();
+        let only_one_account = self.index.for_agent(&agent_id).count() <= 1;
         let (status_text, status_color) = state_label(account.state);
         let row_id = SharedString::from(format!("ai-account-{}", account.id));
         let display_name = SharedString::from(account.display_name.clone());
@@ -708,26 +850,44 @@ impl ManageAiAccountsModal {
                             },
                         )),
                     )
-                    .child(
-                        IconButton::new(
-                            SharedString::from(format!("verify-{}", account.id)),
-                            IconName::Check,
+                    .when(accepts_api_key, |this| {
+                        this.child(
+                            IconButton::new(
+                                SharedString::from(format!("set-key-{}", account.id)),
+                                IconName::Lock,
+                            )
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .tooltip(Tooltip::text("Set API key"))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.set_api_key(account_id_for_key.clone(), window, cx);
+                                },
+                            )),
                         )
-                        .icon_size(IconSize::Small)
-                        .icon_color(Color::Muted)
-                        .disabled(is_verifying)
-                        .tooltip(Tooltip::text(if is_verifying {
-                            "Verifying…"
-                        } else {
-                            "Test connection"
-                        }))
-                        .on_click(cx.listener(
-                            move |this, _, _window, cx| {
-                                this.verify(account_id_for_verify.clone(), cx);
-                            },
-                        )),
-                    )
-                    .when(!is_default && !only_one_account, |this| {
+                    })
+                    .when(can_manage, |this| {
+                        this.child(
+                            IconButton::new(
+                                SharedString::from(format!("verify-{}", account.id)),
+                                IconName::Check,
+                            )
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .disabled(is_verifying)
+                            .tooltip(Tooltip::text(if is_verifying {
+                                "Verifying…"
+                            } else {
+                                "Test connection"
+                            }))
+                            .on_click(cx.listener(
+                                move |this, _, _window, cx| {
+                                    this.verify(account_id_for_verify.clone(), cx);
+                                },
+                            )),
+                        )
+                    })
+                    .when(can_manage && !is_default && !only_one_account, |this| {
                         this.child(
                             Button::new(
                                 SharedString::from(format!("set-default-{}", account.id)),
@@ -776,19 +936,27 @@ impl Render for ManageAiAccountsModal {
             .map(|path| path.exists())
             .unwrap_or(false);
 
+        // Materialize sections imperatively to avoid an FnMut closure trying
+        // to escape `cx`-tied references through `.map(|entry| ...)`.
+        let catalog = account_catalog(&self.project, &self.index, cx);
+        let (with_accounts, without_profiles) = partition_catalog(&catalog, &self.index);
+        let mut sections: Vec<AnyElement> = Vec::with_capacity(with_accounts.len() + 1);
+        for entry in with_accounts {
+            sections.push(self.render_section(entry, window, cx).into_any_element());
+        }
+        if !without_profiles.is_empty() {
+            sections.push(
+                self.render_agents_without_profiles(&without_profiles, cx)
+                    .into_any_element(),
+            );
+        }
+
         let body = if any_accounts_anywhere {
-            // Materialize sections imperatively to avoid an FnMut closure trying
-            // to escape `cx`-tied references through `.map(|descriptor| ...)`.
-            let mut sections: Vec<AnyElement> = Vec::with_capacity(TIER_A_DESCRIPTORS.len());
-            for descriptor in TIER_A_DESCRIPTORS {
-                sections.push(
-                    self.render_section(descriptor, window, cx)
-                        .into_any_element(),
-                );
-            }
             div().children(sections).into_any_element()
         } else {
-            self.render_empty_hero(claude_profiles_present, cx)
+            div()
+                .child(self.render_empty_hero(claude_profiles_present, cx))
+                .children(sections)
                 .into_any_element()
         };
 
@@ -837,6 +1005,67 @@ impl Render for ManageAiAccountsModal {
 }
 
 impl ManageAiAccountsModal {
+    fn render_agents_without_profiles(
+        &self,
+        entries: &[&CatalogEntry],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let rows = entries.iter().map(|entry| {
+            let agent_id = entry.agent_id.clone();
+            let auth_methods = match &entry.support {
+                AccountSupport::AgentManaged { auth_methods } => Some(auth_methods.join(", ")),
+                AccountSupport::IsolatedProfile(_) | AccountSupport::Unsupported => None,
+            };
+            h_flex()
+                .px_2()
+                .py_0p5()
+                .gap_2()
+                .child(div().w_2().h_2().rounded_full().bg(Color::Muted.color(cx)))
+                .child(Label::new(entry.display_name.clone()))
+                .child(div().flex_1())
+                .when_some(auth_methods, |this, auth_methods| {
+                    this.child(
+                        Button::new(
+                            SharedString::from(format!("open-thread-{agent_id}")),
+                            "Open thread",
+                        )
+                        .label_size(LabelSize::XSmall)
+                        .tooltip(Tooltip::text(format!(
+                            "Sign in through the agent's own authentication ({auth_methods})"
+                        )))
+                        .on_click(cx.listener(move |_, _, window, cx| {
+                            cx.emit(DismissEvent);
+                            window.dispatch_action(
+                                Box::new(NewExternalAgentThread {
+                                    agent: AgentId::new(agent_id.to_string()),
+                                }),
+                                cx,
+                            );
+                        })),
+                    )
+                })
+        });
+
+        v_flex()
+            .pb_2()
+            .child(ListSeparator)
+            .child(
+                div().px_2().pt_1().child(
+                    Label::new("Agents without separate accounts")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                div().px_2().pb_1().child(
+                    Label::new(NO_PROFILE_EXPLANATION)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+            )
+            .children(rows)
+    }
+
     fn render_empty_hero(
         &self,
         claude_profiles_present: bool,
@@ -853,7 +1082,7 @@ impl ManageAiAccountsModal {
             )
             .child(
                 Label::new(SharedString::from(
-                    "Add an account to use Claude Code, Gemini, or Codex with a subscription-authenticated identity. Each workspace can bind to a different account per agent.",
+                    "Add an account to use an agent with its own subscription-authenticated identity. Each workspace can bind to a different account per agent.",
                 ))
                 .size(LabelSize::Small)
                 .color(Color::Muted),
@@ -891,19 +1120,29 @@ impl ManageAiAccountsModal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::Rgba;
+
+    fn builtin_descriptors() -> impl Iterator<Item = ai_accounts::AgentDescriptor> {
+        ai_accounts::BUILTIN_AGENT_IDS
+            .iter()
+            .filter_map(|agent_id| builtin_descriptor(agent_id))
+    }
 
     #[test]
     fn descriptors_have_unique_brand_accents() {
         let mut light_seen = std::collections::HashSet::new();
         let mut dark_seen = std::collections::HashSet::new();
-        for descriptor in TIER_A_DESCRIPTORS {
+        for descriptor in builtin_descriptors() {
+            let accent = descriptor
+                .brand_accent
+                .expect("built-in agents have an accent");
             assert!(
-                light_seen.insert(descriptor.brand_accent.light),
+                light_seen.insert(accent.light),
                 "duplicate light accent for {}",
                 descriptor.agent_id
             );
             assert!(
-                dark_seen.insert(descriptor.brand_accent.dark),
+                dark_seen.insert(accent.dark),
                 "duplicate dark accent for {}",
                 descriptor.agent_id
             );
@@ -912,14 +1151,17 @@ mod tests {
 
     #[test]
     fn brand_accents_parse_as_rgba() {
-        for descriptor in TIER_A_DESCRIPTORS {
+        for descriptor in builtin_descriptors() {
+            let accent = descriptor
+                .brand_accent
+                .expect("built-in agents have an accent");
             assert!(
-                Rgba::try_from(descriptor.brand_accent.light).is_ok(),
+                Rgba::try_from(accent.light).is_ok(),
                 "light hex parse failed for {}",
                 descriptor.agent_id
             );
             assert!(
-                Rgba::try_from(descriptor.brand_accent.dark).is_ok(),
+                Rgba::try_from(accent.dark).is_ok(),
                 "dark hex parse failed for {}",
                 descriptor.agent_id
             );
@@ -942,9 +1184,92 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_for_returns_known_agents() {
-        assert!(descriptor_for("claude-acp").is_some());
-        assert!(descriptor_for("gemini").is_some());
-        assert!(descriptor_for("codex-acp").is_some());
+    fn agents_without_profiles_or_accounts_are_grouped_separately() {
+        let entry = |agent_id: &str, support| CatalogEntry {
+            agent_id: agent_id.to_string().into(),
+            display_name: agent_id.to_string().into(),
+            installed: true,
+            support,
+        };
+        let catalog = [
+            entry(
+                "claude-acp",
+                AccountSupport::IsolatedProfile(
+                    builtin_descriptor("claude-acp").expect("claude descriptor"),
+                ),
+            ),
+            entry("copilot", AccountSupport::Unsupported),
+            entry(
+                "auggie",
+                AccountSupport::AgentManaged {
+                    auth_methods: vec!["Sign in".into()],
+                },
+            ),
+            entry("profile-lost", AccountSupport::Unsupported),
+        ];
+        let mut index = AiAccountsIndex::default();
+        index.upsert(AiAccount::new(
+            "profile-lost",
+            "old",
+            std::path::PathBuf::from("/tmp/profile-lost/old"),
+        ));
+
+        let (with_accounts, without_profiles) = partition_catalog(&catalog, &index);
+        let ids = |entries: Vec<&CatalogEntry>| {
+            entries
+                .into_iter()
+                .map(|entry| entry.agent_id.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(with_accounts),
+            ["claude-acp", "profile-lost"],
+            "an agent that still has accounts keeps its own section"
+        );
+        assert_eq!(ids(without_profiles), ["copilot", "auggie"]);
+    }
+
+    #[test]
+    fn section_explanation_matches_support() {
+        let entry = |agent_id: &str, installed, support| CatalogEntry {
+            agent_id: agent_id.to_string().into(),
+            display_name: agent_id.to_string().into(),
+            installed,
+            support,
+        };
+        let claude = builtin_descriptor("claude-acp").expect("claude descriptor");
+        let isolated = AccountSupport::IsolatedProfile(claude);
+
+        assert!(
+            section_explanation(&entry("claude-acp", false, isolated.clone()), false).is_none()
+        );
+        assert!(
+            section_explanation(&entry("opencode", false, isolated.clone()), false)
+                .is_some_and(|text| text.contains("not installed"))
+        );
+        assert!(
+            section_explanation(&entry("opencode", true, isolated), true)
+                .is_some_and(|text| text.starts_with("No accounts yet"))
+        );
+        assert!(
+            section_explanation(
+                &entry(
+                    "auggie",
+                    true,
+                    AccountSupport::AgentManaged {
+                        auth_methods: vec!["Sign in".into()]
+                    }
+                ),
+                true
+            )
+            .is_some_and(|text| text.contains("(Sign in)"))
+        );
+        assert!(
+            section_explanation(
+                &entry("command-code", true, AccountSupport::Unsupported),
+                true
+            )
+            .is_some_and(|text| text.contains("ai_account_profiles"))
+        );
     }
 }

@@ -3,13 +3,15 @@ use std::rc::Rc;
 use std::path::PathBuf;
 
 use ai_accounts::{
-    AgentDescriptor, AiAccountsSettings, BrandAccent, WorkspaceAccountBindings,
-    carry_conversation_to_account, descriptor_for, load_index, mark_account_used,
+    AdvertisedAuthMethods, AiAccountsIndex, AiAccountsSettings, BrandAccent, CatalogEntry,
+    InstalledAgent, TranscriptLayout, WorkspaceAccountBindings, build_catalog,
+    carry_conversation_to_account, load_index, mark_account_used,
 };
 use collections::HashMap;
 use db::kvp::KeyValueStore;
-use gpui::{EntityId, Hsla, Rgba, WeakEntity, WindowAppearance, prelude::*};
-use project::AgentId;
+use gpui::{Entity, EntityId, Hsla, Rgba, WeakEntity, WindowAppearance, prelude::*};
+use notifications::status_toast::StatusToast;
+use project::{AgentId, Project};
 use settings::{Settings as _, SettingsContent};
 use ui::{
     ButtonLike, ButtonStyle, CommonAnimationExt, ContextMenu, ContextMenuEntry, PopoverMenu,
@@ -21,7 +23,8 @@ use workspace::{Workspace, WorkspaceId};
 use crate::agent_panel::AgentPanel;
 use crate::{AddAiAccount, Agent, ManageAiAccounts, NewExternalAgentThread};
 
-fn brand_accent_color(accent: &BrandAccent, window: &Window) -> Option<Hsla> {
+pub(crate) fn brand_accent_color(accent: Option<&BrandAccent>, window: &Window) -> Option<Hsla> {
+    let accent = accent?;
     let is_dark = matches!(
         window.appearance(),
         WindowAppearance::Dark | WindowAppearance::VibrantDark
@@ -30,10 +33,39 @@ fn brand_accent_color(accent: &BrandAccent, window: &Window) -> Option<Hsla> {
     Rgba::try_from(hex).ok().map(Hsla::from)
 }
 
+/// The agents the account UI lists for `project`: built-in agents, every
+/// installed external agent, and agents that still have accounts after being
+/// uninstalled.
+pub(crate) fn account_catalog(
+    project: &Entity<Project>,
+    index: &AiAccountsIndex,
+    cx: &App,
+) -> Vec<CatalogEntry> {
+    let installed: Vec<InstalledAgent> = {
+        let store = project.read(cx).agent_server_store().read(cx);
+        store
+            .external_agents()
+            .map(|agent_id| InstalledAgent {
+                agent_id: agent_id.0.to_string().into(),
+                display_name: store
+                    .agent_display_name(agent_id)
+                    .unwrap_or_else(|| agent_id.0.to_string().into()),
+            })
+            .collect()
+    };
+    build_catalog(
+        &installed,
+        AiAccountsSettings::get_global(cx),
+        cx.try_global::<AdvertisedAuthMethods>(),
+        index,
+    )
+}
+
 impl AgentPanel {
     /// Renders the AI account chip in the panel header. Returns `None` when
-    /// no ACP-mode thread is active or the active agent isn't a Tier A agent
-    /// — in those cases the chip is hidden entirely (no placeholder).
+    /// no ACP-mode thread is active or the active agent has no profile
+    /// contract, so it can't hold isolated accounts. In those cases the chip
+    /// is hidden entirely (no placeholder).
     pub(crate) fn render_ai_account_chip(
         &self,
         window: &mut Window,
@@ -54,17 +86,17 @@ impl AgentPanel {
                 .0
                 .to_string(),
         };
-        let descriptor: &'static AgentDescriptor = descriptor_for(&agent_id_owned)?;
-        let agent_id_static: &'static str = descriptor.agent_id;
+        let settings = AiAccountsSettings::get_global(cx);
+        let descriptor = settings.descriptor_for(&agent_id_owned)?;
+        let agent_id = descriptor.agent_id.clone();
 
-        let settings = AiAccountsSettings::get_global(cx).clone();
         let index = load_index();
         let workspace_binding =
-            WorkspaceAccountBindings::binding_for(self.project_entity_id(), agent_id_static, cx);
+            WorkspaceAccountBindings::binding_for(self.project_entity_id(), &agent_id, cx);
         let active_account =
-            settings.resolve_account(agent_id_static, workspace_binding.as_deref(), &index);
+            settings.resolve_account(&agent_id, workspace_binding.as_deref(), &index);
 
-        let accent = brand_accent_color(&descriptor.brand_accent, window);
+        let accent = brand_accent_color(descriptor.brand_accent.as_ref(), window);
         let chip_label: SharedString = active_account
             .map(|account| account.display_name.clone().into())
             .unwrap_or_else(|| SharedString::from("Add account…"));
@@ -72,7 +104,7 @@ impl AgentPanel {
         // Snapshot data the popover needs into owned values so the menu
         // closure doesn't borrow `self` or the index.
         let other_accounts: Vec<(String, String)> = index
-            .for_agent(agent_id_static)
+            .for_agent(&agent_id)
             .filter(|account| active_account.map_or(true, |active| active.id != account.id))
             .map(|account| (account.id.clone(), account.display_name.clone()))
             .collect();
@@ -86,8 +118,8 @@ impl AgentPanel {
             .active_conversation_view()
             .is_some_and(|conversation_view| conversation_view.read(cx).is_switching_account());
         let panel = cx.weak_entity();
-        let menu_id = SharedString::from(format!("ai-account-chip-menu-{agent_id_static}"));
-        let trigger_id = SharedString::from(format!("ai-account-chip-trigger-{agent_id_static}"));
+        let menu_id = SharedString::from(format!("ai-account-chip-menu-{agent_id}"));
+        let trigger_id = SharedString::from(format!("ai-account-chip-trigger-{agent_id}"));
 
         let trigger = ButtonLike::new(trigger_id)
             .style(ButtonStyle::Subtle)
@@ -118,6 +150,7 @@ impl AgentPanel {
                 .menu(move |window, cx| {
                     let other_accounts = other_accounts.clone();
                     let panel = panel.clone();
+                    let agent_id = agent_id.clone();
                     Some(ContextMenu::build(
                         window,
                         cx,
@@ -125,11 +158,12 @@ impl AgentPanel {
                             let has_alternatives = !other_accounts.is_empty();
                             for (account_id, display_name) in other_accounts {
                                 let panel = panel.clone();
+                                let agent_id = agent_id.clone();
                                 menu = menu.item(
                                     ContextMenuEntry::new(format!("Switch to {display_name}"))
                                         .disabled(is_generating || is_switching_account)
                                         .handler(move |window, cx| {
-                                            let agent_id = agent_id_static.to_string();
+                                            let agent_id = agent_id.to_string();
                                             let account_id = account_id.clone();
                                             panel
                                                 .update(cx, |panel, cx| {
@@ -143,13 +177,14 @@ impl AgentPanel {
                             }
                             if has_workspace_binding {
                                 let panel = panel.clone();
+                                let agent_id = agent_id.clone();
                                 menu = menu.entry(
                                     SharedString::from("Clear binding for this workspace"),
                                     None,
                                     move |_window, cx| {
                                         panel
                                             .update(cx, |panel, cx| {
-                                                panel.clear_ai_account_binding(agent_id_static, cx);
+                                                panel.clear_ai_account_binding(&agent_id, cx);
                                             })
                                             .ok();
                                     },
@@ -164,7 +199,7 @@ impl AgentPanel {
                                 move |window, cx| {
                                     window.dispatch_action(
                                         Box::new(AddAiAccount {
-                                            agent_id: Some(agent_id_static.to_string()),
+                                            agent_id: Some(agent_id.to_string()),
                                         }),
                                         cx,
                                     );
@@ -199,6 +234,25 @@ impl AgentPanel {
         });
     }
 
+    /// Restarts `agent_id` when `account_id` is the account it runs as in
+    /// this workspace, so credentials that changed on disk or in the keychain
+    /// take effect. Credentials are only read when the process spawns.
+    pub(crate) fn restart_if_account_in_use(
+        &mut self,
+        agent_id: &str,
+        account_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace_binding =
+            WorkspaceAccountBindings::binding_for(self.project_entity_id(), agent_id, cx);
+        let in_use = AiAccountsSettings::get_global(cx)
+            .resolve_account(agent_id, workspace_binding.as_deref(), &load_index())
+            .is_some_and(|account| account.id == account_id);
+        if in_use {
+            self.restart_ai_agent_connection(agent_id, cx);
+        }
+    }
+
     /// Binds `account_id` for `agent_id` in this workspace only, then restarts
     /// the agent connection so the new account is actually used.
     pub(crate) fn switch_ai_account(
@@ -231,7 +285,11 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         let index = load_index();
-        let previous_config_dir = AiAccountsSettings::get_global(cx)
+        let settings = AiAccountsSettings::get_global(cx);
+        let Some(descriptor) = settings.descriptor_for(&agent_id) else {
+            return;
+        };
+        let previous_config_dir = settings
             .resolve_account(
                 &agent_id,
                 WorkspaceAccountBindings::binding_for(self.project_entity_id(), &agent_id, cx)
@@ -239,40 +297,68 @@ impl AgentPanel {
                 &index,
             )
             .map(|account| account.config_dir.clone());
-        let next_config_dir = index
-            .accounts
-            .iter()
-            .find(|account| account.id == account_id)
-            .map(|account| account.config_dir.clone());
+        let next_account = index.find(&account_id);
+        let next_config_dir = next_account.map(|account| account.config_dir.clone());
+        let next_display_name = next_account
+            .map(|account| account.display_name.clone())
+            .unwrap_or_default();
         self.switch_ai_account(agent_id.clone(), account_id, cx);
         if let (Some(from), Some(to)) = (previous_config_dir, next_config_dir)
             && from != to
         {
-            self.move_active_thread_to_account(agent_id, from, to, window, cx);
+            let moved = self.move_active_thread_to_account(
+                agent_id,
+                descriptor.profile.transcripts,
+                from,
+                to,
+                window,
+                cx,
+            );
+            if !moved {
+                self.show_account_toast(
+                    format!(
+                        "Switched to \"{next_display_name}\" for new threads. Lathe can't move                          an open {} conversation between accounts yet.",
+                        descriptor.display_name
+                    ),
+                    cx,
+                );
+            }
         }
+    }
+
+    fn show_account_toast(&self, message: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace().upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_status_toast(StatusToast::new(message, cx, |this, _cx| this), cx);
+        });
     }
 
     /// The open thread keeps talking to the process it was started with, so
     /// without this a switch only affects threads created afterwards. A thread
     /// with history is reloaded by session id on the new account's process,
     /// which first needs the transcript copied into that account's config dir.
+    /// Returns `false` when the open conversation can't follow the switch
+    /// because the agent has no [`TranscriptLayout`] adapter.
     fn move_active_thread_to_account(
         &mut self,
         agent_id: String,
+        transcripts: TranscriptLayout,
         from_config_dir: PathBuf,
         to_config_dir: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(conversation_view) = self.active_conversation_view().cloned() else {
-            return;
+            return true;
         };
         let Some(thread) = conversation_view.read(cx).root_thread(cx) else {
-            return;
+            return true;
         };
         let thread = thread.read(cx);
         if thread.connection().agent_id().0.as_ref() != agent_id {
-            return;
+            return true;
         }
         if thread.entries().is_empty() {
             window.dispatch_action(
@@ -281,18 +367,20 @@ impl AgentPanel {
                 }),
                 cx,
             );
-            return;
+            return true;
+        }
+        if transcripts == TranscriptLayout::None {
+            return false;
         }
         let session_id = thread.session_id().0.to_string();
         let conversation_view = conversation_view.downgrade();
         cx.spawn_in(window, async move |_this, cx| {
             let carried = cx
                 .background_spawn({
-                    let agent_id = agent_id.clone();
                     let session_id = session_id.clone();
                     async move {
                         carry_conversation_to_account(
-                            &agent_id,
+                            transcripts,
                             &session_id,
                             &from_config_dir,
                             &to_config_dir,
@@ -312,6 +400,7 @@ impl AgentPanel {
             })
         })
         .detach_and_log_err(cx);
+        true
     }
 
     fn clear_ai_account_binding(&mut self, agent_id: &str, cx: &mut Context<Self>) {
@@ -326,7 +415,8 @@ impl AgentPanel {
         cx.notify();
     }
 
-    /// Connects a freshly added in-thread-login AI account (Claude, Gemini):
+    /// Connects a freshly added AI account that signs in through the agent's
+    /// own ACP authentication (Claude, settings-defined agents):
     /// bind it to this workspace, restart the agent connection so the new
     /// (empty) config dir is used, then open a thread. Because the config dir
     /// has no credentials yet, the agent reports auth-required and the thread

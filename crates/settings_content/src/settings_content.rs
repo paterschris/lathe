@@ -233,6 +233,13 @@ pub struct SettingsContent {
     /// subscription-authenticated identities can be used per-workspace.
     pub ai_accounts: Option<AiAccountsMap>,
 
+    /// Profile contracts for ACP agents Lathe has no built-in account support
+    /// for, keyed by agent ID. An entry tells Lathe which environment variable
+    /// relocates the agent's credentials and state, which lets Manage AI
+    /// Accounts keep several isolated accounts for that agent. Only read from
+    /// user settings.
+    pub ai_account_profiles: Option<HashMap<String, AiAccountProfileContent>>,
+
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,
 
@@ -446,6 +453,40 @@ impl std::ops::DerefMut for FeatureFlagsMap {
 #[serde(transparent)]
 pub struct AiAccountsMap(pub HashMap<String, String>);
 
+#[with_fallible_options]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct AiAccountProfileContent {
+    /// Environment variable the agent reads to locate its profile directory.
+    /// Lathe sets it to the account's directory when it launches the agent.
+    /// `HOME`, `USERPROFILE` and `PATH` are not accepted.
+    pub profile_env_var: Option<String>,
+    /// How a new account signs in. `"agent"` opens a thread so the agent's own
+    /// ACP sign-in runs against the new profile; `{ "terminal": [...] }` runs
+    /// that command in a terminal with the profile variable set.
+    ///
+    /// Default: "agent"
+    pub login: Option<AiAccountLoginContent>,
+    /// Command that exits successfully when the profile is signed in. Without
+    /// one, sign-in is checked when a thread connects.
+    pub verify_command: Option<Vec<String>>,
+    /// Extra environment variables for the agent process, applied only when
+    /// nothing else sets them.
+    pub env: Option<HashMap<String, String>>,
+    /// Inherited environment variables to remove from the agent process while
+    /// an account is bound, such as API keys that would override the
+    /// account's own sign-in.
+    pub scrub_env: Option<Vec<String>>,
+    /// Where to send people who don't have an account yet.
+    pub signup_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+#[serde(rename_all = "snake_case")]
+pub enum AiAccountLoginContent {
+    Agent,
+    Terminal(Vec<String>),
+}
+
 impl JsonSchema for AiAccountsMap {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "AiAccountsMap".into()
@@ -483,7 +524,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
     options: {
         call_hierarchy, command_palette, file_finder, git_panel, repository_dashboard_pinned_repos,
         pull_request_panel, git_activity_panel, mobile_dev_panel, companion, tabs, tab_bar, tab_switcher,
-        status_bar, preview_tabs, agent, agent_servers, ai_accounts, audio, auto_update,
+        status_bar, preview_tabs, agent, agent_servers, ai_accounts, ai_account_profiles, audio, auto_update,
         base_keymap, collaboration_panel, debugger, diagnostics, git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
         journal, log, line_indicator_format, language_models, copilot, outline_panel, project_panel,

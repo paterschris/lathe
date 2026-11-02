@@ -21,7 +21,8 @@ use agent_client_protocol::{
     V2Builder,
 };
 use ai_accounts::{
-    AiAccountsSettings, WorkspaceAccountBindings, descriptor_for, load_index, mark_account_used,
+    AdvertisedAuthMethods, AgentDescriptor, AiAccountsIndex, AiAccountsSettings, LaunchProfile,
+    WorkspaceAccountBindings, load_index, prepare_account_for_launch, resolve_launch_profile,
 };
 use anyhow::anyhow;
 use async_channel;
@@ -55,7 +56,7 @@ use acp_thread::{AcpThread, LoadError, TerminalProviderEvent};
 use terminal::TerminalBuilder;
 use terminal::terminal_settings::{AlternateScroll, CursorShape};
 
-use crate::{CURSOR_ID, GEMINI_ID};
+use crate::CURSOR_ID;
 
 pub const GEMINI_TERMINAL_AUTH_METHOD_ID: &str = "spawn-gemini-cli";
 const PARAMETERIZED_MODEL_PICKER_META_KEY: &str = "parameterizedModelPicker";
@@ -570,20 +571,19 @@ impl AcpConnection {
                 cx,
             )
         } else {
-            &[]
+            Vec::new()
         };
         if is_local_project {
             apply_git_host_env(&agent_id, &project, command.env.get_or_insert_default(), cx).await;
         }
         let spawn_env = command.env.clone().unwrap_or_default();
-        let original_command = command.clone();
         let transport::StdioProcess {
             child,
             incoming,
             outgoing,
             stderr,
             debug_log,
-        } = transport::spawn_stdio(&project, command, scrub_env, cx)?;
+        } = transport::spawn_stdio(&project, command, &scrub_env, cx)?;
         let mut child = transport::OwnedChild(child);
         let sessions = Rc::new(RefCell::new(HashMap::default()));
 
@@ -723,25 +723,16 @@ impl AcpConnection {
             None
         };
 
-        // TODO: Remove this override once Google team releases their official auth methods
-        let auth_methods = if agent_id.0.as_ref() == GEMINI_ID {
-            let mut gemini_args = original_command.args.clone();
-            gemini_args.retain(|a| a != "--experimental-acp" && a != "--acp");
-            let value = serde_json::json!({
-                "label": "gemini /auth",
-                "command": original_command.path.to_string_lossy(),
-                "args": gemini_args,
-                "env": original_command.env.unwrap_or_default(),
-            });
-            let meta = acp_v2::Meta::from_iter([("terminal-auth".to_string(), value)]);
-            vec![acp_v2::AuthMethod::Agent(
-                acp_v2::AuthMethodAgent::new(GEMINI_TERMINAL_AUTH_METHOD_ID, "Login")
-                    .description("Login with your Google or Vertex AI account")
-                    .meta(meta),
-            )]
-        } else {
-            acp_thread::auth_methods::from_v1(response.auth_methods)?
-        };
+        let auth_methods = acp_thread::auth_methods::from_v1(response.auth_methods)?;
+        let auth_method_names = auth_methods
+            .iter()
+            .filter_map(|method| match method {
+                acp_v2::AuthMethod::Agent(method) => Some(method.name.clone().into()),
+                acp_v2::AuthMethod::Terminal(method) => Some(method.name.clone().into()),
+                _ => None,
+            })
+            .collect();
+        cx.update(|cx| AdvertisedAuthMethods::record(agent_id.0.as_ref(), auth_method_names, cx));
         let defaults = AcpConnectionDefaults::new(default_mode, default_config_options);
         let settings_subscription = cx.update({
             let agent_id = agent_id.clone();
@@ -1847,73 +1838,41 @@ impl acp_thread::AgentSessionTruncate for AcpSessionTruncate {
     }
 }
 
-/// Injects the config-dir env var of the Lathe AI account bound to this agent,
+/// Applies the launch profile of the Lathe AI account bound to this agent,
 /// resolved from the project's workspace binding, then the `ai_accounts`
 /// setting, then the agent's global default, then an implicit single-account
-/// default. Agents without a known descriptor are left alone. Returns the env
+/// default. Agents without a profile contract are left alone. Returns the env
 /// var names that must also be removed from the child's inherited environment.
 fn apply_ai_account_env(
     agent_id: &AgentId,
     project: EntityId,
     env: &mut HashMap<String, String>,
     cx: &AsyncApp,
-) -> &'static [&'static str] {
-    let agent_id = agent_id.0.as_ref();
-    let Some(descriptor) = descriptor_for(agent_id) else {
-        return &[];
+) -> Vec<String> {
+    let Some((_, launch_profile)) = ai_account_launch_profile(agent_id, project, &load_index(), cx)
+    else {
+        return Vec::new();
     };
-    let mut scrub_env: &'static [&'static str] = &[];
-    let settings_and_binding = cx.try_read_global::<SettingsStore, _>(|store, cx| {
-        (
-            store.get::<AiAccountsSettings>(None).clone(),
-            WorkspaceAccountBindings::binding_for(project, agent_id, cx),
-        )
-    });
-    if let Some((settings, workspace_binding)) = settings_and_binding
-        && let Some(account) =
-            settings.resolve_account(agent_id, workspace_binding.as_deref(), &load_index())
-    {
-        env.insert(
-            descriptor.config_dir_env_var.to_string(),
-            account.config_dir.display().to_string(),
-        );
-        // For Gemini, make sure the relocated config dir selects AI Studio
-        // API-key auth. Accounts created before this was written at create time
-        // would otherwise launch with no selected auth type and fail with
-        // AuthRequired.
-        if agent_id == GEMINI_ID
-            && let Err(error) =
-                ai_accounts::ensure_gemini_api_key_auth_selected(&account.config_dir)
-        {
-            log::warn!(
-                "ai_accounts: failed to ensure Gemini settings.json for {}: {error:#}",
-                account.id
-            );
-        }
-        // Touch last_used_at so the account floats to the top of the Manage
-        // modal's per-agent list. Failure here is benign, so log it rather than
-        // blocking the thread spawn.
-        if let Err(error) = mark_account_used(&account.id) {
-            log::warn!(
-                "ai_accounts: failed to update last_used_at for {}: {error:#}",
-                account.id
-            );
-        }
-        // Strip API-key env vars that would override the account's
-        // subscription login.
-        scrub_env = descriptor.scrub_env;
-        for key in scrub_env {
-            env.remove(*key);
-        }
+    if let Some(account) = &launch_profile.account {
+        prepare_account_for_launch(account);
     }
-    // Apply the descriptor's protective defaults (e.g. cloud-MCP disable, MCP
-    // startup timeout) only when the user hasn't explicitly set the var:
-    // workspace settings, shell env, or a remote-client template all win.
-    for (key, value) in descriptor.default_env {
-        env.entry(key.to_string())
-            .or_insert_with(|| value.to_string());
-    }
-    scrub_env
+    launch_profile.apply(env);
+    launch_profile.removed_env
+}
+
+fn ai_account_launch_profile(
+    agent_id: &AgentId,
+    project: EntityId,
+    index: &AiAccountsIndex,
+    cx: &AsyncApp,
+) -> Option<(AgentDescriptor, LaunchProfile)> {
+    let agent_id = agent_id.0.as_ref();
+    cx.try_read_global::<SettingsStore, _>(|store, cx| {
+        let settings = store.get::<AiAccountsSettings>(None);
+        let workspace_binding = WorkspaceAccountBindings::binding_for(project, agent_id, cx);
+        resolve_launch_profile(agent_id, workspace_binding.as_deref(), settings, index)
+    })
+    .flatten()
 }
 
 /// How long agent startup waits to learn which git host account each
@@ -5542,6 +5501,90 @@ mod tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
         });
+    }
+
+    /// Each new or reconnected ACP thread runs in a freshly spawned process, so
+    /// an account switch must show up in the environment of the next process
+    /// the agent is launched as.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn account_switch_changes_profile_env_of_next_agent_process(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::BorrowAppContext as _;
+
+        cx.executor().allow_parking();
+        init_settings_test(cx);
+        const AGENT: &str = "profile-test-agent";
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.ai_account_profiles = Some(HashMap::from_iter([(
+                        AGENT.to_string(),
+                        settings::AiAccountProfileContent {
+                            profile_env_var: Some("PROFILE_TEST_AGENT_HOME".to_string()),
+                            scrub_env: Some(vec!["PROFILE_TEST_AGENT_KEY".to_string()]),
+                            ..Default::default()
+                        },
+                    )]));
+                });
+            });
+        });
+        let root = tempfile::tempdir().expect("tempdir");
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(root.path(), serde_json::json!({})).await;
+        let project = project::Project::test(fs, [root.path()], cx).await;
+        let project_id = project.entity_id();
+
+        let personal = ai_accounts::AiAccount::new(AGENT, "personal", root.path().join("personal"));
+        let work = ai_accounts::AiAccount::new(AGENT, "work", root.path().join("work"));
+        let mut index = AiAccountsIndex::default();
+        index.upsert(personal.clone());
+        index.upsert(work.clone());
+
+        for account in [&personal, &work] {
+            cx.update(|cx| {
+                WorkspaceAccountBindings::set(project_id, AGENT, Some(account.id.clone()), cx);
+            });
+            let mut command = AgentServerCommand {
+                path: std::path::PathBuf::from("/usr/bin/env"),
+                args: Vec::new(),
+                env: Some(HashMap::from_iter([(
+                    "PROFILE_TEST_AGENT_KEY".to_string(),
+                    "ambient".to_string(),
+                )])),
+            };
+            let (_, launch_profile) =
+                ai_account_launch_profile(&AgentId::new(AGENT), project_id, &index, &cx.to_async())
+                    .expect("the settings entry gives the agent a profile contract");
+            launch_profile.apply(command.env.get_or_insert_default());
+
+            let process = transport::spawn_stdio(
+                &project,
+                command,
+                &launch_profile.removed_env,
+                &cx.to_async(),
+            )
+            .expect("spawn agent process");
+            let environment: Vec<String> = process
+                .incoming
+                .filter_map(|line| async move { line.ok() })
+                .collect()
+                .await;
+
+            let expected = format!("PROFILE_TEST_AGENT_HOME={}", account.config_dir.display());
+            assert!(
+                environment.contains(&expected),
+                "{} process should run with {expected}",
+                account.display_name
+            );
+            assert!(
+                !environment
+                    .iter()
+                    .any(|line| line.starts_with("PROFILE_TEST_AGENT_KEY=")),
+                "scrubbed variables must not reach the agent process"
+            );
+        }
     }
 
     #[test]

@@ -31,7 +31,7 @@ pub(super) struct StdioProcess {
 pub(super) fn spawn_stdio(
     project: &Entity<Project>,
     command: AgentServerCommand,
-    removed_env: &[&str],
+    removed_env: &[String],
     cx: &AsyncApp,
 ) -> Result<StdioProcess> {
     let root_dir = project.read_with(cx, |project, cx| {

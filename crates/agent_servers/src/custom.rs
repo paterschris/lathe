@@ -316,26 +316,26 @@ impl AgentServer for CustomAgentServer {
         let project_id = project.entity_id();
         cx.spawn(async move |cx| {
             if is_registry_agent && agent_id.as_ref() == GEMINI_ID {
-                match cx
-                    .update(|cx| api_key_for_gemini_cli(project_id, cx))
-                    .await
-                {
-                    Ok(api_key) => {
+                match cx.update(|cx| api_key_for_gemini_cli(project_id, cx)).await {
+                    Ok(Some(api_key)) => {
                         // Confirm injection positively (length only, never the
-                        // key) so the log distinguishes "key was injected" from
-                        // the warning paths above.
+                        // key) so the log shows which way the agent signs in.
                         log::info!(
                             "gemini: injected GEMINI_API_KEY ({} chars) into the subprocess env",
                             api_key.len()
                         );
                         extra_env.insert("GEMINI_API_KEY".into(), api_key);
                     }
-                    // Surface why the key is missing instead of silently dropping
-                    // it: without GEMINI_API_KEY the Gemini CLI falls back to
-                    // OAuth ("Login with Google") and reports auth-required / 401.
-                    Err(error) => log::warn!(
-                        "gemini: no API key injected, the CLI will fail to authenticate: {error:#}"
-                    ),
+                    Ok(None) => {
+                        log::info!("gemini: no API key to inject, the CLI uses its own sign-in")
+                    }
+                    // A key that exists but can't be read (e.g. a Dev build
+                    // reading the file-backed credentials store while the key
+                    // was written to the system keychain) leaves the agent
+                    // asking to sign in, so say why.
+                    Err(error) => {
+                        log::warn!("gemini: failed to load the API key to inject: {error:#}")
+                    }
                 }
             }
             let command = store
@@ -371,11 +371,13 @@ impl AgentServer for CustomAgentServer {
     }
 }
 
-fn api_key_for_gemini_cli(project: EntityId, cx: &mut App) -> Task<Result<String>> {
-    // Prefer the key the user saved for the workspace-bound Gemini account, so
-    // each AI account carries its own AI Studio key. Fall back to an ambient
-    // env var, then a legacy global keychain entry, so setups that predate
-    // per-account keys keep working.
+/// The AI Studio key to start Gemini with, if any. A workspace-bound account
+/// only ever uses the key it was added with: falling back to a shared key
+/// would run it under credentials that belong to no account in particular.
+/// Without an account, an ambient env var or a legacy global keychain entry
+/// keeps setups that predate AI accounts working. `None` is the normal case
+/// for accounts that sign in through the CLI's own methods.
+fn api_key_for_gemini_cli(project: EntityId, cx: &mut App) -> Task<Result<Option<String>>> {
     let workspace_binding = WorkspaceAccountBindings::binding_for(project, GEMINI_ID, cx);
     let account_url = cx
         .try_global::<SettingsStore>()
@@ -392,33 +394,26 @@ fn api_key_for_gemini_cli(project: EntityId, cx: &mut App) -> Task<Result<String
 
     cx.spawn(async move |cx| {
         if let Some(url) = account_url {
-            match ApiKey::load_from_system_keychain(&url, credentials_provider.as_ref(), cx).await {
-                Ok(api_key) => return Ok(api_key.key().to_string()),
-                // Log instead of swallowing: a keychain miss here (e.g. a Dev
-                // build reading the file-backed credentials store while the key
-                // was written to the system keychain) is the difference between
-                // a working agent and a silent OAuth fallback.
-                Err(error) => log::warn!(
-                    "gemini: failed to load the per-account API key from the keychain ({url}): {error}"
-                ),
-            }
-        } else {
-            log::warn!(
-                "gemini: no AI account resolved for this workspace, so no per-account API key could be loaded"
-            );
+            let credentials = credentials_provider
+                .read_credentials(&url, &*cx)
+                .await
+                .with_context(|| format!("reading the account's API key from {url}"))?;
+            return credentials
+                .map(|(_, key)| String::from_utf8(key).context("the account's API key isn't UTF-8"))
+                .transpose();
         }
         if let Some(key) = env_var.value {
-            return Ok(key);
+            return Ok(Some(key));
         }
-        ApiKey::load_from_system_keychain(&global_url, credentials_provider.as_ref(), cx)
+        match ApiKey::load_from_system_keychain(&global_url, credentials_provider.as_ref(), cx)
             .await
-            .map(|api_key| api_key.key().to_string())
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "no Gemini API key available (per-account keychain and GEMINI_API_KEY env both \
-                     unavailable; legacy global keychain at {global_url} failed: {error})"
-                )
-            })
+        {
+            Ok(api_key) => Ok(Some(api_key.key().to_string())),
+            Err(error) => {
+                log::debug!("gemini: no legacy global API key at {global_url}: {error}");
+                Ok(None)
+            }
+        }
     })
 }
 

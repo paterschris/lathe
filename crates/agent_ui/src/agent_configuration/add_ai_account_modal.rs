@@ -1,15 +1,17 @@
 use ai_accounts::{
-    AgentDescriptor, BrandAccent, LoginFlow, TIER_A_DESCRIPTORS, api_key_keychain_url,
-    create_account, descriptor_for,
+    AccountState, AgentDescriptor, AiAccount, CLAUDE_CODE_AGENT_ID, LoginFlow,
+    api_key_keychain_url, builtin_descriptor, create_account, load_index,
+    prepare_profile_for_api_key, save_index,
 };
+use anyhow::Context as _;
 use collections::HashMap;
 use gpui::{
-    ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla, KeyDownEvent,
-    Rgba, ScrollHandle, WeakEntity, WindowAppearance, prelude::*,
+    ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
+    ScrollHandle, WeakEntity, prelude::*,
 };
 use notifications::status_toast::StatusToast;
 // FocusHandle is used through the Focusable trait impl below.
-use project::AgentId;
+use project::{AgentId, Project};
 use task::{RevealStrategy, RevealTarget, SpawnInTerminal, TaskId};
 use terminal_view::terminal_panel::TerminalPanel;
 use ui::{
@@ -20,15 +22,17 @@ use ui_input::InputField;
 use workspace::{ModalView, Workspace};
 
 use crate::agent_panel::AgentPanel;
-use crate::ai_account_chip::bind_account_to_workspace;
+use crate::ai_account_chip::{account_catalog, bind_account_to_workspace, brand_accent_color};
 use crate::{AddAiAccount, NewExternalAgentThread};
 
 pub struct AddAiAccountModal {
     name_input: Entity<InputField>,
-    /// API key entry, used only for agents whose login flow is
-    /// [`LoginFlow::ApiKey`] (e.g. Gemini). Masked. Ignored for OAuth/terminal
-    /// agents.
+    /// Optional API key entry, shown only for agents that accept one in place
+    /// of their own sign-in (Gemini). Masked.
     api_key_input: Entity<InputField>,
+    /// Agents that can hold isolated accounts and can be launched: the
+    /// built-in agents plus installed agents with a profile contract.
+    agents: Vec<AgentDescriptor>,
     selected_agent_id: SharedString,
     last_error: Option<SharedString>,
     scroll_handle: ScrollHandle,
@@ -46,10 +50,11 @@ impl AddAiAccountModal {
                 .agent_id
                 .clone()
                 .map(SharedString::from)
-                .unwrap_or_else(|| SharedString::from(TIER_A_DESCRIPTORS[0].agent_id));
+                .unwrap_or_else(|| SharedString::from(CLAUDE_CODE_AGENT_ID));
             let workspace_handle = cx.weak_entity();
+            let project = workspace.project().clone();
             workspace.toggle_modal(window, cx, |window, cx| {
-                Self::new(agent_id, workspace_handle, window, cx)
+                Self::new(agent_id, workspace_handle, &project, window, cx)
             });
         });
     }
@@ -57,6 +62,7 @@ impl AddAiAccountModal {
     pub fn new(
         agent_id: SharedString,
         workspace: WeakEntity<Workspace>,
+        project: &Entity<Project>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -68,14 +74,20 @@ impl AddAiAccountModal {
         });
         let api_key_input = cx.new(|cx| {
             InputField::new(window, cx, "Paste your API key")
-                .label("API key")
+                .label("API key (optional)")
                 .masked(true)
                 .tab_index(2)
                 .tab_stop(true)
         });
+        let agents = account_catalog(project, &load_index(), cx)
+            .into_iter()
+            .filter(|entry| entry.installed || builtin_descriptor(&entry.agent_id).is_some())
+            .filter_map(|entry| entry.descriptor().cloned())
+            .collect();
         Self {
             name_input,
             api_key_input,
+            agents,
             selected_agent_id: agent_id,
             last_error: None,
             scroll_handle: ScrollHandle::new(),
@@ -83,12 +95,14 @@ impl AddAiAccountModal {
         }
     }
 
-    fn selected_descriptor(&self) -> Option<&'static AgentDescriptor> {
-        descriptor_for(&self.selected_agent_id)
+    fn selected_descriptor(&self) -> Option<&AgentDescriptor> {
+        self.agents
+            .iter()
+            .find(|descriptor| descriptor.agent_id == self.selected_agent_id)
     }
 
-    fn select_agent(&mut self, agent_id: &'static str, cx: &mut Context<Self>) {
-        self.selected_agent_id = SharedString::from(agent_id);
+    fn select_agent(&mut self, agent_id: SharedString, cx: &mut Context<Self>) {
+        self.selected_agent_id = agent_id;
         self.last_error = None;
         cx.notify();
     }
@@ -100,7 +114,7 @@ impl AddAiAccountModal {
     fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.name_input.read(cx).text(cx);
         let agent_id = self.selected_agent_id.to_string();
-        let descriptor = match descriptor_for(&agent_id) {
+        let descriptor = match self.selected_descriptor().cloned() {
             Some(d) => d,
             None => {
                 self.last_error = Some(SharedString::from(format!("Unknown agent: {agent_id}")));
@@ -109,35 +123,28 @@ impl AddAiAccountModal {
             }
         };
 
-        // API-key agents (e.g. Gemini) need a key before we create anything, so
-        // an empty paste doesn't leave an orphan account behind.
-        let api_key = if let LoginFlow::ApiKey { .. } = descriptor.login_flow {
-            let key = self.api_key_input.read(cx).text(cx).trim().to_string();
-            if key.is_empty() {
-                self.last_error = Some(SharedString::from("Enter your API key to connect."));
-                cx.notify();
-                return;
-            }
-            Some(key)
-        } else {
-            None
-        };
+        // A pasted key replaces the agent's own sign-in for agents that accept
+        // one. Left blank, the account signs in through the agent.
+        let api_key = descriptor
+            .profile
+            .api_key
+            .as_ref()
+            .map(|_| self.api_key_input.read(cx).text(cx).trim().to_string())
+            .filter(|key| !key.is_empty());
 
-        match create_account(&agent_id, &name) {
+        match create_account(&descriptor, &name, api_key.is_some()) {
             Ok(account) => {
-                match descriptor.login_flow {
-                    LoginFlow::ApiKey { .. } => {
-                        // Save the key, bind the account, confirm via toast. No
-                        // OAuth, no terminal, no restart. connect_api_key_account
-                        // owns the toast and dismiss for this path.
-                        let key = api_key
-                            .expect("api_key is Some for the ApiKey login flow (validated above)");
-                        self.connect_api_key_account(descriptor, account, key, cx);
-                        return;
-                    }
-                    LoginFlow::InThread { .. } => {
-                        // In-thread agents (Claude, Gemini) authenticate inside
-                        // an ACP thread. Drive the whole bind -> restart -> open
+                if let Some(key) = api_key {
+                    // Save the key, bind the account, confirm via toast. No
+                    // sign-in thread or terminal. connect_api_key_account owns
+                    // the toast and dismiss for this path.
+                    self.connect_api_key_account(&descriptor, account, key, cx);
+                    return;
+                }
+                match descriptor.profile.login_flow {
+                    LoginFlow::AgentAuth => {
+                        // These agents authenticate inside an ACP thread using
+                        // the methods they advertise. Drive the whole bind -> restart -> open
                         // thread sequence from the agent panel: it binds the
                         // account to this workspace, restarts the
                         // agent's subprocess so the new (empty) config dir is
@@ -182,7 +189,7 @@ impl AddAiAccountModal {
                             account.id.clone(),
                             cx,
                         );
-                        self.trigger_login_flow(descriptor, &account.config_dir, window, cx);
+                        self.trigger_login_flow(&descriptor, &account.config_dir, window, cx);
                     }
                 }
 
@@ -190,7 +197,7 @@ impl AddAiAccountModal {
                 // and bound. Sign-in then continues in the thread/terminal.
                 if let Some(workspace) = self.workspace.upgrade() {
                     let display_name = account.display_name.clone();
-                    let agent_display_name = descriptor.display_name;
+                    let agent_display_name = descriptor.display_name.clone();
                     workspace.update(cx, |workspace, cx| {
                         workspace.toggle_status_toast(
                             StatusToast::new(
@@ -221,7 +228,7 @@ impl AddAiAccountModal {
     /// is restarted to pick it up.
     fn connect_api_key_account(
         &self,
-        descriptor: &'static AgentDescriptor,
+        descriptor: &AgentDescriptor,
         account: ai_accounts::AiAccount,
         key: String,
         cx: &mut Context<Self>,
@@ -232,7 +239,7 @@ impl AddAiAccountModal {
         let agent_id = account.agent_id.clone();
         let account_id = account.id.clone();
         let display_name = account.display_name;
-        let agent_display_name = descriptor.display_name;
+        let agent_display_name = descriptor.display_name.clone();
 
         cx.spawn(async move |this, cx| {
             // Username must be non-empty: the macOS keychain read
@@ -285,19 +292,12 @@ impl AddAiAccountModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match descriptor.login_flow {
-            LoginFlow::ApiKey { .. } => {
-                // API-key accounts are connected via connect_api_key_account
-                // (key saved to the keychain, account bound). They never reach
-                // the login-flow trigger.
-            }
-            LoginFlow::InThread { command: _ } => {
+        match &descriptor.profile.login_flow {
+            LoginFlow::AgentAuth => {
                 // Open a new ACP thread for this agent. The ACP spawn pipeline
-                // will inject the just-set workspace binding's config_dir env
-                // var, so the spawned subprocess is already pointed at the new
-                // account. The user runs the login slash command (`/login`,
-                // `/auth`) themselves — programmatic injection of the first
-                // user message would require deeper thread integration.
+                // will inject the just-set workspace binding's profile env var,
+                // so the spawned subprocess is already pointed at the new
+                // account, and the agent's own ACP sign-in runs against it.
                 window.dispatch_action(
                     Box::new(NewExternalAgentThread {
                         agent: AgentId::new(descriptor.agent_id.to_string()),
@@ -306,8 +306,9 @@ impl AddAiAccountModal {
                 );
             }
             LoginFlow::EmbeddedTerminal { argv } => {
-                // Codex login is browser-OAuth; it has to run in a real
-                // terminal, not in an ACP context. Spawn a dock terminal
+                // Terminal logins (Codex's browser OAuth, settings-defined
+                // commands) have to run in a real terminal, not in an ACP
+                // context. Spawn a dock terminal
                 // with the account's config-dir env injected and the agent's
                 // login argv ready to go.
                 let Some(workspace) = self.workspace.upgrade() else {
@@ -318,7 +319,7 @@ impl AddAiAccountModal {
                 };
                 let mut env: HashMap<String, String> = HashMap::default();
                 env.insert(
-                    descriptor.config_dir_env_var.to_string(),
+                    descriptor.profile.profile_env_var.to_string(),
                     config_dir.display().to_string(),
                 );
                 let task = SpawnInTerminal {
@@ -352,21 +353,12 @@ impl Focusable for AddAiAccountModal {
 impl EventEmitter<DismissEvent> for AddAiAccountModal {}
 impl ModalView for AddAiAccountModal {}
 
-fn brand_accent_color(accent: &BrandAccent, window: &Window) -> Option<Hsla> {
-    let is_dark = matches!(
-        window.appearance(),
-        WindowAppearance::Dark | WindowAppearance::VibrantDark
-    );
-    let hex = if is_dark { accent.dark } else { accent.light };
-    Rgba::try_from(hex).ok().map(Hsla::from)
-}
-
 impl AddAiAccountModal {
     fn render_agent_picker(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().children(TIER_A_DESCRIPTORS.iter().map(|descriptor| {
-            let agent_id = descriptor.agent_id;
-            let is_selected = self.selected_agent_id.as_ref() == agent_id;
-            let accent = brand_accent_color(&descriptor.brand_accent, window);
+        v_flex().children(self.agents.iter().map(|descriptor| {
+            let agent_id = descriptor.agent_id.clone();
+            let is_selected = self.selected_agent_id == agent_id;
+            let accent = brand_accent_color(descriptor.brand_accent.as_ref(), window);
             let row_id = SharedString::from(format!("pick-agent-{agent_id}"));
 
             ListItem::new(row_id)
@@ -380,9 +372,9 @@ impl AddAiAccountModal {
                         .rounded_full()
                         .when_some(accent, |this, color| this.bg(color)),
                 )
-                .child(Label::new(SharedString::from(descriptor.display_name)))
+                .child(Label::new(descriptor.display_name.clone()))
                 .on_click(cx.listener(move |this, _, _window, cx| {
-                    this.select_agent(agent_id, cx);
+                    this.select_agent(agent_id.clone(), cx);
                 }))
         }))
     }
@@ -393,10 +385,10 @@ impl AddAiAccountModal {
         let Some(descriptor) = self.selected_descriptor() else {
             return;
         };
-        let LoginFlow::ApiKey { key_url, .. } = descriptor.login_flow else {
+        let Some(api_key) = &descriptor.profile.api_key else {
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(key_url.to_string()));
+        cx.write_to_clipboard(ClipboardItem::new_string(api_key.key_url.to_string()));
         if let Some(workspace) = self.workspace.upgrade() {
             workspace.update(cx, |workspace, cx| {
                 workspace.toggle_status_toast(
@@ -413,9 +405,7 @@ impl AddAiAccountModal {
 
     fn render_api_key_section(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let descriptor = self.selected_descriptor()?;
-        let LoginFlow::ApiKey { key_url, .. } = descriptor.login_flow else {
-            return None;
-        };
+        let key_url = descriptor.profile.api_key.as_ref()?.key_url.clone();
         let get_key_id = SharedString::from(format!("get-api-key-{}", descriptor.agent_id));
         let copy_key_id = SharedString::from(format!("copy-api-key-url-{}", descriptor.agent_id));
         Some(
@@ -424,7 +414,7 @@ impl AddAiAccountModal {
                 .child(self.api_key_input.clone())
                 .child(
                     Label::new(SharedString::from(format!(
-                        "Stored in your system keychain and used only for {}. Already have a key? Just paste it above.",
+                        "Leave blank to sign in through {} in a thread. A key is stored in your system keychain and used only for this account.",
                         descriptor.display_name
                     )))
                     .size(LabelSize::Small)
@@ -436,7 +426,7 @@ impl AddAiAccountModal {
                         .child(
                             Button::new(get_key_id, "Get an API key")
                                 .label_size(LabelSize::Small)
-                                .on_click(move |_, _, cx| cx.open_url(key_url)),
+                                .on_click(move |_, _, cx| cx.open_url(&key_url)),
                         )
                         .child(
                             Button::new(copy_key_id, "Copy link")
@@ -454,11 +444,12 @@ impl AddAiAccountModal {
 
     fn render_signup_section(&self, _cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let descriptor = self.selected_descriptor()?;
-        // API-key agents get a "Get an API key" link in the key section instead.
-        if matches!(descriptor.login_flow, LoginFlow::ApiKey { .. }) {
+        // Agents that accept a key get a "Get an API key" link in the key
+        // section instead.
+        if descriptor.profile.api_key.is_some() {
             return None;
         }
-        let signup_url: &'static str = descriptor.signup_url;
+        let signup_url = descriptor.signup_url.clone()?;
         let label = SharedString::from(format!("Sign up for {}", descriptor.display_name));
         let id = SharedString::from(format!("signup-{}", descriptor.agent_id));
         Some(
@@ -472,7 +463,7 @@ impl AddAiAccountModal {
                 .child(
                     Button::new(id, label)
                         .label_size(LabelSize::Small)
-                        .on_click(move |_, _, cx| cx.open_url(signup_url)),
+                        .on_click(move |_, _, cx| cx.open_url(&signup_url)),
                 ),
         )
     }
@@ -601,6 +592,224 @@ impl Render for AddAiAccountModal {
     }
 }
 
+/// Gives an existing account a provider API key, or replaces the one it has,
+/// for agents that accept one in place of their own sign-in (Gemini).
+pub struct SetAiAccountKeyModal {
+    api_key_input: Entity<InputField>,
+    account: AiAccount,
+    descriptor: AgentDescriptor,
+    last_error: Option<SharedString>,
+    is_saving: bool,
+    workspace: WeakEntity<Workspace>,
+}
+
+impl SetAiAccountKeyModal {
+    pub fn new(
+        account: AiAccount,
+        descriptor: AgentDescriptor,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let api_key_input = cx.new(|cx| {
+            InputField::new(window, cx, "Paste your API key")
+                .label("API key")
+                .masked(true)
+                .tab_index(1)
+                .tab_stop(true)
+        });
+        Self {
+            api_key_input,
+            account,
+            descriptor,
+            last_error: None,
+            is_saving: false,
+            workspace,
+        }
+    }
+
+    fn cancel(&mut self, _: &menu::Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+    }
+
+    fn confirm(&mut self, _: &menu::Confirm, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_saving {
+            return;
+        }
+        let key = self.api_key_input.read(cx).text(cx).trim().to_string();
+        if key.is_empty() {
+            self.last_error = Some("Paste a key to save.".into());
+            cx.notify();
+            return;
+        }
+        self.is_saving = true;
+        self.last_error = None;
+        cx.notify();
+
+        let credentials_provider = zed_credentials_provider::global(cx);
+        let keychain_url = api_key_keychain_url(&self.account.agent_id, &self.account.id);
+        let account = self.account.clone();
+        let descriptor = self.descriptor.clone();
+        let workspace = self.workspace.clone();
+        cx.spawn(async move |this, cx| {
+            let saved = async {
+                // Username must be non-empty: the macOS keychain read requires a
+                // `kSecAttrAccount` attribute. See `connect_api_key_account`.
+                credentials_provider
+                    .write_credentials(&keychain_url, "Bearer", key.as_bytes(), &*cx)
+                    .await
+                    .context("saving the key to the keychain")?;
+                cx.background_spawn({
+                    let account = account.clone();
+                    async move {
+                        prepare_profile_for_api_key(&descriptor, &account.config_dir)?;
+                        let mut index = load_index();
+                        index.set_state(&account.id, AccountState::Authenticated)?;
+                        save_index(&index)
+                    }
+                })
+                .await
+            }
+            .await;
+
+            this.update(cx, |this, cx| {
+                if let Err(error) = saved {
+                    log::error!("ai_accounts: setting the API key failed: {error:#}");
+                    this.is_saving = false;
+                    this.last_error = Some(format!("Couldn't save the key: {error:#}").into());
+                    cx.notify();
+                    return;
+                }
+                let Some(workspace) = workspace.upgrade() else {
+                    cx.emit(DismissEvent);
+                    return;
+                };
+                if let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
+                    panel.update(cx, |panel, cx| {
+                        panel.restart_if_account_in_use(&account.agent_id, &account.id, cx);
+                    });
+                }
+                let message = format!(
+                    "Saved an API key for \"{}\". New {} threads use it.",
+                    account.display_name, this.descriptor.display_name
+                );
+                workspace.update(cx, |workspace, cx| {
+                    workspace
+                        .toggle_status_toast(StatusToast::new(message, cx, |this, _cx| this), cx);
+                });
+                cx.emit(DismissEvent);
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Focusable for SetAiAccountKeyModal {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.api_key_input.read(cx).focus_handle(cx)
+    }
+}
+
+impl EventEmitter<DismissEvent> for SetAiAccountKeyModal {}
+impl ModalView for SetAiAccountKeyModal {}
+
+impl Render for SetAiAccountKeyModal {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus_handle = self.focus_handle(cx);
+        let key_url = self
+            .descriptor
+            .profile
+            .api_key
+            .as_ref()
+            .map(|api_key| api_key.key_url.clone());
+
+        v_flex()
+            .id("set-ai-account-key-modal")
+            .key_context("SetAiAccountKeyModal")
+            .w(rems(30.))
+            .elevation_3(cx)
+            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::confirm))
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.focus_handle(cx).focus(window, cx);
+            }))
+            .child(
+                Modal::new("set-ai-account-key", None)
+                    .header(
+                        ModalHeader::new()
+                            .headline(format!("API key for \"{}\"", self.account.display_name))
+                            .description(format!(
+                                "{} uses this key instead of its own sign-in. It's stored in your \
+                                 system keychain and replaces any key the account had.",
+                                self.descriptor.display_name
+                            )),
+                    )
+                    .when_some(self.last_error.clone(), |this, error| {
+                        this.section(
+                            Section::new().child(
+                                Banner::new()
+                                    .severity(Severity::Warning)
+                                    .child(div().text_xs().child(error)),
+                            ),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .px_3()
+                            .pb_2()
+                            .gap_1()
+                            .child(self.api_key_input.clone())
+                            .when_some(key_url, |this, key_url| {
+                                this.child(
+                                    h_flex().child(
+                                        Button::new("set-key-get-api-key", "Get an API key")
+                                            .label_size(LabelSize::Small)
+                                            .on_click(move |_, _, cx| cx.open_url(&key_url)),
+                                    ),
+                                )
+                            }),
+                    )
+                    .footer(
+                        ModalFooter::new().end_slot(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("set-key-cancel", "Cancel")
+                                        .key_binding(
+                                            KeyBinding::for_action_in(
+                                                &menu::Cancel,
+                                                &focus_handle,
+                                                cx,
+                                            )
+                                            .map(|kb| kb.size(rems_from_px(12.0_f32))),
+                                        )
+                                        .on_click(cx.listener(|this, _event, window, cx| {
+                                            this.cancel(&menu::Cancel, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("set-key-save", "Save Key")
+                                        .style(ButtonStyle::Tinted(TintColor::Accent))
+                                        .disabled(self.is_saving)
+                                        .key_binding(
+                                            KeyBinding::for_action_in(
+                                                &menu::Confirm,
+                                                &focus_handle,
+                                                cx,
+                                            )
+                                            .map(|kb| kb.size(rems_from_px(12.0_f32))),
+                                        )
+                                        .on_click(cx.listener(|this, _event, window, cx| {
+                                            this.confirm(&menu::Confirm, window, cx)
+                                        })),
+                                ),
+                        ),
+                    ),
+            )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,29 +817,26 @@ mod tests {
     #[test]
     fn default_agent_id_resolves_to_descriptor() {
         // Acts as a guard: AddAiAccountModal::register falls back to
-        // TIER_A_DESCRIPTORS[0] when the action carries no agent_id, so
-        // index 0 must always be a valid descriptor.
-        let first = TIER_A_DESCRIPTORS.first().expect("Tier A is non-empty");
-        assert!(descriptor_for(first.agent_id).is_some());
+        // CLAUDE_CODE_AGENT_ID when the action carries no agent_id, and
+        // built-in agents are always offered.
+        assert!(builtin_descriptor(CLAUDE_CODE_AGENT_ID).is_some());
     }
 
     #[test]
-    fn signup_url_is_present_for_every_tier_a_agent() {
-        for descriptor in TIER_A_DESCRIPTORS {
+    fn signup_url_is_present_for_every_builtin_agent() {
+        for descriptor in ai_accounts::BUILTIN_AGENT_IDS
+            .iter()
+            .filter_map(|agent_id| builtin_descriptor(agent_id))
+        {
             assert!(
-                descriptor.signup_url.starts_with("https://"),
+                descriptor
+                    .signup_url
+                    .as_ref()
+                    .is_some_and(|url| url.starts_with("https://")),
                 "{} signup_url must be https",
                 descriptor.agent_id
             );
         }
-    }
-
-    #[test]
-    fn open_signup_silently_no_ops_for_unknown_agent_id() {
-        // open_signup looks up the descriptor and bails when it isn't found.
-        // It can't be called without a Context, but the lookup logic itself
-        // is exercised by descriptor_for() returning None for unknown IDs.
-        assert!(descriptor_for("definitely-not-an-agent").is_none());
     }
 }
 

@@ -1657,6 +1657,10 @@ impl AgentPanel {
         &self.prompt_store
     }
 
+    pub(crate) fn workspace(&self) -> &WeakEntity<Workspace> {
+        &self.workspace
+    }
+
     pub(crate) fn project_entity_id(&self) -> gpui::EntityId {
         self.project.entity_id()
     }
