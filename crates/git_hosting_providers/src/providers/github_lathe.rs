@@ -540,13 +540,45 @@ pub(super) async fn github_send(
         .into());
     }
     if !response.status().is_success() {
-        let text = String::from_utf8_lossy(&bytes);
         bail!(
-            "{context} failed ({}): {text:?}",
-            response.status().as_u16()
+            "{context} failed ({}): {}",
+            response.status().as_u16(),
+            github_error_message(&bytes)
         );
     }
     Ok(bytes)
+}
+
+/// GitHub's top-level `message` on a 422 is just "Validation Failed"; the
+/// actionable reason (e.g. "No commits between main and feature") lives in
+/// `errors[].message`, so prefer those and fall back to the raw body.
+fn github_error_message(bytes: &[u8]) -> String {
+    #[derive(Deserialize)]
+    struct GithubErrorBody {
+        message: Option<String>,
+        #[serde(default)]
+        errors: Vec<GithubErrorDetail>,
+    }
+    #[derive(Deserialize)]
+    struct GithubErrorDetail {
+        message: Option<String>,
+    }
+
+    let Ok(body) = serde_json::from_slice::<GithubErrorBody>(bytes) else {
+        return String::from_utf8_lossy(bytes).into_owned();
+    };
+    let details = body
+        .errors
+        .into_iter()
+        .filter_map(|error| error.message)
+        .collect::<Vec<_>>();
+    if !details.is_empty() {
+        details.join("; ")
+    } else if let Some(message) = body.message {
+        message
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
 
 /// Maps a [`PullRequestListFilter`] to GitHub's single-valued `state` query
@@ -861,6 +893,20 @@ mod tests {
             error.downcast_ref::<PullRequestAuthError>().is_none(),
             "non-401 failures should not be treated as an auth error"
         );
+    }
+
+    #[test]
+    fn test_github_error_message_prefers_validation_details() {
+        let body = br#"{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"No commits between main and feature"}],"status":"422"}"#;
+        assert_eq!(
+            github_error_message(body),
+            "No commits between main and feature"
+        );
+        assert_eq!(
+            github_error_message(br#"{"message":"Not Found"}"#),
+            "Not Found"
+        );
+        assert_eq!(github_error_message(b"boom"), "boom");
     }
 
     #[test]
