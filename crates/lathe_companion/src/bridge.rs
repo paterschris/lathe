@@ -6,7 +6,7 @@ use crate::{
     crypto::encode_url_safe,
     entries,
     protocol::{
-        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_PULL_REQUESTS, PROTOCOL_VERSION, PhoneEnvelope,
+        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_CLOSE_THREADS, FEATURE_PULL_REQUESTS, PROTOCOL_VERSION, PhoneEnvelope,
         PhoneMessage, ThreadStatus, ThreadSummary, WorkspaceSummary,
     },
 };
@@ -218,7 +218,7 @@ impl Bridge {
             lathe_version: release_channel::AppVersion::global(cx).to_string(),
             channel: channel.dev_name().to_string(),
             desktop_name: crate::companion::desktop_name(channel),
-            features: vec![FEATURE_PULL_REQUESTS.to_string()],
+            features: vec![FEATURE_PULL_REQUESTS.to_string(), FEATURE_CLOSE_THREADS.to_string()],
         };
         self.send(device_id, &hello, cx);
         self.send_lists(device_id, cx);
@@ -648,6 +648,7 @@ impl Bridge {
                 None => Err(not_loaded()),
             },
             PhoneMessage::RenameThread { thread_id, title } => self.rename(&thread_id, &title, cx),
+            PhoneMessage::CloseThreads { thread_ids } => self.close_threads(&thread_ids, cx),
             PhoneMessage::SetConfigOption { thread_id, config_id, value } => {
                 match self.set_config_option(device_id, &client_msg_id, &thread_id, &config_id, &value, cx) {
                     // Acked once the agent has applied it.
@@ -1051,6 +1052,32 @@ impl Bridge {
     /// Renames the thread the way the sidebar does: through the thread's view
     /// wherever one is open, which also updates its title editor and saves the
     /// rename, and straight to the saved title otherwise.
+    /// Archives the threads the way Lathe's archive view does: only the thread
+    /// is put away. Unlike archiving from the sidebar, no worktree or workspace
+    /// is removed, which a phone can't see to confirm. Threads already gone are
+    /// skipped, so a repeat after a reconnect is harmless.
+    fn close_threads(&mut self, thread_ids: &[String], cx: &mut Context<Self>) -> Result<(), ErrorBody> {
+        if thread_ids.is_empty() || thread_ids.len() > MAX_LISTED_THREADS {
+            return Err(ErrorBody::new(ErrorCode::BadMessage, "Pick between 1 and 100 threads to close."));
+        }
+        let store = ThreadMetadataStore::try_global(cx)
+            .ok_or_else(|| ErrorBody::new(ErrorCode::Internal, "Lathe's thread list isn't available."))?;
+        let ids = thread_ids
+            .iter()
+            .filter_map(|thread_id| self.thread_metadata(thread_id, cx))
+            .filter(|metadata| !metadata.archived)
+            .map(|metadata| metadata.thread_id)
+            .collect::<Vec<_>>();
+        log::info!("companion: phone closed {} thread(s)", ids.len());
+        store.update(cx, |store, cx| {
+            for thread_id in ids {
+                store.archive(thread_id, None, cx);
+            }
+        });
+        self.schedule_list_flush(cx);
+        Ok(())
+    }
+
     fn rename(&mut self, thread_id: &str, title: &str, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
         let title = title.trim();
         if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
@@ -1700,7 +1727,7 @@ mod tests {
         let received = harness.received();
         assert_eq!(received[0]["type"], "hello");
         assert_eq!(received[0]["lathe_version"], "1.2.3");
-        assert_eq!(received[0]["features"], json!(["pull_requests"]));
+        assert_eq!(received[0]["features"], json!(["pull_requests", "close_threads"]));
         let workspaces = of_type(&received, "workspaces");
         assert_eq!(workspaces[0]["list"][0]["name"], "test");
         let listed = &of_type(&received, "threads")[0]["list"][0];
@@ -1803,6 +1830,34 @@ mod tests {
         assert_eq!(
             of_type(&relay, "push"),
             [&json!({ "type": "push", "kind": "finished", "thread_id": thread_key })]
+        );
+
+        // Closing archives the thread, as Lathe's archive does, and it leaves the
+        // phone's list. Closing it again, or one that doesn't exist, is fine.
+        harness.say(
+            json!({ "type": "close_threads", "client_msg_id": "c1", "thread_ids": [thread_key, "missing"] }),
+            cx,
+        );
+        cx.executor().advance_clock(LIST_FLUSH_DELAY * 2);
+        cx.run_until_parked();
+        let received = harness.received();
+        assert_eq!(of_type(&received, "ack")[0], &json!({ "type": "ack", "client_msg_id": "c1", "ok": true }));
+        assert_eq!(of_type(&received, "threads").last().unwrap()["list"], json!([]));
+        cx.update(|cx| {
+            let store = ThreadMetadataStore::global(cx);
+            assert!(store.read(cx).entry(thread_id).unwrap().archived);
+        });
+        harness.say(json!({ "type": "close_threads", "client_msg_id": "c2", "thread_ids": [thread_key] }), cx);
+        harness.say(json!({ "type": "close_threads", "client_msg_id": "c3", "thread_ids": [] }), cx);
+        let codes = harness
+            .received()
+            .iter()
+            .filter(|message| message["type"] == "ack")
+            .map(|ack| (ack["client_msg_id"].clone(), ack["ok"].clone(), ack["error"]["code"].clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            [(json!("c2"), json!(true), Value::Null), (json!("c3"), json!(false), json!("bad_message"))]
         );
     }
 

@@ -12,6 +12,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Optional parts of the protocol, listed in `hello.features` so an app can
 /// tell what this Lathe supports without a version bump.
 pub const FEATURE_PULL_REQUESTS: &str = "pull_requests";
+/// Accepts `close_threads`.
+pub const FEATURE_CLOSE_THREADS: &str = "close_threads";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -185,6 +187,11 @@ pub enum PhoneMessage {
         text: String,
     },
     Unpair {},
+    /// Archives the threads, as closing them in Lathe's sidebar does: they
+    /// leave the thread list and can be reopened from Lathe's archive.
+    CloseThreads {
+        thread_ids: Vec<String>,
+    },
     /// Without `repo_id`, page 1 of every repository in the workspace; with
     /// `repo_id` and `page`, that page of that repository.
     ListPullRequests {
