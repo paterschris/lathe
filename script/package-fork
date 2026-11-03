@@ -48,6 +48,20 @@ esac
 zip_name="Lathe-${version}-${arch}-macos.zip"
 out_dir="target/release"
 
+# Stapling downloads the ticket from Apple's CloudKit service, and a dropped
+# connection there fails the whole release after a multi-hour build.
+staple() {
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if xcrun stapler staple "$1"; then
+            return 0
+        fi
+        echo "  Stapling attempt ${attempt} failed, retrying in $((attempt * 15))s"
+        sleep $((attempt * 15))
+    done
+    xcrun stapler staple "$1"
+}
+
 signing_identity="Developer ID Application: Chris Paterson (Z2DJF8UWJG)"
 notarize_profile="lathe-notarize"
 
@@ -136,7 +150,7 @@ if $can_sign; then
     echo "  Notarization complete"
 
     # Staple the ticket to the app
-    xcrun stapler staple "$app_path"
+    staple "$app_path"
     echo "  Stapled notarization ticket"
 
     # Re-zip with the stapled ticket
@@ -172,7 +186,7 @@ if $can_sign; then
     echo "--- Signing and notarizing DMG ---"
     codesign --force --sign "$signing_identity" --timestamp "${out_dir}/${dmg_name}"
     xcrun notarytool submit "${out_dir}/${dmg_name}" --keychain-profile "$notarize_profile" --wait
-    xcrun stapler staple "${out_dir}/${dmg_name}"
+    staple "${out_dir}/${dmg_name}"
     echo "  DMG signed + notarized + stapled"
 fi
 

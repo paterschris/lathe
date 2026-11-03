@@ -6,11 +6,39 @@ Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-re
 
 The first stable release since 1.12.0. Everything from the 1.13.0, 1.14.0, 1.14.1 and 1.15.0 betas is in here, plus AI accounts for any installed agent and a rework of how Gemini signs in.
 
+And the big one: **Lathe Companion**, a phone app for your agents. It's been riding along in the betas switched off. This is the first time it's in the notes, so everything it does is below.
+
 ### Before you update
 
 - **Lathe needs macOS 12 (Monterey) or newer now.** Upstream raised the minimum.
 - **The agent's Restore Checkpoint button is gone.** Upstream dropped checkpoints because taking one before every message made the agent slow to respond.
 - **Gemini and "Log in with Google":** Google has turned that off for personal accounts and points you at Antigravity instead. If you use Gemini with a personal account, you need an AI Studio API key from a project with billing (or one that still has free-tier access). Existing API-key accounts keep working as they are.
+
+### Lathe Companion
+
+Keep an eye on your agents from your phone. Approve a tool call from the couch, answer a question from the grocery store, get pinged when a long run finishes.
+
+**Getting set up.** It's off until you turn it on. Run **lathe companion: open companion** from the command palette and choose **Turn on**, then scan the QR code with the app. Lathe asks you to **Allow** the phone before it's paired, so a code someone else scans doesn't get them in. Once it's on, a phone icon in the title bar opens the same dialog.
+
+- Code expired? **New code** makes another, and the old one stops working.
+- **Copy link** gives you a link to open on the phone instead of scanning.
+- The dialog lists your paired phones.
+
+**What the phone can do:**
+
+- See every agent thread in your open projects and follow them live as they stream.
+- Approve or deny tool calls, answer an agent's questions, send messages.
+- Start a new thread with any agent the project has. It opens in the agent panel without pulling the thread you have on screen out from under you.
+- Rename, cancel and close threads. Closing archives a thread the same way Lathe's archive does, so you can bring it back.
+- Change a thread's model and effort. That only affects that one thread, not your default for new ones. Modes stay on the desktop, since some of them skip permission prompts.
+- Push notifications when a thread needs you or finishes.
+- Pull requests: list them per workspace (including the ones waiting on your review), read the diff and comments, reply, leave inline comments, and submit a review. It goes through the git accounts you've already connected in Lathe. No host token ever leaves your computer.
+
+**Privacy.** Everything between Lathe and your phone is end-to-end encrypted. The relay in the middle (`companion.lathe-ide.com`) only sees enough to route messages, not what's in them. Lathe's pairing identity lives in your system keychain.
+
+**Your Mac stays awake** while an agent is running and a phone is paired, so a long run doesn't stall when the lid's open and nobody's touching it. Turn that off with `companion.keep_awake_while_agents_run`.
+
+**Getting the app.** It's on the [App Store](https://apps.apple.com/us/app/lathe-companion/id6825627989) for iPhone. 7-day free trial, then $1.99 a month. Android isn't out yet.
 
 ### Added
 
@@ -45,6 +73,7 @@ The first stable release since 1.12.0. Everything from the 1.13.0, 1.14.0, 1.14.
 ### Known issues
 
 - Moving an open conversation to another account only works for Claude and Codex. Gemini and other agents pick up the new account in new threads.
+- Pull requests don't show up in the iPhone app yet. They're coming in the app's next release.
 - Tested by hand on macOS. Windows and Linux builds haven't been tried on real machines for this release.
 - Windows installers are signed, but SmartScreen still shows a reputation prompt. Choose **More info**, then **Run anyway**.
 
