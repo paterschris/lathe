@@ -334,6 +334,19 @@ describe("push", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it("pushes a terminal waiting for input with its terminal id", async () => {
+    const { desktopSocket } = await pushReady();
+    fetcher.mockImplementation(async () => Response.json({ data: [{ status: "ok" }] }));
+    await say(desktopSocket, { type: "push", kind: "terminal_input", terminal_id: "term1" });
+    const [, init] = fetcher.mock.calls.at(-1)!;
+    const [sent] = JSON.parse(init.body);
+    expect(sent.body).toBe("A terminal is waiting for input");
+    expect(sent.data).toEqual({ desktop_id: desktop.id, kind: "terminal_input", terminal_id: "term1" });
+    // A thread id doesn't stand in for the terminal.
+    await say(desktopSocket, { type: "push", kind: "terminal_input", thread_id: "t1" });
+    expect(desktopSocket.last()).toEqual({ type: "error", code: "invalid_push_terminal" });
+  });
+
   it("rejects unknown kinds", async () => {
     const { desktopSocket } = await pushReady();
     await say(desktopSocket, { type: "push", kind: "anything", thread_id: "t1" });

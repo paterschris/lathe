@@ -138,9 +138,9 @@ Desktop to relay:
 | `authorize_device { device_id, sign_pk, name }` | Register a phone (max 10) |
 | `revoke_device { device_id }` | Remove it and close its sockets with 4403 |
 | `list_devices` | Reply `devices { list: [{ device_id, name, online, has_push }] }` |
-| `push { kind, thread_id, device_id? }` | Notify phones that registered for `kind`, have no open socket, and have an active subscription (60 per hour per desktop) |
+| `push { kind, thread_id or terminal_id, device_id? }` | Notify phones that registered for `kind`, have no open socket, and have an active subscription (60 per hour per desktop) |
 
-Push kinds: `needs_authorization`, `needs_input`, `finished`, `error`.
+Push kinds: `needs_authorization`, `needs_input`, `finished`, `error` (each with `thread_id`), and `terminal_input` (with `terminal_id` instead).
 
 Relay to desktop: `frame` with `device_id`, `sealed { device_id, ciphertext }`, `presence { device_id, online }`.
 

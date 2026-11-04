@@ -21,6 +21,35 @@ impl InteractivePromptKind {
 }
 
 impl Terminal {
+    /// The screen as it is now. `last_content` only refreshes when the
+    /// terminal is drawn, so it goes stale for one that isn't on screen.
+    pub fn current_content(&self) -> crate::Content {
+        let term = self.term.lock_unfair();
+        crate::alacritty::make_content(&term, &self.last_content)
+    }
+
+    /// The rows above the visible screen, newest first, at most `max_lines`
+    /// of them: each one's cells, so their colors come along.
+    pub fn scrollback_rows(&self, max_lines: usize) -> Vec<Vec<crate::Cell>> {
+        let term = self.term.lock_unfair();
+        let grid = term.grid();
+        let columns = grid.columns();
+        let top = term.topmost_line().0;
+        // A desktop scrolled back in Lathe shows older lines; history is what's above them.
+        let mut line = -(grid.display_offset() as i32) - 1;
+        let mut rows = Vec::new();
+        while line >= top && rows.len() < max_lines {
+            let row = &grid[Line(line)];
+            rows.push(
+                (0..columns)
+                    .map(|column| crate::alacritty::terminal_cell_from_alacritty(&row[Column(column)]))
+                    .collect(),
+            );
+            line -= 1;
+        }
+        rows
+    }
+
     pub fn last_output_at(&self) -> Instant {
         self.last_output_at
     }

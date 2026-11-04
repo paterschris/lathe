@@ -477,7 +477,7 @@ impl From<Hyperlink> for AlacHyperlink {
     }
 }
 
-fn terminal_cell_from_alacritty(cell: &AlacCell) -> Cell {
+pub(crate) fn terminal_cell_from_alacritty(cell: &AlacCell) -> Cell {
     Cell { cell: cell.clone() }
 }
 

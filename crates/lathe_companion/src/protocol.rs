@@ -12,6 +12,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Optional parts of the protocol, listed in `hello.features` so an app can
 /// tell what this Lathe supports without a version bump.
 pub const FEATURE_PULL_REQUESTS: &str = "pull_requests";
+pub const FEATURE_TERMINALS: &str = "terminals";
 /// Accepts `close_threads`.
 pub const FEATURE_CLOSE_THREADS: &str = "close_threads";
 
@@ -102,6 +103,42 @@ pub enum DesktopMessage {
         comments: Vec<ReviewComment>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         comments_truncated: bool,
+    },
+    /// The terminals in open workspaces. Sent after `hello`, on `refresh`,
+    /// and when one opens, closes, is renamed or starts or stops waiting.
+    Terminals {
+        list: Vec<TerminalSummary>,
+        /// Whether Lathe accepts typing from the phone, so the app can hide
+        /// its keyboard.
+        input_enabled: bool,
+    },
+    /// The visible screen of a terminal a phone follows, whole each time.
+    TerminalScreen {
+        terminal_id: String,
+        seq: u64,
+        columns: u16,
+        rows: u16,
+        lines: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<TerminalCursor>,
+        exited: bool,
+        /// The lines above the screen, oldest first. On a subscription's
+        /// first screen, then only when they changed; absent means unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scrollback: Option<Vec<String>>,
+        /// The distinct styles the spans below point into, for this message.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        styles: Vec<TerminalStyle>,
+        /// Per line of `lines`, flat `[start, length, style]` triples in
+        /// characters. Absent when nothing on the screen is styled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line_styles: Option<Vec<Vec<u32>>>,
+        /// The same for `scrollback`, sent with it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scrollback_styles: Option<Vec<Vec<u32>>>,
+        /// The terminal's own text and background colors in Lathe's theme.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        colors: Option<TerminalColors>,
     },
     /// Reply to `get_pull_request_diff`, in parts numbered from 0.
     PullRequestDiff {
@@ -228,6 +265,25 @@ pub enum PhoneMessage {
         comment_id: String,
         body: String,
     },
+    SubscribeTerminal {
+        terminal_id: String,
+    },
+    UnsubscribeTerminal {
+        terminal_id: String,
+    },
+    /// Renames a terminal as renaming it in Lathe does.
+    RenameTerminal {
+        terminal_id: String,
+        title: String,
+    },
+    /// Exactly one of `text` or `key`.
+    TerminalInput {
+        terminal_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<TerminalKey>,
+    },
     /// A new inline comment on one line of the diff, anchored to the pull
     /// request's current head commit.
     CreateReviewComment {
@@ -280,6 +336,10 @@ pub enum ErrorCode {
     RepoNotFound,
     /// The git host refused or failed; the message says how.
     HostError,
+    /// The terminal closed, or never existed.
+    TerminalNotFound,
+    /// Typing into terminals from the phone is turned off in Lathe.
+    TerminalInputDisabled,
     Internal,
 }
 
@@ -710,6 +770,18 @@ mod tests {
             }
         );
 
+        let parsed: PhoneEnvelope = serde_json::from_value(json!({
+            "type": "rename_terminal", "client_msg_id": "m5", "terminal_id": "term1", "title": "Release build"
+        }))
+        .unwrap();
+        assert_eq!(
+            parsed.message,
+            PhoneMessage::RenameTerminal {
+                terminal_id: "term1".into(),
+                title: "Release build".into(),
+            }
+        );
+
         let parsed: PhoneEnvelope =
             serde_json::from_value(json!({ "type": "refresh", "client_msg_id": "m2" })).unwrap();
         assert_eq!(parsed.message, PhoneMessage::Refresh {});
@@ -835,5 +907,95 @@ mod tests {
     fn rejects_unknown_types_and_missing_message_ids() {
         assert!(serde_json::from_value::<PhoneEnvelope>(json!({ "type": "rm_rf", "client_msg_id": "m" })).is_err());
         assert!(serde_json::from_value::<PhoneEnvelope>(json!({ "type": "refresh" })).is_err());
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TerminalSummary {
+    pub terminal_id: String,
+    pub workspace_id: String,
+    pub title: String,
+    pub kind: TerminalKind,
+    pub awaiting_input: bool,
+    pub exited: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalKind {
+    /// A terminal thread in the agent panel, usually a CLI agent.
+    Agent,
+    /// The terminal panel.
+    Panel,
+    /// A terminal open as an editor tab.
+    Editor,
+}
+
+/// How a run of characters looks, in Lathe's theme colors. Unset fields are
+/// the terminal's defaults. Colors are `#rrggbb`, or `#rrggbbaa` when dimmed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TerminalStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fg: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bg: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub underline: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strikethrough: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalColors {
+    pub foreground: String,
+    pub background: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCursor {
+    pub row: u16,
+    pub column: u16,
+}
+
+/// The keys a phone can press. A fixed list, so the phone can't send
+/// arbitrary escape sequences as a "key".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalKey {
+    Enter,
+    Escape,
+    Tab,
+    Backspace,
+    Up,
+    Down,
+    Left,
+    Right,
+    CtrlC,
+    CtrlD,
+    CtrlZ,
+    CtrlL,
+}
+
+impl TerminalKey {
+    /// The keystroke as GPUI writes it, for `Terminal::try_keystroke`.
+    pub fn keystroke(self) -> &'static str {
+        match self {
+            TerminalKey::Enter => "enter",
+            TerminalKey::Escape => "escape",
+            TerminalKey::Tab => "tab",
+            TerminalKey::Backspace => "backspace",
+            TerminalKey::Up => "up",
+            TerminalKey::Down => "down",
+            TerminalKey::Left => "left",
+            TerminalKey::Right => "right",
+            TerminalKey::CtrlC => "ctrl-c",
+            TerminalKey::CtrlD => "ctrl-d",
+            TerminalKey::CtrlZ => "ctrl-z",
+            TerminalKey::CtrlL => "ctrl-l",
+        }
     }
 }

@@ -7,7 +7,7 @@ use gpui::{
 use qrcodegen::{QrCode, QrCodeEcc};
 use settings::Settings as _;
 use std::time::{Duration, SystemTime};
-use ui::{Indicator, Tooltip, prelude::*};
+use ui::{Indicator, Switch, Tooltip, prelude::*};
 use workspace::{ModalView, Workspace};
 
 gpui::actions!(
@@ -121,6 +121,36 @@ impl CompanionModal {
             _subscription: subscription,
             _countdown: countdown,
         }
+    }
+
+    fn set_terminal_input(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+            settings.companion.get_or_insert_default().terminal_input = Some(allowed);
+        });
+    }
+
+    fn render_terminal_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let allowed = CompanionSettings::get_global(cx).terminal_input;
+        v_flex()
+            .gap_1()
+            .child(
+                Switch::new(
+                    "companion-terminal-input",
+                    if allowed { ToggleState::Selected } else { ToggleState::Unselected },
+                )
+                .label("Allow typing into terminals from the phone")
+                .on_click(cx.listener(|this, state: &ToggleState, _, cx| {
+                    this.set_terminal_input(matches!(state, ToggleState::Selected), cx)
+                })),
+            )
+            .child(
+                Label::new(
+                    "A paired phone can always see terminals. With this on, it can also type \
+                     into them, which can run any command.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
     }
 
     fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -372,6 +402,7 @@ impl Render for CompanionModal {
                     this.child(self.render_status(cx))
                         .child(self.render_pairing(cx))
                         .child(self.render_devices(cx))
+                        .child(self.render_terminal_input(cx))
                 } else {
                     this.child(
                         Button::new("enable-companion", "Turn on")

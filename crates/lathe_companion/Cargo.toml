@@ -13,6 +13,8 @@ path = "src/lathe_companion.rs"
 doctest = false
 
 [dependencies]
+terminal_view.workspace = true
+terminal.workspace = true
 acp_thread.workspace = true
 agent-client-protocol.workspace = true
 agent_ui.workspace = true
@@ -51,6 +53,7 @@ util.workspace = true
 zed_credentials_provider.workspace = true
 
 [dev-dependencies]
+terminal = { workspace = true, features = ["test-support"] }
 async-trait.workspace = true
 http_client = { workspace = true, features = ["test-support"] }
 agent_ui = { workspace = true, features = ["test-support"] }

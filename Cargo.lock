@@ -10079,6 +10079,8 @@ dependencies = [
  "serde_json",
  "settings",
  "sha2",
+ "terminal",
+ "terminal_view",
  "tokio",
  "ui",
  "url",

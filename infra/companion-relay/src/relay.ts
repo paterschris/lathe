@@ -36,7 +36,11 @@ export const PUSH_TEXT: Record<string, string> = {
   needs_input: "An agent is waiting for your answer",
   finished: "An agent finished",
   error: "An agent stopped with an error",
+  terminal_input: "A terminal is waiting for input",
 };
+
+// A terminal push names a terminal; every other kind names a thread.
+const TERMINAL_KINDS = new Set(["terminal_input"]);
 
 export type Role = "desktop" | "phone" | "pairing";
 
@@ -444,8 +448,9 @@ export class Relay {
     if (count >= PUSHES_PER_HOUR) return this.reject(socket, "push_rate_limited");
     await this.state.storage.put("push_window", { hour, count: count + 1 });
 
-    const threadId = text(message, "thread_id", 128);
-    if (!threadId) return this.reject(socket, "invalid_push_thread");
+    const isTerminal = TERMINAL_KINDS.has(kind);
+    const target = isTerminal ? text(message, "terminal_id", 128) : text(message, "thread_id", 128);
+    if (!target) return this.reject(socket, isTerminal ? "invalid_push_terminal" : "invalid_push_thread");
     const to = text(message, "device_id", 64);
     const online = new Set(this.authedSockets("phone").map((phone) => this.attachment(phone).id));
     const candidates = [...(await this.state.storage.list<DeviceRecord>({ prefix: "device:" })).values()]
@@ -467,7 +472,7 @@ export class Relay {
         body: PUSH_TEXT[kind],
         sound: "default",
         priority: "high",
-        data: { desktop_id: this.desktopId, thread_id: threadId, kind },
+        data: { desktop_id: this.desktopId, kind, ...(isTerminal ? { terminal_id: target } : { thread_id: target }) },
       }))),
     });
     if (!response.ok) return this.reject(socket, "push_failed", { status: response.status });

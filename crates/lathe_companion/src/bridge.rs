@@ -5,8 +5,9 @@ use crate::{
     Companion, CompanionEvent, CompanionSettings, CompanionThreads, CompanionThreadsEvent,
     crypto::encode_url_safe,
     entries,
+    terminals::{Terminals, TerminalsEvent},
     protocol::{
-        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_CLOSE_THREADS, FEATURE_PULL_REQUESTS, PROTOCOL_VERSION, PhoneEnvelope,
+        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_CLOSE_THREADS, FEATURE_PULL_REQUESTS, FEATURE_TERMINALS, PROTOCOL_VERSION, PhoneEnvelope,
         PhoneMessage, ThreadStatus, ThreadSummary, WorkspaceSummary,
     },
 };
@@ -74,6 +75,9 @@ pub(crate) struct Bridge {
     seen_messages: HashMap<String, VecDeque<String>>,
     pending_loads: HashMap<acp::SessionId, Vec<PendingSubscribe>>,
     pending_new_threads: HashMap<ThreadId, PendingNewThread>,
+    terminals: Option<Entity<Terminals>>,
+    /// The phones following each terminal's screen.
+    terminal_subscribers: HashMap<String, HashSet<String>>,
     list_flush: Option<Task<()>>,
     keep_awake: Option<keep_awake::Assertion>,
     _subscriptions: Vec<Subscription>,
@@ -126,6 +130,12 @@ impl Bridge {
         if let Some(store) = ThreadMetadataStore::try_global(cx) {
             subscriptions.push(cx.observe(&store, |this, _, cx| this.complete_new_threads(cx)));
         }
+        let terminals = Terminals::global(cx);
+        if let Some(terminals) = &terminals {
+            subscriptions.push(cx.subscribe(terminals, |this, _, event, cx| {
+                this.handle_terminals_event(event, cx)
+            }));
+        }
         let mut this = Self {
             companion,
             threads,
@@ -135,6 +145,8 @@ impl Bridge {
             seen_messages: HashMap::default(),
             pending_loads: HashMap::default(),
             pending_new_threads: HashMap::default(),
+            terminals,
+            terminal_subscribers: HashMap::default(),
             list_flush: None,
             keep_awake: None,
             _subscriptions: subscriptions,
@@ -202,7 +214,7 @@ impl Bridge {
         match event {
             CompanionEvent::DeviceOnline(device_id) => self.greet(device_id, cx),
             CompanionEvent::DeviceOffline(device_id) | CompanionEvent::DeviceRemoved(device_id) => {
-                self.forget_device(device_id)
+                self.forget_device(device_id, cx)
             }
             CompanionEvent::PhoneMessage { device_id, message } => {
                 self.handle_phone_message(device_id, message, cx)
@@ -218,21 +230,94 @@ impl Bridge {
             lathe_version: release_channel::AppVersion::global(cx).to_string(),
             channel: channel.dev_name().to_string(),
             desktop_name: crate::companion::desktop_name(channel),
-            features: vec![FEATURE_PULL_REQUESTS.to_string(), FEATURE_CLOSE_THREADS.to_string()],
+            features: vec![
+                FEATURE_PULL_REQUESTS.to_string(),
+                FEATURE_CLOSE_THREADS.to_string(),
+                FEATURE_TERMINALS.to_string(),
+            ],
         };
         self.send(device_id, &hello, cx);
         self.send_lists(device_id, cx);
+        self.send_terminals(device_id, cx);
         self.send_pending_prompts(device_id, None, cx);
     }
 
-    fn forget_device(&mut self, device_id: &str) {
+    fn forget_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
         self.seen_messages.remove(device_id);
         self.streams.retain(|_, stream| {
             stream.subscribers.remove(device_id);
             !stream.subscribers.is_empty()
         });
+        let watched = self.terminal_subscribers.keys().cloned().collect::<Vec<_>>();
+        for terminal_id in watched {
+            self.unfollow_terminal(device_id, &terminal_id, cx);
+        }
         // Pending loads stay: a phone that drops and reconnects while its
         // thread loads still gets the answer, and the timeout clears the rest.
+    }
+
+    fn send_terminals(&self, device_id: &str, cx: &mut Context<Self>) {
+        let Some(terminals) = &self.terminals else {
+            return;
+        };
+        let list = terminals.read(cx).list(cx);
+        let input_enabled = CompanionSettings::get_global(cx).terminal_input;
+        self.send(device_id, &DesktopMessage::Terminals { list, input_enabled }, cx);
+    }
+
+    fn handle_terminals_event(&mut self, event: &TerminalsEvent, cx: &mut Context<Self>) {
+        match event {
+            TerminalsEvent::ListChanged => {
+                for device_id in self.online_devices(cx) {
+                    self.send_terminals(&device_id, cx);
+                }
+            }
+            TerminalsEvent::Screen { terminal_id, message } => {
+                let subscribers = self
+                    .terminal_subscribers
+                    .get(terminal_id)
+                    .map(|devices| devices.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for device_id in subscribers {
+                    self.send(&device_id, message, cx);
+                }
+            }
+            TerminalsEvent::AwaitingInput { terminal_id } => {
+                // Someone following the terminal on a phone already sees it.
+                if self.terminal_subscribers.contains_key(terminal_id) {
+                    return;
+                }
+                self.companion.read(cx).push_terminal(terminal_id);
+            }
+        }
+    }
+
+    fn follow_terminal(&mut self, device_id: &str, terminal_id: &str, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
+        let terminals = self.terminals.clone().ok_or_else(|| {
+            ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed.")
+        })?;
+        self.terminal_subscribers
+            .entry(terminal_id.to_string())
+            .or_default()
+            .insert(device_id.to_string());
+        let result = terminals.update(cx, |terminals, cx| terminals.watch(terminal_id, cx));
+        if result.is_err() {
+            self.unfollow_terminal(device_id, terminal_id, cx);
+        }
+        result
+    }
+
+    fn unfollow_terminal(&mut self, device_id: &str, terminal_id: &str, cx: &mut Context<Self>) {
+        let Some(devices) = self.terminal_subscribers.get_mut(terminal_id) else {
+            return;
+        };
+        devices.remove(device_id);
+        if devices.is_empty() {
+            self.terminal_subscribers.remove(terminal_id);
+            if let Some(terminals) = &self.terminals {
+                terminals.update(cx, |terminals, _| terminals.unwatch(terminal_id));
+            }
+        }
     }
 
     fn send_lists(&self, device_id: &str, cx: &mut Context<Self>) {
@@ -628,6 +713,7 @@ impl Bridge {
             PhoneMessage::Refresh {} => {
                 self.send_lists(device_id, cx);
                 self.send_pending_prompts(device_id, None, cx);
+                self.send_terminals(device_id, cx);
                 Ok(())
             }
             PhoneMessage::LoadOlder { thread_id, before_index } => {
@@ -687,6 +773,31 @@ impl Bridge {
                 .detach();
                 return;
             }
+            PhoneMessage::SubscribeTerminal { terminal_id } => {
+                self.follow_terminal(device_id, &terminal_id, cx)
+            }
+            PhoneMessage::UnsubscribeTerminal { terminal_id } => {
+                self.unfollow_terminal(device_id, &terminal_id, cx);
+                Ok(())
+            }
+            PhoneMessage::RenameTerminal { terminal_id, title } => {
+                let title = title.trim();
+                if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
+                    Err(ErrorBody::new(
+                        ErrorCode::BadMessage,
+                        format!("A terminal name has to be 1 to {MAX_TITLE_CHARS} characters."),
+                    ))
+                } else {
+                    match &self.terminals {
+                        Some(terminals) => terminals.update(cx, |terminals, cx| terminals.rename(&terminal_id, title, cx)),
+                        None => Err(ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed.")),
+                    }
+                }
+            }
+            PhoneMessage::TerminalInput { terminal_id, text, key } => match &self.terminals {
+                Some(terminals) => terminals.update(cx, |terminals, cx| terminals.input(&terminal_id, text, key, cx)),
+                None => Err(ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed.")),
+            },
             PhoneMessage::Unpair {} => {
                 self.ack(device_id, &client_msg_id, Ok(()), cx);
                 let device_id = device_id.to_string();
@@ -1266,7 +1377,7 @@ fn not_loaded() -> ErrorBody {
 
 /// Stable id for a set of project folders, so a workspace keeps its id across
 /// Lathe restarts.
-fn workspace_id(paths: &PathList) -> String {
+pub(crate) fn workspace_id(paths: &PathList) -> String {
     let mut hasher = Sha256::new();
     for path in paths.ordered_paths() {
         hasher.update(path.to_string_lossy().as_bytes());
@@ -1287,7 +1398,7 @@ fn workspace_name(paths: &PathList) -> String {
     }
 }
 
-fn open_workspace_paths(cx: &App) -> Vec<(PathList, WeakEntity<workspace::Workspace>, gpui::WindowHandle<MultiWorkspace>)> {
+pub(crate) fn open_workspace_paths(cx: &App) -> Vec<(PathList, WeakEntity<workspace::Workspace>, gpui::WindowHandle<MultiWorkspace>)> {
     cx.windows()
         .into_iter()
         .filter_map(|window| window.downcast::<MultiWorkspace>())
@@ -1727,7 +1838,7 @@ mod tests {
         let received = harness.received();
         assert_eq!(received[0]["type"], "hello");
         assert_eq!(received[0]["lathe_version"], "1.2.3");
-        assert_eq!(received[0]["features"], json!(["pull_requests", "close_threads"]));
+        assert_eq!(received[0]["features"], json!(["pull_requests", "close_threads", "terminals"]));
         let workspaces = of_type(&received, "workspaces");
         assert_eq!(workspaces[0]["list"][0]["name"], "test");
         let listed = &of_type(&received, "threads")[0]["list"][0];

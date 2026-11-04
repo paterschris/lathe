@@ -865,6 +865,11 @@ pub struct CompanionSettingsContent {
     ///
     /// Default: true
     pub keep_awake_while_agents_run: Option<bool>,
+    /// Whether a paired phone may type into terminals. Typing can run any
+    /// command, so it's off until you turn it on.
+    ///
+    /// Default: false
+    pub terminal_input: Option<bool>,
 }
 
 #[with_fallible_options]

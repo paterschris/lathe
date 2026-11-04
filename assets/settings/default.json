@@ -1163,6 +1163,9 @@
     "relay_url": "wss://companion.lathe-ide.com",
     // Whether to keep the computer awake while an agent thread is running.
     "keep_awake_while_agents_run": true,
+    // Whether a paired phone may type into terminals. Typing can run any
+    // command, so it's off until you turn it on.
+    "terminal_input": false,
   },
   "agent": {
     // Whether the inline assistant should use streaming tools, when available

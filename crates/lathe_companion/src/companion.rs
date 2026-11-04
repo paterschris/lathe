@@ -194,6 +194,16 @@ impl Companion {
         self.send(json!({ "type": "push", "kind": kind, "thread_id": thread_id }));
     }
 
+    /// Asks the relay to tell phones a terminal is waiting for input. The
+    /// relay sends fixed text, so nothing about the terminal leaves this
+    /// machine but its random id.
+    pub fn push_terminal(&self, terminal_id: &str) {
+        if self.devices.is_empty() {
+            return;
+        }
+        self.send(json!({ "type": "push", "kind": "terminal_input", "terminal_id": terminal_id }));
+    }
+
     fn set_all_offline(&mut self, cx: &mut Context<Self>) {
         for device_id in self.online.drain().collect::<Vec<_>>() {
             cx.emit(CompanionEvent::DeviceOffline(device_id));
