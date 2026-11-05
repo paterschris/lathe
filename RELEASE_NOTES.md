@@ -2,6 +2,18 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.18.0 - 2026-11-05
+
+Everything from the 1.17.0 beta: Lathe Companion can show your terminals.
+
+### Lathe Companion
+
+- **Terminals on your phone.** The companion app can now list the terminals in your open projects, including Claude Code, Codex and other CLI agents running in the agent panel. Open one to see its screen live, with scrollback and colors.
+- **Typing into terminals is off until you turn it on.** It can run any command, so it has its own switch in the companion dialog ("Allow typing into terminals from the phone"), or set `companion.terminal_input`. With it off, the phone can still watch.
+- You get a push when a terminal starts waiting for input, unless you already have it open on the phone.
+
+Needs a companion app update that adds terminals. Until then, nothing changes on the phone.
+
 ## v1.17.0-beta - 2026-11-04
 
 ### Lathe Companion
