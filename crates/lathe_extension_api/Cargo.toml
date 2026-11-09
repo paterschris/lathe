@@ -7,8 +7,7 @@ documentation = "https://docs.rs/lathe_extension_api"
 readme = "README.md"
 keywords = ["lathe", "zed", "extension"]
 edition.workspace = true
-# Flip to `true` when 0.1 is frozen and ready for crates.io.
-publish = false
+publish = true
 license = "Apache-2.0"
 
 [lints]
