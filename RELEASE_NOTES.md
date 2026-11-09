@@ -18,7 +18,7 @@ Extensions can do a lot more in Lathe now. They can add commands, work with the 
 - **More places to get extensions.** Lathe's extension registry is listed next to Zed's, and `extension_registries` adds more. You can also paste a `.tar.gz` or git URL into the Extensions search box to install from it. Registry downloads are checked against a checksum, and the list still loads when you're offline.
 - Lathe-only extensions get a Lathe badge.
 
-To build one, use the `lathe_extension_api` crate alongside `zed_extension_api`. It isn't on crates.io yet.
+To build one, add `lathe_extension_api = "0.1"` from crates.io next to `zed_extension_api`. Its README covers the API and each permission.
 
 ### Lathe Companion
 
