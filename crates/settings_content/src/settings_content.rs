@@ -870,6 +870,12 @@ pub struct CompanionSettingsContent {
     ///
     /// Default: false
     pub terminal_input: Option<bool>,
+    /// Minutes without input in Lathe before you count as away. While you're
+    /// using Lathe, paired phones get no push notifications, since you'd see
+    /// the update on the desktop. 0 always sends them.
+    ///
+    /// Default: 5
+    pub idle_minutes: Option<u32>,
 }
 
 #[with_fallible_options]

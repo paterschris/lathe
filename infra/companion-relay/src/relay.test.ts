@@ -347,6 +347,27 @@ describe("push", () => {
     expect(desktopSocket.last()).toEqual({ type: "error", code: "invalid_push_terminal" });
   });
 
+  it("puts the title Lathe sent above a shorter body", async () => {
+    const { desktopSocket } = await pushReady();
+    fetcher.mockImplementation(async () => Response.json({ data: [{ status: "ok" }] }));
+    await say(desktopSocket, { type: "push", kind: "finished", thread_id: "t1", title: "  Fix the login redirect  " });
+    let [sent] = JSON.parse(fetcher.mock.calls.at(-1)![1].body);
+    expect(sent.title).toBe("Fix the login redirect");
+    expect(sent.body).toBe("Finished");
+    expect(sent.data).toEqual({ desktop_id: desktop.id, kind: "finished", thread_id: "t1" });
+
+    await say(desktopSocket, { type: "push", kind: "terminal_input", terminal_id: "term1", title: "x".repeat(300) });
+    [sent] = JSON.parse(fetcher.mock.calls.at(-1)![1].body);
+    expect(sent.title).toHaveLength(100);
+    expect(sent.body).toBe("Waiting for input");
+
+    // No title (or an older Lathe): the generic text, with no title.
+    await say(desktopSocket, { type: "push", kind: "finished", thread_id: "t1", title: "   " });
+    [sent] = JSON.parse(fetcher.mock.calls.at(-1)![1].body);
+    expect(sent.title).toBeUndefined();
+    expect(sent.body).toBe("An agent finished");
+  });
+
   it("rejects unknown kinds", async () => {
     const { desktopSocket } = await pushReady();
     await say(desktopSocket, { type: "push", kind: "anything", thread_id: "t1" });

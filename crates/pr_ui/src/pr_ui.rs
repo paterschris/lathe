@@ -2,6 +2,7 @@ use workspace::Workspace;
 
 pub mod connect_modal;
 pub mod create_pull_request_modal;
+pub mod git_integrations_menu;
 pub mod pull_request_loader;
 pub mod pull_request_panel;
 pub mod pull_request_panel_settings;

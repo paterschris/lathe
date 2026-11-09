@@ -1,3 +1,4 @@
+use crate::git_integrations_menu;
 use crate::pull_request_loader::{
     LoadOutcome, LoadedPullRequests, failure_summary, load_pull_request_pages, load_pull_requests,
     pull_request_repositories, remote_candidates,
@@ -71,7 +72,11 @@ enum LoadState {
     Idle,
     Loading,
     Loaded(LoadedPullRequests),
-    NoHost(SharedString),
+    NoHost {
+        reason: SharedString,
+        /// Set when an account for this host would make the list load.
+        connect_host: Option<String>,
+    },
     Failed(FailureMessage),
     /// A pull-request call returned HTTP 401; the stored credential for `host`
     /// is expired or invalid, so the user is offered a targeted reconnect.
@@ -615,10 +620,11 @@ impl PullRequestPanel {
             section.rows.clear();
             section.host_context = None;
             section._load_task = None;
-            section.state = LoadState::NoHost(
-                "This repository has no origin or upstream remote, so there is no host to query."
+            section.state = LoadState::NoHost {
+                reason: "This repository has no origin or upstream remote, so there is no host to query."
                     .into(),
-            );
+                connect_host: None,
+            };
             self.clamp_selection();
             cx.notify();
             return;
@@ -667,10 +673,16 @@ impl PullRequestPanel {
                             section.note_loaded(&loaded);
                             section.state = LoadState::Loaded(loaded);
                         }
-                        Ok(LoadOutcome::NoHost(reason)) => {
+                        Ok(LoadOutcome::NoHost {
+                            reason,
+                            connect_host,
+                        }) => {
                             if !preserve {
                                 section.host_context = None;
-                                section.state = LoadState::NoHost(reason);
+                                section.state = LoadState::NoHost {
+                                    reason,
+                                    connect_host,
+                                };
                             }
                         }
                         Err(error) => {
@@ -787,7 +799,7 @@ impl PullRequestPanel {
                             }
                             section.rebuild_rows(sort);
                         }
-                        Ok(LoadOutcome::NoHost(_)) => {}
+                        Ok(LoadOutcome::NoHost { .. }) => {}
                         Err(error) => failure = Some(error),
                     }
                 }
@@ -1368,6 +1380,7 @@ impl PullRequestPanel {
                 h_flex()
                     .gap_0p5()
                     .child(self.render_filter_picker(cx))
+                    .child(self.render_git_integrations_menu())
                     .child(
                         IconButton::new("pr-panel-create", IconName::Plus)
                             .icon_size(IconSize::Small)
@@ -1402,6 +1415,29 @@ impl PullRequestPanel {
                         })),
                     ),
             )
+    }
+
+    /// The same Git Integrations menu as the title bar's account menu, so
+    /// connecting and switching git host accounts never depends on that menu
+    /// being visible or on being signed in to collaboration.
+    fn render_git_integrations_menu(&self) -> impl IntoElement {
+        let workspace_id = self.workspace.entity_id();
+        PopoverMenu::new("pr-panel-git-integrations")
+            .trigger_with_tooltip(
+                IconButton::new("pr-panel-git-integrations-trigger", IconName::UserRoundPen)
+                    .icon_size(IconSize::Small),
+                Tooltip::text("Git Integrations"),
+            )
+            .menu(move |window, cx| {
+                let entries = git_integrations_menu::menu_entries(workspace_id, cx);
+                Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                    git_integrations_menu::append_git_integrations(
+                        menu.header("Git Integrations"),
+                        entries,
+                    )
+                }))
+            })
+            .anchor(gpui::Anchor::TopRight)
     }
 
     fn render_filter_picker(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1651,10 +1687,26 @@ impl PullRequestPanel {
                         .into_any_element()
                 }
             }
-            LoadState::NoHost(reason) => {
-                Self::render_message("No connected host", Color::Muted, Some(reason))
-                    .into_any_element()
-            }
+            LoadState::NoHost {
+                reason,
+                connect_host,
+            } => Self::render_message("No connected host", Color::Muted, Some(reason))
+                .when_some(connect_host, |this, host| {
+                    let display = crate::pull_request_view::host_display_name(cx, &host);
+                    this.child(
+                        Button::new(
+                            ("pull-request-panel-connect", section_index),
+                            format!("Connect {display}"),
+                        )
+                        .on_click(cx.listener(move |_, _, window, cx| {
+                            window.dispatch_action(
+                                Box::new(zed_actions::ConnectGitHost { host: host.clone() }),
+                                cx,
+                            );
+                        })),
+                    )
+                })
+                .into_any_element(),
             LoadState::Failed(failure) => {
                 Self::render_message(failure.summary.clone(), Color::Error, Some(failure.detail))
                     .child(

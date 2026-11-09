@@ -877,6 +877,8 @@ pub struct App {
     pub(crate) observers: SubscriberSet<EntityId, Handler>,
     pub(crate) event_listeners: SubscriberSet<EntityId, (TypeId, Listener)>,
     pub(crate) keystroke_observers: SingleSubscriberSet<KeystrokeObserver>,
+    /// When a window last got input from the user, if it has since launch.
+    pub(crate) last_input_at: Option<Instant>,
     pub(crate) keystroke_interceptors: SingleSubscriberSet<KeystrokeObserver>,
     pub(crate) keyboard_layout_observers: SingleSubscriberSet<Handler>,
     missing_glyph_callback: Rc<MissingGlyphCallbackSlot>,
@@ -1027,6 +1029,7 @@ impl App {
                 event_listeners: SubscriberSet::new(),
                 release_listeners: SubscriberSet::new(),
                 keystroke_observers: SingleSubscriberSet::new(),
+                last_input_at: None,
                 keystroke_interceptors: SingleSubscriberSet::new(),
                 keyboard_layout_observers: SingleSubscriberSet::new(),
                 missing_glyph_callback: Rc::default(),
@@ -2672,6 +2675,13 @@ impl App {
         self.observe_release(handle, move |entity, cx| {
             let _ = window_handle.update(cx, |_, window, cx| on_release(entity, window, cx));
         })
+    }
+
+    /// When the user last pressed a key, clicked, moved the mouse over or
+    /// scrolled any window of this app. `None` until they first do. Read with
+    /// the executor's clock (`BackgroundExecutor::now`), which tests can fake.
+    pub fn last_input_at(&self) -> Option<Instant> {
+        self.last_input_at
     }
 
     /// Register a callback to be invoked after a keystroke is resolved in any window,

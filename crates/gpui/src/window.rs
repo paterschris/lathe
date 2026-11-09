@@ -5694,6 +5694,18 @@ impl Window {
         if self.last_input_modality != old_modality {
             self.refresh();
         }
+        // Only what the user does: not a release, a pointer leaving, or a dropped file.
+        if matches!(
+            event,
+            PlatformInput::KeyDown(_)
+                | PlatformInput::MouseDown(_)
+                | PlatformInput::MouseMove(_)
+                | PlatformInput::Scroll(_)
+                | PlatformInput::Pinch(_)
+                | PlatformInput::Touch(_)
+        ) {
+            cx.last_input_at = Some(cx.background_executor().now());
+        }
 
         // Handlers may set this to false by calling `stop_propagation`.
         cx.propagate_event = true;

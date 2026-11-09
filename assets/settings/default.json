@@ -1166,6 +1166,10 @@
     // Whether a paired phone may type into terminals. Typing can run any
     // command, so it's off until you turn it on.
     "terminal_input": false,
+    // Minutes without input in Lathe before you count as away. While you're
+    // using Lathe, paired phones get no push notifications, since you'd see
+    // the update on the desktop. 0 always sends them.
+    "idle_minutes": 5,
   },
   "agent": {
     // Whether the inline assistant should use streaming tools, when available

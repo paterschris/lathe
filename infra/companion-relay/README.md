@@ -2,7 +2,7 @@
 
 Cloudflare Worker that connects desktop Lathe to paired phones running the Lathe Companion app. Each desktop gets one Durable Object, which holds the desktop's socket and its phones' sockets and forwards frames between them.
 
-The relay never sees message content. Frames are end-to-end encrypted between the desktop and each phone, and push notifications carry fixed text plus routing data (`desktop_id`, `thread_id`, `kind`).
+The relay never sees message content. Frames are end-to-end encrypted between the desktop and each phone, and push notifications carry fixed text plus routing data (`desktop_id`, `thread_id` or `terminal_id`, `kind`). Lathe adds the thread's or terminal's title, which the notification shows as its title; the relay passes it to Expo and never stores it.
 
 ## Cost
 

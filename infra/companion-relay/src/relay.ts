@@ -3,7 +3,8 @@
 //
 // The relay never sees plaintext: frames are end-to-end encrypted between the
 // desktop and each phone. It only authenticates sockets, forwards frames, and
-// sends content-free push notifications.
+// sends push notifications that carry a thread or terminal title at most,
+// never message content.
 
 import { DEVICE_ID_PATTERN, DesktopIndex, Entitlements, type EntitlementEnv } from "./entitlements";
 
@@ -38,6 +39,18 @@ export const PUSH_TEXT: Record<string, string> = {
   error: "An agent stopped with an error",
   terminal_input: "A terminal is waiting for input",
 };
+
+// The body under a thread or terminal title, which already says which one.
+export const TITLED_PUSH_TEXT: Record<string, string> = {
+  needs_authorization: "Needs your approval",
+  needs_input: "Waiting for your answer",
+  finished: "Finished",
+  error: "Stopped with an error",
+  terminal_input: "Waiting for input",
+};
+
+// Lathe caps titles at 100 characters; anything longer is cut, not rejected.
+const MAX_PUSH_TITLE = 100;
 
 // A terminal push names a terminal; every other kind names a thread.
 const TERMINAL_KINDS = new Set(["terminal_input"]);
@@ -452,6 +465,8 @@ export class Relay {
     const target = isTerminal ? text(message, "terminal_id", 128) : text(message, "thread_id", 128);
     if (!target) return this.reject(socket, isTerminal ? "invalid_push_terminal" : "invalid_push_thread");
     const to = text(message, "device_id", 64);
+    // The thread's or terminal's title, which Lathe chose to show on the lock screen.
+    const title = typeof message.title === "string" ? message.title.trim().slice(0, MAX_PUSH_TITLE) : "";
     const online = new Set(this.authedSockets("phone").map((phone) => this.attachment(phone).id));
     const candidates = [...(await this.state.storage.list<DeviceRecord>({ prefix: "device:" })).values()]
       .filter((device) => device.push_token && (!to || device.device_id === to))
@@ -469,7 +484,7 @@ export class Relay {
       headers,
       body: JSON.stringify(devices.map((device) => ({
         to: device.push_token,
-        body: PUSH_TEXT[kind],
+        ...(title ? { title, body: TITLED_PUSH_TEXT[kind] } : { body: PUSH_TEXT[kind] }),
         sound: "default",
         priority: "high",
         data: { desktop_id: this.desktopId, kind, ...(isTerminal ? { terminal_id: target } : { thread_id: target }) },

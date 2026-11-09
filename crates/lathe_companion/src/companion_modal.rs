@@ -1,4 +1,4 @@
-use crate::{Companion, CompanionSettings, ConnectionStatus, PairingState};
+use crate::{Companion, CompanionSettings, ConnectionStatus, PairingState, activity};
 use gpui::{
     Bounds, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla, Subscription, Task,
     canvas,
@@ -8,6 +8,7 @@ use qrcodegen::{QrCode, QrCodeEcc};
 use settings::Settings as _;
 use std::time::{Duration, SystemTime};
 use ui::{Indicator, Switch, Tooltip, prelude::*};
+use ui_input::{ErasedEditorEvent, InputField};
 use workspace::{ModalView, Workspace};
 
 gpui::actions!(
@@ -23,16 +24,22 @@ pub fn register(workspace: &mut Workspace) {
         let Some(companion) = Companion::global(cx) else {
             return;
         };
-        workspace.toggle_modal(window, cx, |_, cx| CompanionModal::new(companion, cx));
+        workspace.toggle_modal(window, cx, |window, cx| CompanionModal::new(companion, window, cx));
     });
 }
 
 /// Phone icon in the title bar while the companion is on. Its color shows the
-/// connection, and clicking it opens the companion dialog.
+/// connection, and clicking it opens the companion dialog. "Idle" shows next to
+/// it once you've been away from Lathe long enough for phones to get pushes.
 struct TitleBarIndicator {
     companion: Entity<Companion>,
+    idle: bool,
     _subscription: Subscription,
+    _activity: Task<()>,
 }
+
+/// How often the indicator checks whether you went idle or came back.
+const ACTIVITY_CHECK: Duration = Duration::from_secs(1);
 
 pub(crate) fn register_title_bar_indicator(cx: &mut App) {
     let Some(companion) = Companion::global(cx) else {
@@ -40,6 +47,23 @@ pub(crate) fn register_title_bar_indicator(cx: &mut App) {
     };
     let indicator = cx.new(|cx| TitleBarIndicator {
         _subscription: cx.observe(&companion, |_, _, cx| cx.notify()),
+        idle: !activity::is_active(cx),
+        // Input doesn't reach this view, so it checks, and redraws on a change.
+        _activity: cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(ACTIVITY_CHECK).await;
+                let changed = this.update(cx, |this: &mut TitleBarIndicator, cx| {
+                    let idle = !activity::is_active(cx);
+                    if idle != this.idle {
+                        this.idle = idle;
+                        cx.notify();
+                    }
+                });
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }),
         companion,
     });
     lathe_hooks::LatheHooks::update(cx, |hooks| {
@@ -79,11 +103,22 @@ impl Render for TitleBarIndicator {
                 (Color::Error, "Lathe Companion: not connected".into())
             }
         };
-        IconButton::new("lathe-companion-indicator", IconName::Phone)
-            .icon_size(IconSize::Small)
-            .icon_color(color)
-            .tooltip(Tooltip::text(tooltip))
-            .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenCompanion), cx))
+        let minutes = CompanionSettings::get_global(cx).idle_minutes;
+        h_flex()
+            .gap_1()
+            .child(
+                IconButton::new("lathe-companion-indicator", IconName::Phone)
+                    .icon_size(IconSize::Small)
+                    .icon_color(color)
+                    .tooltip(Tooltip::text(tooltip))
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenCompanion), cx)),
+            )
+            // Hidden with idle_minutes at 0, since then you're never "active".
+            // No tooltip: reaching for it with the mouse makes you active, and
+            // the label goes before you could read one. The dialog explains it.
+            .when(self.idle && minutes > 0, |this| {
+                this.child(Label::new("Idle").size(LabelSize::XSmall).color(Color::Muted))
+            })
     }
 }
 
@@ -91,12 +126,59 @@ pub struct CompanionModal {
     companion: Entity<Companion>,
     focus_handle: FocusHandle,
     error: Option<SharedString>,
+    /// Minutes away from Lathe before your phone gets pushes.
+    idle_minutes: Entity<InputField>,
     _subscription: Subscription,
+    _idle_minutes_subscription: Subscription,
     _countdown: Task<()>,
 }
 
+/// The most `idle_minutes` the dialog takes: a day.
+const MAX_IDLE_MINUTES: u32 = 24 * 60;
+
 impl CompanionModal {
-    fn new(companion: Entity<Companion>, cx: &mut Context<Self>) -> Self {
+    fn new(companion: Entity<Companion>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let minutes = CompanionSettings::get_global(cx).idle_minutes;
+        let idle_minutes = cx.new(|cx| {
+            let field = InputField::new(window, cx, "5").label_min_width(px(48.));
+            field.set_text(&minutes.to_string(), window, cx);
+            field
+        });
+        // Saves each whole number as it's typed; leaving the box puts back the
+        // saved value if what's there isn't one.
+        let field = idle_minutes.clone();
+        let editor = idle_minutes.read(cx).editor().clone();
+        let idle_minutes_subscription = editor.subscribe(
+            Box::new(move |event, window, cx| {
+                let text = field.read(cx).text(cx);
+                let parsed = text.trim().parse::<u32>().ok().filter(|minutes| *minutes <= MAX_IDLE_MINUTES);
+                match (event, parsed) {
+                    (ErasedEditorEvent::BufferEdited, Some(minutes)) => {
+                        field.update(cx, |field, cx| field.set_error(None::<SharedString>, cx));
+                        if minutes != CompanionSettings::get_global(cx).idle_minutes {
+                            settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+                                settings.companion.get_or_insert_default().idle_minutes = Some(minutes);
+                            });
+                        }
+                    }
+                    (ErasedEditorEvent::BufferEdited, None) if !text.trim().is_empty() => {
+                        field.update(cx, |field, cx| {
+                            field.set_error(Some(format!("A whole number from 0 to {MAX_IDLE_MINUTES}")), cx)
+                        });
+                    }
+                    (ErasedEditorEvent::Blurred, None) => {
+                        let saved = CompanionSettings::get_global(cx).idle_minutes;
+                        field.update(cx, |field, cx| {
+                            field.set_text(&saved.to_string(), window, cx);
+                            field.set_error(None::<SharedString>, cx);
+                        });
+                    }
+                    _ => {}
+                }
+            }),
+            window,
+            cx,
+        );
         let subscription = cx.observe(&companion, |_, _, cx| cx.notify());
         cx.on_release(|this: &mut Self, cx| {
             // Closing the dialog abandons a pairing in progress, so a QR code
@@ -116,6 +198,8 @@ impl CompanionModal {
         });
         Self {
             companion,
+            idle_minutes,
+            _idle_minutes_subscription: idle_minutes_subscription,
             focus_handle: cx.focus_handle(),
             error: None,
             _subscription: subscription,
@@ -134,14 +218,19 @@ impl CompanionModal {
         v_flex()
             .gap_1()
             .child(
-                Switch::new(
-                    "companion-terminal-input",
-                    if allowed { ToggleState::Selected } else { ToggleState::Unselected },
-                )
-                .label("Allow typing into terminals from the phone")
-                .on_click(cx.listener(|this, state: &ToggleState, _, cx| {
-                    this.set_terminal_input(matches!(state, ToggleState::Selected), cx)
-                })),
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .child(Label::new("Enable Terminal Typing"))
+                    .child(
+                        Switch::new(
+                            "companion-terminal-input",
+                            if allowed { ToggleState::Selected } else { ToggleState::Unselected },
+                        )
+                        .on_click(cx.listener(|this, state: &ToggleState, _, cx| {
+                            this.set_terminal_input(matches!(state, ToggleState::Selected), cx)
+                        })),
+                    ),
             )
             .child(
                 Label::new(
@@ -157,6 +246,27 @@ impl CompanionModal {
         settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
             settings.companion.get_or_insert_default().enabled = Some(enabled);
         });
+    }
+
+    fn render_idle_minutes(&self) -> impl IntoElement {
+        v_flex()
+            .gap_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Label::new("Notify my phone after"))
+                    .child(div().w(rems(3.5)).child(self.idle_minutes.clone()))
+                    .child(Label::new("minutes away from Lathe")),
+            )
+            .child(
+                Label::new(
+                    "While you're using Lathe, your phone gets no push notifications. Once \
+                     you're away this long, \"Idle\" shows next to the phone icon and they \
+                     go out again. 0 always sends them.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
     }
 
     fn render_status(&self, cx: &App) -> impl IntoElement {
@@ -403,6 +513,7 @@ impl Render for CompanionModal {
                         .child(self.render_pairing(cx))
                         .child(self.render_devices(cx))
                         .child(self.render_terminal_input(cx))
+                        .child(self.render_idle_minutes())
                 } else {
                     this.child(
                         Button::new("enable-companion", "Turn on")

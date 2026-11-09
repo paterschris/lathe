@@ -293,7 +293,7 @@ impl Terminals {
         }
         let view = self.view(terminal_id, cx).ok_or_else(not_found)?;
         let terminal = view.read(cx).terminal().clone();
-        match (text, key) {
+        let result = match (text, key) {
             (Some(text), None) if !text.is_empty() && text.len() <= MAX_INPUT_BYTES => {
                 terminal.update(cx, |terminal, _| terminal.input(text.into_bytes()));
                 Ok(())
@@ -304,7 +304,13 @@ impl Terminals {
                 if handled { Ok(()) } else { Err(bad_input()) }
             }
             _ => Err(bad_input()),
+        };
+        // Answered from the phone: the "needs input" marker goes, in Lathe and
+        // (through the view's notify) in the phone's list.
+        if result.is_ok() {
+            view.update(cx, |view, cx| view.note_remote_input(cx));
         }
+        result
     }
 
     /// The tracked terminals that live in open workspaces, with the workspace

@@ -2,12 +2,13 @@
 //! transcripts, applies what phones ask for, and triggers pushes.
 
 use crate::{
+    activity,
     Companion, CompanionEvent, CompanionSettings, CompanionThreads, CompanionThreadsEvent,
     crypto::encode_url_safe,
     entries,
     terminals::{Terminals, TerminalsEvent},
     protocol::{
-        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_CLOSE_THREADS, FEATURE_PULL_REQUESTS, FEATURE_TERMINALS, PROTOCOL_VERSION, PhoneEnvelope,
+        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_CLOSE_THREADS, FEATURE_MUTED_WORKSPACES, FEATURE_PULL_REQUESTS, FEATURE_TERMINALS, PROTOCOL_VERSION, PhoneEnvelope,
         PhoneMessage, ThreadStatus, ThreadSummary, WorkspaceSummary,
     },
 };
@@ -234,6 +235,7 @@ impl Bridge {
                 FEATURE_PULL_REQUESTS.to_string(),
                 FEATURE_CLOSE_THREADS.to_string(),
                 FEATURE_TERMINALS.to_string(),
+                FEATURE_MUTED_WORKSPACES.to_string(),
             ],
         };
         self.send(device_id, &hello, cx);
@@ -283,11 +285,25 @@ impl Bridge {
                 }
             }
             TerminalsEvent::AwaitingInput { terminal_id } => {
-                // Someone following the terminal on a phone already sees it.
-                if self.terminal_subscribers.contains_key(terminal_id) {
+                // Someone following the terminal on a phone already sees it,
+                // and someone working in Lathe sees it there.
+                if self.terminal_subscribers.contains_key(terminal_id) || activity::is_active(cx) {
                     return;
                 }
-                self.companion.read(cx).push_terminal(terminal_id);
+                // Its title for the notification, and its workspace, so phones
+                // that muted it are left out.
+                let terminal = self.terminals.as_ref().and_then(|terminals| {
+                    terminals
+                        .read(cx)
+                        .list(cx)
+                        .into_iter()
+                        .find(|terminal| &terminal.terminal_id == terminal_id)
+                });
+                self.companion.read(cx).push_terminal(
+                    terminal_id,
+                    terminal.as_ref().map(|terminal| terminal.title.as_str()),
+                    terminal.as_ref().map(|terminal| terminal.workspace_id.as_str()),
+                );
             }
         }
     }
@@ -465,11 +481,17 @@ impl Bridge {
             .streams
             .get(session_id)
             .is_some_and(|stream| !stream.subscribers.is_empty());
-        if watched_on_phone {
+        // Nor does someone working in Lathe.
+        if watched_on_phone || activity::is_active(cx) {
             return;
         }
         if let Some(thread_id) = CompanionThreads::thread_id(session_id, cx) {
-            self.companion.read(cx).push(kind, &thread_id);
+            // Its title for the notification, and its workspace, so phones
+            // that muted it are left out.
+            let metadata = self.thread_metadata(&thread_id, cx);
+            let title = metadata.as_ref().and_then(|metadata| metadata.title());
+            let workspace_id = metadata.map(|metadata| workspace_id(metadata.folder_paths()));
+            self.companion.read(cx).push(kind, &thread_id, title.as_deref(), workspace_id.as_deref());
         }
     }
 
@@ -798,6 +820,12 @@ impl Bridge {
                 Some(terminals) => terminals.update(cx, |terminals, cx| terminals.input(&terminal_id, text, key, cx)),
                 None => Err(ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed.")),
             },
+            PhoneMessage::SetMutedWorkspaces { workspace_ids } => {
+                let device_id = device_id.to_string();
+                self.companion
+                    .update(cx, |companion, cx| companion.set_muted_workspaces(&device_id, workspace_ids, cx));
+                Ok(())
+            }
             PhoneMessage::Unpair {} => {
                 self.ack(device_id, &client_msg_id, Ok(()), cx);
                 let device_id = device_id.to_string();
@@ -1838,7 +1866,7 @@ mod tests {
         let received = harness.received();
         assert_eq!(received[0]["type"], "hello");
         assert_eq!(received[0]["lathe_version"], "1.2.3");
-        assert_eq!(received[0]["features"], json!(["pull_requests", "close_threads", "terminals"]));
+        assert_eq!(received[0]["features"], json!(["pull_requests", "close_threads", "terminals", "muted_workspaces"]));
         let workspaces = of_type(&received, "workspaces");
         assert_eq!(workspaces[0]["list"][0]["name"], "test");
         let listed = &of_type(&received, "threads")[0]["list"][0];
@@ -1940,8 +1968,23 @@ mod tests {
         let (_, relay) = harness.split();
         assert_eq!(
             of_type(&relay, "push"),
-            [&json!({ "type": "push", "kind": "finished", "thread_id": thread_key })]
+            [&json!({ "type": "push", "kind": "finished", "thread_id": thread_key, "title": "Relay ping fix" })]
         );
+
+        // Once the phone mutes the thread's workspace, its stops aren't pushed.
+        let workspace = harness
+            .bridge
+            .read_with(cx, |bridge, cx| workspace_id(bridge.thread_metadata(&thread_key, cx).unwrap().folder_paths()));
+        harness.say(json!({ "type": "set_muted_workspaces", "client_msg_id": "w1", "workspace_ids": [workspace] }), cx);
+        assert_eq!(of_type(&harness.received(), "ack")[0]["ok"], true);
+        harness.bridge.update(cx, |bridge, cx| {
+            bridge.status_changed(&session_id, ThreadStatus::Running, cx);
+            bridge.status_changed(&session_id, ThreadStatus::Idle, cx);
+        });
+        let (_, relay) = harness.split();
+        assert!(of_type(&relay, "push").is_empty());
+        harness.say(json!({ "type": "set_muted_workspaces", "client_msg_id": "w2", "workspace_ids": [] }), cx);
+        harness.received();
 
         // Closing archives the thread, as Lathe's archive does, and it leaves the
         // phone's list. Closing it again, or one that doesn't exist, is fine.

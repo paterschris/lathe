@@ -543,6 +543,17 @@ impl TerminalView {
         self.workspace_id
     }
 
+    /// Records input that reached the terminal without a key press in this
+    /// view (the companion phone typing into it), as `key_down` does: the
+    /// awaiting-input marker clears, since the prompt it flagged was answered,
+    /// and a later quiet prompt can raise it again. Without this the marker
+    /// stays up while the answered prompt is still on screen.
+    pub fn note_remote_input(&mut self, cx: &mut Context<Self>) {
+        self.clear_bell(cx);
+        terminal_awaiting_input::clear(self, cx);
+        self.has_had_input = true;
+    }
+
     #[cfg(test)]
     pub(crate) fn awaiting_input(&self) -> Option<InteractivePromptKind> {
         self.awaiting_input

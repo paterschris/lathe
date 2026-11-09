@@ -62,7 +62,12 @@ pub enum LoadOutcome {
         remote: ParsedGitRemote,
         loaded: LoadedPullRequests,
     },
-    NoHost(SharedString),
+    /// Nothing to list. `connect_host` is set when the remote's host is known
+    /// but no account is connected for it, so the UI can offer to connect one.
+    NoHost {
+        reason: SharedString,
+        connect_host: Option<String>,
+    },
 }
 
 /// Loads `pages` pages and concatenates them into one result, mirroring how
@@ -97,7 +102,7 @@ pub async fn load_pull_request_pages(
             (None, outcome) => combined = Some(outcome),
             // A later page reporting no host is not a reason to discard the
             // pages already collected.
-            (Some(_), LoadOutcome::NoHost(_)) => break,
+            (Some(_), LoadOutcome::NoHost { .. }) => break,
             (
                 Some(LoadOutcome::Loaded {
                     loaded: existing, ..
@@ -124,7 +129,7 @@ pub async fn load_pull_request_pages(
                     break;
                 }
             }
-            (Some(LoadOutcome::NoHost(_)), _) => break,
+            (Some(LoadOutcome::NoHost { .. }), _) => break,
         }
     }
     combined.ok_or_else(|| anyhow::anyhow!("no pull request pages were requested"))
@@ -150,7 +155,7 @@ pub async fn load_pull_requests(
     // Auth for the chosen candidate, reused for the second "authored by me" call
     // so we do not re-read the keychain.
     let mut chosen_auth: Option<GitHostAuth> = None;
-    let mut connect_hint: Option<SharedString> = None;
+    let mut connect_hint: Option<(SharedString, Option<String>)> = None;
 
     for remote_url in candidates {
         let Some((provider, parsed)) = parse_git_remote_url(registry.clone(), &remote_url) else {
@@ -171,13 +176,10 @@ pub async fn load_pull_requests(
         .flatten();
         if auth.is_none() {
             if connect_hint.is_none() {
-                connect_hint = Some(
-                    format!(
-                        "Connect {} from the account menu to see this repository's pull requests.",
-                        provider.name()
-                    )
-                    .into(),
-                );
+                connect_hint = Some((
+                    "Connect to see pull requests.".into(),
+                    provider.base_url().host_str().map(str::to_string),
+                ));
             }
             continue;
         }
@@ -211,12 +213,16 @@ pub async fn load_pull_requests(
     }
 
     let Some((provider, remote)) = chosen else {
-        if let Some(hint) = connect_hint {
-            return Ok(LoadOutcome::NoHost(hint));
+        if let Some((reason, connect_host)) = connect_hint {
+            return Ok(LoadOutcome::NoHost {
+                reason,
+                connect_host,
+            });
         }
-        return Ok(LoadOutcome::NoHost(
-            "This repository's remote does not match any known hosting provider.".into(),
-        ));
+        return Ok(LoadOutcome::NoHost {
+            reason: "This repository's remote does not match any known hosting provider.".into(),
+            connect_host: None,
+        });
     };
 
     // A full page back means the host may have more behind it.

@@ -3,7 +3,6 @@ pub mod collab;
 mod lathe_accounts_menu;
 mod lathe_awaiting_input;
 mod lathe_branding;
-mod lathe_git_integrations;
 mod onboarding_banner;
 mod plan_chip;
 mod title_bar_settings;
@@ -19,6 +18,7 @@ pub use platform_title_bar::{
     self, DraggedWindowTab, MergeAllWindows, MoveTabToNewWindow, PlatformTitleBar,
     ShowNextWindowTab, ShowPreviousWindowTab,
 };
+use pr_ui::git_integrations_menu;
 use project::{linked_worktree_short_name, repo_identity_path};
 
 #[cfg(not(target_os = "macos"))]
@@ -1247,27 +1247,7 @@ impl TitleBar {
         let active_account_id = self.client.active_account_id();
         let workspace = self.workspace.clone();
 
-        // Every host the provider registry can authenticate against, so
-        // enterprise and self-hosted instances get menu entries too.
-        let workspace_id = self.workspace.entity_id();
-        let git_host_entries: Vec<lathe_git_integrations::GitHostMenuEntry> =
-            git::git_host_credentials::connectable_hosts(cx)
-                .into_iter()
-                .map(|host| lathe_git_integrations::GitHostMenuEntry {
-                    accounts: git::git_host_credentials::accounts(cx, host.host())
-                        .into_iter()
-                        .map(|account| (account.id, account.username))
-                        .collect(),
-                    active_account_id: git::git_host_credentials::active_account(
-                        cx,
-                        Some(workspace_id),
-                        host.host(),
-                    )
-                    .map(|account| account.id),
-                    host: host.host().to_string(),
-                    display_name: host.display_name().to_string(),
-                })
-                .collect();
+        let git_host_entries = git_integrations_menu::menu_entries(self.workspace.entity_id(), cx);
 
         let bound_account_id = workspace
             .upgrade()
@@ -1336,15 +1316,7 @@ impl TitleBar {
                 let workspace = workspace.clone();
                 let display_login = display_login.clone();
                 let display_account_id = display_account_id.clone();
-                let git_host_entries = git_host_entries
-                    .iter()
-                    .map(|entry| lathe_git_integrations::GitHostMenuEntry {
-                        host: entry.host.clone(),
-                        display_name: entry.display_name.clone(),
-                        accounts: entry.accounts.clone(),
-                        active_account_id: entry.active_account_id.clone(),
-                    })
-                    .collect::<Vec<_>>();
+                let git_host_entries = git_host_entries.clone();
 
                 let ai_enabled = !project::DisableAiSettings::get_global(cx).disable_ai;
                 let current_layout = AgentSettings::get_layout(cx);
@@ -1512,7 +1484,7 @@ impl TitleBar {
                     .separator()
                     .header("Git Integrations")
                     .map(|this| {
-                        lathe_git_integrations::append_git_integrations(this, git_host_entries)
+                        git_integrations_menu::append_git_integrations(this, git_host_entries)
                     })
                 })
                 .into()

@@ -431,7 +431,7 @@ async fn list_repo(
                 pull.reviewers = reviewers.remove(&pull.number);
             }
         }
-        Ok(LoadOutcome::NoHost(reason)) => {
+        Ok(LoadOutcome::NoHost { reason, .. }) => {
             listed.status = RepoStatus::NoHost;
             listed.message = Some(reason.to_string());
         }

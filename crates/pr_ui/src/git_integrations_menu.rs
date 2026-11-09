@@ -1,8 +1,10 @@
-use gpui::Action;
+use git::git_host_credentials;
+use gpui::{Action, App, EntityId};
 use ui::{ContextMenu, IconPosition};
 
-/// One connectable git host and its connected accounts, resolved by the caller
-/// from the hosting-provider registry and the account store.
+/// One connectable git host and its connected accounts, resolved from the
+/// hosting-provider registry and the account store.
+#[derive(Clone)]
 pub struct GitHostMenuEntry {
     pub host: String,
     /// Name to show in the menu, e.g. "GitHub" or "BigCorp GitHub (git.corp.com)".
@@ -11,6 +13,28 @@ pub struct GitHostMenuEntry {
     pub accounts: Vec<(String, String)>,
     /// The account this workspace uses, when any is connected.
     pub active_account_id: Option<String>,
+}
+
+/// Every host the provider registry can authenticate against, so enterprise
+/// and self-hosted instances get menu entries too.
+pub fn menu_entries(workspace_id: EntityId, cx: &App) -> Vec<GitHostMenuEntry> {
+    git_host_credentials::connectable_hosts(cx)
+        .into_iter()
+        .map(|host| GitHostMenuEntry {
+            accounts: git_host_credentials::accounts(cx, host.host())
+                .into_iter()
+                .map(|account| (account.id, account.username))
+                .collect(),
+            active_account_id: git_host_credentials::active_account(
+                cx,
+                Some(workspace_id),
+                host.host(),
+            )
+            .map(|account| account.id),
+            host: host.host().to_string(),
+            display_name: host.display_name().to_string(),
+        })
+        .collect()
 }
 
 /// Appends an entry for every host Lathe can authenticate against. The set is

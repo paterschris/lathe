@@ -48,6 +48,11 @@ pub struct PairedDevice {
     pub box_public_key: String,
     /// Seconds since the Unix epoch.
     pub paired_at: u64,
+    /// Workspaces this phone gets no pushes for, as it last sent with
+    /// `set_muted_workspaces`. Kept with the device because pushes go out
+    /// while the phone is offline, after Lathe may have restarted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub muted_workspaces: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -186,22 +191,54 @@ impl Companion {
     }
 
     /// Asks the relay to notify phones that registered for `kind`. The relay
-    /// sends fixed text, so nothing about the thread leaves this machine.
-    pub fn push(&self, kind: &str, thread_id: &str) {
-        if self.devices.is_empty() {
-            return;
-        }
-        self.send(json!({ "type": "push", "kind": kind, "thread_id": thread_id }));
+    /// sends fixed text under the thread's `title`, so the title is the only
+    /// thing about the thread that leaves this machine, never its messages.
+    /// Phones that muted `workspace_id` are left out.
+    pub fn push(&self, kind: &str, thread_id: &str, title: Option<&str>, workspace_id: Option<&str>) {
+        let push = json!({ "type": "push", "kind": kind, "thread_id": thread_id });
+        self.push_to_unmuted(with_title(push, title), workspace_id);
     }
 
     /// Asks the relay to tell phones a terminal is waiting for input. The
-    /// relay sends fixed text, so nothing about the terminal leaves this
-    /// machine but its random id.
-    pub fn push_terminal(&self, terminal_id: &str) {
-        if self.devices.is_empty() {
+    /// relay sends fixed text under the terminal's `title`, so nothing else
+    /// about the terminal leaves this machine but its random id. Phones that
+    /// muted `workspace_id` are left out.
+    pub fn push_terminal(&self, terminal_id: &str, title: Option<&str>, workspace_id: Option<&str>) {
+        let push = json!({ "type": "push", "kind": "terminal_input", "terminal_id": terminal_id });
+        self.push_to_unmuted(with_title(push, title), workspace_id);
+    }
+
+    /// One push for every phone when none muted the workspace (the relay
+    /// keeps its per-hour count low); otherwise one per phone that didn't,
+    /// addressed with `device_id`. The workspace never reaches the relay.
+    fn push_to_unmuted(&self, push: Value, workspace_id: Option<&str>) {
+        let (muted, listening): (Vec<_>, Vec<_>) = self.devices.iter().partition(|device| {
+            workspace_id.is_some_and(|id| device.muted_workspaces.iter().any(|muted| muted == id))
+        });
+        if listening.is_empty() {
             return;
         }
-        self.send(json!({ "type": "push", "kind": "terminal_input", "terminal_id": terminal_id }));
+        if muted.is_empty() {
+            self.send(push);
+            return;
+        }
+        for device in listening {
+            let mut addressed = push.clone();
+            addressed["device_id"] = json!(device.device_id);
+            self.send(addressed);
+        }
+    }
+
+    /// Records the workspaces a phone wants no pushes for.
+    pub fn set_muted_workspaces(&mut self, device_id: &str, workspace_ids: Vec<String>, cx: &mut Context<Self>) {
+        let Some(device) = self.devices.iter_mut().find(|device| device.device_id == device_id) else {
+            return;
+        };
+        if device.muted_workspaces == workspace_ids {
+            return;
+        }
+        device.muted_workspaces = workspace_ids;
+        save_devices(self.channel, &self.devices, cx);
     }
 
     fn set_all_offline(&mut self, cx: &mut Context<Self>) {
@@ -484,6 +521,7 @@ impl Companion {
                     .duration_since(UNIX_EPOCH)
                     .map(|duration| duration.as_secs())
                     .unwrap_or_default(),
+                muted_workspaces: Vec::new(),
             };
             self.send(authorize_message(&device));
             self.devices.retain(|existing| existing.device_id != device.device_id);
@@ -744,6 +782,26 @@ fn save_devices(channel: ReleaseChannel, devices: &[PairedDevice], cx: &App) {
     .detach();
 }
 
+
+/// Longest title a push carries, in characters. The phone shows one line.
+const MAX_PUSH_TITLE_CHARS: usize = 100;
+
+/// Adds a trimmed, length-capped `title` to a push, when there is one.
+fn with_title(mut push: Value, title: Option<&str>) -> Value {
+    let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) else {
+        return push;
+    };
+    let title = if title.chars().count() > MAX_PUSH_TITLE_CHARS {
+        let mut capped: String = title.chars().take(MAX_PUSH_TITLE_CHARS - 1).collect();
+        capped.push('\u{2026}');
+        capped
+    } else {
+        title.to_string()
+    };
+    push["title"] = json!(title);
+    push
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -835,6 +893,7 @@ pub(crate) mod tests {
                 sign_public_key: STANDARD.encode(phone.signing.verifying_key().as_bytes()),
                 box_public_key: STANDARD.encode(phone.box_secret.public_key().as_bytes()),
                 paired_at: 0,
+                muted_workspaces: Vec::new(),
             });
         });
     }
@@ -1093,6 +1152,53 @@ pub(crate) mod tests {
         assert!(drain(&mut outgoing).is_empty());
     }
 
+    #[test]
+    fn push_titles_are_trimmed_and_capped() {
+        let push = || json!({ "type": "push", "kind": "finished", "thread_id": "t1" });
+        assert_eq!(with_title(push(), None), push());
+        assert_eq!(with_title(push(), Some("   ")), push());
+        assert_eq!(with_title(push(), Some(" Fix login ")), json!({ "type": "push", "kind": "finished", "thread_id": "t1", "title": "Fix login" }));
+        let long = "é".repeat(MAX_PUSH_TITLE_CHARS + 5);
+        let capped = with_title(push(), Some(&long))["title"].as_str().unwrap().to_string();
+        assert_eq!(capped.chars().count(), MAX_PUSH_TITLE_CHARS);
+        assert!(capped.ends_with('\u{2026}'));
+    }
+
+    #[gpui::test]
+    async fn leaves_phones_that_muted_a_workspace_out_of_its_pushes(cx: &mut TestAppContext) {
+        let (companion, mut outgoing, _) = connected_companion(cx);
+        let quiet = FakePhone::new();
+        let loud = FakePhone::new();
+        add_paired(&companion, &quiet, cx);
+        add_paired(&companion, &loud, cx);
+        drain(&mut outgoing);
+
+        // Nobody muted it: one push for every phone.
+        companion.read_with(cx, |companion, _| companion.push("finished", "t1", None, Some("ws")));
+        assert_eq!(drain(&mut outgoing), [json!({ "type": "push", "kind": "finished", "thread_id": "t1" })]);
+
+        // One phone muted it: the push is addressed to the other only.
+        companion.update(cx, |companion, cx| companion.set_muted_workspaces(&quiet.device_id(), vec!["ws".into()], cx));
+        companion.read_with(cx, |companion, _| {
+            companion.push("finished", "t1", None, Some("ws"));
+            companion.push_terminal("term", None, Some("ws"));
+            companion.push("finished", "t2", None, Some("other"));
+        });
+        assert_eq!(
+            drain(&mut outgoing),
+            [
+                json!({ "type": "push", "kind": "finished", "thread_id": "t1", "device_id": loud.device_id() }),
+                json!({ "type": "push", "kind": "terminal_input", "terminal_id": "term", "device_id": loud.device_id() }),
+                json!({ "type": "push", "kind": "finished", "thread_id": "t2" }),
+            ]
+        );
+
+        // Both muted it: nothing goes out.
+        companion.update(cx, |companion, cx| companion.set_muted_workspaces(&loud.device_id(), vec!["ws".into()], cx));
+        companion.read_with(cx, |companion, _| companion.push("finished", "t1", None, Some("ws")));
+        assert!(drain(&mut outgoing).is_empty());
+    }
+
     #[gpui::test]
     async fn reconciles_devices_with_the_relay(cx: &mut TestAppContext) {
         let (companion, mut outgoing, _) = connected_companion(cx);
@@ -1104,6 +1210,7 @@ pub(crate) mod tests {
                 sign_public_key: "c2lnbg==".into(),
                 box_public_key: "Ym94".into(),
                 paired_at: 0,
+                muted_workspaces: Vec::new(),
             });
             companion.handle_relay_message(
                 json!({ "type": "devices", "list": [

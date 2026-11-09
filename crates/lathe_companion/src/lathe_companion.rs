@@ -1,6 +1,7 @@
 //! Desktop side of the Lathe Companion mobile app: tracks live agent threads so
 //! a paired phone can follow and continue them through the companion relay.
 
+mod activity;
 mod bridge;
 mod companion;
 mod companion_modal;
@@ -25,6 +26,8 @@ pub struct CompanionSettings {
     pub relay_url: String,
     pub keep_awake_while_agents_run: bool,
     pub terminal_input: bool,
+    /// Minutes without input before you count as away; 0 means always.
+    pub idle_minutes: u32,
 }
 
 impl Settings for CompanionSettings {
@@ -35,6 +38,7 @@ impl Settings for CompanionSettings {
             relay_url: companion.relay_url.clone().unwrap(),
             keep_awake_while_agents_run: companion.keep_awake_while_agents_run.unwrap(),
             terminal_input: companion.terminal_input.unwrap(),
+            idle_minutes: companion.idle_minutes.unwrap(),
         }
     }
 }
