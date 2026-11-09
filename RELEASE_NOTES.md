@@ -2,6 +2,37 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.19.0-beta - 2026-11-09
+
+Extensions can do a lot more in Lathe now. They can add commands, work with the file you're in, react when files are saved or edited, and run commands in the terminal. Each of those is a permission you approve. Zed extensions work exactly as before.
+
+### Extensions
+
+- **Commands.** Extensions can add commands to the command palette. Bind one to a key with `["extension::RunCommand", { "extension_id": "...", "command": "..." }]`.
+- **Working with your files.** If you allow it, an extension can read the file you're in, edit it as a single undo step and move the cursor. It can also run when files are opened, saved or changed.
+- Status bar text, notifications, a text prompt and a pick list. Prompts only show up from a command you ran, never on their own.
+- **Commands in the terminal.** They run as normal tasks. Save again while one's still running and it reuses the same tab instead of piling up new ones.
+- **Permissions.** Every one of these is a separate permission an extension has to declare. Lathe asks before installing from a registry or a URL, lists them on the extension's card, and has Allow and Revoke buttons. Folders you install as dev extensions are allowed automatically, since they're your own.
+- `extension_settings` holds settings for individual extensions, keyed by extension id. A project's `.zed/settings.json` can set them too. Those only apply once you trust the project.
+- An extension stuck on a file event gets stopped after two seconds. Three in a row and its file events pause until you reinstall or rebuild it.
+- **More places to get extensions.** Lathe's extension registry is listed next to Zed's, and `extension_registries` adds more. You can also paste a `.tar.gz` or git URL into the Extensions search box to install from it. Registry downloads are checked against a checksum, and the list still loads when you're offline.
+- Lathe-only extensions get a Lathe badge.
+
+To build one, use the `lathe_extension_api` crate alongside `zed_extension_api`. It isn't on crates.io yet.
+
+### Lathe Companion
+
+- **No pushes while you're at Lathe.** Phones only get notified once you've been away for 5 minutes. Change that with `companion.idle_minutes`, or set it to 0 to always get them. The title bar says Idle once pushes would go out.
+- Notifications show the thread's or terminal's title.
+- You can mute workspaces from the phone. Their threads and terminals stop notifying you.
+- Answering a terminal from the phone clears its waiting-for-input marker, same as typing at the desktop.
+
+Muting workspaces needs a companion app update.
+
+### Pull requests
+
+- The pull request panel has its own git account menu. When a repo's host has no account connected, it offers to connect one.
+
 ## v1.18.0 - 2026-11-05
 
 Everything from the 1.17.0 beta: Lathe Companion can show your terminals.
