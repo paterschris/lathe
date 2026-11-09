@@ -24,6 +24,10 @@ pub struct ExtensionSettingsContent {
     /// Default: true
     #[serde(default = "default_true")]
     pub suggest_extensions: bool,
+    /// Additional extension registries, given as URLs of static `index.json` files.
+    ///
+    /// Default: ["https://paterschris.github.io/lathe-extensions/index.json"]
+    pub extension_registries: Option<Vec<String>>,
     /// The capabilities granted to extensions.
     pub granted_extension_capabilities: Option<Vec<ExtensionCapabilityContent>>,
 }
@@ -34,6 +38,7 @@ impl Default for ExtensionSettingsContent {
             auto_install_extensions: HashMap::default(),
             auto_update_extensions: HashMap::default(),
             suggest_extensions: true,
+            extension_registries: None,
             granted_extension_capabilities: None,
         }
     }

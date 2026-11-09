@@ -4377,3 +4377,857 @@ impl Extension for FakeExtension {
         anyhow::bail!("not supported by FakeExtension")
     }
 }
+
+async fn packaged_extension_archive(id: &str, version: &str, extra_manifest: &str) -> Vec<u8> {
+    let manifest = format!(
+        "id = \"{id}\"\nname = \"{id}\"\nversion = \"{version}\"\nschema_version = 1\n{extra_manifest}"
+    );
+    let mut bytes = Vec::<u8>::new();
+    let mut archive = async_tar::Builder::new(&mut bytes);
+    let mut header = async_tar::Header::new_gnu();
+    header.set_size(manifest.len() as u64);
+    header.set_mode(0o644);
+    archive
+        .append_data(&mut header, "extension.toml", manifest.as_bytes())
+        .await
+        .unwrap();
+    archive.into_inner().await.unwrap();
+    let mut gzipped_bytes = Vec::new();
+    let mut encoder = GzipEncoder::new(BufReader::new(bytes.as_slice()));
+    encoder.read_to_end(&mut gzipped_bytes).await.unwrap();
+    gzipped_bytes
+}
+
+#[gpui::test]
+async fn test_install_from_static_registry_and_archive_url(cx: &mut TestAppContext) {
+    use crate::registry::InstallOrigin;
+    use sha2::{Digest as _, Sha256};
+
+    init_test(cx);
+    // Archives are unpacked on the real filesystem.
+    cx.executor().allow_parking();
+
+    const INDEX_URL: &str = "https://registry.example/index.json";
+    const GOOD_ARCHIVE_URL: &str = "https://registry.example/good-0.2.0.tar.gz";
+    const BAD_ARCHIVE_URL: &str = "https://registry.example/tampered-0.1.0.tar.gz";
+    const LOOSE_ARCHIVE_URL: &str = "https://elsewhere.example/loose.tar.gz";
+    const FUTURE_ARCHIVE_URL: &str = "https://elsewhere.example/future.tar.gz";
+
+    let good_archive = packaged_extension_archive("good", "0.2.0", "").await;
+    let tampered_archive = packaged_extension_archive("tampered", "0.1.0", "").await;
+    let loose_archive =
+        packaged_extension_archive("loose", "1.0.0", "requires = [\"lathe\"]\n").await;
+    let future_archive =
+        packaged_extension_archive("future", "1.0.0", "requires = [\"lathe-api-99\"]\n").await;
+    let good_sha256 = format!("{:x}", Sha256::digest(&good_archive));
+    let tampered_listed_sha256 = format!("{:x}", Sha256::digest(b"something else"));
+
+    let index = json!({
+        "schema": 1,
+        "extensions": [
+            {
+                "id": "good",
+                "name": "Good",
+                "version": "0.2.0",
+                "description": "A well-behaved extension",
+                "repository": "https://github.com/example/good",
+                "schema_version": 1,
+                "provides": ["themes"],
+                "download_url": GOOD_ARCHIVE_URL,
+                "sha256": good_sha256,
+                "published_at": "2026-11-05T00:00:00Z"
+            },
+            {
+                "id": "tampered",
+                "name": "Tampered",
+                "version": "0.1.0",
+                "repository": "https://github.com/example/tampered",
+                "schema_version": 1,
+                "download_url": BAD_ARCHIVE_URL,
+                "sha256": tampered_listed_sha256,
+                "published_at": "2026-11-05T00:00:00Z"
+            }
+        ]
+    })
+    .to_string();
+
+    let http_client = FakeHttpClient::create(move |request| {
+        let index = index.clone();
+        let good_archive = good_archive.clone();
+        let tampered_archive = tampered_archive.clone();
+        let loose_archive = loose_archive.clone();
+        let future_archive = future_archive.clone();
+        async move {
+            let body = match request.uri().to_string().as_str() {
+                INDEX_URL => index.into_bytes(),
+                GOOD_ARCHIVE_URL => good_archive,
+                BAD_ARCHIVE_URL => tampered_archive,
+                LOOSE_ARCHIVE_URL => loose_archive,
+                FUTURE_ARCHIVE_URL => future_archive,
+                // Includes the Zed API, so this also covers a registry staying
+                // usable while the Zed API is unreachable.
+                _ => return Ok(Response::builder().status(404).body("not found".into())?),
+            };
+            Ok(Response::new(body.into()))
+        }
+    });
+
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.extension.extension_registries = Some(vec![INDEX_URL.to_string()]);
+            });
+        });
+    });
+
+    let extensions_tree = TempTree::new(json!({ "installed": {}, "work": {} }));
+    let extensions_dir = extensions_tree.path().canonicalize().unwrap();
+    let fs = RealFs::new(None, cx.executor());
+    let store = cx.new(|cx| {
+        ExtensionStore::new(
+            extensions_dir.clone(),
+            None,
+            Arc::new(ExtensionHostProxy::new()),
+            fs.clone(),
+            http_client.clone(),
+            http_client.clone(),
+            None,
+            NodeRuntime::unavailable(),
+            cx,
+        )
+    });
+    settle_reload(&store, cx).await;
+
+    let listed = store
+        .update(cx, |store, cx| store.fetch_extensions(None, None, cx))
+        .await
+        .expect("registry listing should succeed even though the Zed API fails");
+    let listed_ids = listed
+        .iter()
+        .map(|extension| extension.id.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(listed_ids, vec!["good", "tampered"]);
+
+    let filtered = store
+        .update(cx, |store, cx| {
+            store.fetch_extensions(Some("well-behaved"), None, cx)
+        })
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].id.as_ref(), "good");
+
+    let install = store.update(cx, |store, cx| {
+        store.install_or_upgrade_extension(
+            "good".into(),
+            "0.2.0".into(),
+            crate::ExtensionOperation::Install,
+            cx,
+        )
+    });
+    cx.executor().advance_clock(RELOAD_DEBOUNCE_DURATION);
+    install
+        .await
+        .expect("installing from the registry should succeed");
+    settle_reload(&store, cx).await;
+
+    let install = store.update(cx, |store, cx| {
+        store.install_or_upgrade_extension(
+            "tampered".into(),
+            "0.1.0".into(),
+            crate::ExtensionOperation::Install,
+            cx,
+        )
+    });
+    let error = install
+        .await
+        .expect_err("a checksum mismatch should fail the install");
+    assert!(
+        format!("{error:#}").contains("checksum mismatch"),
+        "unexpected error: {error:#}"
+    );
+
+    let install = store.update(cx, |store, cx| {
+        store.install_extension_from_archive_url(LOOSE_ARCHIVE_URL.parse().unwrap(), cx)
+    });
+    cx.executor().advance_clock(RELOAD_DEBOUNCE_DURATION);
+    let installed_id = install.await.expect("archive URL install should succeed");
+    assert_eq!(installed_id.as_ref(), "loose");
+
+    let install = store.update(cx, |store, cx| {
+        store.install_extension_from_archive_url(FUTURE_ARCHIVE_URL.parse().unwrap(), cx)
+    });
+    let error = install
+        .await
+        .expect_err("an unsupported requirement should fail the install");
+    assert!(
+        format!("{error:#}").contains("lathe-api-99"),
+        "unexpected error: {error:#}"
+    );
+    settle_reload(&store, cx).await;
+
+    store.read_with(cx, |store, _| {
+        let installed = store
+            .extension_index
+            .extensions
+            .keys()
+            .map(|id| id.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(installed, vec!["good", "loose"]);
+        assert_eq!(
+            store.install_origins.get("good"),
+            InstallOrigin::Registry {
+                index_url: INDEX_URL.into()
+            }
+        );
+        assert_eq!(
+            store.install_origins.get("loose"),
+            InstallOrigin::ArchiveUrl {
+                url: LOOSE_ARCHIVE_URL.into()
+            }
+        );
+        assert!(store.is_lathe_only("loose"));
+        assert!(!store.is_lathe_only("good"));
+    });
+
+    let persisted =
+        crate::registry::InstallOrigins::load(fs.as_ref(), &extensions_dir.join("origins.json"))
+            .await;
+    assert_eq!(persisted.extensions.len(), 2);
+
+    let uninstall = store.update(cx, |store, cx| store.uninstall_extension("good".into(), cx));
+    cx.executor().advance_clock(RELOAD_DEBOUNCE_DURATION);
+    uninstall.await.unwrap();
+    settle_reload(&store, cx).await;
+    store.read_with(cx, |store, _| {
+        assert_eq!(store.install_origins.get("good"), InstallOrigin::ZedApi);
+        assert!(!store.extension_index.extensions.contains_key("good"));
+    });
+}
+
+async fn settle_reload(store: &Entity<ExtensionStore>, cx: &mut TestAppContext) {
+    let reload = store.update(cx, |store, cx| store.reload(None, cx));
+    cx.executor().advance_clock(RELOAD_DEBOUNCE_DURATION);
+    reload.await;
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn test_extension_registries_default_survives_unrelated_user_settings(cx: &mut TestAppContext) {
+    use crate::extension_settings::ExtensionSettings;
+    use settings::Settings as _;
+
+    cx.update(|cx| {
+        let mut store = SettingsStore::new(cx, &settings::default_settings());
+        store
+            .set_user_settings(r#"{ "suggest_extensions": false }"#, cx)
+            .result()
+            .unwrap();
+        cx.set_global(store);
+        ExtensionSettings::register(cx);
+
+        let registries = &ExtensionSettings::get_global(cx).extension_registries;
+        assert_eq!(
+            registries
+                .iter()
+                .map(|url| url.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["https://paterschris.github.io/lathe-extensions/index.json"]
+        );
+
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store
+                .set_user_settings(r#"{ "extension_registries": [] }"#, cx)
+                .result()
+                .unwrap();
+        });
+        assert!(
+            ExtensionSettings::get_global(cx)
+                .extension_registries
+                .is_empty(),
+            "an explicit empty list turns the default off"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_lathe_extension_commands(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.executor().allow_parking();
+
+    let root_dir = util::dev_repo_root().expect("test extension requires a repository checkout");
+    let cache_dir = root_dir.join("target");
+    let extension_dir = root_dir.join("extensions").join("test-lathe-extension");
+
+    // Compile the extension with the same cargo invocation the extension
+    // builder uses for a dev install (`compile_rust_extension`), before the
+    // GPUI part of the test starts. A cold compile can take longer than the
+    // test scheduler lets a test sit parked (15 s); this way the builder's own
+    // build below only confirms it is up to date.
+    // Blocks this thread on purpose, outside the test scheduler, so the time
+    // is not counted as the test sitting parked.
+    let prebuild = smol::block_on(
+        util::command::new_command("cargo")
+            .args(["build", "--target", "wasm32-wasip2", "--target-dir"])
+            .arg(extension_dir.join("target"))
+            .env("RUSTC_WRAPPER", "")
+            .current_dir(&extension_dir)
+            .output(),
+    )
+    .expect("running cargo to prebuild the Lathe test extension");
+    assert!(
+        prebuild.status.success(),
+        "prebuilding the Lathe test extension failed:\n{}",
+        String::from_utf8_lossy(&prebuild.stderr)
+    );
+
+    let fs = RealFs::new(None, cx.executor());
+    let extensions_tree = TempTree::new(json!({ "installed": {}, "work": {} }));
+    let extensions_dir = extensions_tree.path().canonicalize().unwrap();
+
+    let http_client = FakeHttpClient::with_200_response();
+    let user_agent = cx.update(|cx| format!("Lathe/{} test", AppVersion::global(cx)));
+    let builder_client =
+        Arc::new(ReqwestClient::user_agent(&user_agent).expect("Could not create HTTP client"));
+
+    let store = cx.new(|cx| {
+        ExtensionStore::new(
+            extensions_dir,
+            Some(cache_dir),
+            Arc::new(ExtensionHostProxy::new()),
+            fs.clone(),
+            http_client.clone(),
+            builder_client,
+            None,
+            NodeRuntime::unavailable(),
+            cx,
+        )
+    });
+
+    let mut events = cx.events(&store);
+    let executor = cx.executor();
+    let _debounce = cx.executor().spawn(async move {
+        while let Some(event) = events.next().await {
+            if let Event::StartedReloading = event {
+                executor.advance_clock(RELOAD_DEBOUNCE_DURATION);
+            }
+        }
+    });
+
+    store
+        .update(cx, |store, cx| {
+            store.install_dev_extension(extension_dir.clone(), cx)
+        })
+        .await
+        .expect("building and installing the Lathe test extension");
+    cx.run_until_parked();
+
+    // Installing creates a symlink in the watched installed directory. The
+    // watcher reports it on real time and queues a debounced reload on the
+    // test clock, which would otherwise fire when the event section below
+    // advances that clock, unloading the extension mid-test. Let the watcher
+    // report it, then wait for a reload queued after it to finish.
+    std::thread::sleep(Duration::from_millis(500));
+    settle_reload(&store, cx).await;
+
+    let commands = store.read_with(cx, |store, _| {
+        store
+            .lathe_commands()
+            .map(|(manifest, command)| {
+                (
+                    manifest.id.to_string(),
+                    command.id.to_string(),
+                    command.title.to_string(),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        commands,
+        vec![
+            (
+                "test-lathe-extension".to_string(),
+                "count-runs".to_string(),
+                "Count Runs".to_string()
+            ),
+            (
+                "test-lathe-extension".to_string(),
+                "always-fails".to_string(),
+                "Always Fails".to_string()
+            ),
+            (
+                "test-lathe-extension".to_string(),
+                "upcase-selections".to_string(),
+                "Upcase Selections".to_string()
+            ),
+            (
+                "test-lathe-extension".to_string(),
+                "ask".to_string(),
+                "Ask".to_string()
+            ),
+            (
+                "test-lathe-extension".to_string(),
+                "run-task".to_string(),
+                "Run Task".to_string()
+            ),
+        ]
+    );
+
+    let run = |command: &'static str, cx: &mut TestAppContext| {
+        store.update(cx, |store, cx| {
+            store.run_lathe_command("test-lathe-extension", command.into(), None, cx)
+        })
+    };
+
+    run("count-runs", cx).await.expect("first run succeeds");
+    let error = run("count-runs", cx)
+        .await
+        .expect_err("guest state persists between calls");
+    assert!(format!("{error:#}").contains("ran 2 times"), "{error:#}");
+
+    let error = run("always-fails", cx).await.expect_err("guest error");
+    assert!(
+        format!("{error:#}").contains("this command always fails"),
+        "{error:#}"
+    );
+
+    let error = run("not-registered", cx)
+        .await
+        .expect_err("unknown command");
+    assert!(format!("{error:#}").contains("no command"), "{error:#}");
+
+    let error = store
+        .update(cx, |store, cx| {
+            store.run_lathe_command("not-installed", "count-runs".into(), None, cx)
+        })
+        .await
+        .expect_err("unknown extension");
+    assert!(format!("{error:#}").contains("not installed"), "{error:#}");
+
+    let error = run("upcase-selections", cx)
+        .await
+        .expect_err("no editor was passed");
+    assert!(
+        format!("{error:#}").contains("no active buffer"),
+        "{error:#}"
+    );
+
+    assert!(
+        store.read_with(cx, |store, _| store.is_lathe_only("test-lathe-extension")),
+        "a dev-installed extension using the Lathe API is Lathe-only"
+    );
+
+    let capabilities = store.read_with(cx, |store, _| {
+        store.lathe_capabilities("test-lathe-extension")
+    });
+    assert_eq!(
+        capabilities.map(|capabilities| capabilities.iter().map(|c| c.name()).collect::<Vec<_>>()),
+        Some(vec![
+            "buffer:read",
+            "buffer:write",
+            "events:save",
+            "events:change",
+            "ui:status",
+            "ui:prompt",
+            "tasks:spawn"
+        ])
+    );
+
+    let editor = Arc::new(FakeLatheEditor::new("héllo wörld", vec![0..6, 13..13]));
+    store
+        .update(cx, |store, cx| {
+            store.run_lathe_command(
+                "test-lathe-extension",
+                "upcase-selections".into(),
+                Some(editor.clone()),
+                cx,
+            )
+        })
+        .await
+        .expect("upcase-selections succeeds against the fake editor");
+    assert_eq!(editor.text(), ">HÉLLO wörld");
+    assert_eq!(editor.edit_count(), 2, "the stale edit was rejected");
+
+    let ui = Arc::new(FakeLatheUi::default());
+    store.read_with(cx, |store, _| store.wasm_host.set_lathe_ui(ui.clone()));
+
+    *ui.prompt_answer.lock() = Some("Ada".into());
+    *ui.pick_answer.lock() = Some("blue".into());
+    run("ask", cx).await.expect("ask succeeds");
+    assert_eq!(
+        *ui.notifications.lock(),
+        vec!["Test Lathe Extension: Ada likes blue"]
+    );
+    assert_eq!(ui.last_pick_labels(), vec!["Red", "Blue"]);
+
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|settings, cx| {
+            settings.update_user_settings(cx, |content| {
+                content
+                    .project
+                    .extension_settings
+                    .insert("test-lathe-extension".into(), json!({ "mode": "strict" }));
+            });
+        });
+    });
+    let editor = Arc::new(FakeLatheEditor::new("abc", vec![0..0]));
+    store
+        .update(cx, |store, cx| {
+            store.run_lathe_command(
+                "test-lathe-extension",
+                "run-task".into(),
+                Some(editor.clone()),
+                cx,
+            )
+        })
+        .await
+        .expect("run-task succeeds");
+    let tasks = std::mem::take(&mut *ui.tasks.lock());
+    assert_eq!(tasks.len(), 1, "the relative-cwd task was refused");
+    let task = &tasks[0];
+    assert_eq!(task.label, "Test Lathe Extension: echo");
+    assert_eq!(task.command, "echo");
+    assert_eq!(
+        task.args,
+        vec![
+            "/project/dir/file.txt".to_string(),
+            "/project".to_string(),
+            r#"{"mode":"strict"}"#.to_string(),
+        ]
+    );
+    assert_eq!(task.env, vec![("FROM".to_string(), "lathe".to_string())]);
+
+    use crate::wasm_host::lathe::LatheBufferEvent;
+    let dispatch = |event: LatheBufferEvent, text: &str, cx: &mut TestAppContext| {
+        let buffer = Arc::new(FakeLatheEditor::new(text, vec![]));
+        store.update(cx, |store, cx| {
+            store.dispatch_lathe_buffer_event(event, buffer, cx)
+        })
+    };
+
+    dispatch(LatheBufferEvent::Saved, "one two three", cx).await;
+    assert_eq!(
+        ui.status_text("test-lathe-extension"),
+        Some(("3 words".to_string(), Some("dir/file.txt".to_string())))
+    );
+
+    dispatch(LatheBufferEvent::Changed, "typing", cx).await;
+    let (status, _) = ui.status_text("test-lathe-extension").unwrap();
+    assert!(
+        status.contains("prompts can only be shown while a command runs"),
+        "event handlers must not open prompts: {status}"
+    );
+
+    let status_before = ui.status_text("test-lathe-extension");
+    dispatch(LatheBufferEvent::Opened, "not declared", cx).await;
+    dispatch(LatheBufferEvent::Saved, "", cx).await;
+    assert_eq!(
+        ui.status_text("test-lathe-extension"),
+        Some(("0 words".to_string(), Some("dir/file.txt".to_string()))),
+        "events:open is not declared, so only the save reached the extension"
+    );
+    assert_ne!(ui.status_text("test-lathe-extension"), status_before);
+
+    for strike in 1..=crate::LATHE_EVENT_MAX_STRIKES {
+        let instance_before = lathe_instance(&store, cx);
+        let delivery = dispatch(LatheBufferEvent::Changed, "hang", cx);
+        cx.executor().advance_clock(crate::LATHE_EVENT_TIMEOUT);
+        let paused = delivery.await;
+        // Let the guest reach an epoch check so the interrupt traps it.
+        for _ in 0..20 {
+            store.read_with(cx, |store, _| store.wasm_host.increment_epoch_for_test());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The hung handler was interrupted and the extension reloaded; once that
+        // finishes, the extension answers calls again instead of being stuck.
+        wait_for_new_lathe_instance(&store, instance_before, cx);
+        let error = run("always-fails", cx)
+            .await
+            .expect_err("the reloaded extension runs commands again");
+        assert!(
+            format!("{error:#}").contains("this command always fails"),
+            "{error:#}"
+        );
+        let expected = if strike == crate::LATHE_EVENT_MAX_STRIKES {
+            vec![(
+                Arc::<str>::from("test-lathe-extension"),
+                Arc::<str>::from("Test Lathe Extension"),
+            )]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(paused, expected, "after {strike} timeouts");
+    }
+    assert!(
+        store.read_with(cx, |store, _| store
+            .are_lathe_events_paused("test-lathe-extension")),
+        "the pause survives the reloads that follow an interrupt"
+    );
+
+    // Revoking reloads the extension without its Lathe capabilities.
+    let instance_before = lathe_instance(&store, cx);
+    let revoke = store.update(cx, |store, cx| {
+        store.revoke_lathe_capabilities("test-lathe-extension".into(), cx)
+    });
+    wait_for_new_lathe_instance(&store, instance_before, cx);
+    revoke.await.unwrap();
+    let needing_consent = store.read_with(cx, |store, _| {
+        store
+            .lathe_capabilities_needing_consent("test-lathe-extension")
+            .into_iter()
+            .map(|capability| capability.name())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        needing_consent,
+        vec![
+            "buffer:read",
+            "buffer:write",
+            "events:save",
+            "events:change",
+            "ui:status",
+            "ui:prompt",
+            "tasks:spawn"
+        ]
+    );
+    let editor = Arc::new(FakeLatheEditor::new("abc", vec![0..1]));
+    let error = store
+        .update(cx, |store, cx| {
+            store.run_lathe_command(
+                "test-lathe-extension",
+                "upcase-selections".into(),
+                Some(editor.clone()),
+                cx,
+            )
+        })
+        .await
+        .expect_err("buffer access was revoked");
+    assert!(format!("{error:#}").contains("buffer:read"), "{error:#}");
+    assert_eq!(editor.text(), "abc");
+
+    let instance_before = lathe_instance(&store, cx);
+    let grant = store.update(cx, |store, cx| {
+        store.grant_lathe_capabilities(
+            "test-lathe-extension".into(),
+            vec![
+                crate::wasm_host::lathe::LatheCapability::BufferRead,
+                crate::wasm_host::lathe::LatheCapability::BufferWrite,
+            ],
+            cx,
+        )
+    });
+    wait_for_new_lathe_instance(&store, instance_before, cx);
+    grant.await.unwrap();
+    store
+        .update(cx, |store, cx| {
+            store.run_lathe_command(
+                "test-lathe-extension",
+                "upcase-selections".into(),
+                Some(editor.clone()),
+                cx,
+            )
+        })
+        .await
+        .expect("buffer access was granted again");
+    assert!(editor.text().starts_with(">A"), "{}", editor.text());
+}
+
+#[derive(Default)]
+struct FakeLatheUi {
+    statuses: Mutex<HashMap<Arc<str>, (String, Option<String>)>>,
+    notifications: Mutex<Vec<String>>,
+    prompt_answer: Mutex<Option<String>>,
+    pick_answer: Mutex<Option<String>>,
+    pick_labels: Mutex<Vec<String>>,
+    tasks: Mutex<Vec<crate::wasm_host::lathe::TaskSpec>>,
+}
+
+impl FakeLatheUi {
+    fn status_text(&self, extension_id: &str) -> Option<(String, Option<String>)> {
+        self.statuses.lock().get(extension_id).cloned()
+    }
+
+    fn last_pick_labels(&self) -> Vec<String> {
+        self.pick_labels.lock().clone()
+    }
+}
+
+impl crate::wasm_host::lathe::LatheUiDelegate for FakeLatheUi {
+    fn set_status_text(
+        &self,
+        extension_id: Arc<str>,
+        text: Option<String>,
+        tooltip: Option<String>,
+        _cx: &mut gpui::AsyncApp,
+    ) {
+        let mut statuses = self.statuses.lock();
+        match text {
+            Some(text) => {
+                statuses.insert(extension_id, (text, tooltip));
+            }
+            None => {
+                statuses.remove(&extension_id);
+            }
+        }
+    }
+
+    fn show_notification(
+        &self,
+        extension_name: Arc<str>,
+        _level: crate::wasm_host::lathe::NotificationLevel,
+        message: String,
+        _cx: &mut gpui::AsyncApp,
+    ) {
+        self.notifications
+            .lock()
+            .push(format!("{extension_name}: {message}"));
+    }
+
+    fn prompt_input(
+        &self,
+        _extension_name: Arc<str>,
+        _label: String,
+        _placeholder: Option<String>,
+        _cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<futures::channel::oneshot::Receiver<Option<String>>> {
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        sender.send(self.prompt_answer.lock().clone()).ok();
+        Ok(receiver)
+    }
+
+    fn spawn_task(
+        &self,
+        task: crate::wasm_host::lathe::TaskSpec,
+        _cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<()> {
+        self.tasks.lock().push(task);
+        Ok(())
+    }
+
+    fn quick_pick(
+        &self,
+        _extension_name: Arc<str>,
+        _label: String,
+        items: Vec<crate::wasm_host::lathe::PickItem>,
+        _cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<futures::channel::oneshot::Receiver<Option<String>>> {
+        *self.pick_labels.lock() = items.into_iter().map(|item| item.label).collect();
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        sender.send(self.pick_answer.lock().clone()).ok();
+        Ok(receiver)
+    }
+}
+
+/// An in-memory stand-in for an editor, enforcing the same version and range
+/// rules the real editor delegate does.
+struct FakeLatheEditor {
+    state: Mutex<(u64, String, Vec<std::ops::Range<usize>>, usize)>,
+}
+
+impl FakeLatheEditor {
+    fn new(text: &str, selections: Vec<std::ops::Range<usize>>) -> Self {
+        Self {
+            state: Mutex::new((1, text.to_string(), selections, 0)),
+        }
+    }
+
+    fn text(&self) -> String {
+        self.state.lock().1.clone()
+    }
+
+    fn edit_count(&self) -> usize {
+        self.state.lock().3
+    }
+}
+
+impl crate::wasm_host::lathe::LatheEditorDelegate for FakeLatheEditor {
+    fn snapshot(
+        &self,
+        _cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<Option<crate::wasm_host::lathe::ActiveBufferSnapshot>> {
+        let state = self.state.lock();
+        Ok(Some(crate::wasm_host::lathe::ActiveBufferSnapshot {
+            version: state.0,
+            path: Some("dir/file.txt".into()),
+            abs_path: Some("/project/dir/file.txt".into()),
+            worktree_root: Some("/project".into()),
+            language: Some("Plain Text".into()),
+            text: state.1.clone(),
+            selections: state.2.clone(),
+        }))
+    }
+
+    fn edit(
+        &self,
+        version: u64,
+        mut edits: Vec<(std::ops::Range<usize>, String)>,
+        _cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<()> {
+        let mut state = self.state.lock();
+        anyhow::ensure!(version == state.0, "buffer changed since it was read");
+        crate::wasm_host::lathe::validate_ranges(&state.1, edits.iter().map(|edit| &edit.0), true)?;
+        edits.reverse();
+        for (range, text) in edits {
+            state.1.replace_range(range, &text);
+        }
+        state.0 += 1;
+        state.3 += 1;
+        Ok(())
+    }
+
+    fn select(
+        &self,
+        version: u64,
+        ranges: Vec<std::ops::Range<usize>>,
+        _cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<()> {
+        let mut state = self.state.lock();
+        anyhow::ensure!(version == state.0, "buffer changed since it was read");
+        state.2 = ranges;
+        state.0 += 1;
+        Ok(())
+    }
+}
+
+/// Identifies the currently loaded instance of the Lathe test extension: each
+/// load produces a new command list. Holding the returned `Arc` keeps its
+/// address from being reused by a later load.
+fn lathe_instance(
+    store: &Entity<ExtensionStore>,
+    cx: &mut TestAppContext,
+) -> Option<Arc<[crate::wasm_host::lathe::LatheCommand]>> {
+    store.read_with(cx, |store, _| {
+        store
+            .wasm_extensions
+            .iter()
+            .find(|(manifest, _)| manifest.id.as_ref() == "test-lathe-extension")
+            .map(|(_, extension)| extension.lathe_commands.clone())
+    })
+}
+
+/// Drives the debounced reload until the extension has been loaded afresh.
+/// Reload requests reach the store's reload loop asynchronously and index
+/// rebuilding touches the real filesystem, so this polls rather than assuming
+/// a fixed number of clock advances.
+fn wait_for_new_lathe_instance(
+    store: &Entity<ExtensionStore>,
+    instance_before: Option<Arc<[crate::wasm_host::lathe::LatheCommand]>>,
+    cx: &mut TestAppContext,
+) {
+    // Up to ~15 s of real time, for when the whole suite runs in parallel.
+    for _ in 0..1500 {
+        cx.run_until_parked();
+        cx.executor().advance_clock(RELOAD_DEBOUNCE_DURATION);
+        cx.run_until_parked();
+        let is_new = match (lathe_instance(store, cx), &instance_before) {
+            (Some(instance), Some(before)) => !Arc::ptr_eq(&instance, before),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if is_new {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the Lathe test extension was not reloaded");
+}

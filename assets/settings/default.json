@@ -2404,6 +2404,23 @@
   },
   // Whether to suggest installing extensions based on the files you open.
   "suggest_extensions": true,
+  // Additional extension registries, given as URLs of static `index.json` files.
+  //
+  // Extensions from these registries are listed alongside the Zed extension
+  // registry. When several registries offer the same extension id, the
+  // registry listed last wins. Set to [] to use only the Zed registry.
+  "extension_registries": [
+    "https://paterschris.github.io/lathe-extensions/index.json",
+  ],
+  // Settings for individual extensions, keyed by extension id. Extensions
+  // that use the Lathe extension API can read their own entry. A project's
+  // .zed/settings.json can set this too; it only takes effect once you trust
+  // the project, and then overrides your own values for its files. Example:
+  //
+  //   "extension_settings": {
+  //     "run-on-save": { "rules": [{ "extensions": ["rs"], "command": "cargo", "args": ["fmt"] }] }
+  //   }
+  "extension_settings": {},
   // The capabilities granted to extensions.
   //
   // This list can be customized to restrict what extensions are able to do.

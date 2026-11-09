@@ -42,6 +42,21 @@ const WASI_SDK_PLATFORM: Option<&str> = cfg_select! {
     _ => None
 };
 
+/// Whether a compiled extension embeds the `lathe:api-version` section, which
+/// the `lathe_extension_api` crate adds to extensions that use the Lathe API.
+pub fn uses_lathe_api(wasm_bytes: &[u8]) -> Result<bool> {
+    let mut found = false;
+    for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
+        if let wasmparser::Payload::CustomSection(section) =
+            payload.context("error parsing wasm extension")?
+            && section.name() == "lathe:api-version"
+        {
+            found = true;
+        }
+    }
+    Ok(found)
+}
+
 pub struct ExtensionBuilder {
     cache_dir: PathBuf,
     pub http: Arc<dyn HttpClient>,
@@ -570,11 +585,12 @@ impl ExtensionBuilder {
             // * the `name` section
             // * any `component-type` sections
             // * the `dylink.0` section
-            // * our custom version section
+            // * our custom version sections
             name != "name"
                 && !name.starts_with("component-type:")
                 && name != "dylink.0"
                 && name != "zed:api-version"
+                && name != "lathe:api-version"
         };
 
         let mut output = Vec::new();

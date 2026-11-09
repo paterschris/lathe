@@ -1,6 +1,7 @@
 mod capability_granter;
 pub mod extension_settings;
 pub mod headless_host;
+pub mod registry;
 pub mod wasm_host;
 
 #[cfg(test)]
@@ -74,6 +75,7 @@ pub use extension::{
 pub use extension_settings::ExtensionSettings;
 
 use crate::headless_host::hash_directory_contents;
+use crate::registry::{InstallOrigin, InstallOrigins, LatheManifestFields, RegistryEntry};
 
 pub const RELOAD_DEBOUNCE_DURATION: Duration = Duration::from_millis(200);
 const FS_WATCH_LATENCY: Duration = Duration::from_millis(100);
@@ -126,6 +128,16 @@ static SUPPRESSED_EXTENSIONS: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
     ])
 });
 
+fn provides_filter_set(provides_filter: Option<&str>) -> Option<BTreeSet<ExtensionProvides>> {
+    let provides_filter = provides_filter?;
+    Some(
+        provides_filter
+            .split(',')
+            .filter_map(|provides| ExtensionProvides::from_str(provides.trim()).ok())
+            .collect(),
+    )
+}
+
 /// Returns the [`SchemaVersion`] range that is compatible with this version of Zed.
 pub fn schema_version_range() -> RangeInclusive<SchemaVersion> {
     SchemaVersion::ZERO..=SchemaVersion::CURRENT
@@ -173,7 +185,37 @@ pub struct ExtensionStore {
     pub tasks: Vec<Task<()>>,
     pub(crate) remote_clients: HashMap<EntityId, RemoteClientState>,
     pub(crate) initial_index_load: Shared<Task<()>>,
+    /// The latest version offered by each configured static registry, keyed by
+    /// extension id. Refreshed on every registry fetch.
+    pub registry_entries: HashMap<Arc<str>, RegistryEntry>,
+    pub install_origins: InstallOrigins,
+    pub origins_path: PathBuf,
+    pub registry_cache_dir: PathBuf,
+    pub git_checkouts_dir: PathBuf,
+    /// Consecutive event-handler timeouts per extension.
+    lathe_event_strikes: HashMap<Arc<str>, u32>,
+    /// Extensions whose buffer events are paused. Survives the reloads that
+    /// follow an interrupted handler; cleared when the extension is installed,
+    /// upgraded, rebuilt or uninstalled.
+    lathe_events_paused: HashSet<Arc<str>>,
+    pub lathe_grants_path: PathBuf,
 }
+
+async fn load_lathe_grants(fs: &dyn Fs, path: &Path) -> wasm_host::lathe::LatheGrants {
+    let Ok(content) = fs.load(path).await else {
+        return Default::default();
+    };
+    serde_json::from_str(&content)
+        .with_context(|| format!("parsing {path:?}"))
+        .log_err()
+        .unwrap_or_default()
+}
+
+/// How long an extension's buffer event handler may run before it counts as
+/// a timeout.
+pub const LATHE_EVENT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Consecutive timeouts after which an extension's events are paused.
+pub const LATHE_EVENT_MAX_STRIKES: u32 = 3;
 
 pub(crate) struct RemoteClientState {
     dirty_tx: UnboundedSender<RemoteSyncSignal>,
@@ -382,6 +424,10 @@ impl ExtensionStore {
         let installed_dir = extensions_dir.join("installed");
         let staging_dir = extensions_dir.join("staging");
         let index_path = extensions_dir.join("index.json");
+        let origins_path = extensions_dir.join("origins.json");
+        let lathe_grants_path = extensions_dir.join("lathe-grants.json");
+        let registry_cache_dir = extensions_dir.join("registry-cache");
+        let git_checkouts_dir = extensions_dir.join("git");
 
         let (reload_tx, mut reload_rx) = unbounded();
         let mut this = Self {
@@ -411,19 +457,31 @@ impl ExtensionStore {
 
             remote_clients: HashMap::default(),
             initial_index_load: Task::ready(()).shared(),
+            registry_entries: HashMap::default(),
+            install_origins: InstallOrigins::default(),
+            origins_path,
+            registry_cache_dir,
+            git_checkouts_dir,
+            lathe_event_strikes: HashMap::default(),
+            lathe_events_paused: HashSet::default(),
+            lathe_grants_path,
         };
 
         // The extensions store maintains an index file, which contains a complete
         // list of the installed extensions and the resources that they provide.
         // This index is loaded synchronously on startup.
-        let (index_content, index_metadata, extensions_metadata) =
+        let (index_content, index_metadata, extensions_metadata, install_origins, lathe_grants) =
             cx.foreground_executor().block_on(async {
                 futures::join!(
                     this.fs.load(&this.index_path),
                     this.fs.metadata(&this.index_path),
                     this.fs.metadata(&this.installed_dir),
+                    InstallOrigins::load(this.fs.as_ref(), &this.origins_path),
+                    load_lathe_grants(this.fs.as_ref(), &this.lathe_grants_path),
                 )
             });
+        this.install_origins = install_origins;
+        this.wasm_host.set_lathe_grants(lathe_grants);
 
         // Normally, there is no need to rebuild the index. But if the index file
         // is invalid or is out-of-date according to the filesystem mtimes, then
@@ -681,7 +739,89 @@ impl ExtensionStore {
             query.push(("provides", provides_filter));
         }
 
-        self.fetch_extensions_from_api("/extensions", &query, cx)
+        let zed_task = self.fetch_extensions_from_api("/extensions", &query, cx);
+        let registry_task = self.fetch_registry_entries(cx);
+        let search = search.map(ToOwned::to_owned);
+        let provides_filter = provides_filter_set(provides_filter.as_deref());
+        let release_channel = ReleaseChannel::global(cx);
+        cx.background_spawn(async move {
+            let (zed_result, registry_entries) = futures::join!(zed_task, registry_task);
+            let registry_extensions = registry_entries
+                .values()
+                .filter(|registry_entry| {
+                    registry_entry
+                        .entry
+                        .matches(search.as_deref(), provides_filter.as_ref())
+                })
+                .map(|registry_entry| registry_entry.entry.to_metadata())
+                .filter(|metadata| is_version_compatible(release_channel, metadata))
+                .collect::<Vec<_>>();
+
+            let zed_extensions = match zed_result {
+                Ok(zed_extensions) => zed_extensions,
+                Err(error) if !registry_extensions.is_empty() => {
+                    log::error!("failed to fetch extensions from the Zed API: {error:#}");
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+            };
+
+            Ok(registry::merge_extension_lists(
+                zed_extensions,
+                registry_extensions,
+            ))
+        })
+    }
+
+    /// Fetches every configured static registry and refreshes
+    /// [`Self::registry_entries`]. Registries that fail to load are logged and skipped.
+    pub fn fetch_registry_entries(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Task<HashMap<Arc<str>, RegistryEntry>> {
+        let registry_urls = ExtensionSettings::get_global(cx)
+            .extension_registries
+            .clone();
+        if registry_urls.is_empty() {
+            return Task::ready(HashMap::default());
+        }
+
+        let http_client = self.http_client.clone();
+        let fs = self.fs.clone();
+        let cache_dir = self.registry_cache_dir.clone();
+        cx.spawn(async move |this, cx| {
+            let indexes = join_all(registry_urls.into_iter().map(|url| {
+                let http_client = http_client.clone();
+                let fs = fs.clone();
+                let cache_dir = cache_dir.clone();
+                async move {
+                    let index = registry::fetch_static_index(
+                        http_client.as_ref(),
+                        fs.as_ref(),
+                        &cache_dir,
+                        &url,
+                    )
+                    .await;
+                    (url, index)
+                }
+            }))
+            .await
+            .into_iter()
+            .filter_map(|(url, index)| match index {
+                Ok(index) => Some((url, index)),
+                Err(error) => {
+                    log::error!("{error:#}");
+                    None
+                }
+            });
+
+            let mut entries = registry::collect_registry_entries(indexes);
+            entries.retain(|id, _| !SUPPRESSED_EXTENSIONS.contains(id.as_ref()));
+
+            this.update(cx, |this, _| this.registry_entries = entries.clone())
+                .log_err();
+            entries
+        })
     }
 
     pub fn fetch_extensions_with_update_available(
@@ -691,14 +831,21 @@ impl ExtensionStore {
         let schema_versions = schema_version_range();
         let wasm_api_versions = wasm_api_version_range(ReleaseChannel::global(cx));
         let extension_settings = ExtensionSettings::get_global(cx);
-        let extension_ids = self
+        let updatable_ids = self
             .extension_index
             .extensions
             .iter()
             .filter(|(id, entry)| !entry.dev && extension_settings.should_auto_update(id))
-            .map(|(id, _)| id.as_ref())
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let extension_ids = updatable_ids
+            .iter()
+            .filter(|id| self.install_origins.get(id) == InstallOrigin::ZedApi)
+            .map(|id| id.as_ref())
             .collect::<Vec<_>>()
             .join(",");
+        let registry_task = self.fetch_registry_entries(cx);
+        let release_channel = ReleaseChannel::global(cx);
         let task = self.fetch_extensions_from_api(
             "/extensions/updates",
             &[
@@ -714,8 +861,23 @@ impl ExtensionStore {
             cx,
         );
         cx.spawn(async move |this, cx| {
-            let extensions = task.await?;
+            let (zed_result, registry_entries) = futures::join!(task, registry_task);
+            let mut extensions = zed_result?;
             this.update(cx, |this, _cx| {
+                // Extensions installed from a registry only update from that same
+                // registry. Extensions installed from an archive URL never auto-update.
+                extensions.extend(updatable_ids.iter().filter_map(|id| {
+                    let InstallOrigin::Registry { index_url } = this.install_origins.get(id) else {
+                        return None;
+                    };
+                    let registry_entry = registry_entries.get(id)?;
+                    if registry_entry.index_url != index_url {
+                        return None;
+                    }
+                    let metadata = registry_entry.entry.to_metadata();
+                    is_version_compatible(release_channel, &metadata).then_some(metadata)
+                }));
+
                 extensions
                     .into_iter()
                     .filter(|extension| {
@@ -736,7 +898,17 @@ impl ExtensionStore {
         extension_id: &str,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<ExtensionMetadata>>> {
-        self.fetch_extensions_from_api(&format!("/extensions/{extension_id}"), &[], cx)
+        let zed_task =
+            self.fetch_extensions_from_api(&format!("/extensions/{extension_id}"), &[], cx);
+        let registry_task = self.fetch_registry_entries(cx);
+        let extension_id: Arc<str> = extension_id.into();
+        cx.background_spawn(async move {
+            // Static registries only publish the latest version of each extension.
+            if let Some(registry_entry) = registry_task.await.get(&extension_id) {
+                return Ok(vec![registry_entry.entry.to_metadata()]);
+            }
+            zed_task.await
+        })
     }
 
     /// Installs any extensions that should be included with Zed by default.
@@ -862,6 +1034,9 @@ impl ExtensionStore {
         &mut self,
         extension_id: Arc<str>,
         url: Url,
+        expected_sha256: Option<Arc<str>>,
+        origin: InstallOrigin,
+        requires: Vec<Arc<str>>,
         operation: ExtensionOperation,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
@@ -886,29 +1061,12 @@ impl ExtensionStore {
             });
 
             cx.background_spawn(async move {
-                let mut response = http_client
-                    .get(url.as_ref(), Default::default(), true)
-                    .await
-                    .context("downloading extension")?;
-
-                let content_length = response
-                    .headers()
-                    .get(http_client::http::header::CONTENT_LENGTH)
-                    .and_then(|value| value.to_str().ok()?.parse::<usize>().ok());
-
-                let mut body = BufReader::new(response.body_mut());
-                let mut tar_gz_bytes = Vec::new();
-                body.read_to_end(&mut tar_gz_bytes).await?;
-
-                if let Some(content_length) = content_length {
-                    let actual_len = tar_gz_bytes.len();
-                    if content_length != actual_len {
-                        bail!(
-                            "downloaded extension size {actual_len} \
-                        does not match content length {content_length}"
-                        );
-                    }
-                }
+                let tar_gz_bytes = registry::download_archive(
+                    http_client.as_ref(),
+                    url.as_ref(),
+                    expected_sha256.as_deref(),
+                )
+                .await?;
 
                 let decompressed_bytes = GzipDecoder::new(BufReader::new(tar_gz_bytes.as_slice()));
                 let archive = Archive::new(decompressed_bytes);
@@ -951,6 +1109,13 @@ impl ExtensionStore {
             })
             .await?;
 
+            this.update(cx, |this, cx| {
+                this.lathe_events_paused.remove(&extension_id);
+                this.record_install_origin(extension_id.clone(), origin, requires, cx)
+            })?
+            .await
+            .log_err();
+
             this.update(cx, |this, cx| this.reload(Some(extension_id.clone()), cx))?
                 .await;
 
@@ -974,6 +1139,12 @@ impl ExtensionStore {
 
     pub fn install_latest_extension(&mut self, extension_id: Arc<str>, cx: &mut Context<Self>) {
         log::info!("installing extension {extension_id} latest version");
+
+        if let Some(registry_entry) = self.registry_entries.get(&extension_id).cloned() {
+            self.install_from_registry_entry(registry_entry, ExtensionOperation::Install, cx)
+                .detach_and_log_err(cx);
+            return;
+        }
 
         let schema_versions = schema_version_range();
         let wasm_api_versions = wasm_api_version_range(ReleaseChannel::global(cx));
@@ -1000,6 +1171,9 @@ impl ExtensionStore {
         self.install_or_upgrade_extension_at_endpoint(
             extension_id,
             url,
+            None,
+            InstallOrigin::ZedApi,
+            Vec::new(),
             ExtensionOperation::Install,
             cx,
         )
@@ -1023,6 +1197,14 @@ impl ExtensionStore {
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         log::info!("installing extension {extension_id} {version}");
+
+        if let Some(registry_entry) = self.registry_entries.get(&extension_id)
+            && registry_entry.entry.version == version
+        {
+            let registry_entry = registry_entry.clone();
+            return self.install_from_registry_entry(registry_entry, operation, cx);
+        }
+
         let Some(url) = self
             .http_client
             .build_zed_api_url(
@@ -1034,7 +1216,530 @@ impl ExtensionStore {
             return Task::ready(Ok(()));
         };
 
-        self.install_or_upgrade_extension_at_endpoint(extension_id, url, operation, cx)
+        self.install_or_upgrade_extension_at_endpoint(
+            extension_id,
+            url,
+            None,
+            InstallOrigin::ZedApi,
+            Vec::new(),
+            operation,
+            cx,
+        )
+    }
+
+    fn install_from_registry_entry(
+        &mut self,
+        registry_entry: RegistryEntry,
+        operation: ExtensionOperation,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let RegistryEntry { index_url, entry } = registry_entry;
+        log::info!(
+            "installing extension {} {} from registry {index_url}",
+            entry.id,
+            entry.version
+        );
+        let url = match Url::parse(&entry.download_url) {
+            Ok(url) => url,
+            Err(error) => {
+                return Task::ready(Err(anyhow!(
+                    "invalid download URL {:?} for extension {}: {error}",
+                    entry.download_url,
+                    entry.id
+                )));
+            }
+        };
+        self.install_or_upgrade_extension_at_endpoint(
+            entry.id,
+            url,
+            Some(entry.sha256),
+            InstallOrigin::Registry { index_url },
+            entry.requires,
+            operation,
+            cx,
+        )
+    }
+
+    /// Commands registered by loaded extensions through the Lathe API, as
+    /// `(extension manifest, command)` pairs.
+    pub fn lathe_commands(
+        &self,
+    ) -> impl Iterator<Item = (&Arc<ExtensionManifest>, &wasm_host::lathe::LatheCommand)> {
+        self.wasm_extensions
+            .iter()
+            .flat_map(|(manifest, extension)| {
+                extension
+                    .lathe_commands
+                    .iter()
+                    .map(move |command| (manifest, command))
+            })
+    }
+
+    /// Runs a command that an extension registered through the Lathe API.
+    pub fn run_lathe_command(
+        &self,
+        extension_id: &str,
+        command_id: Arc<str>,
+        editor: Option<Arc<dyn wasm_host::lathe::LatheEditorDelegate>>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(extension) = self
+            .wasm_extensions
+            .iter()
+            .find(|(manifest, _)| manifest.id.as_ref() == extension_id)
+            .map(|(_, extension)| extension.clone())
+        else {
+            return Task::ready(Err(anyhow!(
+                "extension {extension_id} is not installed or failed to load"
+            )));
+        };
+        cx.background_spawn(async move { extension.run_lathe_command(command_id, editor).await })
+    }
+
+    /// Delivers a buffer event to every loaded extension that declared the
+    /// matching capability. Each handler gets [`LATHE_EVENT_TIMEOUT`]; after
+    /// [`LATHE_EVENT_MAX_STRIKES`] timeouts in a row, that extension's events
+    /// are paused until it is reloaded. Resolves to the extensions this
+    /// event caused to be paused, as `(id, name)` pairs.
+    pub fn dispatch_lathe_buffer_event(
+        &mut self,
+        event: wasm_host::lathe::LatheBufferEvent,
+        buffer: Arc<dyn wasm_host::lathe::LatheEditorDelegate>,
+        cx: &mut Context<Self>,
+    ) -> Task<Vec<(Arc<str>, Arc<str>)>> {
+        let capability = event.capability();
+        let targets = self
+            .wasm_extensions
+            .iter()
+            .filter(|(manifest, extension)| {
+                extension.lathe_capabilities.contains(&capability)
+                    && !self.lathe_events_paused.contains(&manifest.id)
+            })
+            .map(|(manifest, extension)| (manifest.id.clone(), extension.clone()))
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return Task::ready(Vec::new());
+        }
+        let interrupts = targets
+            .iter()
+            .map(|(extension_id, extension)| {
+                (extension_id.clone(), extension.lathe_interrupt.clone())
+            })
+            .collect::<HashMap<_, _>>();
+
+        let executor = cx.background_executor().clone();
+        let deliveries = targets
+            .into_iter()
+            .map(|(extension_id, extension)| {
+                let buffer = buffer.clone();
+                let timeout = executor.timer(LATHE_EVENT_TIMEOUT);
+                async move {
+                    let delivery = extension.dispatch_lathe_buffer_event(event, buffer);
+                    futures::pin_mut!(delivery);
+                    let outcome = match futures::future::select(delivery, timeout).await {
+                        futures::future::Either::Left((result, _)) => Some(result),
+                        futures::future::Either::Right(_) => None,
+                    };
+                    (extension_id, outcome)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        cx.spawn(async move |this, cx| {
+            let outcomes = join_all(deliveries).await;
+            this.update(cx, |this, cx| {
+                outcomes
+                    .into_iter()
+                    .filter_map(|(extension_id, outcome)| {
+                        if outcome.is_none() {
+                            // Stop the stuck handler. A trapped instance cannot be
+                            // called again, so load the extension afresh.
+                            if let Some(interrupt) = interrupts.get(&extension_id) {
+                                interrupt.interrupt();
+                            }
+                            drop(this.reload(Some(extension_id.clone()), cx));
+                        }
+                        this.record_lathe_event_outcome(extension_id, event, outcome, cx)
+                    })
+                    .collect()
+            })
+            .log_err()
+            .unwrap_or_default()
+        })
+    }
+
+    fn record_lathe_event_outcome(
+        &mut self,
+        extension_id: Arc<str>,
+        event: wasm_host::lathe::LatheBufferEvent,
+        outcome: Option<Result<()>>,
+        cx: &mut Context<Self>,
+    ) -> Option<(Arc<str>, Arc<str>)> {
+        match outcome {
+            Some(result) => {
+                self.lathe_event_strikes.remove(&extension_id);
+                if let Err(error) = result {
+                    log::error!("extension {extension_id} failed handling {event:?}: {error:#}");
+                }
+                None
+            }
+            None => {
+                let strikes = self
+                    .lathe_event_strikes
+                    .entry(extension_id.clone())
+                    .or_default();
+                *strikes += 1;
+                log::warn!(
+                    "extension {extension_id} took longer than {LATHE_EVENT_TIMEOUT:?} handling {event:?} ({strikes} in a row)"
+                );
+                if *strikes < LATHE_EVENT_MAX_STRIKES {
+                    return None;
+                }
+                log::error!("pausing buffer events for extension {extension_id}");
+                self.lathe_event_strikes.remove(&extension_id);
+                self.lathe_events_paused.insert(extension_id.clone());
+                cx.notify();
+                let name = self
+                    .extension_manifest_for_id(&extension_id)
+                    .map(|manifest| Arc::<str>::from(manifest.name.as_str()))
+                    .unwrap_or_else(|| extension_id.clone());
+                Some((extension_id, name))
+            }
+        }
+    }
+
+    /// Lathe capabilities a loaded extension declares that the user has not
+    /// granted yet.
+    pub fn lathe_capabilities_needing_consent(
+        &self,
+        extension_id: &str,
+    ) -> Vec<wasm_host::lathe::LatheCapability> {
+        self.wasm_extensions
+            .iter()
+            .find(|(manifest, _)| manifest.id.as_ref() == extension_id)
+            .map(|(_, extension)| {
+                extension
+                    .lathe_declared_capabilities
+                    .difference(&extension.lathe_capabilities)
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Lathe capabilities the user has granted an extension.
+    pub fn granted_lathe_capabilities(
+        &self,
+        extension_id: &str,
+    ) -> collections::BTreeSet<wasm_host::lathe::LatheCapability> {
+        self.wasm_host.lathe_grants().granted(extension_id)
+    }
+
+    /// Grants capabilities and reloads the extension so they take effect.
+    /// Granting before installing is allowed; the grant applies on first load.
+    pub fn grant_lathe_capabilities(
+        &mut self,
+        extension_id: Arc<str>,
+        capabilities: Vec<wasm_host::lathe::LatheCapability>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let save = self.update_lathe_grants(cx, |grants| {
+            grants.grant(extension_id.clone(), capabilities)
+        });
+        self.reload_after_grant_change(extension_id, save, cx)
+    }
+
+    /// Withdraws every Lathe capability granted to the extension and reloads it.
+    pub fn revoke_lathe_capabilities(
+        &mut self,
+        extension_id: Arc<str>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let save = self.update_lathe_grants(cx, |grants| grants.revoke(&extension_id));
+        self.reload_after_grant_change(extension_id, save, cx)
+    }
+
+    fn reload_after_grant_change(
+        &mut self,
+        extension_id: Arc<str>,
+        save: Task<Result<()>>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        cx.spawn(async move |this, cx| {
+            save.await?;
+            let is_installed = this.read_with(cx, |this, _| {
+                this.extension_index.extensions.contains_key(&extension_id)
+            })?;
+            if is_installed {
+                this.update(cx, |this, cx| this.reload(Some(extension_id), cx))?
+                    .await;
+            }
+            Ok(())
+        })
+    }
+
+    fn update_lathe_grants(
+        &mut self,
+        cx: &mut Context<Self>,
+        update: impl FnOnce(&mut wasm_host::lathe::LatheGrants),
+    ) -> Task<Result<()>> {
+        let mut grants = self.wasm_host.lathe_grants();
+        update(&mut grants);
+        self.wasm_host.set_lathe_grants(grants.clone());
+        cx.notify();
+        let fs = self.fs.clone();
+        let path = self.lathe_grants_path.clone();
+        cx.background_spawn(async move {
+            let content = serde_json::to_string_pretty(&grants)?;
+            fs.save(&path, &content.as_str().into(), Default::default())
+                .await
+                .with_context(|| format!("saving {path:?}"))
+        })
+    }
+
+    /// Whether an extension's buffer events were paused for repeated timeouts.
+    pub fn are_lathe_events_paused(&self, extension_id: &str) -> bool {
+        self.lathe_events_paused.contains(extension_id)
+    }
+
+    /// Lathe API capabilities of an extension, from the loaded extension if it
+    /// is installed, otherwise from the registry offering it.
+    pub fn lathe_capabilities_for_display(
+        &self,
+        extension_id: &str,
+    ) -> Vec<wasm_host::lathe::LatheCapability> {
+        if let Some((_, extension)) = self
+            .wasm_extensions
+            .iter()
+            .find(|(manifest, _)| manifest.id.as_ref() == extension_id)
+            && !extension.lathe_declared_capabilities.is_empty()
+        {
+            return extension
+                .lathe_declared_capabilities
+                .iter()
+                .copied()
+                .collect();
+        }
+        self.registry_entries
+            .get(extension_id)
+            .and_then(|registry_entry| {
+                wasm_host::lathe::LatheCapability::parse_all(
+                    &registry_entry.entry.lathe_capabilities,
+                )
+                .ok()
+            })
+            .map(|capabilities| capabilities.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Lathe API capabilities declared by a loaded extension.
+    pub fn lathe_capabilities(
+        &self,
+        extension_id: &str,
+    ) -> Option<Arc<collections::BTreeSet<wasm_host::lathe::LatheCapability>>> {
+        self.wasm_extensions
+            .iter()
+            .find(|(manifest, _)| manifest.id.as_ref() == extension_id)
+            .map(|(_, extension)| extension.lathe_capabilities.clone())
+            .filter(|capabilities| !capabilities.is_empty())
+    }
+
+    /// Whether the extension is marked as only working in Lathe, either by the
+    /// registry offering it or by the record kept when it was installed.
+    ///
+    /// For an installed extension this comes from the extension itself: its
+    /// `requires` in `extension.toml`, or the fact that it uses the Lathe API
+    /// (which makes it Lathe-only even if the author left `requires` out).
+    pub fn is_lathe_only(&self, extension_id: &str) -> bool {
+        let is_lathe_requirement =
+            |requirement: &Arc<str>| requirement.as_ref() == registry::LATHE_REQUIREMENT;
+        let loaded = self
+            .wasm_extensions
+            .iter()
+            .find(|(manifest, _)| manifest.id.as_ref() == extension_id)
+            .is_some_and(|(_, extension)| {
+                extension.lathe_api_version.is_some()
+                    || extension.lathe_requires.iter().any(is_lathe_requirement)
+            });
+        loaded
+            || self
+                .registry_entries
+                .get(extension_id)
+                .is_some_and(|registry_entry| registry_entry.entry.is_lathe_only())
+            || self
+                .install_origins
+                .requires(extension_id)
+                .iter()
+                .any(is_lathe_requirement)
+    }
+
+    fn record_install_origin(
+        &mut self,
+        extension_id: Arc<str>,
+        origin: InstallOrigin,
+        requires: Vec<Arc<str>>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        self.install_origins.set(extension_id, origin, requires);
+        self.save_install_origins(cx)
+    }
+
+    fn save_install_origins(&self, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let fs = self.fs.clone();
+        let origins = self.install_origins.clone();
+        let origins_path = self.origins_path.clone();
+        cx.background_spawn(async move { origins.save(fs.as_ref(), &origins_path).await })
+    }
+
+    /// Installs a packaged extension archive (`.tar.gz`, as produced by the
+    /// extension CLI) from an arbitrary URL. The extension id is read from the
+    /// archive's manifest. Extensions installed this way do not auto-update.
+    pub fn install_extension_from_archive_url(
+        &mut self,
+        url: Url,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Arc<str>>> {
+        // Archives from a URL have no published checksum, so require TLS.
+        if url.scheme() != "https" {
+            return Task::ready(Err(anyhow!(
+                "extension archive URL must use https, got {url}"
+            )));
+        }
+
+        let staging_dir = self.staging_dir.clone();
+        let installed_dir = self.installed_dir.clone();
+        let http_client = self.http_client.clone();
+        let fs = self.fs.clone();
+
+        cx.spawn(async move |this, cx| {
+            let (temp_dir, manifest, lathe_fields) = cx
+                .background_spawn({
+                    let url = url.clone();
+                    let fs = fs.clone();
+                    async move {
+                        let tar_gz_bytes =
+                            registry::download_archive(http_client.as_ref(), url.as_ref(), None)
+                                .await?;
+                        fs.create_dir(&staging_dir).await?;
+                        let temp_dir = tempfile::tempdir_in(&staging_dir)?;
+                        let decompressed_bytes =
+                            GzipDecoder::new(BufReader::new(tar_gz_bytes.as_slice()));
+                        Archive::new(decompressed_bytes)
+                            .unpack(temp_dir.path())
+                            .await
+                            .with_context(|| format!("unpacking extension archive from {url}"))?;
+                        let manifest = ExtensionManifest::load(fs.clone(), temp_dir.path())
+                            .await
+                            .with_context(|| format!("no valid extension manifest in {url}"))?;
+                        let lathe_fields =
+                            LatheManifestFields::load(fs.as_ref(), temp_dir.path()).await?;
+                        anyhow::Ok((temp_dir, manifest, lathe_fields))
+                    }
+                })
+                .await?;
+
+            let extension_id = manifest.id.clone();
+            if SUPPRESSED_EXTENSIONS.contains(extension_id.as_ref()) {
+                bail!("extension {extension_id} is no longer supported");
+            }
+            let unsupported = registry::unsupported_requirements(&lathe_fields.requires);
+            if !unsupported.is_empty() {
+                bail!(
+                    "extension {extension_id} requires {}, which this version of Lathe does not support",
+                    unsupported.join(", ")
+                );
+            }
+
+            let operation = this.update(cx, |this, cx| {
+                if this
+                    .extension_index
+                    .extensions
+                    .get(&extension_id)
+                    .is_some_and(|entry| entry.dev)
+                {
+                    bail!(
+                        "extension {extension_id} is installed as a dev extension; uninstall it first"
+                    );
+                }
+                let operation = if this.extension_index.extensions.contains_key(&extension_id) {
+                    ExtensionOperation::Upgrade
+                } else {
+                    ExtensionOperation::Install
+                };
+                match this.outstanding_operations.entry(extension_id.clone()) {
+                    btree_map::Entry::Occupied(_) => {
+                        bail!("extension {extension_id} is already being installed or removed")
+                    }
+                    btree_map::Entry::Vacant(entry) => entry.insert(operation),
+                };
+                cx.notify();
+                anyhow::Ok(operation)
+            })??;
+
+            let _finish = cx.on_drop(&this, {
+                let extension_id = extension_id.clone();
+                move |this, cx| {
+                    this.outstanding_operations.remove(extension_id.as_ref());
+                    cx.notify();
+                }
+            });
+
+            let extension_dir = installed_dir.join(extension_id.as_ref());
+            cx.background_spawn(async move {
+                fs.remove_dir(
+                    &extension_dir,
+                    RemoveOptions {
+                        recursive: true,
+                        ignore_if_not_exists: true,
+                    },
+                )
+                .await?;
+                fs.rename(
+                    temp_dir.path(),
+                    &extension_dir,
+                    RenameOptions {
+                        overwrite: true,
+                        ignore_if_exists: true,
+                        create_parents: true,
+                    },
+                )
+                .await
+            })
+            .await?;
+
+            this.update(cx, |this, cx| {
+                this.lathe_events_paused.remove(&extension_id);
+                this.record_install_origin(
+                    extension_id.clone(),
+                    InstallOrigin::ArchiveUrl {
+                        url: url.as_str().into(),
+                    },
+                    lathe_fields.requires,
+                    cx,
+                )
+            })?
+            .await
+            .log_err();
+
+            this.update(cx, |this, cx| this.reload(Some(extension_id.clone()), cx))?
+                .await;
+
+            if let ExtensionOperation::Install = operation {
+                this.update(cx, |this, cx| {
+                    cx.emit(Event::ExtensionInstalled(extension_id.clone()));
+                    if let Some(events) = ExtensionEvents::try_global(cx)
+                        && let Some(manifest) = this.extension_manifest_for_id(&extension_id)
+                    {
+                        events.update(cx, |this, cx| {
+                            this.emit(extension::Event::ExtensionInstalled(manifest.clone()), cx)
+                        });
+                    }
+                })
+                .ok();
+            }
+
+            Ok(extension_id)
+        })
     }
 
     pub fn uninstall_extension(
@@ -1047,6 +1752,14 @@ impl ExtensionStore {
         let fs = self.fs.clone();
 
         let extension_manifest = self.extension_manifest_for_id(&extension_id).cloned();
+        let git_checkout = match self.install_origins.get(&extension_id) {
+            InstallOrigin::GitUrl { checkout, .. }
+                if checkout.starts_with(&self.git_checkouts_dir) =>
+            {
+                Some(checkout)
+            }
+            _ => None,
+        };
 
         match self.outstanding_operations.entry(extension_id.clone()) {
             btree_map::Entry::Occupied(_) => return Task::ready(Ok(())),
@@ -1101,6 +1814,35 @@ impl ExtensionStore {
                 }
             }
 
+            if let Some(git_checkout) = git_checkout {
+                fs.remove_dir(
+                    &git_checkout,
+                    RemoveOptions {
+                        recursive: true,
+                        ignore_if_not_exists: true,
+                    },
+                )
+                .await
+                .with_context(|| format!("removing git checkout {git_checkout:?}"))
+                .log_err();
+            }
+
+            extension_store
+                .update(cx, |extension_store, cx| {
+                    extension_store.install_origins.remove(&extension_id);
+                    extension_store.lathe_events_paused.remove(&extension_id);
+                    extension_store.lathe_event_strikes.remove(&extension_id);
+                    extension_store.save_install_origins(cx)
+                })?
+                .await
+                .log_err();
+            extension_store
+                .update(cx, |extension_store, cx| {
+                    extension_store.update_lathe_grants(cx, |grants| grants.revoke(&extension_id))
+                })?
+                .await
+                .log_err();
+
             extension_store.update(cx, |_, cx| {
                 cx.emit(Event::ExtensionUninstalled(extension_id.clone()));
                 if let Some(events) = ExtensionEvents::try_global(cx)
@@ -1116,9 +1858,21 @@ impl ExtensionStore {
         })
     }
 
+    /// Builds and installs an extension from a local directory. The user picked
+    /// the directory themselves, so the Lathe capabilities it declares are
+    /// granted.
     pub fn install_dev_extension(
         &mut self,
         extension_source_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        self.install_dev_extension_with_grants(extension_source_path, true, cx)
+    }
+
+    fn install_dev_extension_with_grants(
+        &mut self,
+        extension_source_path: PathBuf,
+        grant_declared_capabilities: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         let extensions_dir = self.extensions_dir();
@@ -1198,8 +1952,25 @@ impl ExtensionStore {
                 }
             }
 
-            fs.create_symlink(output_path, extension_source_path)
+            fs.create_symlink(output_path, extension_source_path.clone())
                 .await?;
+
+            if grant_declared_capabilities {
+                let lathe_fields =
+                    LatheManifestFields::load(fs.as_ref(), &extension_source_path).await?;
+                let declared =
+                    wasm_host::lathe::LatheCapability::parse_all(&lathe_fields.lathe_capabilities)?;
+                if !declared.is_empty() {
+                    this.update(cx, |this, cx| {
+                        this.update_lathe_grants(cx, |grants| {
+                            grants.grant(extension_id.clone(), declared)
+                        })
+                    })?
+                    .await
+                    .log_err();
+                }
+            }
+            this.update(cx, |this, _| this.lathe_events_paused.remove(&extension_id))?;
 
             this.update(cx, |this, cx| this.reload(None, cx))?.await;
             this.update(cx, |this, cx| {
@@ -1217,7 +1988,108 @@ impl ExtensionStore {
         })
     }
 
+    /// Clones a git repository and installs it as a dev extension, which builds
+    /// it locally. Building requires the same toolchain as any dev extension
+    /// (`rustup` with the `wasm32-wasip2` target for extensions with Rust code).
+    /// Cloning the same URL again replaces the previous checkout.
+    pub fn install_extension_from_git_url(
+        &mut self,
+        url: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Arc<str>>> {
+        let url = url.trim().to_string();
+        if let Err(error) = registry::validate_git_url(&url) {
+            return Task::ready(Err(error));
+        }
+
+        let checkout = self
+            .git_checkouts_dir
+            .join(registry::git_checkout_dir_name(&url));
+        let git_checkouts_dir = self.git_checkouts_dir.clone();
+        let fs = self.fs.clone();
+
+        cx.spawn(async move |this, cx| {
+            let lathe_fields = cx
+                .background_spawn({
+                    let url = url.clone();
+                    let checkout = checkout.clone();
+                    let fs = fs.clone();
+                    async move {
+                        which::which("git").context(
+                            "installing an extension from a git URL requires git on your PATH",
+                        )?;
+                        fs.create_dir(&git_checkouts_dir).await?;
+                        fs.remove_dir(
+                            &checkout,
+                            RemoveOptions {
+                                recursive: true,
+                                ignore_if_not_exists: true,
+                            },
+                        )
+                        .await?;
+                        let output = util::command::new_command("git")
+                            .arg("clone")
+                            .arg("--depth=1")
+                            .arg("--recurse-submodules")
+                            .arg("--shallow-submodules")
+                            .arg("--")
+                            .arg(&url)
+                            .arg(&checkout)
+                            .env("GIT_TERMINAL_PROMPT", "0")
+                            .output()
+                            .await
+                            .context("running git clone")?;
+                        if !output.status.success() {
+                            bail!(
+                                "git clone {url} failed: {}",
+                                String::from_utf8_lossy(&output.stderr).trim()
+                            );
+                        }
+                        LatheManifestFields::load(fs.as_ref(), &checkout).await
+                    }
+                })
+                .await?;
+
+            let unsupported = registry::unsupported_requirements(&lathe_fields.requires);
+            if !unsupported.is_empty() {
+                bail!(
+                    "the extension at {url} requires {}, which this version of Lathe does not support",
+                    unsupported.join(", ")
+                );
+            }
+
+            let manifest = ExtensionManifest::load(fs.clone(), &checkout)
+                .await
+                .with_context(|| format!("no valid extension manifest at the root of {url}"))?;
+            let extension_id = manifest.id.clone();
+
+            // Code from a URL is not the user's own, so its Lathe capabilities
+            // wait for the user to allow them.
+            this.update(cx, |this, cx| {
+                this.install_dev_extension_with_grants(checkout.clone(), false, cx)
+            })?
+                .await?;
+
+            this.update(cx, |this, cx| {
+                this.record_install_origin(
+                    extension_id.clone(),
+                    InstallOrigin::GitUrl {
+                        url: url.as_str().into(),
+                        checkout,
+                    },
+                    lathe_fields.requires,
+                    cx,
+                )
+            })?
+            .await
+            .log_err();
+
+            Ok(extension_id)
+        })
+    }
+
     pub fn rebuild_dev_extension(&mut self, extension_id: Arc<str>, cx: &mut Context<Self>) {
+        self.lathe_events_paused.remove(&extension_id);
         let path = self.installed_dir.join(extension_id.as_ref());
         let builder = self.builder.clone();
         let fs = self.fs.clone();
@@ -1424,6 +2296,7 @@ impl ExtensionStore {
 
         self.wasm_extensions
             .retain(|(extension, _)| !extensions_to_unload.contains(&extension.id));
+
         self.proxy.remove_user_themes(themes_to_remove);
         self.proxy.remove_icon_themes(icon_themes_to_remove);
         self.proxy

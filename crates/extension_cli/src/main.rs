@@ -118,7 +118,16 @@ async fn main() -> Result<()> {
 
     validate_extension_manifest(&manifest)?;
     let extension_provides = manifest.provides();
-    validate_extension_features(&extension_provides)?;
+    let wasm_path = extension_path.join("extension.wasm");
+    let uses_lathe_api = manifest.lib.kind.is_some()
+        && extension::extension_builder::uses_lathe_api(
+            &fs::read(&wasm_path).with_context(|| format!("reading {wasm_path:?}"))?,
+        )?;
+    // Commands and other Lathe API features are not part of `provides`, so an
+    // extension that only uses the Lathe API would otherwise look empty.
+    if !(uses_lathe_api && extension_provides.is_empty()) {
+        validate_extension_features(&extension_provides)?;
+    }
 
     let cx = TestingContext::new(&manifest, &extension_path);
     let grammars = test_grammars(&manifest, &extension_path, &mut wasm_store)?;

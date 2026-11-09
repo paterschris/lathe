@@ -307,6 +307,15 @@ fn available_commands(window: &Window, cx: &App) -> Vec<Command> {
                 usage: None,
             })
         })
+        .chain(
+            command_palette_hooks::extra_commands(cx)
+                .into_iter()
+                .map(|extra_command| Command {
+                    name: extra_command.name,
+                    action: extra_command.action,
+                    usage: None,
+                }),
+        )
         .collect()
 }
 
@@ -1172,6 +1181,59 @@ mod tests {
         });
         palette.read_with(cx, |palette, _| {
             assert!(palette.delegate.matches.is_empty())
+        });
+    }
+
+    #[gpui::test]
+    async fn test_extra_commands_are_listed_and_dispatched(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let db = cx.update(|cx| persistence::CommandPaletteDB::global(cx));
+        db.clear_all().await.unwrap();
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let editor = cx.new_window_entity(|window, cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_text("abc", window, cx);
+            editor
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(editor.clone()), None, true, window, cx);
+            editor.update(cx, |editor, cx| window.focus(&editor.focus_handle(cx), cx))
+        });
+
+        cx.update(|_, cx| {
+            command_palette_hooks::register_extra_commands(cx, |_| {
+                vec![command_palette_hooks::ExtraCommand {
+                    name: "My Extension: Delete Character".into(),
+                    action: Box::new(editor::actions::Backspace),
+                }]
+            });
+        });
+
+        cx.dispatch_action(Toggle);
+        cx.simulate_input("my extension delete");
+
+        let palette = workspace.update(cx, |workspace, cx| {
+            workspace
+                .active_modal::<CommandPalette>(cx)
+                .unwrap()
+                .read(cx)
+                .picker
+                .clone()
+        });
+        palette.read_with(cx, |palette, _| {
+            assert_eq!(
+                palette.delegate.matches[0].string,
+                "My Extension: Delete Character"
+            );
+        });
+
+        cx.dispatch_action(menu::Confirm);
+        workspace.update(cx, |_, cx| {
+            assert_eq!(editor.read(cx).text(cx), "ab");
         });
     }
 

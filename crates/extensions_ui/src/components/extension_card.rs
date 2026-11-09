@@ -6,6 +6,7 @@ use extension_host::{ExtensionOperation, ExtensionStatus, ExtensionStore};
 use gpui::{Anchor, ElementId, Entity, Point, SharedString, prelude::*};
 use release_channel::ReleaseChannel;
 use ui::{Chip, ContextMenu, PopoverMenu, Tooltip, prelude::*, utils::format_number_with_commas};
+use util::ResultExt as _;
 
 type ContextMenuBuilder = Box<
     dyn Fn(Arc<str>, SharedString, &mut Window, &mut App) -> Option<Entity<ContextMenu>> + 'static,
@@ -48,6 +49,9 @@ struct ExtensionCardDetails {
     repository_url: Option<SharedString>,
     repository_icon: IconName,
     provided_features: Vec<&'static str>,
+    lathe_only: bool,
+    /// Plain-language labels for the Lathe API capabilities it declares.
+    lathe_capability_labels: Vec<&'static str>,
     source: ExtensionCardSource,
 }
 
@@ -57,7 +61,9 @@ enum ExtensionCardSource {
     Installed,
     Remote {
         state: PublishedExtensionState,
-        download_count: u64,
+        /// `None` for extensions from a static registry, which has no server
+        /// to count downloads.
+        download_count: Option<u64>,
     },
 }
 
@@ -74,7 +80,7 @@ impl ExtensionCardSource {
 
     fn download_count(&self) -> Option<u64> {
         match self {
-            Self::Remote { download_count, .. } => Some(*download_count),
+            Self::Remote { download_count, .. } => *download_count,
             Self::Dev | Self::Installed => None,
         }
     }
@@ -104,7 +110,12 @@ pub struct ExtensionCard {
 impl ExtensionCard {
     pub fn for_dev(extension: Arc<ExtensionManifest>, extension_store: &ExtensionStore) -> Self {
         let status = extension_store.extension_status(&extension.id);
-        Self::manifest(extension, status, LocalExtensionKind::Dev)
+        let lathe_only = extension_store.is_lathe_only(&extension.id);
+        let labels = lathe_capability_labels(extension_store, &extension.id);
+        let permissions = Self::lathe_permissions_button(&extension.id, extension_store);
+        Self::manifest(extension, status, LocalExtensionKind::Dev, lathe_only)
+            .with_capability_labels(labels)
+            .with_extra_action(permissions)
     }
 
     pub fn for_installed(
@@ -112,7 +123,12 @@ impl ExtensionCard {
         extension_store: &ExtensionStore,
     ) -> Self {
         let status = extension_store.extension_status(&extension.id);
-        Self::manifest(extension, status, LocalExtensionKind::Installed)
+        let lathe_only = extension_store.is_lathe_only(&extension.id);
+        let labels = lathe_capability_labels(extension_store, &extension.id);
+        let permissions = Self::lathe_permissions_button(&extension.id, extension_store);
+        Self::manifest(extension, status, LocalExtensionKind::Installed, lathe_only)
+            .with_capability_labels(labels)
+            .with_extra_action(permissions)
     }
 
     pub fn for_remote(
@@ -121,13 +137,26 @@ impl ExtensionCard {
         cx: &App,
     ) -> Self {
         let state = PublishedExtensionState::new(&extension.id, extension_store);
-        Self::remote(extension, state, cx)
+        let lathe_only = extension_store.is_lathe_only(&extension.id);
+        let download_count = (!extension_store.registry_entries.contains_key(&extension.id))
+            .then_some(extension.download_count);
+        let labels = lathe_capability_labels(extension_store, &extension.id);
+        let permissions = Self::lathe_permissions_button(&extension.id, extension_store);
+        Self::remote(extension, state, lathe_only, download_count, cx)
+            .with_capability_labels(labels)
+            .with_extra_action(permissions)
+    }
+
+    fn with_capability_labels(mut self, labels: Vec<&'static str>) -> Self {
+        self.details.lathe_capability_labels = labels;
+        self
     }
 
     fn manifest(
         extension: Arc<ExtensionManifest>,
         status: ExtensionStatus,
         kind: LocalExtensionKind,
+        lathe_only: bool,
     ) -> Self {
         let actions = Self::actions_for_manifest_extension(&extension, &status, kind);
         let details = ExtensionCardDetails {
@@ -139,6 +168,8 @@ impl ExtensionCard {
             repository_url: extension.repository.clone().map(Into::into),
             repository_icon: IconName::Link,
             provided_features: provided_feature_labels(extension.provides()),
+            lathe_only,
+            lathe_capability_labels: Vec::new(),
             source: match kind {
                 LocalExtensionKind::Dev => ExtensionCardSource::Dev,
                 LocalExtensionKind::Installed => ExtensionCardSource::Installed,
@@ -152,7 +183,13 @@ impl ExtensionCard {
         }
     }
 
-    fn remote(extension: &ExtensionMetadata, state: PublishedExtensionState, cx: &App) -> Self {
+    fn remote(
+        extension: &ExtensionMetadata,
+        state: PublishedExtensionState,
+        lathe_only: bool,
+        download_count: Option<u64>,
+        cx: &App,
+    ) -> Self {
         let actions = Self::actions_for_remote_extension(extension, &state, cx);
         let details = ExtensionCardDetails {
             id: extension.id.clone(),
@@ -163,9 +200,11 @@ impl ExtensionCard {
             repository_url: Some(extension.manifest.repository.clone().into()),
             repository_icon: IconName::Link,
             provided_features: provided_feature_labels(extension.manifest.provides.iter().copied()),
+            lathe_only,
+            lathe_capability_labels: Vec::new(),
             source: ExtensionCardSource::Remote {
                 state,
-                download_count: extension.download_count,
+                download_count,
             },
         };
 
@@ -296,13 +335,116 @@ impl ExtensionCard {
         )
         .on_click({
             let extension_id = extension_id.clone();
-            move |_, _, cx| {
+            move |_, window, cx| {
                 telemetry::event!("Extension Installed");
-                ExtensionStore::global(cx).update(cx, |store, cx| {
-                    store.install_latest_extension(extension_id.clone(), cx)
-                });
+                let store = ExtensionStore::global(cx);
+                let (name, capabilities) = {
+                    let store = store.read(cx);
+                    let granted = store.granted_lathe_capabilities(&extension_id);
+                    let name = store
+                        .registry_entries
+                        .get(&extension_id)
+                        .map(|registry_entry| registry_entry.entry.name.clone())
+                        .unwrap_or_else(|| extension_id.to_string());
+                    let capabilities = store
+                        .lathe_capabilities_for_display(&extension_id)
+                        .into_iter()
+                        .filter(|capability| !granted.contains(capability))
+                        .collect::<Vec<_>>();
+                    (name, capabilities)
+                };
+                if capabilities.is_empty() {
+                    store.update(cx, |store, cx| {
+                        store.install_latest_extension(extension_id.clone(), cx)
+                    });
+                    return;
+                }
+                let consent = crate::lathe_ui::ask_for_lathe_consent(
+                    &name,
+                    &capabilities,
+                    "Install and Allow",
+                    window,
+                    cx,
+                );
+                let extension_id = extension_id.clone();
+                cx.spawn(async move |cx| {
+                    if !consent.await {
+                        return;
+                    }
+                    let grant = store.update(cx, |store, cx| {
+                        store.grant_lathe_capabilities(extension_id.clone(), capabilities, cx)
+                    });
+                    if grant.await.log_err().is_some() {
+                        store.update(cx, |store, cx| {
+                            store.install_latest_extension(extension_id, cx)
+                        });
+                    }
+                })
+                .detach();
             }
         })
+    }
+
+    /// "Allow…" when the extension declares Lathe capabilities the user has
+    /// not granted, "Revoke" when it has some granted.
+    fn lathe_permissions_button(
+        extension_id: &Arc<str>,
+        extension_store: &ExtensionStore,
+    ) -> Option<Button> {
+        let needs_consent = !extension_store
+            .lathe_capabilities_needing_consent(extension_id)
+            .is_empty();
+        let has_grants = !extension_store
+            .granted_lathe_capabilities(extension_id)
+            .is_empty();
+        let extension_id = extension_id.clone();
+        if needs_consent {
+            Some(
+                Button::new(
+                    SharedString::from(format!("allow-lathe-{extension_id}")),
+                    "Allow…",
+                )
+                .style(ButtonStyle::Tinted(ui::TintColor::Warning))
+                .tooltip(Tooltip::text(
+                    "This extension needs your permission for some Lathe features",
+                ))
+                .on_click(move |_, window, cx| {
+                    crate::lathe_ui::request_missing_lathe_capabilities(
+                        extension_id.clone(),
+                        window,
+                        cx,
+                    )
+                }),
+            )
+        } else if has_grants {
+            Some(
+                Button::new(
+                    SharedString::from(format!("revoke-lathe-{extension_id}")),
+                    "Revoke",
+                )
+                .style(ButtonStyle::OutlinedGhost)
+                .tooltip(Tooltip::text("Withdraw this extension's Lathe permissions"))
+                .on_click(move |_, _, cx| {
+                    ExtensionStore::global(cx).update(cx, |store, cx| {
+                        store
+                            .revoke_lathe_capabilities(extension_id.clone(), cx)
+                            .detach_and_log_err(cx)
+                    });
+                }),
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Puts `button` in the first free action slot, if there is one.
+    fn with_extra_action(mut self, button: Option<Button>) -> Self {
+        if let Some(button) = button
+            && let Some(slot) = self.actions.iter_mut().find(|slot| slot.is_none())
+        {
+            *slot = Some(button);
+        }
+        self
     }
 
     fn actions_for_remote_extension(
@@ -514,6 +656,8 @@ impl Component for ExtensionCard {
                         [ExtensionProvides::Languages],
                     ),
                     PublishedExtensionState::Store(ExtensionStatus::NotInstalled),
+                    false,
+                    Some(482_391),
                     cx,
                 )
                 .into_any_element(),
@@ -534,6 +678,8 @@ impl Component for ExtensionCard {
                         ],
                     ),
                     PublishedExtensionState::Store(ExtensionStatus::Installed("0.5.1".into())),
+                    false,
+                    Some(1_284_613),
                     cx,
                 )
                 .into_any_element(),
@@ -553,6 +699,8 @@ impl Component for ExtensionCard {
                         ],
                     ),
                     PublishedExtensionState::Store(ExtensionStatus::Installed("0.3.1".into())),
+                    false,
+                    Some(2_947_028),
                     cx,
                 )
                 .into_any_element(),
@@ -563,6 +711,7 @@ impl Component for ExtensionCard {
                     dev_extension(),
                     ExtensionStatus::Installed("0.1.0".into()),
                     LocalExtensionKind::Dev,
+                    false,
                 )
                 .into_any_element(),
             ),
@@ -578,6 +727,26 @@ impl Component for ExtensionCard {
                         [ExtensionProvides::Themes],
                     ),
                     PublishedExtensionState::OverriddenByDevExtension,
+                    false,
+                    Some(36_512),
+                    cx,
+                )
+                .into_any_element(),
+            ),
+            single_example(
+                "Lathe Only",
+                ExtensionCard::remote(
+                    &remote_extension(
+                        "preview-lathe-only",
+                        "Insert Date",
+                        "0.1.0",
+                        "An extension published to the Lathe registry.",
+                        0,
+                        [ExtensionProvides::Languages],
+                    ),
+                    PublishedExtensionState::Store(ExtensionStatus::NotInstalled),
+                    true,
+                    None,
                     cx,
                 )
                 .into_any_element(),
@@ -607,6 +776,8 @@ impl RenderOnce for ExtensionCard {
             repository_url,
             repository_icon,
             provided_features,
+            lathe_only,
+            lathe_capability_labels,
             source,
         } = details;
         let installed_version = source.installed_version(&version);
@@ -654,6 +825,21 @@ impl RenderOnce for ExtensionCard {
                                     Headline::new(format!("(v{installed_version} installed)"))
                                         .size(HeadlineSize::XSmall)
                                 }))
+                                .children(lathe_capability_labels.into_iter().map(|label| {
+                                    Chip::new(label).label_color(Color::Warning).tooltip(
+                                        Tooltip::text(
+                                            "Declared in the extension's lathe_capabilities",
+                                        ),
+                                    )
+                                }))
+                                .when(lathe_only, |parent| {
+                                    parent.child(
+                                        Chip::new("Lathe")
+                                            .label_color(Color::Accent)
+                                            .border_color(cx.theme().colors().border_focused)
+                                            .tooltip(Tooltip::text("Only works in Lathe")),
+                                    )
+                                })
                                 .when(!provided_features.is_empty(), |parent| {
                                     parent.child(
                                         h_flex()
@@ -773,4 +959,15 @@ impl RenderOnce for ExtensionCard {
                 }),
         )
     }
+}
+
+fn lathe_capability_labels(
+    extension_store: &ExtensionStore,
+    extension_id: &str,
+) -> Vec<&'static str> {
+    extension_store
+        .lathe_capabilities_for_display(extension_id)
+        .into_iter()
+        .map(|capability| capability.label())
+        .collect()
 }

@@ -1,0 +1,25 @@
+[package]
+name = "lathe_extension_api"
+version = "0.1.0"
+description = "Lathe-only APIs for Lathe extensions, used alongside zed_extension_api"
+repository = "https://github.com/paterschris/lathe"
+documentation = "https://docs.rs/lathe_extension_api"
+readme = "README.md"
+keywords = ["lathe", "zed", "extension"]
+edition.workspace = true
+# Flip to `true` when 0.1 is frozen and ready for crates.io.
+publish = false
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lathe_extension_api.rs"
+test = false
+doctest = false
+
+[dependencies]
+# Must match the wit-bindgen version used by zed_extension_api, so both
+# crates share one runtime inside the extension's wasm component.
+wit-bindgen = "0.41"

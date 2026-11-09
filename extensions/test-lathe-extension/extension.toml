@@ -1,0 +1,17 @@
+id = "test-lathe-extension"
+name = "Test Lathe Extension"
+description = "An extension that uses the Lathe-only API, for use in tests."
+version = "0.1.0"
+schema_version = 1
+requires = ["lathe"]
+lathe_capabilities = [
+    "buffer:read",
+    "buffer:write",
+    "events:save",
+    "events:change",
+    "ui:status",
+    "ui:prompt",
+    "tasks:spawn",
+]
+authors = ["Chris Paterson <chris.r.paterson@gmail.com>"]
+repository = "https://github.com/paterschris/lathe"

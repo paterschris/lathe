@@ -125,6 +125,7 @@ members = [
     "crates/journal",
     "crates/json_schema_store",
     "crates/keymap_editor",
+    "crates/lathe_extension_api",
     "crates/language",
     "crates/language_core",
     "crates/language_detection",
@@ -272,6 +273,7 @@ members = [
     "extensions/html",
     "extensions/proto",
     "extensions/test-extension",
+    "extensions/test-lathe-extension",
 
     #
     # Tooling

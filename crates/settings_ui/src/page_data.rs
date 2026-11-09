@@ -539,7 +539,7 @@ fn general_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn extensions_section() -> [SettingsPageItem; 2] {
+    fn extensions_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader("Extensions"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -555,6 +555,42 @@ fn general_page(cx: &App) -> SettingsPage {
                 }),
                 metadata: None,
                 files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Extension Registries",
+                description: "URLs of additional extension registries (static index.json files) to list alongside the Zed registry.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("extension_registries"),
+                        pick: |settings_content| {
+                            settings_content.extension.extension_registries.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.extension.extension_registries = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Extension Settings",
+                description: "Settings for individual extensions, keyed by extension id.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("extension_settings"),
+                        pick: |settings_content| Some(&settings_content.project.extension_settings),
+                        write: |settings_content, value, _| {
+                            settings_content.project.extension_settings = value.unwrap_or_default();
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER | PROJECT,
             }),
         ]
     }

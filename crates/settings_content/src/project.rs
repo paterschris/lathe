@@ -69,6 +69,17 @@ pub struct ProjectSettingsContent {
     #[serde(default)]
     pub context_servers: HashMap<Arc<str>, ContextServerSettingsContent>,
 
+    /// Settings for individual extensions, keyed by extension id. Each
+    /// extension can read its own entry through the Lathe extension API.
+    ///
+    /// Allowed in project settings files too. A project's values are only
+    /// applied once the project is trusted, like the rest of its settings, and
+    /// override the user's values for files in that project.
+    ///
+    /// Default: {}
+    #[serde(default)]
+    pub extension_settings: HashMap<Arc<str>, serde_json::Value>,
+
     /// Default timeout in seconds for context server tool calls.
     /// Can be overridden per-server in context_servers configuration.
     ///
@@ -92,7 +103,7 @@ crate::fallible_options::flattened_deserialize!(ProjectSettingsContent {
     options: {
         terminal, context_server_timeout, load_direnv, git_hosting_providers, disable_ai,
     },
-    defaults: { lsp, dap, context_servers },
+    defaults: { lsp, dap, context_servers, extension_settings },
 });
 
 /// When to scan content of linked directories.

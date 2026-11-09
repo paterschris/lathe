@@ -6188,6 +6188,7 @@ dependencies = [
  "async-compression",
  "async-tar",
  "async-trait",
+ "chrono",
  "client",
  "cloud_api_types",
  "collections",
@@ -6218,6 +6219,8 @@ dependencies = [
  "serde_json",
  "serde_json_lenient",
  "settings",
+ "sha2",
+ "smol",
  "task",
  "telemetry",
  "tempfile",
@@ -6231,6 +6234,7 @@ dependencies = [
  "wasmparser 0.254.2",
  "wasmtime",
  "wasmtime-wasi",
+ "which",
  "zlog",
  "ztracing",
 ]
@@ -6247,6 +6251,7 @@ name = "extensions_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clock",
  "cloud_api_types",
  "collections",
  "command_palette_hooks",
@@ -6257,6 +6262,7 @@ dependencies = [
  "extension_host",
  "extension_suggest",
  "fs",
+ "futures 0.3.34",
  "fuzzy",
  "git",
  "gpui",
@@ -6264,6 +6270,7 @@ dependencies = [
  "language",
  "log",
  "markdown",
+ "parking_lot",
  "paths",
  "picker",
  "project",
@@ -6274,9 +6281,13 @@ dependencies = [
  "serde_json",
  "settings",
  "strum 0.28.0",
+ "task",
  "telemetry",
+ "text",
+ "theme",
  "theme_settings",
  "ui",
+ "url",
  "util",
  "vim_mode_setting",
  "workspace",
@@ -10107,10 +10118,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lathe_extension_api"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
 name = "lathe_hooks"
 version = "0.1.0"
 dependencies = [
  "gpui",
+]
+
+[[package]]
+name = "lathe_test_extension"
+version = "0.1.0"
+dependencies = [
+ "lathe_extension_api",
+ "zed_extension_api 0.7.0",
 ]
 
 [[package]]

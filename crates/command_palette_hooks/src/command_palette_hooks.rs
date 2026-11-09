@@ -151,3 +151,43 @@ impl GlobalCommandPaletteInterceptor {
         Some(handler(query, workspace, cx))
     }
 }
+
+/// A command palette entry whose label is not derived from its action's name,
+/// such as a command contributed by an extension.
+pub struct ExtraCommand {
+    /// The label shown in the command palette.
+    pub name: gpui::SharedString,
+    /// The action dispatched when the entry is confirmed.
+    pub action: Box<dyn Action>,
+}
+
+type ExtraCommandProvider = Rc<dyn Fn(&App) -> Vec<ExtraCommand>>;
+
+#[derive(Default)]
+struct GlobalExtraCommandProviders(Vec<ExtraCommandProvider>);
+
+impl Global for GlobalExtraCommandProviders {}
+
+/// Registers a function that contributes additional entries every time the
+/// command palette opens. Unlike [`GlobalCommandPaletteInterceptor`], any
+/// number of providers can be registered.
+pub fn register_extra_commands(
+    cx: &mut App,
+    provider: impl Fn(&App) -> Vec<ExtraCommand> + 'static,
+) {
+    cx.default_global::<GlobalExtraCommandProviders>()
+        .0
+        .push(Rc::new(provider));
+}
+
+/// Collects the entries from every registered provider.
+pub fn extra_commands(cx: &App) -> Vec<ExtraCommand> {
+    let Some(providers) = cx.try_global::<GlobalExtraCommandProviders>() else {
+        return Vec::new();
+    };
+    providers
+        .0
+        .iter()
+        .flat_map(|provider| provider(cx))
+        .collect()
+}

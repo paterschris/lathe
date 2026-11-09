@@ -1,0 +1,166 @@
+package lathe:extension@0.1.0;
+
+/// Commands an extension makes available in the command palette and keymap.
+interface commands {
+    record command-spec {
+        /// Unique within the extension. Lowercase letters, digits and `-`.
+        id: string,
+        /// Shown in the command palette.
+        title: string,
+    }
+
+    /// Registers a command. Call this while the extension initializes.
+    register-command: func(spec: command-spec) -> result<_, string>;
+}
+
+/// Access to the buffer a command was run from (its editor) or that an event
+/// is about.
+///
+/// Offsets are UTF-8 byte offsets into the buffer text. Each snapshot carries
+/// a version; edits and selection changes made against an older version are
+/// rejected, so an extension never edits text it has not seen.
+///
+/// Reading needs the `buffer:read` capability and editing or selecting needs
+/// `buffer:write`, declared in `lathe_capabilities` in `extension.toml`.
+interface buffers {
+    record byte-range {
+        start: u64,
+        end: u64,
+    }
+
+    record buffer-edit {
+        range: byte-range,
+        text: string,
+    }
+
+    record buffer-snapshot {
+        version: u64,
+        /// The file's path within its project, if the buffer has a file.
+        path: option<string>,
+        /// The file's absolute path, for files on this machine.
+        abs-path: option<string>,
+        /// The absolute path of the project folder that contains the file.
+        worktree-root: option<string>,
+        language: option<string>,
+        text: string,
+        /// Every selection in the editor; an empty range is a cursor.
+        selections: list<byte-range>,
+    }
+
+    /// Returns `none` when a command was not run from a single-file editor.
+    active-buffer: func() -> result<option<buffer-snapshot>, string>;
+
+    /// Applies all edits as one undoable change. Ranges must not overlap.
+    edit-active-buffer: func(version: u64, edits: list<buffer-edit>) -> result<_, string>;
+
+    /// Replaces the editor's selections. Only while a command runs; event
+    /// handlers have no editor.
+    select-in-active-buffer: func(version: u64, ranges: list<byte-range>) -> result<_, string>;
+}
+
+/// Small pieces of UI an extension can show.
+interface ui {
+    enum notification-level {
+        info,
+        warning,
+        error,
+    }
+
+    record pick-item {
+        /// Returned by `quick-pick` when this item is chosen.
+        id: string,
+        label: string,
+        detail: option<string>,
+    }
+
+    /// Sets this extension's text in the status bar; `none` hides it.
+    /// Needs the `ui:status` capability.
+    set-status-text: func(text: option<string>, tooltip: option<string>) -> result<_, string>;
+
+    /// Shows a notification. Needs the `ui:status` capability.
+    show-notification: func(level: notification-level, message: string) -> result<_, string>;
+
+    /// Asks the user for a line of text; `none` if they dismiss it.
+    /// Needs the `ui:prompt` capability and can only be called from a command.
+    prompt-input: func(label: string, placeholder: option<string>) -> result<option<string>, string>;
+
+    /// Lets the user choose one item; returns its `id`, or `none` if they
+    /// dismiss it. Needs `ui:prompt` and can only be called from a command.
+    quick-pick: func(label: string, items: list<pick-item>) -> result<option<string>, string>;
+}
+
+/// Runs commands as Lathe tasks, in a terminal tab. Needs the `tasks:spawn`
+/// capability. Allowed from commands and event handlers: the call returns as
+/// soon as the task starts, so a long command never holds up the extension.
+interface tasks {
+    enum task-reveal {
+        /// Show and focus the task's terminal.
+        always,
+        /// Show the terminal without moving focus to it.
+        no-focus,
+        /// Only add the terminal tab; do not show it.
+        never,
+    }
+
+    record task-spec {
+        /// Shown on the terminal tab. Lathe prefixes the extension's name.
+        /// Starting a task with the same label as one that is still running
+        /// waits for it to finish, then reuses its terminal.
+        label: string,
+        command: string,
+        args: list<string>,
+        /// Absolute working directory; defaults to the project folder.
+        cwd: option<string>,
+        env: list<tuple<string, string>>,
+        reveal: task-reveal,
+    }
+
+    spawn-task: func(task: task-spec) -> result<_, string>;
+}
+
+/// The extension's own section of `"extension_settings": { "<extension id>": ... }`.
+/// Resolved for the file the running command or event is about: a trusted
+/// project's settings override the user's for that project's files.
+interface extension-settings {
+    /// The section as JSON, or `none` if it is not set.
+    get: func() -> result<option<string>, string>;
+}
+
+/// Buffer events an extension can subscribe to by declaring the matching
+/// capability (`events:open`, `events:save`, `events:change`). While a handler
+/// runs, `buffers.active-buffer` returns the buffer the event is about.
+interface events {
+    enum buffer-event {
+        /// A file was opened in this project.
+        opened,
+        /// A file was saved.
+        saved,
+        /// A file's text changed. Delivered after typing pauses.
+        changed,
+    }
+}
+
+/// Implemented by the extension to receive the events it declared.
+interface event-handler {
+    use events.{buffer-event};
+
+    on-buffer-event: func(event: buffer-event) -> result<_, string>;
+}
+
+/// Implemented by the extension to run the commands it registered.
+interface command-handler {
+    run-command: func(command-id: string) -> result<_, string>;
+}
+
+/// The Lathe-only parts of an extension. An extension's component combines
+/// this world with `zed:extension/extension`.
+world extension {
+    import commands;
+    import buffers;
+    import ui;
+    import events;
+    import tasks;
+    import extension-settings;
+    export command-handler;
+    export event-handler;
+}

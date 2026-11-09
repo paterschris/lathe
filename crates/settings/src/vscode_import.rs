@@ -584,6 +584,7 @@ impl VsCodeSettings {
             dap: Default::default(),
             context_servers: self.context_servers(),
             context_server_timeout: None,
+            extension_settings: Default::default(),
             load_direnv: None,
             git_hosting_providers: None,
             disable_ai: None,

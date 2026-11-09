@@ -1,6 +1,8 @@
 mod components;
 mod extension_suggestions;
 mod extension_version_selector;
+mod lathe_editor;
+pub(crate) mod lathe_ui;
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -33,6 +35,7 @@ use ui::{
     Switch, ToggleButtonGroup, ToggleButtonGroupSize, ToggleButtonGroupStyle, ToggleButtonSimple,
     WithScrollbar, prelude::*,
 };
+use url::Url;
 use util::ResultExt;
 use vim_mode_setting::VimModeSetting;
 use workspace::{
@@ -65,6 +68,72 @@ pub struct RebuildDevExtension {
     /// Default: opens a picker if multiple dev extensions are installed.
     #[serde(default)]
     pub extension_id: Option<String>,
+}
+
+/// Runs a command contributed by an extension through the Lathe extension API.
+///
+/// Bind it in your keymap, for example:
+/// `"ctrl-alt-d": ["extension::RunCommand", { "extension_id": "insert-date", "command": "insert-date" }]`
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, gpui::Action)]
+#[action(namespace = extension)]
+#[serde(deny_unknown_fields)]
+pub struct RunCommand {
+    /// The id of the extension that registered the command.
+    pub extension_id: String,
+    /// The command's id within that extension.
+    pub command: String,
+}
+
+fn extension_command_palette_entries(cx: &App) -> Vec<command_palette_hooks::ExtraCommand> {
+    let Some(store) = ExtensionStore::try_global(cx) else {
+        return Vec::new();
+    };
+    store
+        .read(cx)
+        .lathe_commands()
+        .map(|(manifest, command)| command_palette_hooks::ExtraCommand {
+            name: format!("{}: {}", manifest.name, command.title).into(),
+            action: Box::new(RunCommand {
+                extension_id: manifest.id.to_string(),
+                command: command.id.to_string(),
+            }),
+        })
+        .collect()
+}
+
+fn run_extension_command(
+    workspace: &mut Workspace,
+    action: &RunCommand,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let RunCommand {
+        extension_id,
+        command,
+    } = action.clone();
+    let editor = workspace.active_item_as::<Editor>(cx).map(|editor| {
+        Arc::new(lathe_editor::ExtensionEditorDelegate::new(
+            editor.downgrade(),
+            window.window_handle(),
+        )) as Arc<dyn extension_host::wasm_host::lathe::LatheEditorDelegate>
+    });
+    let run = ExtensionStore::global(cx).update(cx, |store, cx| {
+        store.run_lathe_command(&extension_id, command.as_str().into(), editor, cx)
+    });
+    cx.spawn(async move |workspace, cx| {
+        if let Err(error) = run.await {
+            log::error!("extension command {extension_id}/{command} failed: {error:#}");
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.show_error(
+                        format!("Extension command {extension_id}/{command} failed: {error:#}"),
+                        cx,
+                    );
+                })
+                .log_err();
+        }
+    })
+    .detach();
 }
 
 #[derive(Default)]
@@ -111,10 +180,19 @@ pub fn init(cx: &mut App) {
     .detach();
     extension_suggestions::init(cx);
 
-    cx.observe_new(move |workspace: &mut Workspace, window, _cx| {
-        if window.is_none() {
+    // Extension commands appear in the palette by their own titles, so the
+    // generic action would only be a confusing duplicate there.
+    CommandPaletteFilter::update_global(cx, |filter, _| {
+        filter.hide_action_types(&[TypeId::of::<RunCommand>()]);
+    });
+    command_palette_hooks::register_extra_commands(cx, extension_command_palette_entries);
+    lathe_ui::init(cx);
+
+    cx.observe_new(move |workspace: &mut Workspace, window, cx| {
+        let Some(window) = window else {
             return;
-        }
+        };
+        lathe_ui::add_status_item(workspace, window, cx);
         workspace
             .register_action(
                 move |workspace, action: &zed_actions::Extensions, window, cx| {
@@ -168,6 +246,9 @@ pub fn init(cx: &mut App) {
                     }
                 },
             )
+            .register_action(|workspace, action: &RunCommand, window, cx| {
+                run_extension_command(workspace, action, window, cx)
+            })
             .register_action(move |workspace, _: &InstallDevExtension, window, cx| {
                 let store = ExtensionStore::global(cx);
                 let prompt = workspace.prompt_for_open_path(
@@ -386,6 +467,40 @@ enum FetchDebounce {
     Immediate,
     /// Debounce the fetch if there is a search query.
     WhenSearching,
+}
+
+/// An extension location typed into the search box.
+#[derive(Clone, Debug, PartialEq)]
+enum InstallSource {
+    /// A packaged `.tar.gz` archive.
+    Archive(Url),
+    /// A git repository to clone and build.
+    Git(String),
+}
+
+impl InstallSource {
+    fn parse(search: &str) -> Option<Self> {
+        let search = search.trim();
+        if let Ok(url) = Url::parse(search)
+            && url.scheme() == "https"
+            && url.host_str().is_some()
+        {
+            let path = url.path();
+            if path.ends_with(".tar.gz") || path.ends_with(".tgz") {
+                return Some(Self::Archive(url));
+            }
+        }
+        extension_host::registry::validate_git_url(search)
+            .is_ok()
+            .then(|| Self::Git(search.to_string()))
+    }
+
+    fn location(&self) -> String {
+        match self {
+            Self::Archive(url) => url.to_string(),
+            Self::Git(url) => url.clone(),
+        }
+    }
 }
 
 pub struct ExtensionsPage {
@@ -985,7 +1100,96 @@ impl ExtensionsPage {
         }
     }
 
-    fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn install_source_in_search(&self, cx: &mut App) -> Option<InstallSource> {
+        InstallSource::parse(&self.search_query(cx)?)
+    }
+
+    fn install_from_source(
+        &mut self,
+        source: InstallSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let install = self.extension_store.update(cx, |store, cx| match &source {
+            InstallSource::Archive(url) => {
+                store.install_extension_from_archive_url(url.clone(), cx)
+            }
+            InstallSource::Git(url) => store.install_extension_from_git_url(url.clone(), cx),
+        });
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| match install.await {
+            Ok(extension_id) => {
+                this.update_in(cx, |this, window, cx| {
+                    this.focus_extension(&extension_id, window, cx);
+                    lathe_ui::request_missing_lathe_capabilities(extension_id.clone(), window, cx);
+                })
+                .log_err();
+            }
+            Err(error) => {
+                let location = source.location();
+                log::error!("Failed to install extension from {location}: {error:#}");
+                workspace
+                    .update(cx, |workspace, cx| {
+                        workspace.show_error(
+                            format!("Failed to install extension from {location}: {error:#}"),
+                            cx,
+                        );
+                    })
+                    .log_err();
+            }
+        })
+        .detach();
+    }
+
+    fn render_install_from_source(
+        &self,
+        source: InstallSource,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (prompt, detail, button_label) = match &source {
+            InstallSource::Archive(_) => (
+                "Install the extension archive at this URL?",
+                "The URL must point to a packaged extension (.tar.gz). \
+                 Extensions installed from a URL do not update automatically.",
+                "Install from URL",
+            ),
+            InstallSource::Git(_) => (
+                "Clone this repository and build it as a dev extension?",
+                "Building needs git, and for extensions with Rust code, rustup with the \
+                 wasm32-wasip2 target. Use Rebuild to pick up changes; it does not update \
+                 automatically.",
+                "Clone and Install",
+            ),
+        };
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(Label::new(prompt))
+            .child(
+                Label::new(detail)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                Button::new("install-extension-from-url", button_label)
+                    .style(ButtonStyle::Outlined)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.install_from_source(source.clone(), window, cx)
+                    })),
+            )
+    }
+
+    fn render_empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.filter != ExtensionFilter::Installed
+            && let Some(source) = self.install_source_in_search(cx)
+        {
+            return self
+                .render_install_from_source(source, cx)
+                .into_any_element();
+        }
+
         let has_search = self.search_query(cx).is_some();
 
         // The `Installed` filter is fully local, so fetch progress and failure are
@@ -1052,6 +1256,7 @@ impl ExtensionsPage {
             .when(fetch_failure_is_relevant, |this| {
                 this.child(self.retry_button(cx))
             })
+            .into_any_element()
     }
 
     fn update_settings(
@@ -1662,5 +1867,38 @@ impl Item for ExtensionsPage {
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
         f(*event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InstallSource;
+
+    #[test]
+    fn test_install_source_parse() {
+        assert!(matches!(
+            InstallSource::parse(" https://example.com/releases/ext-0.1.0.tar.gz "),
+            Some(InstallSource::Archive(_))
+        ));
+        assert!(matches!(
+            InstallSource::parse("https://example.com/ext.tgz"),
+            Some(InstallSource::Archive(_))
+        ));
+        assert_eq!(
+            InstallSource::parse("https://github.com/example/ext"),
+            Some(InstallSource::Git("https://github.com/example/ext".into()))
+        );
+        assert_eq!(
+            InstallSource::parse("git@github.com:example/ext.git"),
+            Some(InstallSource::Git("git@github.com:example/ext.git".into()))
+        );
+        assert_eq!(InstallSource::parse("rust"), None);
+        assert_eq!(InstallSource::parse("id:rust"), None);
+        assert_eq!(InstallSource::parse("/Users/me/ext"), None);
+        assert_eq!(InstallSource::parse("http://insecure.example/ext"), None);
+        assert_eq!(
+            InstallSource::parse("http://insecure.example/ext.tar.gz"),
+            None
+        );
     }
 }

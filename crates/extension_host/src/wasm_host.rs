@@ -1,3 +1,4 @@
+pub mod lathe;
 pub mod wit;
 
 use crate::capability_granter::CapabilityGranter;
@@ -71,6 +72,36 @@ pub struct WasmHost {
     pub(crate) download_consent: Option<ConsentRequester>,
     _main_thread_message_task: Task<()>,
     main_thread_message_tx: mpsc::UnboundedSender<MainThreadCall>,
+    /// Shows status text, notifications and prompts for the Lathe API. Set by
+    /// the UI layer once it initializes.
+    pub(crate) lathe_ui: parking_lot::Mutex<Option<Arc<dyn lathe::LatheUiDelegate>>>,
+    pub(crate) lathe_grants: parking_lot::Mutex<lathe::LatheGrants>,
+}
+
+impl WasmHost {
+    pub fn set_lathe_ui(&self, delegate: Arc<dyn lathe::LatheUiDelegate>) {
+        *self.lathe_ui.lock() = Some(delegate);
+    }
+
+    pub(crate) fn lathe_ui(&self) -> Option<Arc<dyn lathe::LatheUiDelegate>> {
+        self.lathe_ui.lock().clone()
+    }
+
+    /// The engine is shared by every test in the process, and its epoch ticker
+    /// runs on whichever test's executor created it first, so tests that need
+    /// epochs to advance (to interrupt a guest) tick it themselves.
+    #[cfg(test)]
+    pub(crate) fn increment_epoch_for_test(&self) {
+        self.engine.increment_epoch();
+    }
+
+    pub fn lathe_grants(&self) -> lathe::LatheGrants {
+        self.lathe_grants.lock().clone()
+    }
+
+    pub(crate) fn set_lathe_grants(&self, grants: lathe::LatheGrants) {
+        *self.lathe_grants.lock() = grants;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -80,12 +111,75 @@ pub struct WasmExtension {
     pub work_dir: Arc<Path>,
     #[allow(unused)]
     pub zed_api_version: Version,
+    /// Set when the extension also implements the Lathe-only API.
+    pub lathe_api_version: Option<Version>,
+    /// Commands the extension registered with the Lathe API while it initialized.
+    pub lathe_commands: Arc<[lathe::LatheCommand]>,
+    /// Lathe capabilities the extension may use: those declared in
+    /// `lathe_capabilities` in `extension.toml` that the user has granted.
+    pub lathe_capabilities: Arc<collections::BTreeSet<lathe::LatheCapability>>,
+    /// Everything declared, granted or not.
+    pub lathe_declared_capabilities: Arc<collections::BTreeSet<lathe::LatheCapability>>,
+    /// Stops the call that is currently running in this extension.
+    pub lathe_interrupt: lathe::InterruptHandle,
+    /// `requires` from `extension.toml`, e.g. `["lathe"]`.
+    pub lathe_requires: Arc<[Arc<str>]>,
+    _channel_closer: Arc<CloseChannelOnDrop>,
     _task: Arc<Task<Result<(), gpui_tokio::JoinError>>>,
 }
 
-impl Drop for WasmExtension {
+/// Closes the extension's call channel once the last [`WasmExtension`] clone is
+/// dropped. Closing it from `WasmExtension::drop` would let any temporary
+/// clone stop the extension while other handles still use it.
+#[derive(Debug)]
+struct CloseChannelOnDrop(UnboundedSender<ExtensionCall>);
+
+impl Drop for CloseChannelOnDrop {
     fn drop(&mut self) {
-        self.tx.close_channel();
+        self.0.close_channel();
+    }
+}
+
+impl WasmExtension {
+    /// Runs a command the extension registered with the Lathe API.
+    pub async fn run_lathe_command(
+        &self,
+        command_id: Arc<str>,
+        editor: Option<Arc<dyn lathe::LatheEditorDelegate>>,
+    ) -> Result<()> {
+        if self.lathe_api_version.is_none() {
+            bail!("extension {} does not use the Lathe API", self.manifest.id);
+        }
+        if !self
+            .lathe_commands
+            .iter()
+            .any(|command| command.id == command_id)
+        {
+            bail!(
+                "extension {} has no command {command_id:?}",
+                self.manifest.id
+            );
+        }
+        self.call(move |_extension, store| {
+            async move { lathe::run_command(store, &command_id, editor).await }.boxed()
+        })
+        .await?
+    }
+
+    /// Delivers a buffer event to the extension. While the handler runs,
+    /// `active-buffer` reads from `buffer`.
+    pub async fn dispatch_lathe_buffer_event(
+        &self,
+        event: lathe::LatheBufferEvent,
+        buffer: Arc<dyn lathe::LatheEditorDelegate>,
+    ) -> Result<()> {
+        if !self.lathe_capabilities.contains(&event.capability()) {
+            return Ok(());
+        }
+        self.call(move |_extension, store| {
+            async move { lathe::dispatch_buffer_event(store, event, buffer).await }.boxed()
+        })
+        .await?
     }
 }
 
@@ -560,6 +654,7 @@ pub struct WasmState {
     pub host: Arc<WasmHost>,
     pub(crate) capability_granter: CapabilityGranter,
     pub(crate) language_server_status_source: Option<gpui::EntityId>,
+    pub(crate) lathe: lathe::LatheState,
 }
 
 type MainThreadCall = Box<dyn Send + for<'a> FnOnce(&'a mut AsyncApp) -> LocalBoxFuture<'a, ()>>;
@@ -673,6 +768,8 @@ impl WasmHost {
             download_consent,
             _main_thread_message_task: task,
             main_thread_message_tx: tx,
+            lathe_ui: parking_lot::Mutex::new(None),
+            lathe_grants: parking_lot::Mutex::new(Default::default()),
         })
     }
 
@@ -680,6 +777,23 @@ impl WasmHost {
         self: &Arc<Self>,
         wasm_bytes: Vec<u8>,
         manifest: &Arc<ExtensionManifest>,
+        cx: &AsyncApp,
+    ) -> Task<Result<WasmExtension>> {
+        self.load_extension_with_lathe_capabilities(
+            wasm_bytes,
+            manifest,
+            Default::default(),
+            Default::default(),
+            cx,
+        )
+    }
+
+    pub fn load_extension_with_lathe_capabilities(
+        self: &Arc<Self>,
+        wasm_bytes: Vec<u8>,
+        manifest: &Arc<ExtensionManifest>,
+        lathe_declared_capabilities: collections::BTreeSet<lathe::LatheCapability>,
+        lathe_capabilities: collections::BTreeSet<lathe::LatheCapability>,
         cx: &AsyncApp,
     ) -> Task<Result<WasmExtension>> {
         let this = self.clone();
@@ -694,72 +808,123 @@ impl WasmHost {
 
             executor.spawn(async move {
                 let zed_api_version = parse_wasm_extension_version(&manifest_id, &wasm_bytes)?;
+                let lathe_api_version = parse_lathe_api_version(&manifest_id, &wasm_bytes)?;
                 let component = Component::from_binary(&engine, &wasm_bytes)
                     .map_err(anyhow::Error::from)
                     .context("failed to compile wasm component")?;
 
-                anyhow::Ok((zed_api_version, component))
+                anyhow::Ok((zed_api_version, lathe_api_version, component))
             })
         };
 
-        let load_extension = |zed_api_version: Version, component| async move {
-            let wasi_ctx = this.build_wasi_ctx(&manifest).await?;
-            let mut store = wasmtime::Store::new(
-                &this.engine,
-                WasmState {
-                    ctx: wasi_ctx,
-                    manifest: manifest.clone(),
-                    table: ResourceTable::new(),
-                    host: this.clone(),
-                    capability_granter: CapabilityGranter::new(
-                        this.granted_capabilities.clone(),
-                        manifest.clone(),
-                    ),
-                    language_server_status_source: None,
-                },
-            );
-            // Store will yield after 1 tick, and get a new deadline of 1 tick after each yield.
-            store.set_epoch_deadline(1);
-            store.epoch_deadline_async_yield_and_update(1);
+        let lathe_capabilities_for_handle = Arc::new(lathe_capabilities.clone());
+        let lathe_declared_capabilities = Arc::new(lathe_declared_capabilities);
+        let lathe_interrupt = lathe::InterruptHandle::default();
+        let lathe_interrupt_for_store = lathe_interrupt.clone();
+        let load_extension =
+            |zed_api_version: Version, lathe_api_version: Option<Version>, component| async move {
+                let wasi_ctx = this.build_wasi_ctx(&manifest).await?;
+                let mut store = wasmtime::Store::new(
+                    &this.engine,
+                    WasmState {
+                        ctx: wasi_ctx,
+                        manifest: manifest.clone(),
+                        table: ResourceTable::new(),
+                        host: this.clone(),
+                        capability_granter: CapabilityGranter::new(
+                            this.granted_capabilities.clone(),
+                            manifest.clone(),
+                        ),
+                        language_server_status_source: None,
+                        lathe: lathe::LatheState {
+                            capabilities: lathe_capabilities.clone(),
+                            ..Default::default()
+                        },
+                    },
+                );
+                // Store will yield after 1 tick, and get a new deadline of 1 tick after each
+                // yield, unless the host asked to interrupt the running call.
+                store.set_epoch_deadline(1);
+                let interrupt = lathe_interrupt_for_store.clone();
+                store.epoch_deadline_callback(move |_| {
+                    Ok(if interrupt.take() {
+                        wasmtime::UpdateDeadline::Interrupt
+                    } else {
+                        wasmtime::UpdateDeadline::Yield(1)
+                    })
+                });
 
-            let mut extension = Extension::instantiate_async(
-                &executor,
-                &mut store,
-                this.release_channel,
-                zed_api_version.clone(),
-                &component,
-            )
-            .await?;
+                let mut extension = match &lathe_api_version {
+                    Some(lathe_api_version) => {
+                        lathe::instantiate(
+                            &executor,
+                            &mut store,
+                            this.release_channel,
+                            &zed_api_version,
+                            lathe_api_version,
+                            &component,
+                        )
+                        .await?
+                    }
+                    None => {
+                        Extension::instantiate_async(
+                            &executor,
+                            &mut store,
+                            this.release_channel,
+                            zed_api_version.clone(),
+                            &component,
+                        )
+                        .await?
+                    }
+                };
 
-            extension
-                .call_init_extension(&mut store)
-                .await
-                .map_err(anyhow::Error::from)
-                .context("failed to initialize wasm extension")?;
+                store.data_mut().lathe.initializing = true;
+                let init_result = extension
+                    .call_init_extension(&mut store)
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .context("failed to initialize wasm extension");
+                store.data_mut().lathe.initializing = false;
+                init_result?;
+                let lathe_commands: Arc<[lathe::LatheCommand]> =
+                    std::mem::take(&mut store.data_mut().lathe.commands).into();
 
-            let (tx, mut rx) = mpsc::unbounded::<ExtensionCall>();
-            let extension_task = async move {
-                while let Some(call) = rx.next().await {
-                    (call)(&mut extension, &mut store).await;
-                }
+                let (tx, mut rx) = mpsc::unbounded::<ExtensionCall>();
+                let extension_task = async move {
+                    while let Some(call) = rx.next().await {
+                        (call)(&mut extension, &mut store).await;
+                    }
+                };
+
+                anyhow::Ok((
+                    extension_task,
+                    manifest.clone(),
+                    this.work_dir.join(manifest.id.as_ref()).into(),
+                    tx,
+                    zed_api_version,
+                    lathe_api_version,
+                    lathe_commands,
+                ))
             };
 
-            anyhow::Ok((
-                extension_task,
-                manifest.clone(),
-                this.work_dir.join(manifest.id.as_ref()).into(),
-                tx,
-                zed_api_version,
-            ))
-        };
-
         cx.spawn(async move |cx| {
-            let (zed_api_version, component) = compile_task.await?;
+            let (zed_api_version, lathe_api_version, component) = compile_task.await?;
 
             // Run wasi-dependent operations on tokio.
             // wasmtime_wasi internally uses tokio for I/O operations.
-            let (extension_task, manifest, work_dir, tx, zed_api_version) =
-                gpui_tokio::Tokio::spawn(cx, load_extension(zed_api_version, component)).await??;
+            let (
+                extension_task,
+                manifest,
+                work_dir,
+                tx,
+                zed_api_version,
+                lathe_api_version,
+                lathe_commands,
+            ) = gpui_tokio::Tokio::spawn(
+                cx,
+                load_extension(zed_api_version, lathe_api_version, component),
+            )
+            .await??;
 
             // Run the extension message loop on tokio since extension
             // calls may invoke wasi functions that require a tokio runtime.
@@ -768,8 +933,15 @@ impl WasmHost {
             Ok(WasmExtension {
                 manifest,
                 work_dir,
+                _channel_closer: Arc::new(CloseChannelOnDrop(tx.clone())),
                 tx,
                 zed_api_version,
+                lathe_api_version,
+                lathe_commands,
+                lathe_capabilities: lathe_capabilities_for_handle,
+                lathe_declared_capabilities,
+                lathe_interrupt,
+                lathe_requires: Arc::from([]),
                 _task: task,
             })
         })
@@ -879,6 +1051,29 @@ pub fn parse_wasm_extension_version(extension_id: &str, wasm_bytes: &[u8]) -> Re
     version.with_context(|| format!("extension {extension_id} has no zed:api-version section"))
 }
 
+/// Returns the Lathe API version embedded by `lathe_extension_api`, or `None`
+/// for extensions that only use the Zed API.
+pub fn parse_lathe_api_version(extension_id: &str, wasm_bytes: &[u8]) -> Result<Option<Version>> {
+    let mut version = None;
+    for part in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
+        if let wasmparser::Payload::CustomSection(section) =
+            part.context("error parsing wasm extension")?
+            && section.name() == lathe::API_VERSION_SECTION
+        {
+            version = Some(
+                parse_wasm_extension_version_custom_section(section.data()).with_context(|| {
+                    format!(
+                        "extension {extension_id} has invalid {} section: {:?}",
+                        lathe::API_VERSION_SECTION,
+                        section.data()
+                    )
+                })?,
+            );
+        }
+    }
+    Ok(version)
+}
+
 fn parse_wasm_extension_version_custom_section(data: &[u8]) -> Option<Version> {
     if data.len() == 6 {
         Some(Version::new(
@@ -911,10 +1106,20 @@ impl WasmExtension {
             .read_to_end(&mut wasm_bytes)
             .context(format!("reading wasm file, path: {path:?}"))?;
 
-        wasm_host
-            .load_extension(wasm_bytes, manifest, cx)
+        let lathe_fields =
+            crate::registry::LatheManifestFields::load(wasm_host.fs.as_ref(), extension_dir)
+                .await?;
+        let declared = lathe::LatheCapability::parse_all(&lathe_fields.lathe_capabilities)
+            .with_context(|| format!("invalid lathe_capabilities for {}", manifest.id))?;
+        let granted = wasm_host.lathe_grants().granted(&manifest.id);
+        let effective = declared.intersection(&granted).copied().collect();
+
+        let mut extension = wasm_host
+            .load_extension_with_lathe_capabilities(wasm_bytes, manifest, declared, effective, cx)
             .await
-            .with_context(|| format!("loading wasm extension: {}", manifest.id))
+            .with_context(|| format!("loading wasm extension: {}", manifest.id))?;
+        extension.lathe_requires = lathe_fields.requires.into();
+        Ok(extension)
     }
 
     async fn call_with_language_server_status_source<T, Fn>(
