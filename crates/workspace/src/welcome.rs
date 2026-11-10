@@ -565,7 +565,7 @@ impl Render for WelcomePage {
                                     .child(img("images/lathe_logo.png").size(rems_from_px(45_f32)))
                                     .child(
                                         v_flex().child(Headline::new(welcome_label)).child(
-                                            Label::new("The editor for what's next")
+                                            Label::new("Craft your masterpiece")
                                                 .size(LabelSize::Small)
                                                 .color(Color::Muted)
                                                 .italic(),

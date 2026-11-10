@@ -356,7 +356,7 @@ impl Render for Onboarding {
                                                             .size(HeadlineSize::Small),
                                                     )
                                                     .child(
-                                                        Label::new("The editor for what's next")
+                                                        Label::new("Craft your masterpiece")
                                                             .color(Color::Muted)
                                                             .size(LabelSize::Small)
                                                             .italic(),
