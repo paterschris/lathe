@@ -652,9 +652,24 @@ impl PickerDelegate for CommandPaletteDelegate {
                     fuzzy_nucleo::LengthPenalty::On,
                     10000,
                     &Default::default(),
-                    executor,
+                    executor.clone(),
                 )
                 .await;
+                // Zed's own actions are shown as "lathe: ...", but people
+                // coming from Zed type "zed: ...", so search with both.
+                if let Some(lathe_query) = lathe_namespace_query(&query) {
+                    let lathe_matches = fuzzy_nucleo::match_strings_async(
+                        &candidates,
+                        &lathe_query,
+                        fuzzy_nucleo::Case::Smart,
+                        fuzzy_nucleo::LengthPenalty::On,
+                        10000,
+                        &Default::default(),
+                        executor,
+                    )
+                    .await;
+                    matches = merge_best_matches(matches, lathe_matches);
+                }
 
                 let used_commands = commands
                     .iter()
@@ -894,7 +909,68 @@ impl PickerDelegate for CommandPaletteDelegate {
     }
 }
 
+/// The namespace Zed's own app-level actions use (`zed::OpenSettings`).
+const ZED_NAMESPACE: &str = "zed";
+/// How that namespace is shown, since this is Lathe.
+const LATHE_NAMESPACE: &str = "lathe";
+
+/// For a query that starts with the word "zed" (as in "zed: open settings"),
+/// the same query with "lathe" in its place, so actions shown as "lathe: ..."
+/// still match what someone used to Zed types.
+fn lathe_namespace_query(query: &str) -> Option<String> {
+    let prefix = query.get(..ZED_NAMESPACE.len())?;
+    if !prefix.eq_ignore_ascii_case(ZED_NAMESPACE) {
+        return None;
+    }
+    let rest = &query[ZED_NAMESPACE.len()..];
+    if !(rest.is_empty() || rest.starts_with(':') || rest.starts_with(' ')) {
+        return None;
+    }
+    Some(format!("{LATHE_NAMESPACE}{rest}"))
+}
+
+/// Combines two match lists over the same candidates, keeping each
+/// candidate's better match, ordered by score as the matcher orders them.
+fn merge_best_matches(
+    first: Vec<fuzzy_nucleo::StringMatch>,
+    second: Vec<fuzzy_nucleo::StringMatch>,
+) -> Vec<fuzzy_nucleo::StringMatch> {
+    let mut best = std::collections::HashMap::<usize, fuzzy_nucleo::StringMatch>::new();
+    for string_match in first.into_iter().chain(second) {
+        match best.entry(string_match.candidate_id) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if string_match.score > entry.get().score {
+                    entry.insert(string_match);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(string_match);
+            }
+        }
+    }
+    let mut merged = best.into_values().collect::<Vec<_>>();
+    merged.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then(left.candidate_id.cmp(&right.candidate_id))
+    });
+    merged
+}
+
+/// A readable name for an action: `editor::GoToDefinition` becomes
+/// "editor: go to definition". Zed's own `zed::` actions read as "lathe: ..."
+/// here; their action names (used in keymaps) stay `zed::...`, so Zed keymaps
+/// keep working.
 pub fn humanize_action_name(name: &str) -> String {
+    let humanized = humanize_action_name_parts(name);
+    match humanized.strip_prefix(ZED_NAMESPACE) {
+        Some(rest) if rest.starts_with(':') => format!("{LATHE_NAMESPACE}{rest}"),
+        _ => humanized,
+    }
+}
+
+fn humanize_action_name_parts(name: &str) -> String {
     let chars = name.chars().collect::<Vec<_>>();
     let capacity = name.len() + chars.iter().filter(|c| c.is_uppercase()).count();
     let mut result = String::with_capacity(capacity);
@@ -1006,8 +1082,58 @@ mod tests {
         );
         assert_eq!(humanize_action_name("editor::OpenURL"), "editor: open URL");
         assert_eq!(
+            humanize_action_name("zed::InstallDevExtension"),
+            "lathe: install dev extension"
+        );
+        assert_eq!(
+            humanize_action_name("zed_predict_onboarding::OpenZedPredictOnboarding"),
+            "zed predict onboarding: open zed predict onboarding",
+            "only the exact zed namespace is renamed"
+        );
+        assert_eq!(humanize_action_name("zedx::Thing"), "zedx: thing");
+        assert_eq!(
             humanize_action_name("editor::OpenURLParser"),
             "editor: open URL parser"
+        );
+    }
+
+    #[test]
+    fn test_lathe_namespace_query() {
+        assert_eq!(lathe_namespace_query("zed"), Some("lathe".into()));
+        assert_eq!(
+            lathe_namespace_query("zed: open settings"),
+            Some("lathe: open settings".into())
+        );
+        assert_eq!(lathe_namespace_query("Zed:Quit"), Some("lathe:Quit".into()));
+        assert_eq!(
+            lathe_namespace_query("zed predict"),
+            Some("lathe predict".into())
+        );
+        assert_eq!(lathe_namespace_query("zeditor"), None);
+        assert_eq!(lathe_namespace_query("ze"), None);
+        assert_eq!(lathe_namespace_query("open zed"), None);
+        assert_eq!(lathe_namespace_query(""), None);
+    }
+
+    #[test]
+    fn test_merge_best_matches() {
+        let string_match = |candidate_id, score| fuzzy_nucleo::StringMatch {
+            candidate_id,
+            score,
+            positions: Vec::new(),
+            string: Default::default(),
+        };
+        let merged = merge_best_matches(
+            vec![string_match(1, 5.0), string_match(2, 1.0)],
+            vec![string_match(2, 9.0), string_match(3, 3.0)],
+        );
+        assert_eq!(
+            merged
+                .iter()
+                .map(|string_match| (string_match.candidate_id, string_match.score))
+                .collect::<Vec<_>>(),
+            vec![(2, 9.0), (1, 5.0), (3, 3.0)],
+            "each candidate once, with its better score, best first"
         );
     }
 
@@ -1182,6 +1308,66 @@ mod tests {
         palette.read_with(cx, |palette, _| {
             assert!(palette.delegate.matches.is_empty())
         });
+    }
+
+    mod zed {
+        gpui::actions!(zed, [PaletteNamespaceTestAction]);
+    }
+
+    #[gpui::test]
+    async fn test_zed_actions_show_as_lathe_and_match_both(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        workspace.update(cx, |workspace, _| {
+            let ran = ran.clone();
+            workspace.register_action(move |_, _: &zed::PaletteNamespaceTestAction, _, _| {
+                ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+        });
+        // Workspace actions are offered when focus is inside the workspace.
+        let editor = cx.new_window_entity(|window, cx| Editor::single_line(window, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(editor.clone()), None, true, window, cx);
+            editor.update(cx, |editor, cx| window.focus(&editor.focus_handle(cx), cx))
+        });
+
+        for query in [
+            "zed: palette namespace test",
+            "lathe: palette namespace test",
+            "palette namespace test",
+        ] {
+            cx.dispatch_action(Toggle);
+            cx.simulate_input(query);
+            let palette = workspace.update(cx, |workspace, cx| {
+                workspace
+                    .active_modal::<CommandPalette>(cx)
+                    .unwrap()
+                    .read(cx)
+                    .picker
+                    .clone()
+            });
+            palette.read_with(cx, |palette, _| {
+                assert_eq!(
+                    palette
+                        .delegate
+                        .matches
+                        .first()
+                        .map(|string_match| string_match.string.to_string()),
+                    Some("lathe: palette namespace test action".to_string()),
+                    "query {query:?}"
+                );
+            });
+            cx.dispatch_action(menu::Confirm);
+        }
+        assert_eq!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the action runs from either prefix"
+        );
     }
 
     #[gpui::test]
