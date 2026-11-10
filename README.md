@@ -1,6 +1,6 @@
 # Lathe
 
-A code editor. It's a fork of [Zed](https://zed.dev) with my own changes stacked on top: a mobile dev panel for React Native and Expo, more git tooling than upstream ships, pull request review inside the editor, and a theme I actually want to look at all day.
+A code editor. It's a fork of [Zed](https://zed.dev) with my own changes stacked on top: a mobile dev panel for React Native and Expo, an extension API that goes further than Zed's, more git tooling than upstream ships, pull request review inside the editor, and a theme I actually want to look at all day.
 
 ### [Download Lathe](https://github.com/paterschris/lathe/releases/latest)
 
@@ -23,18 +23,19 @@ This is a personal fork. I maintain it because I wanted a handful of editor twea
 Roughly ordered by how far each one is from stock Zed. One caveat on the git entry: upstream already has a commit graph, a tabbed git panel, worktree support, and single-file history, so that section only covers what Lathe puts on top of them.
 
 1. [Mobile development](docs/features.md#mobile-development-expo--react-native) - a panel for Expo and bare React Native projects
-2. [Merge conflicts and interactive rebase](docs/features.md#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, drag-and-drop rebase
-3. [Pull request reviews](docs/features.md#pull-request-reviews) - GitHub, GitLab, Bitbucket, in the editor, with several accounts per host
-4. [Code navigation](docs/features.md#code-navigation) - definitions and references open in a peek instead of a new tab
-5. [AI agent integration](docs/features.md#ai-agent-integration) - sign into several accounts, control approval levels, per-workspace thread history
-6. [Theme and syntax highlighting](docs/features.md#theme-and-syntax-highlighting) - the default theme, plus a live customizer for all 200+ colors
-7. [Git additions](docs/features.md#git-additions) - explorer tab, branch tree, compare any two commits, graph context menus, multi-select, undo, Git Flow
-8. [Jupyter notebooks](docs/features.md#jupyter-notebooks) - saving keeps your outputs, cells share one document, and the kernel picker finds your project's venv
-9. [Docks and panels](docs/features.md#docks-and-panels) - two panels per dock, drag panels to any dock, every panel allowed in the bottom dock
-10. [Terminal, windows, and workspaces](docs/features.md#terminal-windows-and-workspaces) - extra windows for editors and terminals, an awaiting-input indicator, workspace groups, per-window zoom
-11. [Editor additions](docs/features.md#editor-additions) - color swatches and a color picker, Open Recent File, project panel refresh
-12. [AWS profiles](docs/features.md#aws-profiles) - a per-window profile selector
-13. [Separate data from Zed](docs/features.md#separate-data-from-zed) - Lathe's own settings and data folders, imported from Zed on first launch
+2. [Extensions](docs/features.md#extensions) - an extension API past Zed's (commands, buffer edits, file events, terminal tasks) with per-extension permissions, more registries, install from a URL, disable and recommend extensions
+3. [Merge conflicts and interactive rebase](docs/features.md#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, drag-and-drop rebase
+4. [Pull request reviews](docs/features.md#pull-request-reviews) - GitHub, GitLab, Bitbucket, in the editor, with several accounts per host
+5. [Code navigation](docs/features.md#code-navigation) - definitions and references open in a peek instead of a new tab
+6. [AI agent integration](docs/features.md#ai-agent-integration) - sign into several accounts, control approval levels, per-workspace thread history
+7. [Theme and syntax highlighting](docs/features.md#theme-and-syntax-highlighting) - the default theme, plus a live customizer for all 200+ colors
+8. [Git additions](docs/features.md#git-additions) - explorer tab, branch tree, compare any two commits, graph context menus, multi-select, undo, Git Flow
+9. [Jupyter notebooks](docs/features.md#jupyter-notebooks) - saving keeps your outputs, cells share one document, and the kernel picker finds your project's venv
+10. [Docks and panels](docs/features.md#docks-and-panels) - two panels per dock, drag panels to any dock, every panel allowed in the bottom dock
+11. [Terminal, windows, and workspaces](docs/features.md#terminal-windows-and-workspaces) - extra windows for editors and terminals, an awaiting-input indicator, workspace groups, per-window zoom
+12. [Editor additions](docs/features.md#editor-additions) - color swatches and a color picker, Open Recent File, project panel refresh
+13. [AWS profiles](docs/features.md#aws-profiles) - a per-window profile selector
+14. [Separate data from Zed](docs/features.md#separate-data-from-zed) - Lathe's own settings and data folders, imported from Zed on first launch
 
 Screenshots and the long version live in **[docs/features.md](docs/features.md)**.
 
