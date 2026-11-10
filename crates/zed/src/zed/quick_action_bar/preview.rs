@@ -1,9 +1,10 @@
 use editor::{Editor, MultiBuffer};
+use gpui::{Action as _, Focusable as _};
 use gpui::{AnyElement, Entity, Modifiers};
 use markdown_preview::markdown_preview_view::MarkdownPreviewView;
 use svg_preview::svg_preview_view::SvgPreviewView;
 use tabular_data_preview::TabularDataPreviewPane;
-use ui::{Tooltip, prelude::*, text_for_keystroke};
+use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*, text_for_keystroke};
 
 use super::QuickActionBar;
 
@@ -14,6 +15,59 @@ enum PreviewTarget {
 }
 
 impl QuickActionBar {
+    /// A button for previews Lathe extensions registered for this file. With
+    /// several, it opens a menu of them.
+    pub fn render_extension_preview_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let editor = self.active_item.as_ref()?.act_as::<Editor>(cx)?;
+        let previews = extensions_ui::matching_previews(&editor, cx);
+        match previews.as_slice() {
+            [] => None,
+            [only] => {
+                let action = only.action();
+                let tooltip = only.label();
+                Some(
+                    IconButton::new("extension-preview", IconName::Blocks)
+                        .icon_size(IconSize::Small)
+                        .style(ButtonStyle::Subtle)
+                        .tooltip(Tooltip::text(tooltip))
+                        .on_click(move |_, window, cx| {
+                            window.dispatch_action(action.boxed_clone(), cx)
+                        })
+                        .into_any_element(),
+                )
+            }
+            several => {
+                let entries = several
+                    .iter()
+                    .map(|available| (available.label(), available.action()))
+                    .collect::<Vec<_>>();
+                let focus = editor.focus_handle(cx);
+                Some(
+                    PopoverMenu::new("extension-previews")
+                        .trigger_with_tooltip(
+                            IconButton::new("extension-previews-button", IconName::Blocks)
+                                .icon_size(IconSize::Small)
+                                .style(ButtonStyle::Subtle),
+                            Tooltip::text("Extension Previews"),
+                        )
+                        .anchor(gpui::Anchor::TopRight)
+                        .menu(move |window, cx| {
+                            let entries = entries.clone();
+                            let focus = focus.clone();
+                            Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                                menu = menu.context(focus);
+                                for (label, action) in entries {
+                                    menu = menu.action(label, Box::new(action));
+                                }
+                                menu
+                            }))
+                        })
+                        .into_any_element(),
+                )
+            }
+        }
+    }
+
     pub fn render_preview_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // Resolve against this toolbar's own pane item rather than the
         // workspace's focused item, so each pane's button reflects and

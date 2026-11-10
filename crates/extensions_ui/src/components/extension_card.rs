@@ -52,6 +52,8 @@ struct ExtensionCardDetails {
     lathe_only: bool,
     /// Plain-language labels for the Lathe API capabilities it declares.
     lathe_capability_labels: Vec<&'static str>,
+    /// Installed but turned off in `disabled_extensions`.
+    disabled: bool,
     source: ExtensionCardSource,
 }
 
@@ -113,8 +115,12 @@ impl ExtensionCard {
         let lathe_only = extension_store.is_lathe_only(&extension.id);
         let labels = lathe_capability_labels(extension_store, &extension.id);
         let permissions = Self::lathe_permissions_button(&extension.id, extension_store);
+        let disabled = extension_store.is_extension_disabled(&extension.id);
+        let enable = disabled.then(|| Self::enable_button(&extension.id));
         Self::manifest(extension, status, LocalExtensionKind::Dev, lathe_only)
             .with_capability_labels(labels)
+            .with_disabled(disabled)
+            .with_extra_action(enable)
             .with_extra_action(permissions)
     }
 
@@ -126,8 +132,12 @@ impl ExtensionCard {
         let lathe_only = extension_store.is_lathe_only(&extension.id);
         let labels = lathe_capability_labels(extension_store, &extension.id);
         let permissions = Self::lathe_permissions_button(&extension.id, extension_store);
+        let disabled = extension_store.is_extension_disabled(&extension.id);
+        let enable = disabled.then(|| Self::enable_button(&extension.id));
         Self::manifest(extension, status, LocalExtensionKind::Installed, lathe_only)
             .with_capability_labels(labels)
+            .with_disabled(disabled)
+            .with_extra_action(enable)
             .with_extra_action(permissions)
     }
 
@@ -142,9 +152,28 @@ impl ExtensionCard {
             .then_some(extension.download_count);
         let labels = lathe_capability_labels(extension_store, &extension.id);
         let permissions = Self::lathe_permissions_button(&extension.id, extension_store);
+        let disabled = extension_store.is_extension_disabled(&extension.id);
+        let enable = disabled.then(|| Self::enable_button(&extension.id));
         Self::remote(extension, state, lathe_only, download_count, cx)
             .with_capability_labels(labels)
+            .with_disabled(disabled)
+            .with_extra_action(enable)
             .with_extra_action(permissions)
+    }
+
+    fn with_disabled(mut self, disabled: bool) -> Self {
+        self.details.disabled = disabled;
+        self
+    }
+
+    fn enable_button(extension_id: &Arc<str>) -> Button {
+        let extension_id = extension_id.clone();
+        Button::new(
+            SharedString::from(format!("enable-{extension_id}")),
+            "Enable",
+        )
+        .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+        .on_click(move |_, _, cx| crate::set_extension_disabled(extension_id.clone(), false, cx))
     }
 
     fn with_capability_labels(mut self, labels: Vec<&'static str>) -> Self {
@@ -170,6 +199,7 @@ impl ExtensionCard {
             provided_features: provided_feature_labels(extension.provides()),
             lathe_only,
             lathe_capability_labels: Vec::new(),
+            disabled: false,
             source: match kind {
                 LocalExtensionKind::Dev => ExtensionCardSource::Dev,
                 LocalExtensionKind::Installed => ExtensionCardSource::Installed,
@@ -202,6 +232,7 @@ impl ExtensionCard {
             provided_features: provided_feature_labels(extension.manifest.provides.iter().copied()),
             lathe_only,
             lathe_capability_labels: Vec::new(),
+            disabled: false,
             source: ExtensionCardSource::Remote {
                 state,
                 download_count,
@@ -778,6 +809,7 @@ impl RenderOnce for ExtensionCard {
             provided_features,
             lathe_only,
             lathe_capability_labels,
+            disabled,
             source,
         } = details;
         let installed_version = source.installed_version(&version);
@@ -832,6 +864,15 @@ impl RenderOnce for ExtensionCard {
                                         ),
                                     )
                                 }))
+                                .when(disabled, |parent| {
+                                    parent.child(
+                                        Chip::new("Disabled")
+                                            .label_color(Color::Muted)
+                                            .tooltip(Tooltip::text(
+                                                "Installed but not loaded. Enable it to use it again.",
+                                            )),
+                                    )
+                                })
                                 .when(lathe_only, |parent| {
                                     parent.child(
                                         Chip::new("Lathe")

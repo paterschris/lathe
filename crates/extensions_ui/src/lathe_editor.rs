@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context as _, Result, bail};
 use editor::{Editor, MultiBufferOffset, SelectionEffects};
 use extension_host::wasm_host::lathe::{
-    ActiveBufferSnapshot, LatheEditorDelegate, validate_ranges,
+    ActiveBufferSnapshot, LatheDecoration, LatheEditorDelegate, validate_ranges,
 };
 use gpui::{AnyWindowHandle, AsyncApp, Entity, WeakEntity};
 use language::Buffer;
@@ -113,6 +113,28 @@ impl LatheEditorDelegate for ExtensionEditorDelegate {
             })
         })?;
         Ok(())
+    }
+
+    fn set_decorations(
+        &self,
+        version: u64,
+        extension_id: Arc<str>,
+        layer: Arc<str>,
+        decorations: Vec<LatheDecoration>,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        let (_, buffer) = self
+            .editor_and_buffer(cx)?
+            .context("the editor no longer shows a single file")?;
+        set_decorations(
+            &self.latest,
+            version,
+            &buffer,
+            extension_id,
+            layer,
+            decorations,
+            cx,
+        )
     }
 
     fn settings_location(
@@ -239,6 +261,26 @@ impl LatheEditorDelegate for ExtensionBufferDelegate {
         Ok(())
     }
 
+    fn set_decorations(
+        &self,
+        version: u64,
+        extension_id: Arc<str>,
+        layer: Arc<str>,
+        decorations: Vec<LatheDecoration>,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        let buffer = self.buffer.upgrade().context("the buffer was closed")?;
+        set_decorations(
+            &self.latest,
+            version,
+            &buffer,
+            extension_id,
+            layer,
+            decorations,
+            cx,
+        )
+    }
+
     fn settings_location(
         &self,
         cx: &mut AsyncApp,
@@ -261,13 +303,13 @@ fn settings_location(
 }
 
 #[derive(Default)]
-struct FileLocation {
-    path: Option<String>,
-    abs_path: Option<String>,
-    worktree_root: Option<String>,
+pub(crate) struct FileLocation {
+    pub(crate) path: Option<String>,
+    pub(crate) abs_path: Option<String>,
+    pub(crate) worktree_root: Option<String>,
 }
 
-fn file_location(buffer: &Buffer, cx: &gpui::App) -> FileLocation {
+pub(crate) fn file_location(buffer: &Buffer, cx: &gpui::App) -> FileLocation {
     let Some(file) = buffer.file() else {
         return FileLocation::default();
     };
@@ -307,7 +349,20 @@ fn claim(
     cx: &mut AsyncApp,
 ) -> Result<String> {
     let mut latest = latest.lock();
-    let Some((latest_version, buffer_version)) = latest.as_ref() else {
+    let text = check_current(latest.as_ref(), version, buffer, cx)?;
+    *latest = None;
+    Ok(text)
+}
+
+/// Checks that `version` is the latest snapshot and the buffer is unchanged
+/// since, returning its text.
+fn check_current(
+    latest: Option<&(u64, clock::Global)>,
+    version: u64,
+    buffer: &Entity<Buffer>,
+    cx: &mut AsyncApp,
+) -> Result<String> {
+    let Some((latest_version, buffer_version)) = latest else {
         bail!("read the buffer with active_buffer() before changing it");
     };
     let (current_version, text) =
@@ -315,8 +370,35 @@ fn claim(
     if *latest_version != version || *buffer_version != current_version {
         bail!("the buffer changed since it was read; read it again and retry");
     }
-    *latest = None;
     Ok(text)
+}
+
+/// Decorations don't use up the snapshot, unlike edits: an extension can
+/// decorate and then edit from the same read.
+fn set_decorations(
+    latest: &Mutex<Option<(u64, clock::Global)>>,
+    version: u64,
+    buffer: &Entity<Buffer>,
+    extension_id: Arc<str>,
+    layer: Arc<str>,
+    decorations: Vec<LatheDecoration>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let text = check_current(latest.lock().as_ref(), version, buffer, cx)?;
+    validate_ranges(
+        &text,
+        decorations.iter().map(|decoration| &decoration.range),
+        false,
+    )?;
+    let store = cx
+        .update(|cx| {
+            cx.try_global::<crate::lathe_decorations::GlobalExtensionDecorations>()
+                .map(|global| global.0.clone())
+        })
+        .context("decorations are not available in this build of Lathe")?;
+    store.update(cx, |store, cx| {
+        store.set(buffer, extension_id, layer, decorations, cx)
+    })
 }
 
 #[cfg(test)]

@@ -199,6 +199,9 @@ pub struct ExtensionStore {
     /// upgraded, rebuilt or uninstalled.
     lathe_events_paused: HashSet<Arc<str>>,
     pub lathe_grants_path: PathBuf,
+    /// Last seen `disabled_extensions`, to reload only when it changes.
+    disabled_extensions: HashMap<Arc<str>, bool>,
+    _settings_subscription: Option<Subscription>,
 }
 
 async fn load_lathe_grants(fs: &dyn Fs, path: &Path) -> wasm_host::lathe::LatheGrants {
@@ -274,7 +277,7 @@ impl ExtensionIndex {
         let mut extensions = RemoteSyncExtensions::default();
 
         for (id, entry) in &self.extensions {
-            if entry.manifest.remote_load().is_some() {
+            if !entry.disabled && entry.manifest.remote_load().is_some() {
                 extensions.insert_extension_and_language_dependencies(self, id);
             }
         }
@@ -326,6 +329,10 @@ impl RemoteSyncExtensions {
 pub struct ExtensionIndexEntry {
     pub manifest: Arc<ExtensionManifest>,
     pub dev: bool,
+    /// Turned off in `disabled_extensions`: installed, but nothing it
+    /// provides is loaded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Deserialize, Serialize)]
@@ -465,6 +472,8 @@ impl ExtensionStore {
             lathe_event_strikes: HashMap::default(),
             lathe_events_paused: HashSet::default(),
             lathe_grants_path,
+            disabled_extensions: HashMap::default(),
+            _settings_subscription: None,
         };
 
         // The extensions store maintains an index file, which contains a complete
@@ -504,6 +513,19 @@ impl ExtensionStore {
 
         // Immediately load all of the extensions in the initial manifest. If the
         // index needs to be rebuild, then enqueue
+        this.disabled_extensions = ExtensionSettings::get_global(cx)
+            .disabled_extensions
+            .clone();
+        this._settings_subscription = Some(cx.observe_global::<SettingsStore>(|this, cx| {
+            let disabled_extensions = ExtensionSettings::get_global(cx)
+                .disabled_extensions
+                .clone();
+            if disabled_extensions != this.disabled_extensions {
+                this.disabled_extensions = disabled_extensions;
+                drop(this.reload(None, cx));
+            }
+        }));
+
         let load_initial_extensions = this.extensions_updated(extension_index, cx);
         let mut reload_future = None;
         if extension_index_needs_rebuild {
@@ -636,6 +658,14 @@ impl ExtensionStore {
                 None => ExtensionStatus::NotInstalled,
             },
         }
+    }
+
+    /// Whether the extension is installed but turned off.
+    pub fn is_extension_disabled(&self, extension_id: &str) -> bool {
+        self.extension_index
+            .extensions
+            .get(extension_id)
+            .is_some_and(|extension| extension.disabled)
     }
 
     pub fn is_dev_extension(&self, extension_id: &str) -> bool {
@@ -1273,6 +1303,115 @@ impl ExtensionStore {
                     .iter()
                     .map(move |command| (manifest, command))
             })
+    }
+
+    /// Panels registered by loaded extensions the user allows `ui:views`, as
+    /// `(extension manifest, panel)` pairs.
+    pub fn lathe_panels(
+        &self,
+    ) -> impl Iterator<Item = (&Arc<ExtensionManifest>, &wasm_host::lathe::LathePanel)> {
+        self.wasm_extensions
+            .iter()
+            .filter(|(_, extension)| extension.may_show_views())
+            .flat_map(|(manifest, extension)| {
+                extension
+                    .lathe_panels
+                    .iter()
+                    .map(move |panel| (manifest, panel))
+            })
+    }
+
+    /// Previews registered by loaded extensions the user allows `ui:views`,
+    /// as `(extension manifest, preview)` pairs.
+    pub fn lathe_previews(
+        &self,
+    ) -> impl Iterator<Item = (&Arc<ExtensionManifest>, &wasm_host::lathe::LathePreview)> {
+        self.wasm_extensions
+            .iter()
+            .filter(|(_, extension)| extension.may_show_views())
+            .flat_map(|(manifest, extension)| {
+                extension
+                    .lathe_previews
+                    .iter()
+                    .map(move |preview| (manifest, preview))
+            })
+    }
+
+    /// Tells an extension where its UI appears. See
+    /// [`wasm_host::lathe::LatheSurfaceEvent`].
+    pub fn dispatch_lathe_surface_event(
+        &self,
+        extension_id: &str,
+        event: wasm_host::lathe::LatheSurfaceEvent,
+        buffer: Option<Arc<dyn wasm_host::lathe::LatheEditorDelegate>>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(extension) = self
+            .wasm_extensions
+            .iter()
+            .find(|(manifest, _)| manifest.id.as_ref() == extension_id)
+            .map(|(_, extension)| extension.clone())
+        else {
+            return Task::ready(Err(anyhow!(
+                "extension {extension_id} is not installed or failed to load"
+            )));
+        };
+        cx.background_spawn(
+            async move { extension.dispatch_lathe_surface_event(event, buffer).await },
+        )
+    }
+
+    /// Asks an extension for rows `start..start + count` of a virtual list.
+    pub fn lathe_provide_rows(
+        &self,
+        extension_id: &str,
+        view_id: Arc<str>,
+        list_id: Arc<str>,
+        start: u32,
+        count: u32,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<wasm_host::lathe_views::NodeKind>>> {
+        let Some(extension) = self
+            .wasm_extensions
+            .iter()
+            .find(|(manifest, _)| manifest.id.as_ref() == extension_id)
+            .map(|(_, extension)| extension.clone())
+        else {
+            return Task::ready(Err(anyhow!(
+                "extension {extension_id} is not installed or failed to load"
+            )));
+        };
+        cx.background_spawn(async move {
+            extension
+                .lathe_provide_rows(view_id, list_id, start, count)
+                .await
+        })
+    }
+
+    /// Delivers a click on an element of one of an extension's views.
+    pub fn dispatch_lathe_view_event(
+        &self,
+        extension_id: &str,
+        view_id: Arc<str>,
+        element_id: Arc<str>,
+        event: wasm_host::lathe_views::ViewEvent,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(extension) = self
+            .wasm_extensions
+            .iter()
+            .find(|(manifest, _)| manifest.id.as_ref() == extension_id)
+            .map(|(_, extension)| extension.clone())
+        else {
+            return Task::ready(Err(anyhow!(
+                "extension {extension_id} is not installed or failed to load"
+            )));
+        };
+        cx.background_spawn(async move {
+            extension
+                .dispatch_lathe_view_event(view_id, element_id, event)
+                .await
+        })
     }
 
     /// Runs a command that an extension registered through the Lathe API.
@@ -2146,6 +2285,29 @@ impl ExtensionStore {
             })
             .collect::<Vec<_>>();
 
+        // Disabled extensions stay in the index, marked, so they still show as
+        // installed. Flipping the mark changes the entry, which makes the diff
+        // below unload it; it is then left out of `extensions_to_load`.
+        let extension_settings = ExtensionSettings::get_global(cx);
+        for (extension_id, entry) in new_index.extensions.iter_mut() {
+            entry.disabled = extension_settings.is_disabled(extension_id);
+        }
+        let disabled = new_index
+            .extensions
+            .iter()
+            .filter(|(_, entry)| entry.disabled)
+            .map(|(extension_id, _)| extension_id.clone())
+            .collect::<HashSet<_>>();
+        new_index
+            .languages
+            .retain(|_, entry| !disabled.contains(&entry.extension));
+        new_index
+            .themes
+            .retain(|_, entry| !disabled.contains(&entry.extension));
+        new_index
+            .icon_themes
+            .retain(|_, entry| !disabled.contains(&entry.extension));
+
         // Determine which extensions need to be loaded and unloaded, based
         // on the changes to the manifest and the extensions that we know have been
         // modified.
@@ -2184,6 +2346,7 @@ impl ExtensionStore {
             }
             self.modified_extensions.clear();
         }
+        extensions_to_load.retain(|extension_id| !disabled.contains(extension_id));
 
         let trigger_suppressed_extension_removal =
             move |this: &mut ExtensionStore, cx: &mut Context<ExtensionStore>| {
@@ -2609,6 +2772,9 @@ impl ExtensionStore {
                 }
 
                 this.wasm_extensions.extend(wasm_extensions);
+                // Observers (extension previews waiting at startup, for one)
+                // rely on this to learn that extensions finished loading.
+                cx.notify();
                 this.proxy.set_extensions_loaded();
                 this.proxy.reload_current_theme(cx);
                 this.proxy.reload_current_icon_theme(cx);
@@ -2818,6 +2984,7 @@ impl ExtensionStore {
             ExtensionIndexEntry {
                 dev: is_dev,
                 manifest: Arc::new(extension_manifest),
+                disabled: false,
             },
         );
 

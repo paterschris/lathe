@@ -107,6 +107,14 @@ impl Inlay {
         }
     }
 
+    pub fn lathe_extension<T: Into<Rope>>(id: usize, position: Anchor, text: T) -> Self {
+        Self {
+            id: InlayId::LatheExtension(id),
+            position,
+            content: InlayContent::Text(text.into()),
+        }
+    }
+
     pub fn repl_result<T: Into<Rope>>(id: usize, position: Anchor, text: T) -> Self {
         Self {
             id: InlayId::ReplResult(id),

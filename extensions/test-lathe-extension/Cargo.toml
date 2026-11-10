@@ -14,5 +14,5 @@ crate-type = ["cdylib"]
 test = false
 
 [dependencies]
-lathe_extension_api = { path = "../../crates/lathe_extension_api" }
+lathe_extension_api = "0.1"
 zed_extension_api = "0.7.0"

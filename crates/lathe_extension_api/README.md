@@ -83,8 +83,160 @@ not declare, or the user did not allow, returns an error.
 - `ActiveBuffer::abs_path` / `worktree_root`: absolute locations for files on
   this machine, for building command lines.
 
+## Views (API 0.2, not released yet)
+
+0.2 adds views: a small UI the extension describes and Lathe draws with its
+own components, so it follows the theme. It needs the `ui:views` capability,
+and an extension that uses it only loads in a Lathe build with API 0.2.
+
+```rust
+use lathe_extension_api::{TextStyle, Tone, ViewBuilder, ViewEvent};
+
+let mut view = ViewBuilder::column();
+view.text("Results", TextStyle::Heading)
+    .text_input("filter", "", Some("Filter"))
+    .checkbox("hidden", "Show hidden", false)
+    .scrolling(|list| {
+        list.list_item("a", "first.rs", Some("2 KB"))
+            .list_item("b", "second.rs", None);
+    })
+    .badge("2", Tone::Accent);
+lathe_extension_api::update_view("results", &view.build())?;
+
+lathe_extension_api::on_view_event(|view_id, element_id, event| {
+    match event {
+        ViewEvent::Clicked => { /* a button or list item */ }
+        ViewEvent::Toggled(on) => { /* a checkbox, or a tree item's arrow */ }
+        ViewEvent::InputChanged(text) => { /* sent after typing pauses */ }
+        ViewEvent::Submitted(text) => { /* Enter in a text input */ }
+        ViewEvent::MenuChosen(entry) => { /* a list item's right-click menu */ }
+        ViewEvent::Selected(value) => { /* a dropdown option */ }
+    }
+    Ok(())
+});
+```
+
+- Nodes: column, row, scroll, text (with a style and a theme color), button,
+  list item (selected, disabled, indent, an expand arrow for trees, and a
+  right-click menu via `.menu(...)`), text input, checkbox, select
+  (dropdown), progress (bar or spinner), markdown, badge, icon, divider,
+  spacer, and virtual list.
+- Each update replaces the whole view. `remove_view` forgets it.
+- Ids of buttons, list items, inputs, checkboxes, selects and virtual lists
+  must be unique within a view. Lathe refuses views that are malformed or
+  too big (2,000 nodes, nesting 16 deep, 32 views per extension).
+- While the user is typing in an input, a new value from the extension
+  doesn't overwrite what they've typed.
+- Markdown links open only for `http`, `https` and `mailto`.
+
+### Long lists
+
+A virtual list holds up to 1,000,000 rows without sending them. Lathe asks
+for the rows on screen, at most 100 at a time, and keeps them until you
+change the list's `revision`:
+
+```rust
+view.virtual_list("files", files.len() as u32, revision);
+
+lathe_extension_api::on_provide_rows(|_view_id, _list_id, start, count| {
+    Ok((start..(start + count).min(total))
+        .map(|index| lathe_extension_api::list_row(&format!("file-{index}"), "name.rs", None))
+        .collect())
+});
+```
+
+Row events use the row's id as the element id, so keep row ids distinct
+from the view's other ids.
+
+### Where UI appears
+
+A CSV preview, start to finish:
+
+```rust
+lathe_extension_api::register_preview("csv", "CSV Preview", &[".csv"])?;
+
+fn draw(view_id: &str) -> lathe_extension_api::Result<()> {
+    let Some(buffer) = lathe_extension_api::active_buffer()? else { return Ok(()) };
+    let mut view = ViewBuilder::column();
+    view.text(&format!("{} rows", buffer.text.lines().count()), TextStyle::Heading);
+    lathe_extension_api::update_view(view_id, &view.build())
+}
+
+lathe_extension_api::on_surface_event(|event| match event {
+    SurfaceEvent::PreviewOpened(file) => draw(&file.view_id),
+    SurfaceEvent::PreviewChanged(view_id) => draw(view_id),
+    _ => Ok(()),
+});
+```
+
+- `register_preview(id, title, suffixes)` adds a file preview. Users open
+  it from the button in the editor's toolbar or the command palette
+  ("<Extension Name>: <title>") on a matching file, and it shows in a tab
+  beside the editor, which stays open for editing. Each preview arrives as
+  `SurfaceEvent::PreviewOpened` with a view id to fill in. Edits to the file
+  arrive as `PreviewChanged` once typing pauses (your own edits don't). In
+  both, `active_buffer()` returns the file (with `buffer:read`). Closing the
+  tab sends `PreviewClosed` and Lathe drops the view. Open previews come back
+  after a restart, once your extension has loaded.
+- `register_panel(id, title, icon, dock)` adds a dockable panel showing the
+  view with the same id. Lathe doesn't show panels yet; registering them
+  now is safe.
+- Both are called from `zed::Extension::new`. Registering always works;
+  they only appear while the user allows `ui:views`.
+- `set_status_item(Some(&StatusItem { .. }))` puts a clickable item in the
+  status bar (needs `ui:status`). Clicks arrive as
+  `SurfaceEvent::StatusItemClicked`.
+- `on_surface_event` also gets `ViewShown` and `ViewHidden`, so you can do
+  work only while someone is looking.
+- `open_location(path, line, column)` opens a file (absolute, or relative to
+  a folder in the window) with 1-based line and column. It only works while
+  handling something the user did: a command, a view event or a status item
+  click.
+
+## Decorations (API 0.2, not released yet)
+
+Highlights, underlines, gutter marks and short end-of-line messages in the
+editor. They're anchored to the text, so they move with edits, and every
+editor showing the file draws them. Needs `ui:decorations` (and `buffer:read`
+to get the buffer).
+
+```rust
+use lathe_extension_api::{DecorationStyle, Tone, decoration};
+
+let Some(buffer) = lathe_extension_api::active_buffer()? else { return Ok(()) };
+let todos = buffer
+    .text
+    .match_indices("TODO")
+    .map(|(start, found)| {
+        decoration(start..start + found.len(), DecorationStyle::WavyUnderline, Tone::Warning, Some("todo"))
+    })
+    .collect::<Vec<_>>();
+buffer.set_decorations("todos", &todos)?;
+```
+
+Each call replaces the layer you name; an empty list clears it. Limits:
+5,000 decorations per layer, 8 layers per file, 200-character messages.
+Decorating doesn't use up the snapshot, so you can still edit afterwards.
+
 ## Testing
 
 The wasm exports are only compiled for `wasm32`, so `cargo test` runs your
 extension's own unit tests natively. Build and package the extension with
 Lathe's extension CLI (`zed-extension`, package `extension_cli`).
+
+## Sharing your extension
+
+Three ways, from least to most setup:
+
+- **Archive URL.** Package it with `zed-extension`, host the `.tar.gz`
+  anywhere, and send people the link. They paste it into the search box on
+  Lathe's Extensions page.
+- **Git URL.** People paste your repository's URL into the same box. Lathe
+  clones and builds it, which needs Rust on their machine.
+- **The Lathe registry.** Open a pull request to
+  [lathe-extensions](https://github.com/paterschris/lathe-extensions). The
+  maintainer reviews it, and once it's merged your extension shows up on
+  everyone's Extensions page. The steps are in its
+  [CONTRIBUTING.md](https://github.com/paterschris/lathe-extensions/blob/main/CONTRIBUTING.md).
+
+Every way asks the user to allow your `lathe_capabilities` before installing.

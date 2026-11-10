@@ -346,7 +346,9 @@ impl<'a> Iterator for InlayChunks<'a> {
                         }
                     }),
                     InlayId::Hint(_) => self.highlight_styles.inlay_hint,
-                    InlayId::DebuggerValue(_) => self.highlight_styles.inlay_hint,
+                    InlayId::DebuggerValue(_) | InlayId::LatheExtension(_) => {
+                        self.highlight_styles.inlay_hint
+                    }
                     InlayId::ReplResult(_) => {
                         let text = inlay.text().to_string();
                         renderer = Some(ChunkRenderer {

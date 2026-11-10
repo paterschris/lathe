@@ -80,6 +80,11 @@ pub struct ProjectSettingsContent {
     #[serde(default)]
     pub extension_settings: HashMap<Arc<str>, serde_json::Value>,
 
+    /// Extension ids this project recommends. When you open the project and
+    /// some aren't installed, Lathe offers to install them. Only applied once
+    /// the project is trusted, like the rest of its settings.
+    pub recommended_extensions: Option<Vec<Arc<str>>>,
+
     /// Default timeout in seconds for context server tool calls.
     /// Can be overridden per-server in context_servers configuration.
     ///
@@ -102,6 +107,7 @@ crate::fallible_options::flattened_deserialize!(ProjectSettingsContent {
     sections: { all_languages, worktree },
     options: {
         terminal, context_server_timeout, load_direnv, git_hosting_providers, disable_ai,
+        recommended_extensions,
     },
     defaults: { lsp, dap, context_servers, extension_settings },
 });

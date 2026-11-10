@@ -19,11 +19,13 @@ use std::sync::{Arc, OnceLock};
 use wasmtime::Store;
 use wasmtime::component::{Component, Linker};
 
-/// The Lathe API version this host implements. Extensions embed the version
-/// of `lathe_extension_api` they were built with; any 0.1.x is accepted,
-/// because patch releases of the crate may only change guest-side code and
-/// never the 0.1.0 WIT.
-pub const API_VERSION: Version = Version::new(0, 1, 0);
+/// Lathe API versions this host implements. Extensions embed the version of
+/// `lathe_extension_api` they were built with; any patch release of a
+/// supported minor is accepted, because patch releases of the crate may only
+/// change guest-side code, never the WIT.
+pub const API_VERSION_V0_1: Version = Version::new(0, 1, 0);
+/// Adds views (`lathe:extension/views@0.2.0`) on top of everything in 0.1.
+pub const API_VERSION_V0_2: Version = Version::new(0, 2, 0);
 
 /// The custom section the `lathe_extension_api` crate embeds in an extension.
 pub const API_VERSION_SECTION: &str = "lathe:api-version";
@@ -38,6 +40,36 @@ wasmtime::component::bindgen!({
     path: "../lathe_extension_api/wit/since_v0.1.0",
     world: "lathe:extension/extension@0.1.0",
 });
+
+/// Bindings for the 0.2 world. It includes the 0.1 world unchanged, so every
+/// 0.1 interface maps to the 0.1 bindings above and keeps its single host
+/// implementation; only interfaces new in 0.2 need host code here.
+pub mod v0_2_0 {
+    wasmtime::component::bindgen!({
+        imports: {
+            default: async | trappable,
+        },
+        exports: {
+            default: async,
+        },
+        path: "../lathe_extension_api/wit/since_v0.2.0",
+        world: "lathe:extension/extension@0.2.0",
+        with: {
+            "lathe:extension/commands@0.1.0": super::lathe::extension::commands,
+            "lathe:extension/buffers@0.1.0": super::lathe::extension::buffers,
+            "lathe:extension/ui@0.1.0": super::lathe::extension::ui,
+            "lathe:extension/events@0.1.0": super::lathe::extension::events,
+            "lathe:extension/tasks@0.1.0": super::lathe::extension::tasks,
+            "lathe:extension/extension-settings@0.1.0": super::lathe::extension::extension_settings,
+        },
+    });
+}
+
+/// The Lathe exports of a loaded extension, by the API version it was built with.
+pub(super) enum LatheBindings {
+    V0_1(Extension),
+    V0_2(v0_2_0::Extension),
+}
 
 pub use self::lathe::extension::buffers::{
     BufferEdit, BufferSnapshot as WitBufferSnapshot, ByteRange,
@@ -67,6 +99,10 @@ pub enum LatheCapability {
     UiPrompt,
     /// Run commands as tasks in a terminal.
     TasksSpawn,
+    /// Show views the extension describes (API 0.2).
+    UiViews,
+    /// Highlight text in the editor (API 0.2).
+    UiDecorations,
 }
 
 impl LatheCapability {
@@ -80,6 +116,8 @@ impl LatheCapability {
             "ui:status" => Ok(Self::UiStatus),
             "ui:prompt" => Ok(Self::UiPrompt),
             "tasks:spawn" => Ok(Self::TasksSpawn),
+            "ui:views" => Ok(Self::UiViews),
+            "ui:decorations" => Ok(Self::UiDecorations),
             other => bail!("unknown Lathe capability {other:?}"),
         }
     }
@@ -94,6 +132,8 @@ impl LatheCapability {
             Self::UiStatus => "ui:status",
             Self::UiPrompt => "ui:prompt",
             Self::TasksSpawn => "tasks:spawn",
+            Self::UiViews => "ui:views",
+            Self::UiDecorations => "ui:decorations",
         }
     }
 
@@ -108,6 +148,8 @@ impl LatheCapability {
             Self::UiStatus => "Shows status",
             Self::UiPrompt => "Asks for input",
             Self::TasksSpawn => "Runs commands",
+            Self::UiViews => "Shows views",
+            Self::UiDecorations => "Highlights text",
         }
     }
 
@@ -227,6 +269,25 @@ pub trait LatheUiDelegate: Send + Sync + 'static {
     /// Starts a task in a terminal. `task.label` is already prefixed with the
     /// extension's name.
     fn spawn_task(&self, task: TaskSpec, cx: &mut AsyncApp) -> Result<()>;
+    /// Stores or replaces one of an extension's views, already validated.
+    fn update_view(
+        &self,
+        extension_id: Arc<str>,
+        view_id: Arc<str>,
+        view: super::lathe_views::LatheView,
+        cx: &mut AsyncApp,
+    );
+    fn remove_view(&self, extension_id: Arc<str>, view_id: Arc<str>, cx: &mut AsyncApp);
+    /// Shows, replaces or (with `None`) hides an extension's status item. It
+    /// shares the extension's status bar slot with `set_status_text`.
+    fn set_status_item(
+        &self,
+        extension_id: Arc<str>,
+        item: Option<LatheStatusItem>,
+        cx: &mut AsyncApp,
+    );
+    /// Opens a file in the focused window and moves the cursor if a row is set.
+    fn open_location(&self, location: LatheLocation, cx: &mut AsyncApp) -> Result<()>;
     /// Opens a picker; the receiver yields the chosen item's id.
     fn quick_pick(
         &self,
@@ -262,6 +323,18 @@ pub trait LatheEditorDelegate: Send + Sync + 'static {
         cx: &mut AsyncApp,
     ) -> Result<()>;
     fn select(&self, version: u64, ranges: Vec<Range<usize>>, cx: &mut AsyncApp) -> Result<()>;
+    /// Replaces one extension's decorations in `layer` for this buffer.
+    /// Rejects a stale `version` and ranges outside the text.
+    fn set_decorations(
+        &self,
+        _version: u64,
+        _extension_id: Arc<str>,
+        _layer: Arc<str>,
+        _decorations: Vec<LatheDecoration>,
+        _cx: &mut AsyncApp,
+    ) -> Result<()> {
+        bail!("decorations are not available here")
+    }
     /// Where the buffer's file sits in its project, so settings can be read
     /// for it, including a trusted project's own settings file.
     fn settings_location(
@@ -310,10 +383,128 @@ pub struct LatheCommand {
     pub title: Arc<str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatheDockSide {
+    Left,
+    Right,
+    Bottom,
+}
+
+/// A panel registered by an extension while it initialized. It shows the
+/// extension's view whose id is the panel's id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LathePanel {
+    pub id: Arc<str>,
+    pub title: Arc<str>,
+    pub icon: Option<Arc<str>>,
+    pub dock: LatheDockSide,
+}
+
+/// A preview registered by an extension while it initialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LathePreview {
+    pub id: Arc<str>,
+    pub title: Arc<str>,
+    pub file_suffixes: Arc<[Arc<str>]>,
+}
+
+impl LathePreview {
+    pub fn matches(&self, file_name: &str) -> bool {
+        self.file_suffixes
+            .iter()
+            .any(|suffix| file_name.ends_with(suffix.as_ref()))
+    }
+}
+
+/// An extension's clickable status bar item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatheStatusItem {
+    pub label: Arc<str>,
+    pub icon: Option<Arc<str>>,
+    pub tooltip: Option<Arc<str>>,
+    pub tone: super::lathe_views::Tone,
+}
+
+/// Where a file to open is, as asked for by `open-location`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatheLocation {
+    /// Absolute, or relative to a folder open in the window.
+    pub path: String,
+    /// 0-based, converted from the API's 1-based numbers.
+    pub row: Option<u32>,
+    pub column: Option<u32>,
+}
+
+/// Changes to where an extension's UI appears, sent to the extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LatheSurfaceEvent {
+    ViewShown(Arc<str>),
+    ViewHidden(Arc<str>),
+    StatusItemClicked,
+    PreviewOpened {
+        preview_id: Arc<str>,
+        view_id: Arc<str>,
+        path: Option<String>,
+        abs_path: Option<String>,
+    },
+    PreviewChanged(Arc<str>),
+    PreviewClosed(Arc<str>),
+}
+
+impl LatheSurfaceEvent {
+    /// Clicks are something the user did, so the extension may open files
+    /// and prompts while handling them.
+    fn is_user_action(&self) -> bool {
+        matches!(self, Self::StatusItemClicked)
+    }
+
+    /// The capability an extension needs to receive this event.
+    pub fn capability(&self) -> LatheCapability {
+        match self {
+            Self::StatusItemClicked => LatheCapability::UiStatus,
+            _ => LatheCapability::UiViews,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum LatheDecorationStyle {
+    Background,
+    Underline,
+    WavyUnderline,
+    Gutter,
+}
+
+/// One decoration, with byte offsets into the buffer text it was set against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatheDecoration {
+    pub range: Range<usize>,
+    pub style: LatheDecorationStyle,
+    pub tone: super::lathe_views::Tone,
+    pub message: Option<Arc<str>>,
+}
+
+/// Most decorations in one layer.
+pub const MAX_DECORATIONS_PER_LAYER: usize = 5_000;
+/// Most layers one extension may have on one buffer.
+pub const MAX_DECORATION_LAYERS: usize = 8;
+/// Longest decoration message, in characters.
+pub const MAX_DECORATION_MESSAGE_CHARS: usize = 200;
+
+/// Most panels one extension may register.
+pub const MAX_PANELS_PER_EXTENSION: usize = 4;
+/// Most previews one extension may register.
+pub const MAX_PREVIEWS_PER_EXTENSION: usize = 8;
+/// Most file suffixes one preview may match.
+pub const MAX_PREVIEW_SUFFIXES: usize = 16;
+const MAX_TITLE_CHARS: usize = 100;
+const MAX_SUFFIX_CHARS: usize = 64;
+
 /// Whether this build accepts extensions that use the given Lathe API version.
 pub fn is_supported_api_version(release_channel: ReleaseChannel, version: &Version) -> bool {
-    version.major == API_VERSION.major
-        && version.minor == API_VERSION.minor
+    [API_VERSION_V0_1, API_VERSION_V0_2]
+        .iter()
+        .any(|supported| version.major == supported.major && version.minor == supported.minor)
         && is_api_enabled(release_channel)
 }
 
@@ -353,7 +544,7 @@ pub(super) async fn instantiate(
             .context("failed to instantiate Lathe extension")?;
         let extension =
             since_v0_8_0::Extension::new(&mut *store, &instance).map_err(anyhow::Error::from)?;
-        store.data_mut().lathe.bindings = Some(load_bindings(store, &instance)?);
+        store.data_mut().lathe.bindings = Some(load_bindings(store, &instance, lathe_api_version)?);
         super::wit::Extension::V0_8_0(extension)
     } else if *zed_api_version >= since_v0_6_0::MIN_VERSION {
         let instance = linker_v0_6_0(executor)
@@ -363,7 +554,7 @@ pub(super) async fn instantiate(
             .context("failed to instantiate Lathe extension")?;
         let extension =
             since_v0_6_0::Extension::new(&mut *store, &instance).map_err(anyhow::Error::from)?;
-        store.data_mut().lathe.bindings = Some(load_bindings(store, &instance)?);
+        store.data_mut().lathe.bindings = Some(load_bindings(store, &instance, lathe_api_version)?);
         super::wit::Extension::V0_6_0(extension)
     } else {
         bail!(
@@ -378,14 +569,23 @@ pub(super) async fn instantiate(
 fn load_bindings(
     store: &mut Store<WasmState>,
     instance: &wasmtime::component::Instance,
-) -> Result<Extension> {
-    Extension::new(&mut *store, instance)
-        .map_err(anyhow::Error::from)
-        .context("extension declares the Lathe API but does not implement it")
+    lathe_api_version: &Version,
+) -> Result<LatheBindings> {
+    let bindings = if lathe_api_version.minor >= API_VERSION_V0_2.minor {
+        v0_2_0::Extension::new(&mut *store, instance).map(LatheBindings::V0_2)
+    } else {
+        Extension::new(&mut *store, instance).map(LatheBindings::V0_1)
+    };
+    bindings.map_err(anyhow::Error::from).with_context(|| {
+        format!("extension declares Lathe API {lathe_api_version} but does not implement it")
+    })
 }
 
+/// The 0.2 world includes every 0.1 import, so one linker serves extensions
+/// built against either version; a 0.1 extension simply doesn't import the
+/// 0.2 interfaces.
 fn add_lathe_imports(linker: &mut Linker<WasmState>) -> wasmtime::Result<()> {
-    Extension::add_to_linker::<_, WasmState>(linker, |state| state)
+    v0_2_0::Extension::add_to_linker::<_, WasmState>(linker, |state| state)
 }
 
 fn linker_v0_8_0(executor: &BackgroundExecutor) -> &'static Linker<WasmState> {
@@ -411,10 +611,14 @@ fn linker_v0_6_0(executor: &BackgroundExecutor) -> &'static Linker<WasmState> {
 /// Per-extension Lathe state kept in the wasm store.
 #[derive(Default)]
 pub struct LatheState {
-    pub(super) bindings: Option<Extension>,
+    pub(super) bindings: Option<LatheBindings>,
+    /// Ids of the views this extension has created, to cap how many it keeps.
+    pub(super) view_ids: collections::HashSet<Arc<str>>,
     /// Commands may only be registered while the extension initializes.
     pub(super) initializing: bool,
     pub(super) commands: Vec<LatheCommand>,
+    pub(super) panels: Vec<LathePanel>,
+    pub(super) previews: Vec<LathePreview>,
     pub(super) capabilities: BTreeSet<LatheCapability>,
     /// The editor the currently running command was invoked from, or the
     /// buffer the currently running event handler is about.
@@ -589,10 +793,20 @@ pub(super) async fn run_command(
         .ok_or_else(|| anyhow!("extension does not use the Lathe API"))?;
     store.data_mut().lathe.editor = editor;
     store.data_mut().lathe.running_command = true;
-    let result = bindings
-        .lathe_extension_command_handler()
-        .call_run_command(&mut *store, command_id)
-        .await;
+    let result = match &bindings {
+        LatheBindings::V0_1(bindings) => {
+            bindings
+                .lathe_extension_command_handler()
+                .call_run_command(&mut *store, command_id)
+                .await
+        }
+        LatheBindings::V0_2(bindings) => {
+            bindings
+                .lathe_extension0_1_0_command_handler()
+                .call_run_command(&mut *store, command_id)
+                .await
+        }
+    };
     store.data_mut().lathe.running_command = false;
     store.data_mut().lathe.editor = None;
     store.data_mut().lathe.bindings = Some(bindings);
@@ -613,15 +827,600 @@ pub(super) async fn dispatch_buffer_event(
         .take()
         .ok_or_else(|| anyhow!("extension does not use the Lathe API"))?;
     store.data_mut().lathe.editor = Some(buffer);
-    let result = bindings
-        .lathe_extension_event_handler()
-        .call_on_buffer_event(&mut *store, event.to_wit())
-        .await;
+    let result = match &bindings {
+        LatheBindings::V0_1(bindings) => {
+            bindings
+                .lathe_extension_event_handler()
+                .call_on_buffer_event(&mut *store, event.to_wit())
+                .await
+        }
+        LatheBindings::V0_2(bindings) => {
+            bindings
+                .lathe_extension0_1_0_event_handler()
+                .call_on_buffer_event(&mut *store, event.to_wit())
+                .await
+        }
+    };
     store.data_mut().lathe.editor = None;
     store.data_mut().lathe.bindings = Some(bindings);
     result
         .map_err(anyhow::Error::from)?
         .map_err(|error| anyhow!(error))
+}
+
+/// Delivers a click on one of the extension's views. Treated like running a
+/// command, since the user did it: prompts are allowed.
+pub(super) async fn dispatch_view_event(
+    store: &mut Store<WasmState>,
+    view_id: &str,
+    element_id: &str,
+    event: super::lathe_views::ViewEvent,
+) -> Result<()> {
+    let bindings = store
+        .data_mut()
+        .lathe
+        .bindings
+        .take()
+        .ok_or_else(|| anyhow!("extension does not use the Lathe API"))?;
+    let LatheBindings::V0_2(v0_2) = &bindings else {
+        store.data_mut().lathe.bindings = Some(bindings);
+        bail!("views need an extension built with lathe_extension_api 0.2");
+    };
+    store.data_mut().lathe.running_command = true;
+    let result = v0_2
+        .lathe_extension0_2_0_view_handler()
+        .call_on_view_event(&mut *store, view_id, element_id, &to_wit_view_event(event))
+        .await;
+    store.data_mut().lathe.running_command = false;
+    store.data_mut().lathe.bindings = Some(bindings);
+    result
+        .map_err(anyhow::Error::from)?
+        .map_err(|error| anyhow!(error))
+}
+
+fn to_wit_view_event(
+    event: super::lathe_views::ViewEvent,
+) -> v0_2_0::lathe::extension0_2_0::views::ViewEvent {
+    use super::lathe_views::ViewEvent;
+    use v0_2_0::lathe::extension0_2_0::views::ViewEvent as WitViewEvent;
+    match event {
+        ViewEvent::Clicked => WitViewEvent::Clicked,
+        ViewEvent::Toggled(on) => WitViewEvent::Toggled(on),
+        ViewEvent::InputChanged(text) => WitViewEvent::InputChanged(text),
+        ViewEvent::Submitted(text) => WitViewEvent::Submitted(text),
+        ViewEvent::MenuChosen(id) => WitViewEvent::MenuChosen(id),
+        ViewEvent::Selected(value) => WitViewEvent::Selected(value),
+    }
+}
+
+fn to_wit_surface_event(
+    event: LatheSurfaceEvent,
+) -> v0_2_0::lathe::extension0_2_0::surfaces::SurfaceEvent {
+    use v0_2_0::lathe::extension0_2_0::surfaces::{PreviewFile, SurfaceEvent};
+    match event {
+        LatheSurfaceEvent::ViewShown(view_id) => SurfaceEvent::ViewShown(view_id.to_string()),
+        LatheSurfaceEvent::ViewHidden(view_id) => SurfaceEvent::ViewHidden(view_id.to_string()),
+        LatheSurfaceEvent::StatusItemClicked => SurfaceEvent::StatusItemClicked,
+        LatheSurfaceEvent::PreviewOpened {
+            preview_id,
+            view_id,
+            path,
+            abs_path,
+        } => SurfaceEvent::PreviewOpened(PreviewFile {
+            preview_id: preview_id.to_string(),
+            view_id: view_id.to_string(),
+            path,
+            abs_path,
+        }),
+        LatheSurfaceEvent::PreviewChanged(view_id) => {
+            SurfaceEvent::PreviewChanged(view_id.to_string())
+        }
+        LatheSurfaceEvent::PreviewClosed(view_id) => {
+            SurfaceEvent::PreviewClosed(view_id.to_string())
+        }
+    }
+}
+
+/// Delivers a surface event. A status item click counts as a user action, so
+/// the handler may prompt and open files. `buffer` is what `active-buffer`
+/// returns while the handler runs: the previewed file for `preview-opened`.
+pub(super) async fn dispatch_surface_event(
+    store: &mut Store<WasmState>,
+    event: LatheSurfaceEvent,
+    buffer: Option<Arc<dyn LatheEditorDelegate>>,
+) -> Result<()> {
+    let bindings = store
+        .data_mut()
+        .lathe
+        .bindings
+        .take()
+        .ok_or_else(|| anyhow!("extension does not use the Lathe API"))?;
+    let LatheBindings::V0_2(v0_2) = &bindings else {
+        store.data_mut().lathe.bindings = Some(bindings);
+        bail!("surface events need an extension built with lathe_extension_api 0.2");
+    };
+    if let LatheSurfaceEvent::PreviewClosed(view_id) = &event {
+        store.data_mut().lathe.view_ids.remove(view_id);
+    }
+    store.data_mut().lathe.running_command = event.is_user_action();
+    store.data_mut().lathe.editor = buffer;
+    let result = v0_2
+        .lathe_extension0_2_0_view_handler()
+        .call_on_surface_event(&mut *store, &to_wit_surface_event(event))
+        .await;
+    store.data_mut().lathe.editor = None;
+    store.data_mut().lathe.running_command = false;
+    store.data_mut().lathe.bindings = Some(bindings);
+    result
+        .map_err(anyhow::Error::from)?
+        .map_err(|error| anyhow!(error))
+}
+
+fn to_tone(tone: v0_2_0::lathe::extension0_2_0::views::Tone) -> super::lathe_views::Tone {
+    use super::lathe_views::Tone;
+    use v0_2_0::lathe::extension0_2_0::views::Tone as WitTone;
+    match tone {
+        WitTone::Neutral => Tone::Neutral,
+        WitTone::Accent => Tone::Accent,
+        WitTone::Success => Tone::Success,
+        WitTone::Warning => Tone::Warning,
+        WitTone::Error => Tone::Error,
+    }
+}
+
+fn to_list_item(
+    item: v0_2_0::lathe::extension0_2_0::views::ListItemNode,
+) -> super::lathe_views::NodeKind {
+    use super::lathe_views::{Disclosure, MenuEntry, NodeKind};
+    use v0_2_0::lathe::extension0_2_0::views as wit_views;
+    NodeKind::ListItem {
+        id: item.id.into(),
+        label: item.label.into(),
+        detail: item.detail.map(Into::into),
+        icon: item.icon.map(Into::into),
+        tooltip: item.tooltip.map(Into::into),
+        selected: item.selected,
+        disabled: item.disabled,
+        indent: item.indent,
+        disclosure: match item.disclosure {
+            wit_views::Disclosure::None => Disclosure::None,
+            wit_views::Disclosure::Collapsed => Disclosure::Collapsed,
+            wit_views::Disclosure::Expanded => Disclosure::Expanded,
+        },
+        menu: item
+            .menu
+            .into_iter()
+            .map(|entry| MenuEntry {
+                id: entry.id.into(),
+                label: entry.label.into(),
+            })
+            .collect(),
+    }
+}
+
+/// Asks the extension for rows of a virtual list and checks them.
+pub(super) async fn provide_rows(
+    store: &mut Store<WasmState>,
+    view_id: &str,
+    list_id: &str,
+    start: u32,
+    count: u32,
+) -> Result<Vec<super::lathe_views::NodeKind>> {
+    let count = count.min(super::lathe_views::ROWS_PER_REQUEST);
+    let bindings = store
+        .data_mut()
+        .lathe
+        .bindings
+        .take()
+        .ok_or_else(|| anyhow!("extension does not use the Lathe API"))?;
+    let LatheBindings::V0_2(v0_2) = &bindings else {
+        store.data_mut().lathe.bindings = Some(bindings);
+        bail!("virtual lists need an extension built with lathe_extension_api 0.2");
+    };
+    let result = v0_2
+        .lathe_extension0_2_0_view_handler()
+        .call_provide_rows(&mut *store, view_id, list_id, start, count)
+        .await;
+    store.data_mut().lathe.bindings = Some(bindings);
+    let rows = result
+        .map_err(anyhow::Error::from)?
+        .map_err(|error| anyhow!(error))?
+        .into_iter()
+        .map(to_list_item)
+        .collect::<Vec<_>>();
+    super::lathe_views::validate_rows(&rows, count)?;
+    Ok(rows)
+}
+
+fn to_lathe_view(
+    view: v0_2_0::lathe::extension0_2_0::views::View,
+) -> Result<super::lathe_views::LatheView> {
+    use super::lathe_views::{Node, NodeKind, SelectOption, TextStyle, validate};
+    use v0_2_0::lathe::extension0_2_0::views as wit_views;
+    let nodes = view
+        .nodes
+        .into_iter()
+        .map(|node| Node {
+            kind: match node.kind {
+                wit_views::NodeKind::Column => NodeKind::Column,
+                wit_views::NodeKind::Row => NodeKind::Row,
+                wit_views::NodeKind::Scroll => NodeKind::Scroll,
+                wit_views::NodeKind::Text(text) => NodeKind::Text {
+                    text: text.text.into(),
+                    style: match text.style {
+                        wit_views::TextStyle::Body => TextStyle::Body,
+                        wit_views::TextStyle::Muted => TextStyle::Muted,
+                        wit_views::TextStyle::Heading => TextStyle::Heading,
+                        wit_views::TextStyle::Code => TextStyle::Code,
+                    },
+                    tone: to_tone(text.tone),
+                },
+                wit_views::NodeKind::Button(button) => NodeKind::Button {
+                    id: button.id.into(),
+                    label: button.label.into(),
+                    icon: button.icon.map(Into::into),
+                    tooltip: button.tooltip.map(Into::into),
+                    disabled: button.disabled,
+                },
+                wit_views::NodeKind::ListItem(item) => to_list_item(item),
+                wit_views::NodeKind::VirtualList(list) => NodeKind::VirtualList {
+                    id: list.id.into(),
+                    row_count: list.row_count,
+                    revision: list.revision,
+                },
+                wit_views::NodeKind::TextInput(input) => NodeKind::TextInput {
+                    id: input.id.into(),
+                    value: input.value.into(),
+                    placeholder: input.placeholder.map(Into::into),
+                    disabled: input.disabled,
+                },
+                wit_views::NodeKind::Checkbox(checkbox) => NodeKind::Checkbox {
+                    id: checkbox.id.into(),
+                    label: checkbox.label.into(),
+                    checked: checkbox.checked,
+                    disabled: checkbox.disabled,
+                },
+                wit_views::NodeKind::Badge(badge) => NodeKind::Badge {
+                    text: badge.text.into(),
+                    tone: to_tone(badge.tone),
+                },
+                wit_views::NodeKind::Select(select) => NodeKind::Select {
+                    id: select.id.into(),
+                    options: select
+                        .options
+                        .into_iter()
+                        .map(|option| SelectOption {
+                            value: option.value.into(),
+                            label: option.label.into(),
+                        })
+                        .collect(),
+                    selected: select.selected.map(Into::into),
+                    placeholder: select.placeholder.map(Into::into),
+                    disabled: select.disabled,
+                },
+                wit_views::NodeKind::Progress(progress) => NodeKind::Progress {
+                    fraction: progress.fraction,
+                    label: progress.label.map(Into::into),
+                },
+                wit_views::NodeKind::Markdown(markdown) => NodeKind::Markdown(markdown.into()),
+                wit_views::NodeKind::Icon(name) => NodeKind::Icon(name.into()),
+                wit_views::NodeKind::Divider => NodeKind::Divider,
+                wit_views::NodeKind::Spacer => NodeKind::Spacer,
+            },
+            children: node.children,
+        })
+        .collect();
+    validate(nodes)
+}
+
+impl v0_2_0::lathe::extension0_2_0::views::Host for WasmState {
+    async fn update_view(
+        &mut self,
+        view_id: String,
+        view: v0_2_0::lathe::extension0_2_0::views::View,
+    ) -> wasmtime::Result<Result<(), String>> {
+        let prepared = (|| {
+            self.lathe.require(LatheCapability::UiViews)?;
+            super::lathe_views::validate_id("view", &view_id)?;
+            let view_id: Arc<str> = view_id.as_str().into();
+            if !self.lathe.view_ids.contains(&view_id)
+                && self.lathe.view_ids.len() >= super::lathe_views::MAX_VIEWS_PER_EXTENSION
+            {
+                bail!(
+                    "an extension can have at most {} views",
+                    super::lathe_views::MAX_VIEWS_PER_EXTENSION
+                );
+            }
+            let view = to_lathe_view(view)?;
+            self.lathe.view_ids.insert(view_id.clone());
+            anyhow::Ok((view_id, view))
+        })();
+        let (view_id, view) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return Ok(Err(format!("{error:#}"))),
+        };
+        let Some(ui) = self.host.lathe_ui() else {
+            return Ok(Ok(()));
+        };
+        let extension_id = self.manifest.id.clone();
+        self.on_main_thread(move |cx| {
+            async move { ui.update_view(extension_id, view_id, view, cx) }.boxed_local()
+        })
+        .await;
+        Ok(Ok(()))
+    }
+
+    async fn open_location(
+        &mut self,
+        location: v0_2_0::lathe::extension0_2_0::views::Location,
+    ) -> wasmtime::Result<Result<(), String>> {
+        if !self.lathe.running_command {
+            return Ok(Err(
+                "files can only be opened while handling something the user \
+                           did: a command, a view event or a status item click"
+                    .into(),
+            ));
+        }
+        if location.path.trim().is_empty() {
+            return Ok(Err("open-location needs a path".into()));
+        }
+        if location.line == Some(0) || location.column == Some(0) {
+            return Ok(Err("line and column are 1-based".into()));
+        }
+        let Some(ui) = self.host.lathe_ui() else {
+            return Ok(Err(
+                "opening files is not available in this build of Lathe".into()
+            ));
+        };
+        let location = LatheLocation {
+            path: location.path,
+            row: location.line.map(|line| line - 1),
+            column: location.column.map(|column| column - 1),
+        };
+        let result = self
+            .on_main_thread(move |cx| async move { ui.open_location(location, cx) }.boxed_local())
+            .await;
+        Ok(result.map_err(|error| format!("{error:#}")))
+    }
+
+    async fn remove_view(&mut self, view_id: String) -> wasmtime::Result<Result<(), String>> {
+        if let Err(error) = self.lathe.require(LatheCapability::UiViews) {
+            return Ok(Err(error.to_string()));
+        }
+        let view_id: Arc<str> = view_id.as_str().into();
+        if !self.lathe.view_ids.remove(&view_id) {
+            return Ok(Ok(()));
+        }
+        let Some(ui) = self.host.lathe_ui() else {
+            return Ok(Ok(()));
+        };
+        let extension_id = self.manifest.id.clone();
+        self.on_main_thread(move |cx| {
+            async move { ui.remove_view(extension_id, view_id, cx) }.boxed_local()
+        })
+        .await;
+        Ok(Ok(()))
+    }
+}
+
+impl v0_2_0::lathe::extension0_2_0::surfaces::Host for WasmState {
+    async fn register_panel(
+        &mut self,
+        spec: v0_2_0::lathe::extension0_2_0::surfaces::PanelSpec,
+    ) -> wasmtime::Result<Result<(), String>> {
+        Ok(register_panel(&mut self.lathe, spec).map_err(|error| error.to_string()))
+    }
+
+    async fn register_preview(
+        &mut self,
+        spec: v0_2_0::lathe::extension0_2_0::surfaces::PreviewSpec,
+    ) -> wasmtime::Result<Result<(), String>> {
+        Ok(register_preview(&mut self.lathe, spec).map_err(|error| error.to_string()))
+    }
+
+    async fn set_status_item(
+        &mut self,
+        item: Option<v0_2_0::lathe::extension0_2_0::surfaces::StatusItem>,
+    ) -> wasmtime::Result<Result<(), String>> {
+        if let Err(error) = self.lathe.require(LatheCapability::UiStatus) {
+            return Ok(Err(error.to_string()));
+        }
+        let item = match item.map(to_status_item).transpose() {
+            Ok(item) => item,
+            Err(error) => return Ok(Err(error.to_string())),
+        };
+        let Some(ui) = self.host.lathe_ui() else {
+            return Ok(Ok(()));
+        };
+        let extension_id = self.manifest.id.clone();
+        self.on_main_thread(move |cx| {
+            async move { ui.set_status_item(extension_id, item, cx) }.boxed_local()
+        })
+        .await;
+        Ok(Ok(()))
+    }
+}
+
+fn validate_title(what: &str, id: &str, title: &str) -> Result<Arc<str>> {
+    let title = title.trim();
+    if title.is_empty() {
+        bail!("{what} {id:?} needs a title");
+    }
+    if title.chars().count() > MAX_TITLE_CHARS {
+        bail!("{what} {id:?} has a title longer than {MAX_TITLE_CHARS} characters");
+    }
+    Ok(title.into())
+}
+
+fn validate_surface_id(state: &LatheState, what: &str, id: &str) -> Result<()> {
+    if !state.initializing {
+        bail!("{what}s can only be registered while the extension initializes");
+    }
+    // No capability check here: revoking `ui:views` reloads the extension,
+    // and failing registration would break its startup. Surfaces check the
+    // grant when they show anything instead.
+    if !is_valid_command_id(id) {
+        bail!("invalid {what} id {id:?}: use 1 to 64 lowercase letters, digits and `-`");
+    }
+    Ok(())
+}
+
+fn register_panel(
+    state: &mut LatheState,
+    spec: v0_2_0::lathe::extension0_2_0::surfaces::PanelSpec,
+) -> Result<()> {
+    use v0_2_0::lathe::extension0_2_0::surfaces::DockSide;
+    validate_surface_id(state, "panel", &spec.id)?;
+    let title = validate_title("panel", &spec.id, &spec.title)?;
+    if let Some(icon) = &spec.icon {
+        super::lathe_views::validate_id("panel icon", icon)?;
+    }
+    if state.panels.iter().any(|panel| *panel.id == spec.id) {
+        bail!("panel {:?} is already registered", spec.id);
+    }
+    if state.panels.len() >= MAX_PANELS_PER_EXTENSION {
+        bail!("an extension can have at most {MAX_PANELS_PER_EXTENSION} panels");
+    }
+    state.panels.push(LathePanel {
+        id: spec.id.into(),
+        title,
+        icon: spec.icon.map(Into::into),
+        dock: match spec.dock {
+            DockSide::Left => LatheDockSide::Left,
+            DockSide::Right => LatheDockSide::Right,
+            DockSide::Bottom => LatheDockSide::Bottom,
+        },
+    });
+    Ok(())
+}
+
+fn register_preview(
+    state: &mut LatheState,
+    spec: v0_2_0::lathe::extension0_2_0::surfaces::PreviewSpec,
+) -> Result<()> {
+    validate_surface_id(state, "preview", &spec.id)?;
+    let title = validate_title("preview", &spec.id, &spec.title)?;
+    if spec.file_suffixes.is_empty() || spec.file_suffixes.len() > MAX_PREVIEW_SUFFIXES {
+        bail!(
+            "preview {:?} needs 1 to {MAX_PREVIEW_SUFFIXES} file suffixes",
+            spec.id
+        );
+    }
+    for suffix in &spec.file_suffixes {
+        if suffix.is_empty()
+            || suffix.chars().count() > MAX_SUFFIX_CHARS
+            || suffix.contains(['/', '\\'])
+        {
+            bail!(
+                "invalid file suffix {suffix:?} for preview {:?}: use up to \
+                 {MAX_SUFFIX_CHARS} characters and no path separators",
+                spec.id
+            );
+        }
+    }
+    if state.previews.iter().any(|preview| *preview.id == spec.id) {
+        bail!("preview {:?} is already registered", spec.id);
+    }
+    if state.previews.len() >= MAX_PREVIEWS_PER_EXTENSION {
+        bail!("an extension can have at most {MAX_PREVIEWS_PER_EXTENSION} previews");
+    }
+    state.previews.push(LathePreview {
+        id: spec.id.into(),
+        title,
+        file_suffixes: spec.file_suffixes.into_iter().map(Into::into).collect(),
+    });
+    Ok(())
+}
+
+fn to_status_item(
+    item: v0_2_0::lathe::extension0_2_0::surfaces::StatusItem,
+) -> Result<LatheStatusItem> {
+    let label = truncate_chars(item.label.trim(), MAX_STATUS_CHARS);
+    if label.is_empty() && item.icon.is_none() {
+        bail!("a status item needs a label or an icon");
+    }
+    if let Some(icon) = &item.icon {
+        super::lathe_views::validate_id("status item icon", icon)?;
+    }
+    Ok(LatheStatusItem {
+        label: label.into(),
+        icon: item.icon.map(Into::into),
+        tooltip: item
+            .tooltip
+            .map(|tooltip| truncate_chars(&tooltip, MAX_NOTIFICATION_CHARS).into()),
+        tone: to_tone(item.tone),
+    })
+}
+
+impl v0_2_0::lathe::extension0_2_0::decorations::Host for WasmState {
+    async fn set_decorations(
+        &mut self,
+        version: u64,
+        layer: String,
+        decorations: Vec<v0_2_0::lathe::extension0_2_0::decorations::Decoration>,
+    ) -> wasmtime::Result<Result<(), String>> {
+        if let Err(error) = self.lathe.require(LatheCapability::UiDecorations) {
+            return Ok(Err(error.to_string()));
+        }
+        let Some(editor) = self.lathe.editor() else {
+            return Ok(Err(
+                "decorations need a buffer: call this from a command run in an \
+                           editor, or from a buffer event"
+                    .into(),
+            ));
+        };
+        let decorations = match to_decorations(&layer, decorations) {
+            Ok(decorations) => decorations,
+            Err(error) => return Ok(Err(error.to_string())),
+        };
+        let extension_id = self.manifest.id.clone();
+        let layer: Arc<str> = layer.into();
+        let result = self
+            .on_main_thread(move |cx| {
+                async move { editor.set_decorations(version, extension_id, layer, decorations, cx) }
+                    .boxed_local()
+            })
+            .await;
+        Ok(result.map_err(|error| format!("{error:#}")))
+    }
+}
+
+fn to_decorations(
+    layer: &str,
+    decorations: Vec<v0_2_0::lathe::extension0_2_0::decorations::Decoration>,
+) -> Result<Vec<LatheDecoration>> {
+    use v0_2_0::lathe::extension0_2_0::decorations::DecorationStyle;
+    if !is_valid_command_id(layer) {
+        bail!("invalid decoration layer {layer:?}: use 1 to 64 lowercase letters, digits and `-`");
+    }
+    if decorations.len() > MAX_DECORATIONS_PER_LAYER {
+        bail!("a decoration layer can have at most {MAX_DECORATIONS_PER_LAYER} decorations");
+    }
+    decorations
+        .into_iter()
+        .map(|decoration| {
+            let range = from_byte_range(decoration.range)?;
+            let message = match decoration.message {
+                Some(message) if message.chars().count() > MAX_DECORATION_MESSAGE_CHARS => bail!(
+                    "decoration messages can be at most {MAX_DECORATION_MESSAGE_CHARS} characters"
+                ),
+                Some(message) if message.trim().is_empty() => None,
+                Some(message) => Some(message.trim().into()),
+                None => None,
+            };
+            Ok(LatheDecoration {
+                range,
+                style: match decoration.style {
+                    DecorationStyle::Background => LatheDecorationStyle::Background,
+                    DecorationStyle::Underline => LatheDecorationStyle::Underline,
+                    DecorationStyle::WavyUnderline => LatheDecorationStyle::WavyUnderline,
+                    DecorationStyle::Gutter => LatheDecorationStyle::Gutter,
+                },
+                tone: to_tone(decoration.tone),
+                message,
+            })
+        })
+        .collect()
 }
 
 impl lathe::extension::events::Host for WasmState {}
@@ -844,6 +1643,56 @@ mod tests {
     }
 
     #[test]
+    fn test_register_panels_and_previews() {
+        use v0_2_0::lathe::extension0_2_0::surfaces::{DockSide, PanelSpec, PreviewSpec};
+        let panel = |id: &str, title: &str| PanelSpec {
+            id: id.into(),
+            title: title.into(),
+            icon: None,
+            dock: DockSide::Left,
+        };
+        let preview = |id: &str, suffixes: &[&str]| PreviewSpec {
+            id: id.into(),
+            title: "Preview".into(),
+            file_suffixes: suffixes.iter().map(|suffix| suffix.to_string()).collect(),
+        };
+        let mut state = LatheState::default();
+        assert!(
+            register_panel(&mut state, panel("a", "A"))
+                .unwrap_err()
+                .to_string()
+                .contains("while the extension initializes")
+        );
+        state.initializing = true;
+        register_panel(&mut state, panel("a", "A")).unwrap();
+        assert!(
+            register_panel(&mut state, panel("a", "A")).is_err(),
+            "duplicate"
+        );
+        assert!(register_panel(&mut state, panel("Bad Id", "A")).is_err());
+        assert!(
+            register_panel(&mut state, panel("b", "  ")).is_err(),
+            "blank title"
+        );
+        for id in ["b", "c", "d"] {
+            register_panel(&mut state, panel(id, id)).unwrap();
+        }
+        assert!(
+            register_panel(&mut state, panel("e", "E"))
+                .unwrap_err()
+                .to_string()
+                .contains("at most")
+        );
+
+        register_preview(&mut state, preview("csv", &[".csv", "Dockerfile"])).unwrap();
+        assert!(register_preview(&mut state, preview("none", &[])).is_err());
+        assert!(register_preview(&mut state, preview("slash", &["a/b"])).is_err());
+        assert!(register_preview(&mut state, preview("empty", &[""])).is_err());
+        assert!(state.previews[0].matches("x.csv") && state.previews[0].matches("Dockerfile"));
+        assert!(!state.previews[0].matches("x.csv.bak"));
+    }
+
+    #[test]
     fn test_validate_ranges() {
         let text = "héllo";
         assert!(validate_ranges(text, &[0..1, 1..3, 6..6], true).is_ok());
@@ -914,6 +1763,10 @@ mod tests {
     fn test_api_version_gating() {
         let version = Version::new(0, 1, 0);
         assert!(is_supported_api_version(ReleaseChannel::Beta, &version));
+        assert!(
+            is_supported_api_version(ReleaseChannel::Beta, &Version::new(0, 2, 3)),
+            "0.2.x extensions load"
+        );
         assert!(is_supported_api_version(ReleaseChannel::Dev, &version));
         assert!(
             is_supported_api_version(ReleaseChannel::Beta, &Version::new(0, 1, 7)),
@@ -921,7 +1774,7 @@ mod tests {
         );
         assert!(!is_supported_api_version(
             ReleaseChannel::Beta,
-            &Version::new(0, 2, 0)
+            &Version::new(0, 3, 0)
         ));
     }
 }

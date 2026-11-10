@@ -585,6 +585,7 @@ impl VsCodeSettings {
             context_servers: self.context_servers(),
             context_server_timeout: None,
             extension_settings: Default::default(),
+            recommended_extensions: None,
             load_direnv: None,
             git_hosting_providers: None,
             disable_ai: None,

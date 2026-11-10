@@ -104,6 +104,7 @@ fn remote_sync_entry(id: &str, manifest_body: &str) -> ExtensionIndexEntry {
     ExtensionIndexEntry {
         manifest: Arc::new(toml::from_str(&manifest).unwrap()),
         dev: false,
+        disabled: false,
     }
 }
 
@@ -406,6 +407,7 @@ async fn test_extension_store(cx: &mut TestAppContext) {
                         language_model_providers: BTreeMap::default(),
                     }),
                     dev: false,
+                    disabled: false,
                 },
             ),
             (
@@ -437,6 +439,7 @@ async fn test_extension_store(cx: &mut TestAppContext) {
                         language_model_providers: BTreeMap::default(),
                     }),
                     dev: false,
+                    disabled: false,
                 },
             ),
         ]
@@ -623,6 +626,7 @@ async fn test_extension_store(cx: &mut TestAppContext) {
                 language_model_providers: BTreeMap::default(),
             }),
             dev: false,
+            disabled: false,
         },
     );
     expected_index.themes.insert(
@@ -4655,80 +4659,7 @@ async fn test_lathe_extension_commands(cx: &mut TestAppContext) {
     init_test(cx);
     cx.executor().allow_parking();
 
-    let root_dir = util::dev_repo_root().expect("test extension requires a repository checkout");
-    let cache_dir = root_dir.join("target");
-    let extension_dir = root_dir.join("extensions").join("test-lathe-extension");
-
-    // Compile the extension with the same cargo invocation the extension
-    // builder uses for a dev install (`compile_rust_extension`), before the
-    // GPUI part of the test starts. A cold compile can take longer than the
-    // test scheduler lets a test sit parked (15 s); this way the builder's own
-    // build below only confirms it is up to date.
-    // Blocks this thread on purpose, outside the test scheduler, so the time
-    // is not counted as the test sitting parked.
-    let prebuild = smol::block_on(
-        util::command::new_command("cargo")
-            .args(["build", "--target", "wasm32-wasip2", "--target-dir"])
-            .arg(extension_dir.join("target"))
-            .env("RUSTC_WRAPPER", "")
-            .current_dir(&extension_dir)
-            .output(),
-    )
-    .expect("running cargo to prebuild the Lathe test extension");
-    assert!(
-        prebuild.status.success(),
-        "prebuilding the Lathe test extension failed:\n{}",
-        String::from_utf8_lossy(&prebuild.stderr)
-    );
-
-    let fs = RealFs::new(None, cx.executor());
-    let extensions_tree = TempTree::new(json!({ "installed": {}, "work": {} }));
-    let extensions_dir = extensions_tree.path().canonicalize().unwrap();
-
-    let http_client = FakeHttpClient::with_200_response();
-    let user_agent = cx.update(|cx| format!("Lathe/{} test", AppVersion::global(cx)));
-    let builder_client =
-        Arc::new(ReqwestClient::user_agent(&user_agent).expect("Could not create HTTP client"));
-
-    let store = cx.new(|cx| {
-        ExtensionStore::new(
-            extensions_dir,
-            Some(cache_dir),
-            Arc::new(ExtensionHostProxy::new()),
-            fs.clone(),
-            http_client.clone(),
-            builder_client,
-            None,
-            NodeRuntime::unavailable(),
-            cx,
-        )
-    });
-
-    let mut events = cx.events(&store);
-    let executor = cx.executor();
-    let _debounce = cx.executor().spawn(async move {
-        while let Some(event) = events.next().await {
-            if let Event::StartedReloading = event {
-                executor.advance_clock(RELOAD_DEBOUNCE_DURATION);
-            }
-        }
-    });
-
-    store
-        .update(cx, |store, cx| {
-            store.install_dev_extension(extension_dir.clone(), cx)
-        })
-        .await
-        .expect("building and installing the Lathe test extension");
-    cx.run_until_parked();
-
-    // Installing creates a symlink in the watched installed directory. The
-    // watcher reports it on real time and queues a debounced reload on the
-    // test clock, which would otherwise fire when the event section below
-    // advances that clock, unloading the extension mid-test. Let the watcher
-    // report it, then wait for a reload queued after it to finish.
-    std::thread::sleep(Duration::from_millis(500));
-    settle_reload(&store, cx).await;
+    let (store, _extensions_dir) = install_lathe_test_extension("test-lathe-extension", cx).await;
 
     let commands = store.read_with(cx, |store, _| {
         store
@@ -5040,6 +4971,9 @@ struct FakeLatheUi {
     pick_answer: Mutex<Option<String>>,
     pick_labels: Mutex<Vec<String>>,
     tasks: Mutex<Vec<crate::wasm_host::lathe::TaskSpec>>,
+    views: Mutex<HashMap<(Arc<str>, Arc<str>), crate::wasm_host::lathe_views::LatheView>>,
+    status_items: Mutex<HashMap<Arc<str>, crate::wasm_host::lathe::LatheStatusItem>>,
+    opened: Mutex<Vec<crate::wasm_host::lathe::LatheLocation>>,
 }
 
 impl FakeLatheUi {
@@ -5095,6 +5029,41 @@ impl crate::wasm_host::lathe::LatheUiDelegate for FakeLatheUi {
         Ok(receiver)
     }
 
+    fn update_view(
+        &self,
+        extension_id: Arc<str>,
+        view_id: Arc<str>,
+        view: crate::wasm_host::lathe_views::LatheView,
+        _cx: &mut gpui::AsyncApp,
+    ) {
+        self.views.lock().insert((extension_id, view_id), view);
+    }
+
+    fn remove_view(&self, extension_id: Arc<str>, view_id: Arc<str>, _cx: &mut gpui::AsyncApp) {
+        self.views.lock().remove(&(extension_id, view_id));
+    }
+
+    fn set_status_item(
+        &self,
+        extension_id: Arc<str>,
+        item: Option<crate::wasm_host::lathe::LatheStatusItem>,
+        _cx: &mut gpui::AsyncApp,
+    ) {
+        match item {
+            Some(item) => self.status_items.lock().insert(extension_id, item),
+            None => self.status_items.lock().remove(&extension_id),
+        };
+    }
+
+    fn open_location(
+        &self,
+        location: crate::wasm_host::lathe::LatheLocation,
+        _cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<()> {
+        self.opened.lock().push(location);
+        Ok(())
+    }
+
     fn spawn_task(
         &self,
         task: crate::wasm_host::lathe::TaskSpec,
@@ -5122,12 +5091,14 @@ impl crate::wasm_host::lathe::LatheUiDelegate for FakeLatheUi {
 /// rules the real editor delegate does.
 struct FakeLatheEditor {
     state: Mutex<(u64, String, Vec<std::ops::Range<usize>>, usize)>,
+    decorations: Mutex<Vec<(String, Vec<crate::wasm_host::lathe::LatheDecoration>)>>,
 }
 
 impl FakeLatheEditor {
     fn new(text: &str, selections: Vec<std::ops::Range<usize>>) -> Self {
         Self {
             state: Mutex::new((1, text.to_string(), selections, 0)),
+            decorations: Mutex::default(),
         }
     }
 
@@ -5187,6 +5158,27 @@ impl crate::wasm_host::lathe::LatheEditorDelegate for FakeLatheEditor {
         state.0 += 1;
         Ok(())
     }
+
+    fn set_decorations(
+        &self,
+        version: u64,
+        _extension_id: Arc<str>,
+        layer: Arc<str>,
+        decorations: Vec<crate::wasm_host::lathe::LatheDecoration>,
+        _cx: &mut gpui::AsyncApp,
+    ) -> anyhow::Result<()> {
+        let state = self.state.lock();
+        anyhow::ensure!(version == state.0, "buffer changed since it was read");
+        crate::wasm_host::lathe::validate_ranges(
+            &state.1,
+            decorations.iter().map(|decoration| &decoration.range),
+            false,
+        )?;
+        self.decorations
+            .lock()
+            .push((layer.to_string(), decorations));
+        Ok(())
+    }
 }
 
 /// Identifies the currently loaded instance of the Lathe test extension: each
@@ -5230,4 +5222,550 @@ fn wait_for_new_lathe_instance(
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("the Lathe test extension was not reloaded");
+}
+
+#[gpui::test]
+async fn test_disabled_extensions_stay_installed_but_unloaded(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/extensions/installed",
+        json!({
+            "gruvbox": {
+                "extension.toml": "id = \"gruvbox\"\nname = \"Gruvbox\"\nversion = \"1.0.0\"\nschema_version = 1\nthemes = [\"themes/gruvbox.json\"]\n",
+                "themes": {
+                    "gruvbox.json": r#"{
+                        "name": "Gruvbox",
+                        "author": "Someone",
+                        "themes": [{ "name": "Gruvbox Dark", "appearance": "dark", "style": {} }]
+                    }"#,
+                },
+            },
+        }),
+    )
+    .await;
+
+    let proxy = Arc::new(ExtensionHostProxy::new());
+    let theme_registry = Arc::new(ThemeRegistry::new(Box::new(())));
+    theme_extension::init(proxy.clone(), theme_registry, cx.executor());
+    let store = create_extension_store_with(fs.clone(), proxy, cx);
+    let themes = |store: &Entity<ExtensionStore>, cx: &mut TestAppContext| {
+        store.read_with(cx, |store, _| {
+            store
+                .extension_themes("gruvbox")
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(themes(&store, cx), vec!["Gruvbox Dark"]);
+
+    let set_disabled = |disabled: bool, cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|settings, cx| {
+                settings.update_user_settings(cx, |content| {
+                    content
+                        .extension
+                        .disabled_extensions
+                        .insert("gruvbox".into(), disabled);
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(RELOAD_DEBOUNCE_DURATION);
+        cx.run_until_parked();
+    };
+
+    set_disabled(true, cx);
+    store.read_with(cx, |store, _| {
+        assert!(store.is_extension_disabled("gruvbox"));
+        assert!(
+            store.installed_extensions().contains_key("gruvbox"),
+            "a disabled extension still shows as installed"
+        );
+        assert_eq!(
+            store.extension_status("gruvbox"),
+            crate::ExtensionStatus::Installed("1.0.0".into())
+        );
+    });
+    assert!(themes(&store, cx).is_empty(), "its theme is unloaded");
+
+    set_disabled(false, cx);
+    store.read_with(cx, |store, _| {
+        assert!(!store.is_extension_disabled("gruvbox"))
+    });
+    assert_eq!(themes(&store, cx), vec!["Gruvbox Dark"], "and loaded again");
+}
+
+/// Builds an extension from `extensions/<name>`, dev-installs it into a fresh
+/// store, and waits until the store has settled with it loaded. Keep the
+/// returned `TempTree` alive for as long as the store is used.
+async fn install_lathe_test_extension(
+    name: &str,
+    cx: &mut TestAppContext,
+) -> (Entity<ExtensionStore>, TempTree) {
+    let root_dir = util::dev_repo_root().expect("test extension requires a repository checkout");
+    let cache_dir = root_dir.join("target");
+    let extension_dir = root_dir.join("extensions").join(name);
+
+    // Compile the extension with the same cargo invocation the extension
+    // builder uses for a dev install (`compile_rust_extension`), before the
+    // GPUI part of the test starts. A cold compile can take longer than the
+    // test scheduler lets a test sit parked (15 s); this way the builder's own
+    // build below only confirms it is up to date. Blocks this thread on
+    // purpose, outside the test scheduler.
+    let prebuild = smol::block_on(
+        util::command::new_command("cargo")
+            .args(["build", "--target", "wasm32-wasip2", "--target-dir"])
+            .arg(extension_dir.join("target"))
+            .env("RUSTC_WRAPPER", "")
+            .current_dir(&extension_dir)
+            .output(),
+    )
+    .expect("running cargo to prebuild a Lathe test extension");
+    assert!(
+        prebuild.status.success(),
+        "prebuilding {name} failed:\n{}",
+        String::from_utf8_lossy(&prebuild.stderr)
+    );
+
+    let fs = RealFs::new(None, cx.executor());
+    let extensions_tree = TempTree::new(json!({ "installed": {}, "work": {} }));
+    let extensions_dir = extensions_tree.path().canonicalize().unwrap();
+
+    let http_client = FakeHttpClient::with_200_response();
+    let user_agent = cx.update(|cx| format!("Lathe/{} test", AppVersion::global(cx)));
+    let builder_client =
+        Arc::new(ReqwestClient::user_agent(&user_agent).expect("Could not create HTTP client"));
+    let store = cx.new(|cx| {
+        ExtensionStore::new(
+            extensions_dir,
+            Some(cache_dir),
+            Arc::new(ExtensionHostProxy::new()),
+            fs.clone(),
+            http_client.clone(),
+            builder_client,
+            None,
+            NodeRuntime::unavailable(),
+            cx,
+        )
+    });
+
+    let mut events = cx.events(&store);
+    let executor = cx.executor();
+    cx.executor()
+        .spawn(async move {
+            while let Some(event) = events.next().await {
+                if let Event::StartedReloading = event {
+                    executor.advance_clock(RELOAD_DEBOUNCE_DURATION);
+                }
+            }
+        })
+        .detach();
+
+    store
+        .update(cx, |store, cx| {
+            store.install_dev_extension(extension_dir.clone(), cx)
+        })
+        .await
+        .unwrap_or_else(|error| panic!("building and installing {name}: {error:#}"));
+    cx.run_until_parked();
+
+    // Installing creates a symlink in the watched installed directory. The
+    // watcher reports it on real time and queues a debounced reload on the
+    // test clock, which would otherwise fire later and unload the extension
+    // mid-test. Let the watcher report it, then wait for a reload queued
+    // after it to finish.
+    std::thread::sleep(Duration::from_millis(500));
+    settle_reload(&store, cx).await;
+    (store, extensions_tree)
+}
+
+#[gpui::test]
+async fn test_store_notifies_when_extensions_load(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.executor().allow_parking();
+    let (store, _extensions_dir) =
+        install_lathe_test_extension("test-lathe-extension-v2", cx).await;
+    store.update(cx, |store, _| store.wasm_extensions.clear());
+    // Whether the extension was loaded at each notification: a notification
+    // that comes before loading finishes doesn't help a waiting observer.
+    let notified = Arc::new(Mutex::new(Vec::new()));
+    let _subscription = cx.update(|cx| {
+        let notified = notified.clone();
+        cx.observe(&store, move |store, cx| {
+            let loaded = store
+                .read(cx)
+                .wasm_extensions
+                .iter()
+                .any(|(manifest, _)| manifest.id.as_ref() == "test-lathe-extension-v2");
+            notified.lock().push(loaded);
+        })
+    });
+
+    store
+        .update(cx, |store, cx| {
+            store.reload(Some("test-lathe-extension-v2".into()), cx)
+        })
+        .await;
+    cx.run_until_parked();
+    let loaded = store.read_with(cx, |store, _| {
+        store
+            .wasm_extensions
+            .iter()
+            .any(|(manifest, _)| manifest.id.as_ref() == "test-lathe-extension-v2")
+    });
+    assert!(loaded);
+    assert!(
+        notified.lock().last() == Some(&true),
+        "notified: {:?}",
+        notified.lock()
+    );
+    assert!(
+        notified.lock().contains(&true),
+        "observers learn that extensions loaded, so a preview restored at \
+         startup stops waiting"
+    );
+}
+
+#[gpui::test]
+async fn test_lathe_extension_v0_2_views(cx: &mut TestAppContext) {
+    use crate::wasm_host::lathe::{LatheDockSide, LatheSurfaceEvent};
+    use crate::wasm_host::lathe_views::{NodeKind, ViewEvent};
+
+    init_test(cx);
+    cx.executor().allow_parking();
+    let (store, _extensions_dir) =
+        install_lathe_test_extension("test-lathe-extension-v2", cx).await;
+    let ui = Arc::new(FakeLatheUi::default());
+    store.read_with(cx, |store, _| store.wasm_host.set_lathe_ui(ui.clone()));
+
+    let api_version = store.read_with(cx, |store, _| {
+        store
+            .wasm_extensions
+            .iter()
+            .find(|(manifest, _)| manifest.id.as_ref() == "test-lathe-extension-v2")
+            .and_then(|(_, extension)| extension.lathe_api_version.clone())
+    });
+    assert_eq!(
+        api_version.map(|version| (version.major, version.minor)),
+        Some((0, 2))
+    );
+
+    let key = (
+        Arc::<str>::from("test-lathe-extension-v2"),
+        Arc::<str>::from("counter"),
+    );
+    let texts = |ui: &FakeLatheUi| -> Vec<String> {
+        let views = ui.views.lock();
+        let Some(view) = views.get(&key) else {
+            return Vec::new();
+        };
+        (0..view.len() as u32)
+            .filter_map(|index| match &view.node(index).kind {
+                NodeKind::Text { text, .. } => Some(text.to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let status = |ui: &FakeLatheUi| texts(ui).last().cloned().unwrap_or_default();
+    let run = |command: &'static str, cx: &mut TestAppContext| {
+        store.update(cx, |store, cx| {
+            store.run_lathe_command("test-lathe-extension-v2", command.into(), None, cx)
+        })
+    };
+    let send = |element: &'static str, event: ViewEvent, cx: &mut TestAppContext| {
+        store.update(cx, |store, cx| {
+            store.dispatch_lathe_view_event(
+                "test-lathe-extension-v2",
+                "counter".into(),
+                element.into(),
+                event,
+                cx,
+            )
+        })
+    };
+
+    let surface = |event: LatheSurfaceEvent, cx: &mut TestAppContext| {
+        store.update(cx, |store, cx| {
+            store.dispatch_lathe_surface_event("test-lathe-extension-v2", event, None, cx)
+        })
+    };
+
+    store.read_with(cx, |store, _| {
+        let panels = store
+            .lathe_panels()
+            .map(|(_, panel)| (panel.id.to_string(), panel.dock))
+            .collect::<Vec<_>>();
+        assert_eq!(panels, vec![("counter".to_string(), LatheDockSide::Right)]);
+        let previews = store
+            .lathe_previews()
+            .map(|(_, preview)| preview)
+            .collect::<Vec<_>>();
+        assert_eq!(previews.len(), 1);
+        assert!(previews[0].matches("data.tsv") && !previews[0].matches("data.json"));
+    });
+
+    run("show-counter", cx)
+        .await
+        .expect("a 0.2 extension still runs 0.1 commands, and sends a view");
+    assert_eq!(texts(&ui)[1], "Clicked 0 times");
+    assert_eq!(
+        ui.status_items
+            .lock()
+            .get("test-lathe-extension-v2")
+            .map(|item| item.label.to_string()),
+        Some("Counter".to_string())
+    );
+
+    surface(LatheSurfaceEvent::ViewShown("counter".into()), cx)
+        .await
+        .unwrap();
+    assert!(
+        status(&ui).ends_with("shown=true open_from_event=refused"),
+        "a view-shown event is not something the user did, so it can't open files: {}",
+        status(&ui)
+    );
+    assert!(ui.opened.lock().is_empty());
+
+    surface(LatheSurfaceEvent::StatusItemClicked, cx)
+        .await
+        .expect("a status item click may open files");
+    send("open", ViewEvent::Clicked, cx).await.unwrap();
+    assert_eq!(
+        ui.opened
+            .lock()
+            .iter()
+            .map(|location| (location.path.clone(), location.row, location.column))
+            .collect::<Vec<_>>(),
+        vec![
+            ("src/main.rs".to_string(), Some(2), Some(1)),
+            ("/abs/notes.md".to_string(), None, None),
+        ],
+        "1-based lines and columns arrive 0-based"
+    );
+
+    send("todo", ViewEvent::MenuChosen("done".into()), cx)
+        .await
+        .unwrap();
+    send("sort", ViewEvent::Selected("size".into()), cx)
+        .await
+        .unwrap();
+    assert!(
+        status(&ui).contains("menu=done sort=size"),
+        "{}",
+        status(&ui)
+    );
+    {
+        let views = ui.views.lock();
+        let view = views.get(&key).unwrap();
+        let kinds = (0..view.len() as u32)
+            .map(|index| &view.node(index).kind)
+            .collect::<Vec<_>>();
+        assert!(kinds.iter().any(|kind| matches!(kind, NodeKind::Select { selected: Some(value), .. } if value.as_ref() == "size")));
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, NodeKind::Progress { fraction: None, .. }))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, NodeKind::Markdown(_)))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, NodeKind::ListItem { menu, .. } if menu.len() == 2))
+        );
+    }
+
+    let csv = Arc::new(FakeLatheEditor::new("a,b\n1,2\n3,4\n", Vec::new()));
+    store
+        .update(cx, |store, cx| {
+            store.dispatch_lathe_surface_event(
+                "test-lathe-extension-v2",
+                LatheSurfaceEvent::PreviewOpened {
+                    preview_id: "csv".into(),
+                    view_id: "preview-1".into(),
+                    path: Some("data/a.csv".into()),
+                    abs_path: None,
+                },
+                Some(csv),
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    let preview_key = (
+        Arc::<str>::from("test-lathe-extension-v2"),
+        Arc::<str>::from("preview-1"),
+    );
+    assert!(matches!(
+        &ui.views.lock().get(&preview_key).map(|view| view.node(1).kind.clone()),
+        Some(NodeKind::Text { text, .. }) if text.as_ref() == "csv data/a.csv 3 rows"
+    ));
+    let edited = Arc::new(FakeLatheEditor::new(
+        "a,b\n1,2\n3,4\n5,6\n7,8\n",
+        Vec::new(),
+    ));
+    store
+        .update(cx, |store, cx| {
+            store.dispatch_lathe_surface_event(
+                "test-lathe-extension-v2",
+                LatheSurfaceEvent::PreviewChanged("preview-1".into()),
+                Some(edited),
+                cx,
+            )
+        })
+        .await
+        .expect("preview-changed reaches the extension with the file readable");
+    assert!(matches!(
+        &ui.views.lock().get(&preview_key).map(|view| view.node(1).kind.clone()),
+        Some(NodeKind::Text { text, .. }) if text.as_ref() == "csv data/a.csv 5 rows"
+    ));
+    surface(LatheSurfaceEvent::PreviewClosed("preview-1".into()), cx)
+        .await
+        .unwrap();
+    surface(LatheSurfaceEvent::ViewHidden("counter".into()), cx)
+        .await
+        .unwrap();
+    assert!(status(&ui).contains("shown=false"), "{}", status(&ui));
+
+    send("increment", ViewEvent::Clicked, cx).await.unwrap();
+    send("increment", ViewEvent::Clicked, cx).await.unwrap();
+    assert_eq!(texts(&ui)[1], "Clicked 2 times");
+
+    send("filter", ViewEvent::InputChanged("rs".into()), cx)
+        .await
+        .unwrap();
+    send("filter", ViewEvent::Submitted("rs".into()), cx)
+        .await
+        .unwrap();
+    send("hidden", ViewEvent::Toggled(true), cx).await.unwrap();
+    assert!(
+        status(&ui).starts_with("filter=rs submitted=rs hidden=true "),
+        "{}",
+        status(&ui)
+    );
+    {
+        let views = ui.views.lock();
+        let view = views.get(&key).unwrap();
+        let input_value = (0..view.len() as u32).find_map(|index| match &view.node(index).kind {
+            NodeKind::TextInput { value, .. } => Some(value.to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            input_value.as_deref(),
+            Some("rs"),
+            "the input value round-trips"
+        );
+    }
+
+    let error = send("filter", ViewEvent::Clicked, cx)
+        .await
+        .expect_err("the extension rejects an event it doesn't expect");
+    assert!(
+        format!("{error:#}").contains("unexpected event"),
+        "{error:#}"
+    );
+
+    // Virtual list rows come from the extension, a page at a time.
+    let rows = |start: u32, count: u32, cx: &mut TestAppContext| {
+        store.update(cx, |store, cx| {
+            store.lathe_provide_rows(
+                "test-lathe-extension-v2",
+                "counter".into(),
+                "files".into(),
+                start,
+                count,
+                cx,
+            )
+        })
+    };
+    let row_ids = |rows: Vec<NodeKind>| {
+        rows.into_iter()
+            .filter_map(|row| match row {
+                NodeKind::ListItem { id, .. } => Some(id.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = row_ids(rows(0, 100, cx).await.unwrap());
+    assert_eq!((first.len(), first[0].as_str()), (100, "file-0"));
+    let last = row_ids(rows(200, 100, cx).await.unwrap());
+    assert_eq!(last.len(), 50, "fewer rows at the end of a 250-row list");
+    assert_eq!(
+        rows(0, 5_000, cx).await.unwrap().len(),
+        100,
+        "Lathe never asks for more than 100 rows at once"
+    );
+    let error = rows(0, 1, cx)
+        .await
+        .expect_err("returning more rows than asked for is refused");
+    assert!(format!("{error:#}").contains("asked for 1"), "{error:#}");
+
+    // Decorations go to the buffer the command was run from.
+    let editor = Arc::new(FakeLatheEditor::new("a TODO b TODO", Vec::new()));
+    store
+        .update(cx, |store, cx| {
+            store.run_lathe_command(
+                "test-lathe-extension-v2",
+                "decorate".into(),
+                Some(editor.clone()),
+                cx,
+            )
+        })
+        .await
+        .expect("decorating the active buffer");
+    {
+        let decorations = editor.decorations.lock();
+        assert_eq!(decorations.len(), 1);
+        let (layer, decorations) = &decorations[0];
+        assert_eq!(layer, "todos");
+        assert_eq!(
+            decorations
+                .iter()
+                .map(|decoration| (
+                    decoration.range.clone(),
+                    decoration.message.as_deref().map(str::to_string)
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (2..6, Some("todo".to_string())),
+                (9..13, Some("todo".to_string()))
+            ]
+        );
+    }
+    let error = run("decorate", cx)
+        .await
+        .expect_err("decorations need a buffer");
+    assert!(
+        format!("{error:#}").contains("decorations need a buffer"),
+        "{error:#}"
+    );
+
+    run("hide-counter", cx)
+        .await
+        .expect("removing a view, twice, succeeds");
+    assert!(!ui.views.lock().contains_key(&key), "the view is gone");
+    assert!(ui.status_items.lock().is_empty(), "the status item is gone");
+
+    let error = run("bad-view", cx)
+        .await
+        .expect_err("a view with a cycle is refused");
+    assert!(format!("{error:#}").contains("more than once"), "{error:#}");
+
+    store
+        .update(cx, |store, cx| {
+            store.revoke_lathe_capabilities("test-lathe-extension-v2".into(), cx)
+        })
+        .await
+        .unwrap();
+    let error = send("increment", ViewEvent::Clicked, cx)
+        .await
+        .expect_err("views need the ui:views permission");
+    assert!(
+        format!("{error:#}").contains("allowed to show views"),
+        "{error:#}"
+    );
 }

@@ -815,6 +815,78 @@ mod tests {
         install_extension_on_disk(EMMET_EXTENSION_ID, app_state, cx).await;
     }
 
+    #[gpui::test]
+    async fn test_recommended_extensions_prompt(cx: &mut TestAppContext) {
+        use crate::recommended_extensions;
+
+        let app_state = init_test(cx);
+        install_emmet_on_disk(&app_state, cx).await;
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+        let root = path!("/root").to_string();
+        let recommendation_shown = |cx: &VisualTestContext| {
+            notification_ids(&workspace, cx)
+                .contains(&recommended_extensions::notification_id(&root))
+        };
+        assert!(!recommendation_shown(cx), "nothing recommended yet");
+
+        let recommend = |ids: &str, cx: &mut VisualTestContext| {
+            let fs = app_state.fs.clone();
+            let settings = format!(r#"{{ "recommended_extensions": [{ids}] }}"#);
+            cx.update(|_, cx| {
+                cx.background_spawn(async move {
+                    fs.save(
+                        path!("/root/.zed/settings.json").as_ref(),
+                        &settings.as_str().into(),
+                        Default::default(),
+                    )
+                    .await
+                })
+            })
+            .detach();
+            cx.run_until_parked();
+        };
+
+        recommend(&format!(r#""{EMMET_EXTENSION_ID}""#), cx);
+        assert!(
+            !recommendation_shown(cx),
+            "installed extensions aren't offered"
+        );
+
+        recommend(&format!(r#""{EMMET_EXTENSION_ID}", "gleam""#), cx);
+        assert!(
+            recommendation_shown(cx),
+            "a missing recommendation is offered"
+        );
+        cx.update(|_, cx| {
+            let store = ExtensionStore::global(cx);
+            let missing = recommended_extensions::missing_recommendations(
+                &[EMMET_EXTENSION_ID.into(), "gleam".into(), " gleam ".into()],
+                store.read(cx),
+            );
+            assert_eq!(missing, vec![Arc::<str>::from("gleam")]);
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.dismiss_notification(&recommended_extensions::notification_id(&root), cx)
+        });
+        cx.update(|_, cx| {
+            recommended_extensions::dismiss_recommendations(
+                recommended_extensions::dismissed_key(&root),
+                "gleam".into(),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        recommend(&format!(r#""{EMMET_EXTENSION_ID}", "gleam""#), cx);
+        assert!(
+            !recommendation_shown(cx),
+            "a declined list isn't offered again"
+        );
+
+        recommend(r#""gleam", "toml""#, cx);
+        assert!(recommendation_shown(cx), "a changed list is offered again");
+    }
+
     async fn install_extension_on_disk(
         extension_id: &str,
         app_state: &Arc<AppState>,

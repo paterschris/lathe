@@ -11,11 +11,13 @@ use anyhow::{Context as _, Result};
 use collections::HashMap;
 use extension_host::ExtensionStore;
 use extension_host::wasm_host::lathe::{
-    LatheBufferEvent, LatheCapability, LatheUiDelegate, NotificationLevel, PickItem, TaskReveal,
-    TaskSpec,
+    LatheBufferEvent, LatheCapability, LatheLocation, LatheStatusItem, LatheSurfaceEvent,
+    LatheUiDelegate, NotificationLevel, PickItem, TaskReveal, TaskSpec,
 };
+use extension_host::wasm_host::lathe_views::LatheView;
 use futures::channel::oneshot;
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
+use gpui::AnyElement;
 use gpui::{
     App, AppContext as _, AsyncApp, Context, DismissEvent, Entity, Global, IntoElement, Render,
     SharedString, Subscription, Task, WeakEntity, Window,
@@ -38,11 +40,19 @@ pub fn init(cx: &mut App) {
     let status_texts = cx.new(|_| ExtensionStatusTexts::default());
     cx.set_global(GlobalExtensionStatusTexts(status_texts.clone()));
 
+    let views = cx.new(|_| ExtensionViews {
+        surface_sink: Some(Arc::new(send_surface_event)),
+        ..ExtensionViews::default()
+    });
+    cx.set_global(GlobalExtensionViews(views.clone()));
+
     let store = ExtensionStore::global(cx);
     let delegate = Arc::new(LatheUi {
         status_texts: status_texts.downgrade(),
+        views: views.downgrade(),
     });
     store.read(cx).wasm_host.set_lathe_ui(delegate);
+    crate::lathe_decorations::init(cx);
 
     // Drop status text of extensions that were unloaded.
     cx.observe(&store, move |store, cx| {
@@ -59,15 +69,29 @@ pub fn init(cx: &mut App) {
                 cx.notify();
             }
         });
+        views.update(cx, |views, cx| {
+            let before = views.views.len();
+            views
+                .views
+                .retain(|(extension_id, _), _| loaded.contains(extension_id));
+            views
+                .shown
+                .retain(|(extension_id, _), _| loaded.contains(extension_id));
+            if views.views.len() != before {
+                cx.notify();
+            }
+        });
     })
     .detach();
 
+    let edited_by_extensions = ExtensionEditedBuffers::default();
+    crate::lathe_preview::init(edited_by_extensions.clone(), cx);
     let sink = EventSink {
         wants: Arc::new(|capability, cx| {
             ExtensionStore::try_global(cx).is_some_and(|store| wants(store.read(cx), capability))
         }),
         dispatch: Arc::new(dispatch),
-        edited_by_extensions: ExtensionEditedBuffers::default(),
+        edited_by_extensions,
     };
     cx.observe_new(move |project: &mut Project, _window, cx| {
         if project.is_local() {
@@ -125,6 +149,8 @@ fn capability_description(capability: LatheCapability) -> &'static str {
         LatheCapability::UiStatus => "show text in the status bar and show notifications",
         LatheCapability::UiPrompt => "ask you for input while its commands run",
         LatheCapability::TasksSpawn => "run commands in a terminal on your machine",
+        LatheCapability::UiViews => "show its own views inside Lathe",
+        LatheCapability::UiDecorations => "highlight and annotate text in the editor",
     }
 }
 
@@ -182,9 +208,21 @@ pub fn add_status_item(
     });
 }
 
+/// What an extension shows in its status bar slot: plain text from 0.1's
+/// `set-status-text`, or 0.2's clickable status item. Setting one replaces
+/// the other.
+#[derive(Debug, Clone, PartialEq)]
+enum StatusEntry {
+    Text {
+        text: SharedString,
+        tooltip: Option<SharedString>,
+    },
+    Item(LatheStatusItem),
+}
+
 #[derive(Default)]
 pub struct ExtensionStatusTexts {
-    texts: BTreeMap<Arc<str>, (SharedString, Option<SharedString>)>,
+    texts: BTreeMap<Arc<str>, StatusEntry>,
 }
 
 struct GlobalExtensionStatusTexts(Entity<ExtensionStatusTexts>);
@@ -208,22 +246,73 @@ impl ExtensionStatusBarItem {
 
 impl Render for ExtensionStatusBarItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .gap_2()
-            .children(self.status_texts.read(cx).texts.iter().map(
-                |(extension_id, (text, tooltip))| {
-                    let tooltip = tooltip
-                        .clone()
-                        .unwrap_or_else(|| extension_id.to_string().into());
-                    div()
-                        .id(SharedString::from(format!(
-                            "extension-status-{extension_id}"
-                        )))
-                        .child(Label::new(text.clone()).size(LabelSize::Small))
-                        .tooltip(Tooltip::text(tooltip))
-                },
-            ))
+        h_flex().gap_2().children(
+            self.status_texts
+                .read(cx)
+                .texts
+                .iter()
+                .map(|(extension_id, entry)| render_status_entry(extension_id, entry)),
+        )
     }
+}
+
+fn render_status_entry(extension_id: &Arc<str>, entry: &StatusEntry) -> AnyElement {
+    let id = SharedString::from(format!("extension-status-{extension_id}"));
+    match entry {
+        StatusEntry::Text { text, tooltip } => {
+            let tooltip = tooltip
+                .clone()
+                .unwrap_or_else(|| extension_id.to_string().into());
+            div()
+                .id(id)
+                .child(Label::new(text.clone()).size(LabelSize::Small))
+                .tooltip(Tooltip::text(tooltip))
+                .into_any_element()
+        }
+        StatusEntry::Item(item) => {
+            let tooltip: SharedString = item
+                .tooltip
+                .as_deref()
+                .unwrap_or(extension_id.as_ref())
+                .to_string()
+                .into();
+            let color = crate::lathe_view_renderer::tone_color(item.tone);
+            let mut button = Button::new(id, item.label.to_string())
+                .label_size(LabelSize::Small)
+                .color(color)
+                .tooltip(Tooltip::text(tooltip))
+                .on_click({
+                    let extension_id = extension_id.clone();
+                    move |_, _, cx| {
+                        send_surface_event(
+                            extension_id.clone(),
+                            LatheSurfaceEvent::StatusItemClicked,
+                            cx,
+                        )
+                    }
+                });
+            if let Some(icon) = item
+                .icon
+                .as_deref()
+                .and_then(crate::lathe_view_renderer::icon_name)
+            {
+                button = button.start_icon(Icon::new(icon).size(IconSize::Small).color(color));
+            }
+            button.into_any_element()
+        }
+    }
+}
+
+/// Sends a surface event to an extension, logging failures.
+fn send_surface_event(extension_id: Arc<str>, event: LatheSurfaceEvent, cx: &mut App) {
+    let Some(store) = ExtensionStore::try_global(cx) else {
+        return;
+    };
+    let task = store.update(cx, |store, cx| {
+        store.dispatch_lathe_surface_event(&extension_id, event, None, cx)
+    });
+    cx.background_spawn(async move { task.await.log_err() })
+        .detach();
 }
 
 impl StatusItemView for ExtensionStatusBarItem {
@@ -244,7 +333,85 @@ impl StatusItemView for ExtensionStatusBarItem {
 
 struct LatheUi {
     status_texts: WeakEntity<ExtensionStatusTexts>,
+    views: WeakEntity<ExtensionViews>,
 }
+
+/// Every view extensions have sent, keyed by (extension id, view id). Surfaces
+/// that show views (panels, previews) read from here and redraw on notify.
+/// Where `view-shown`/`view-hidden` go. Production sends them to the
+/// extension; tests record them.
+pub type SurfaceEventSink = Arc<dyn Fn(Arc<str>, LatheSurfaceEvent, &mut App)>;
+
+#[derive(Default)]
+pub struct ExtensionViews {
+    views: BTreeMap<(Arc<str>, Arc<str>), LatheView>,
+    /// How many surfaces show each view.
+    shown: HashMap<(Arc<str>, Arc<str>), usize>,
+    surface_sink: Option<SurfaceEventSink>,
+}
+
+impl ExtensionViews {
+    #[cfg(test)]
+    pub(crate) fn with_surface_sink(sink: SurfaceEventSink) -> Self {
+        Self {
+            surface_sink: Some(sink),
+            ..Self::default()
+        }
+    }
+
+    /// Records that a surface started showing a view. The first one tells
+    /// the extension the view is shown.
+    pub(crate) fn attach(&mut self, extension_id: Arc<str>, view_id: Arc<str>, cx: &mut App) {
+        let count = self
+            .shown
+            .entry((extension_id.clone(), view_id.clone()))
+            .or_default();
+        *count += 1;
+        if *count == 1
+            && let Some(sink) = &self.surface_sink
+        {
+            sink(extension_id, LatheSurfaceEvent::ViewShown(view_id), cx);
+        }
+    }
+
+    /// Records that a surface stopped showing a view. The last one tells the
+    /// extension the view is hidden.
+    pub(crate) fn detach(&mut self, extension_id: Arc<str>, view_id: Arc<str>, cx: &mut App) {
+        let key = (extension_id.clone(), view_id.clone());
+        let Some(count) = self.shown.get_mut(&key) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            self.shown.remove(&key);
+            if let Some(sink) = &self.surface_sink {
+                sink(extension_id, LatheSurfaceEvent::ViewHidden(view_id), cx);
+            }
+        }
+    }
+
+    /// Stores or replaces a view. Callers notify.
+    pub(crate) fn set_view(&mut self, extension_id: Arc<str>, view_id: Arc<str>, view: LatheView) {
+        self.views.insert((extension_id, view_id), view);
+    }
+
+    pub(crate) fn remove(&mut self, extension_id: Arc<str>, view_id: Arc<str>) -> bool {
+        self.views.remove(&(extension_id, view_id)).is_some()
+    }
+
+    pub fn view(&self, extension_id: &str, view_id: &str) -> Option<&LatheView> {
+        self.views
+            .iter()
+            .find(|((extension, view), _)| {
+                extension.as_ref() == extension_id && view.as_ref() == view_id
+            })
+            .map(|(_, view)| view)
+    }
+}
+
+pub struct GlobalExtensionViews(pub Entity<ExtensionViews>);
+
+impl Global for GlobalExtensionViews {}
 
 /// The workspace of the focused window, or of the first open window.
 fn active_workspace(
@@ -278,9 +445,13 @@ impl LatheUiDelegate for LatheUi {
         status_texts.update(cx, |status_texts, cx| {
             match text {
                 Some(text) => {
-                    status_texts
-                        .texts
-                        .insert(extension_id, (text.into(), tooltip.map(Into::into)));
+                    status_texts.texts.insert(
+                        extension_id,
+                        StatusEntry::Text {
+                            text: text.into(),
+                            tooltip: tooltip.map(Into::into),
+                        },
+                    );
                 }
                 None => {
                     status_texts.texts.remove(&extension_id);
@@ -343,6 +514,113 @@ impl LatheUiDelegate for LatheUi {
         )
     }
 
+    fn update_view(
+        &self,
+        extension_id: Arc<str>,
+        view_id: Arc<str>,
+        view: LatheView,
+        cx: &mut AsyncApp,
+    ) {
+        let Some(views) = self.views.upgrade() else {
+            return;
+        };
+        views.update(cx, |views, cx| {
+            views.set_view(extension_id, view_id, view);
+            cx.notify();
+        });
+    }
+
+    fn set_status_item(
+        &self,
+        extension_id: Arc<str>,
+        item: Option<LatheStatusItem>,
+        cx: &mut AsyncApp,
+    ) {
+        let Some(status_texts) = self.status_texts.upgrade() else {
+            return;
+        };
+        status_texts.update(cx, |status_texts, cx| {
+            match item {
+                Some(item) => {
+                    status_texts
+                        .texts
+                        .insert(extension_id, StatusEntry::Item(item));
+                }
+                None => {
+                    status_texts.texts.remove(&extension_id);
+                }
+            }
+            cx.notify();
+        });
+    }
+
+    fn open_location(&self, location: LatheLocation, cx: &mut AsyncApp) -> Result<()> {
+        cx.update(|cx| {
+            let (window, workspace) =
+                active_workspace(cx).context("no open window to open the file in")?;
+            let abs_path =
+                resolve_location_path(workspace.read(cx).project().read(cx), &location.path, cx)
+                    .with_context(|| {
+                        format!("no folder open in the window contains {:?}", location.path)
+                    })?;
+            window.update(cx, |_, window, cx| {
+                let open = workspace.update(cx, |workspace, cx| {
+                    workspace.open_abs_path(
+                        abs_path,
+                        workspace::OpenOptions {
+                            visible: Some(workspace::OpenVisible::None),
+                            focus: Some(true),
+                            ..Default::default()
+                        },
+                        window,
+                        cx,
+                    )
+                });
+                let Some(row) = location.row else {
+                    open.detach_and_log_err(cx);
+                    return;
+                };
+                let column = location.column.unwrap_or(0);
+                window
+                    .spawn(cx, async move |cx| {
+                        let item = open.await?;
+                        if let Some(editor) =
+                            cx.update(|_, cx| item.act_as::<editor::Editor>(cx))?
+                        {
+                            editor.update_in(cx, |editor, window, cx| {
+                                let point = editor
+                                    .buffer()
+                                    .read(cx)
+                                    .as_singleton()
+                                    .map(|buffer| {
+                                        buffer.read(cx).snapshot().clip_point(
+                                            language::Point::new(row, column),
+                                            text::Bias::Left,
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                                editor.go_to_singleton_buffer_point(point, window, cx);
+                            })?;
+                        }
+                        anyhow::Ok(())
+                    })
+                    .detach_and_log_err(cx);
+            })?;
+            anyhow::Ok(())
+        })
+    }
+
+    fn remove_view(&self, extension_id: Arc<str>, view_id: Arc<str>, cx: &mut AsyncApp) {
+        let Some(views) = self.views.upgrade() else {
+            return;
+        };
+        views.update(cx, |views, cx| {
+            if views.remove(extension_id, view_id) {
+                cx.notify();
+            }
+        });
+    }
+
     fn spawn_task(&self, task: TaskSpec, cx: &mut AsyncApp) -> Result<()> {
         cx.update(|cx| {
             let (window, workspace) =
@@ -376,6 +654,24 @@ impl LatheUiDelegate for LatheUi {
             cx,
         )
     }
+}
+
+/// An absolute path for `path`: itself if absolute, otherwise the first open
+/// folder that has an entry at that relative path, or failing that the first
+/// open folder joined with it.
+fn resolve_location_path(project: &Project, path: &str, cx: &App) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(path);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+    let path_style = project.path_style(cx);
+    let relative = util::rel_path::RelPath::new(path, path_style).ok()?;
+    let worktrees = project.visible_worktrees(cx).collect::<Vec<_>>();
+    let containing = worktrees
+        .iter()
+        .find(|worktree| worktree.read(cx).entry_for_path(&relative).is_some())
+        .or_else(|| worktrees.first())?;
+    Some(containing.read(cx).abs_path().join(path))
 }
 
 fn spawn_in_terminal(task: TaskSpec, cwd: Option<std::path::PathBuf>) -> task::SpawnInTerminal {
@@ -998,8 +1294,10 @@ mod tests {
     async fn test_status_texts(cx: &mut TestAppContext) {
         init_test(cx);
         let status_texts = cx.new(|_| ExtensionStatusTexts::default());
+        let views = cx.new(|_| ExtensionViews::default());
         let ui = LatheUi {
             status_texts: status_texts.downgrade(),
+            views: views.downgrade(),
         };
         let mut async_cx = cx.to_async();
         ui.set_status_text("one".into(), Some("12 words".into()), None, &mut async_cx);
@@ -1012,18 +1310,77 @@ mod tests {
         ui.set_status_text("one".into(), None, None, &mut async_cx);
         status_texts.read_with(cx, |status_texts, _| {
             assert_eq!(
-                status_texts
-                    .texts
-                    .iter()
-                    .map(|(id, (text, tooltip))| (
-                        id.to_string(),
-                        text.to_string(),
-                        tooltip.clone().map(|t| t.to_string())
-                    ))
-                    .collect::<Vec<_>>(),
-                vec![("two".to_string(), "ok".to_string(), Some("tip".to_string()))]
+                status_texts.texts.iter().collect::<Vec<_>>(),
+                vec![(
+                    &Arc::<str>::from("two"),
+                    &StatusEntry::Text {
+                        text: "ok".into(),
+                        tooltip: Some("tip".into()),
+                    }
+                )]
             );
         });
+
+        let item = LatheStatusItem {
+            label: "3 TODOs".into(),
+            icon: Some("check".into()),
+            tooltip: None,
+            tone: extension_host::wasm_host::lathe_views::Tone::Warning,
+        };
+        ui.set_status_item("two".into(), Some(item.clone()), &mut async_cx);
+        status_texts.read_with(cx, |status_texts, _| {
+            assert_eq!(
+                status_texts.texts.get("two"),
+                Some(&StatusEntry::Item(item.clone())),
+                "a status item replaces the extension's status text"
+            );
+        });
+        ui.set_status_item("two".into(), None, &mut async_cx);
+        status_texts.read_with(cx, |status_texts, _| assert!(status_texts.texts.is_empty()));
+    }
+
+    #[gpui::test]
+    fn test_view_shown_and_hidden(cx: &mut TestAppContext) {
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let views = cx.new(|_| {
+            ExtensionViews::with_surface_sink({
+                let events = events.clone();
+                Arc::new(move |extension_id, event, _| {
+                    events.lock().push((extension_id.to_string(), event))
+                })
+            })
+        });
+        let attach = |cx: &mut TestAppContext| {
+            views.update(cx, |views, cx| {
+                views.attach("ext".into(), "main".into(), cx)
+            })
+        };
+        let detach = |cx: &mut TestAppContext| {
+            views.update(cx, |views, cx| {
+                views.detach("ext".into(), "main".into(), cx)
+            })
+        };
+        attach(cx);
+        attach(cx);
+        detach(cx);
+        assert_eq!(
+            std::mem::take(&mut *events.lock()),
+            vec![(
+                "ext".to_string(),
+                LatheSurfaceEvent::ViewShown("main".into())
+            )],
+            "only the first surface showing a view counts, and one is still open"
+        );
+        detach(cx);
+        detach(cx);
+        assert_eq!(
+            std::mem::take(&mut *events.lock()),
+            vec![(
+                "ext".to_string(),
+                LatheSurfaceEvent::ViewHidden("main".into())
+            )],
+            "hidden once, when the last surface closes; extra detaches are ignored"
+        );
     }
 }
 

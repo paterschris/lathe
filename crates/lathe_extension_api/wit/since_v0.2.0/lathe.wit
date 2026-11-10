@@ -1,0 +1,359 @@
+package lathe:extension@0.2.0;
+
+/// Views: UI an extension describes and Lathe draws, using Lathe's own
+/// components so it follows the theme. Needs the `ui:views` capability.
+///
+/// WIT has no recursive types, so a view is a flat list of nodes. Node 0 is
+/// the root, and containers list their children by index. Every node must be
+/// reachable from the root exactly once.
+interface views {
+    enum text-style {
+        body,
+        muted,
+        heading,
+        code,
+    }
+
+    /// Color for text and badges, from the theme.
+    enum tone {
+        neutral,
+        accent,
+        success,
+        warning,
+        error,
+    }
+
+    /// Whether a list item has children under it, for tree views.
+    enum disclosure {
+        /// A leaf: no expand arrow.
+        none,
+        collapsed,
+        expanded,
+    }
+
+    record text-node {
+        text: string,
+        style: text-style,
+        tone: tone,
+    }
+
+    record button-node {
+        /// Sent back in `view-handler.on-view-event` when clicked. Unique
+        /// within the view.
+        id: string,
+        label: string,
+        /// One of Lathe's icon names, e.g. "plus", or none.
+        icon: option<string>,
+        tooltip: option<string>,
+        disabled: bool,
+    }
+
+    record list-item-node {
+        /// Sent back when the item is clicked or its arrow toggled. Unique
+        /// within the view.
+        id: string,
+        label: string,
+        detail: option<string>,
+        icon: option<string>,
+        tooltip: option<string>,
+        /// Shown highlighted, e.g. the item a panel has open.
+        selected: bool,
+        disabled: bool,
+        /// Nesting level for tree views, 0 to 8.
+        indent: u8,
+        disclosure: disclosure,
+        /// Shown when the item is right-clicked. Choosing an entry sends
+        /// `menu-chosen` with the entry's id. Empty for no menu.
+        menu: list<menu-entry>,
+    }
+
+    record menu-entry {
+        /// Unique within its menu.
+        id: string,
+        label: string,
+    }
+
+    record text-input-node {
+        /// Sent back with `input-changed` as the user types (after a short
+        /// pause) and with `submitted` when they press Enter. Unique within
+        /// the view.
+        id: string,
+        /// The text to show. While the user is typing in the field, a new
+        /// value from the extension doesn't overwrite what they've typed.
+        value: string,
+        placeholder: option<string>,
+        disabled: bool,
+    }
+
+    record checkbox-node {
+        /// Sent back with `toggled` when the user changes it. Unique within
+        /// the view.
+        id: string,
+        label: string,
+        checked: bool,
+        disabled: bool,
+    }
+
+    record badge-node {
+        text: string,
+        tone: tone,
+    }
+
+    record select-option {
+        /// Sent back with `selected`. Unique within the select.
+        value: string,
+        label: string,
+    }
+
+    record select-node {
+        /// Sent back with `selected` when the user picks an option. Unique
+        /// within the view.
+        id: string,
+        options: list<select-option>,
+        /// The `value` of the option to show as chosen, or none.
+        selected: option<string>,
+        /// Shown when nothing is chosen.
+        placeholder: option<string>,
+        disabled: bool,
+    }
+
+    /// A list too long to send whole. Lathe asks for the rows on screen with
+    /// `view-handler.provide-rows` and keeps them until `revision` changes.
+    /// It fills the height its parent gives it and scrolls by itself. Row
+    /// events (clicks, arrows, menus) use the row's own id as the element id,
+    /// so keep row ids distinct from the view's other element ids.
+    record virtual-list-node {
+        /// Unique within the view; passed to `provide-rows`.
+        id: string,
+        /// Up to 1,000,000.
+        row-count: u32,
+        /// Change it when rows change, and Lathe asks for them again.
+        revision: u32,
+    }
+
+    record progress-node {
+        /// From 0.0 to 1.0. None shows a spinner instead of a bar.
+        fraction: option<f32>,
+        label: option<string>,
+    }
+
+    variant node-kind {
+        /// Lays its children out top to bottom.
+        column,
+        /// Lays its children out left to right.
+        row,
+        /// A column that scrolls when its children don't fit.
+        scroll,
+        text(text-node),
+        button(button-node),
+        list-item(list-item-node),
+        text-input(text-input-node),
+        checkbox(checkbox-node),
+        badge(badge-node),
+        select(select-node),
+        virtual-list(virtual-list-node),
+        progress(progress-node),
+        /// Markdown text, drawn the way Lathe draws markdown elsewhere. Up to
+        /// 20,000 characters. Clicking a link opens http, https and mailto
+        /// links; other links do nothing.
+        markdown(string),
+        icon(string),
+        divider,
+        /// Takes up the remaining space in its row or column.
+        spacer,
+    }
+
+    record node {
+        kind: node-kind,
+        /// Indices into the view's node list. Only `column`, `row` and
+        /// `scroll` may have children.
+        children: list<u32>,
+    }
+
+    record view {
+        nodes: list<node>,
+    }
+
+    /// What the user did to an element.
+    variant view-event {
+        /// A button or list item was clicked.
+        clicked,
+        /// A checkbox changed (its new state), or a list item's arrow was
+        /// toggled (true when it is now expanded).
+        toggled(bool),
+        /// A text input's text changed. Sent after a short pause in typing.
+        input-changed(string),
+        /// Enter was pressed in a text input.
+        submitted(string),
+        /// An entry of a list item's menu was chosen (the entry's id).
+        menu-chosen(string),
+        /// An option of a select was picked (the option's value).
+        selected(string),
+    }
+
+    /// Opens a file in the editor and, optionally, moves the cursor. Only
+    /// allowed while handling something the user did: running a command, an
+    /// event from a view, or a click on the status item. Needs no capability.
+    record location {
+        /// Absolute, or relative to a folder open in the window.
+        path: string,
+        /// 1-based line. None opens the file without moving the cursor.
+        line: option<u32>,
+        /// 1-based byte column within the line, as ripgrep reports it.
+        column: option<u32>,
+    }
+
+    open-location: func(location: location) -> result<_, string>;
+
+    /// Replaces the view with this id. Where it appears depends on how the
+    /// extension attached it; a view that isn't attached anywhere is kept and
+    /// shown once it is.
+    update-view: func(view-id: string, view: view) -> result<_, string>;
+
+    /// Forgets the view with this id. Surfaces showing it go blank. Removing
+    /// a view that doesn't exist is not an error.
+    remove-view: func(view-id: string) -> result<_, string>;
+}
+
+/// Places in Lathe where an extension's UI appears.
+interface surfaces {
+    use views.{tone};
+
+    enum dock-side {
+        left,
+        right,
+        bottom,
+    }
+
+    /// A dockable panel that shows the view whose id equals the panel's id.
+    /// Can only be registered while the extension initializes; up to 4 per
+    /// extension. Registering always succeeds regardless of permissions, but
+    /// the panel only appears while the user allows `ui:views`.
+    record panel-spec {
+        /// Lowercase letters, digits and `-`. Also the id of the view shown.
+        id: string,
+        title: string,
+        /// One of Lathe's icon names, for the dock button.
+        icon: option<string>,
+        dock: dock-side,
+    }
+
+    register-panel: func(spec: panel-spec) -> result<_, string>;
+
+    /// A view of a file, opened in a tab beside the file's editor from the
+    /// command palette entry "<Extension Name>: <title>" (or the
+    /// `extension::OpenPreview` action), for files whose names end with one
+    /// of `file-suffixes`. The extension gets `preview-opened` with a view id
+    /// to fill in with `views.update-view`. Can only be registered while the extension
+    /// initializes; up to 8 per extension. Like panels, it only takes effect
+    /// while the user allows `ui:views`.
+    record preview-spec {
+        /// Lowercase letters, digits and `-`.
+        id: string,
+        title: string,
+        /// File name endings such as ".csv" or "Dockerfile". 1 to 16 of them.
+        file-suffixes: list<string>,
+    }
+
+    register-preview: func(spec: preview-spec) -> result<_, string>;
+
+    /// A clickable item in the status bar. Clicking it sends
+    /// `status-item-clicked`. Replaces any text set with `ui.set-status-text`.
+    /// Needs the `ui:status` capability.
+    record status-item {
+        label: string,
+        icon: option<string>,
+        tooltip: option<string>,
+        tone: tone,
+    }
+
+    /// Shows the extension's status item; none hides it.
+    set-status-item: func(item: option<status-item>) -> result<_, string>;
+
+    record preview-file {
+        preview-id: string,
+        /// The view the preview shows. Fill it in with `views.update-view`.
+        view-id: string,
+        /// The file's path within its project.
+        path: option<string>,
+        /// The file's absolute path, for files on this machine.
+        abs-path: option<string>,
+    }
+
+    variant surface-event {
+        /// A view became visible somewhere (it went from no surfaces showing
+        /// it to one). Good for starting work only while someone is looking.
+        view-shown(string),
+        /// No surface shows the view anymore.
+        view-hidden(string),
+        status-item-clicked,
+        /// A preview of a file was opened. While this event is handled,
+        /// `buffers.active-buffer` returns that file (with `buffer:read`), so
+        /// the extension can read it. Later changes arrive as
+        /// `preview-changed`.
+        preview-opened(preview-file),
+        /// The file a preview shows changed: edited (after typing pauses),
+        /// or reloaded from disk. Carries the preview's view id. As with
+        /// `preview-opened`, `buffers.active-buffer` returns the file while
+        /// this is handled, so the extension can redraw without declaring
+        /// any `events:*` capability.
+        preview-changed(string),
+        /// A preview was closed. Lathe has already removed its view.
+        preview-closed(string),
+    }
+}
+
+/// Highlights in the text editor, anchored to the text so they move with
+/// edits. Needs the `ui:decorations` capability.
+interface decorations {
+    use lathe:extension/buffers@0.1.0.{byte-range};
+    use views.{tone};
+
+    enum decoration-style {
+        background,
+        underline,
+        wavy-underline,
+        /// A colored mark in the gutter next to the range's lines.
+        gutter,
+    }
+
+    record decoration {
+        range: byte-range,
+        style: decoration-style,
+        tone: tone,
+        /// Short text shown dimmed after the end of the range's last line,
+        /// like an inline diagnostic. Up to 200 characters.
+        message: option<string>,
+    }
+
+    /// Replaces this extension's decorations in `layer` for the buffer the
+    /// running command or event is about (the one `buffers.active-buffer`
+    /// returns). `version` comes from that snapshot; a stale one is
+    /// rejected. An empty list clears the layer. Up to 5,000 decorations per
+    /// layer and 8 layers per buffer.
+    set-decorations: func(version: u64, layer: string, decorations: list<decoration>) -> result<_, string>;
+}
+
+/// Implemented by the extension to receive what users do in its views.
+interface view-handler {
+    use views.{view-event, list-item-node};
+    use surfaces.{surface-event};
+
+    on-view-event: func(view-id: string, element-id: string, event: view-event) -> result<_, string>;
+
+    /// Changes to the places the extension's UI appears in.
+    on-surface-event: func(event: surface-event) -> result<_, string>;
+
+    /// Rows `start` to `start + count` of a virtual list, as list items.
+    /// Lathe asks for at most 100 at a time. Return fewer only at the end of
+    /// the list.
+    provide-rows: func(view-id: string, list-id: string, start: u32, count: u32) -> result<list<list-item-node>, string>;
+}
+
+world extension {
+    include lathe:extension/extension@0.1.0;
+    import views;
+    import surfaces;
+    import decorations;
+    export view-handler;
+}

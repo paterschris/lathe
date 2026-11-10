@@ -2406,6 +2406,12 @@
   "auto_install_extensions": {
     "html": true,
   },
+  // Whether installed extensions update automatically. To change it for one
+  // extension, set its id in "auto_update_extensions" to true or false.
+  "extension_auto_update": true,
+  // Extensions that stay installed but don't load. Set an extension's id to
+  // true to turn it off, for example: { "html": true }.
+  "disabled_extensions": {},
   // Whether to suggest installing extensions based on the files you open.
   "suggest_extensions": true,
   // Additional extension registries, given as URLs of static `index.json` files.

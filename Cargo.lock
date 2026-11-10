@@ -6270,6 +6270,7 @@ dependencies = [
  "language",
  "log",
  "markdown",
+ "menu",
  "parking_lot",
  "paths",
  "picker",
@@ -10121,6 +10122,15 @@ dependencies = [
 [[package]]
 name = "lathe_extension_api"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af2e9e72d78d794d8ca49d67c6816628e8510456621114db94f859340df5744c"
+dependencies = [
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
+name = "lathe_extension_api"
+version = "0.2.0-alpha.0"
 dependencies = [
  "wit-bindgen 0.41.0",
 ]
@@ -10136,7 +10146,15 @@ dependencies = [
 name = "lathe_test_extension"
 version = "0.1.0"
 dependencies = [
- "lathe_extension_api",
+ "lathe_extension_api 0.1.0",
+ "zed_extension_api 0.7.0",
+]
+
+[[package]]
+name = "lathe_test_extension_v2"
+version = "0.1.0"
+dependencies = [
+ "lathe_extension_api 0.2.0-alpha.0",
  "zed_extension_api 0.7.0",
 ]
 

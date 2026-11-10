@@ -517,6 +517,8 @@ pub enum InlayId {
     EditPrediction(usize),
     DebuggerValue(usize),
     ReplResult(usize),
+    /// Messages from Lathe extension decorations.
+    LatheExtension(usize),
     // LSP
     Hint(usize),
     Color(usize),
@@ -530,6 +532,7 @@ impl InlayId {
             Self::Hint(id) => *id,
             Self::Color(id) => *id,
             Self::ReplResult(id) => *id,
+            Self::LatheExtension(id) => *id,
         }
     }
 }

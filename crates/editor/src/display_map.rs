@@ -180,6 +180,8 @@ pub enum HighlightKey {
     HoveredLinkState,
     InlineAssist,
     InputComposition,
+    /// Decorations from Lathe extensions, one key per style and color.
+    LatheExtension(usize),
     MatchingBracket,
     NavigationOverlay(NavigationOverlayKey),
     PeekPreview,

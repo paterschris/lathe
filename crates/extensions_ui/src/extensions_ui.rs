@@ -1,8 +1,14 @@
 mod components;
 mod extension_suggestions;
 mod extension_version_selector;
+mod lathe_decorations;
 mod lathe_editor;
+mod lathe_preview;
 pub(crate) mod lathe_ui;
+pub(crate) mod lathe_view_renderer;
+mod recommended_extensions;
+
+pub use lathe_preview::{AvailablePreview, OpenPreview as OpenExtensionPreview, matching_previews};
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -13,6 +19,7 @@ use cloud_api_types::{ExtensionMetadata, ExtensionProvides};
 use collections::{BTreeMap, BTreeSet};
 use command_palette_hooks::CommandPaletteFilter;
 use editor::{Editor, EditorElement, EditorStyle};
+use extension_host::extension_settings::ExtensionSettings;
 use extension_host::{ExtensionIndexEntry, ExtensionManifest, ExtensionStore};
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use git::{GitHostingProviderRegistry, parse_git_remote_url};
@@ -136,6 +143,62 @@ fn run_extension_command(
     .detach();
 }
 
+/// Turns an installed extension off or back on, by writing
+/// `disabled_extensions` in the user's settings.
+pub(crate) fn set_extension_disabled(extension_id: Arc<str>, disabled: bool, cx: &mut App) {
+    settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+        if disabled {
+            settings
+                .extension
+                .disabled_extensions
+                .insert(extension_id, true);
+        } else {
+            settings.extension.disabled_extensions.remove(&extension_id);
+        }
+    });
+}
+
+/// Turns automatic updates on or off for one extension.
+fn set_extension_auto_update(extension_id: Arc<str>, enabled: bool, cx: &mut App) {
+    settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+        settings
+            .extension
+            .auto_update_extensions
+            .insert(extension_id, enabled);
+    });
+}
+
+/// Disable/Enable and auto-update entries for an installed extension's menu.
+fn installed_extension_menu_entries(
+    menu: ContextMenu,
+    extension_id: &Arc<str>,
+    cx: &App,
+) -> ContextMenu {
+    let store = ExtensionStore::global(cx).read(cx);
+    if !store.installed_extensions().contains_key(extension_id) {
+        return menu;
+    }
+    let disabled = store.is_extension_disabled(extension_id);
+    let auto_update = ExtensionSettings::get_global(cx).should_auto_update(extension_id);
+    menu.entry(if disabled { "Enable" } else { "Disable" }, None, {
+        let extension_id = extension_id.clone();
+        move |_, cx| set_extension_disabled(extension_id.clone(), !disabled, cx)
+    })
+    .entry(
+        if auto_update {
+            "Turn Off Auto-Update"
+        } else {
+            "Turn On Auto-Update"
+        },
+        None,
+        {
+            let extension_id = extension_id.clone();
+            move |_, cx| set_extension_auto_update(extension_id.clone(), !auto_update, cx)
+        },
+    )
+    .separator()
+}
+
 #[derive(Default)]
 struct DevExtensionNotInstalledError {
     extension_id: Option<SharedString>,
@@ -187,6 +250,7 @@ pub fn init(cx: &mut App) {
     });
     command_palette_hooks::register_extra_commands(cx, extension_command_palette_entries);
     lathe_ui::init(cx);
+    recommended_extensions::init(cx);
 
     cx.observe_new(move |workspace: &mut Workspace, window, cx| {
         let Some(window) = window else {
@@ -875,7 +939,20 @@ impl ExtensionsPage {
                     ExtensionCard::for_dev(manifest, extension_store)
                 } else {
                     ExtensionCard::for_installed(manifest, extension_store)
-                };
+                }
+                .context_menu(|extension_id, _authors, window, cx| {
+                    Some(ContextMenu::build(window, cx, |menu, _, cx| {
+                        installed_extension_menu_entries(menu, &extension_id, cx).entry(
+                            "Copy Extension ID",
+                            None,
+                            move |_, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    extension_id.to_string(),
+                                ))
+                            },
+                        )
+                    }))
+                });
                 return Some(match repository_icon {
                     Some(icon) => card.repository_icon(icon),
                     None => card,
@@ -913,8 +990,8 @@ impl ExtensionsPage {
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<ContextMenu> {
-        ContextMenu::build(window, cx, |context_menu, window, _| {
-            context_menu
+        ContextMenu::build(window, cx, |context_menu, window, cx| {
+            installed_extension_menu_entries(context_menu, &extension_id, cx)
                 .entry(
                     "Install Another Version...",
                     None,

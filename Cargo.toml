@@ -274,6 +274,7 @@ members = [
     "extensions/proto",
     "extensions/test-extension",
     "extensions/test-lathe-extension",
+    "extensions/test-lathe-extension-v2",
 
     #
     # Tooling

@@ -539,7 +539,7 @@ fn general_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn extensions_section() -> [SettingsPageItem; 4] {
+    fn extensions_section() -> [SettingsPageItem; 5] {
         [
             SettingsPageItem::SectionHeader("Extensions"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -551,6 +551,22 @@ fn general_page(cx: &App) -> SettingsPage {
                     pick: |settings_content| Some(&settings_content.extension.suggest_extensions),
                     write: |settings_content, value, _| {
                         settings_content.extension.suggest_extensions = value.unwrap_or(true);
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Auto-Update Extensions",
+                description: "Whether installed extensions update automatically. An extension's entry in auto_update_extensions overrides this.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("extension_auto_update"),
+                    pick: |settings_content| {
+                        settings_content.extension.extension_auto_update.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.extension.extension_auto_update = value;
                     },
                 }),
                 metadata: None,

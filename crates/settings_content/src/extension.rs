@@ -19,6 +19,18 @@ pub struct ExtensionSettingsContent {
     pub auto_install_extensions: HashMap<Arc<str>, bool>,
     #[serde(default)]
     pub auto_update_extensions: HashMap<Arc<str>, bool>,
+    /// Whether installed extensions update automatically. An extension's
+    /// entry in `auto_update_extensions` overrides this.
+    ///
+    /// Default: true
+    pub extension_auto_update: Option<bool>,
+    /// Extensions that stay installed but are not loaded, keyed by extension
+    /// id. Set an extension to `true` to turn it off and `false` (or remove
+    /// it) to turn it back on.
+    ///
+    /// Default: {}
+    #[serde(default)]
+    pub disabled_extensions: HashMap<Arc<str>, bool>,
     /// Whether to suggest installing extensions based on the files you open.
     ///
     /// Default: true
@@ -37,6 +49,8 @@ impl Default for ExtensionSettingsContent {
         Self {
             auto_install_extensions: HashMap::default(),
             auto_update_extensions: HashMap::default(),
+            disabled_extensions: HashMap::default(),
+            extension_auto_update: None,
             suggest_extensions: true,
             extension_registries: None,
             granted_extension_capabilities: None,

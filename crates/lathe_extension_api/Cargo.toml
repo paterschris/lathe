@@ -1,6 +1,6 @@
 [package]
 name = "lathe_extension_api"
-version = "0.1.0"
+version = "0.2.0-alpha.0"
 description = "Lathe-only APIs for Lathe extensions, used alongside zed_extension_api"
 repository = "https://github.com/paterschris/lathe"
 documentation = "https://docs.rs/lathe_extension_api"
@@ -15,7 +15,6 @@ workspace = true
 
 [lib]
 path = "src/lathe_extension_api.rs"
-test = false
 doctest = false
 
 [dependencies]

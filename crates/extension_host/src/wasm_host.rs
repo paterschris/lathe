@@ -1,4 +1,5 @@
 pub mod lathe;
+pub mod lathe_views;
 pub mod wit;
 
 use crate::capability_granter::CapabilityGranter;
@@ -28,10 +29,10 @@ use language::LanguageName;
 use lsp::LanguageServerName;
 use moka::sync::Cache;
 use node_runtime::NodeRuntime;
-use release_channel::ReleaseChannel;
-use semver::Version;
 use project::binary_download_consent::{BinaryDownloadConsent, ConsentRequester};
 use project::project_settings::ProjectSettings;
+use release_channel::ReleaseChannel;
+use semver::Version;
 use settings::{Settings, SettingsStore};
 use std::{
     borrow::Cow,
@@ -115,6 +116,10 @@ pub struct WasmExtension {
     pub lathe_api_version: Option<Version>,
     /// Commands the extension registered with the Lathe API while it initialized.
     pub lathe_commands: Arc<[lathe::LatheCommand]>,
+    /// Panels the extension registered while it initialized.
+    pub lathe_panels: Arc<[lathe::LathePanel]>,
+    /// Previews the extension registered while it initialized.
+    pub lathe_previews: Arc<[lathe::LathePreview]>,
     /// Lathe capabilities the extension may use: those declared in
     /// `lathe_capabilities` in `extension.toml` that the user has granted.
     pub lathe_capabilities: Arc<collections::BTreeSet<lathe::LatheCapability>>,
@@ -162,6 +167,81 @@ impl WasmExtension {
         }
         self.call(move |_extension, store| {
             async move { lathe::run_command(store, &command_id, editor).await }.boxed()
+        })
+        .await?
+    }
+
+    /// Tells the extension where its UI appears: views shown and hidden,
+    /// status item clicks, previews opened and closed.
+    pub async fn dispatch_lathe_surface_event(
+        &self,
+        event: lathe::LatheSurfaceEvent,
+        buffer: Option<Arc<dyn lathe::LatheEditorDelegate>>,
+    ) -> Result<()> {
+        let capability = event.capability();
+        if !self.lathe_capabilities.contains(&capability) {
+            bail!(
+                "extension {} has not been allowed the {:?} capability",
+                self.manifest.id,
+                capability.name()
+            );
+        }
+        self.call(move |_extension, store| {
+            async move { lathe::dispatch_surface_event(store, event, buffer).await }.boxed()
+        })
+        .await?
+    }
+
+    /// Whether the user allows this extension to show views, panels and
+    /// previews.
+    pub fn may_show_views(&self) -> bool {
+        self.lathe_capabilities
+            .contains(&lathe::LatheCapability::UiViews)
+    }
+
+    /// Asks the extension for rows of one of its virtual lists.
+    pub async fn lathe_provide_rows(
+        &self,
+        view_id: Arc<str>,
+        list_id: Arc<str>,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<lathe_views::NodeKind>> {
+        if !self
+            .lathe_capabilities
+            .contains(&lathe::LatheCapability::UiViews)
+        {
+            bail!(
+                "extension {} has not been allowed to show views",
+                self.manifest.id
+            );
+        }
+        self.call(move |_extension, store| {
+            async move { lathe::provide_rows(store, &view_id, &list_id, start, count).await }
+                .boxed()
+        })
+        .await?
+    }
+
+    /// Delivers a click on one of the extension's views.
+    pub async fn dispatch_lathe_view_event(
+        &self,
+        view_id: Arc<str>,
+        element_id: Arc<str>,
+        event: lathe_views::ViewEvent,
+    ) -> Result<()> {
+        if !self
+            .lathe_capabilities
+            .contains(&lathe::LatheCapability::UiViews)
+        {
+            bail!(
+                "extension {} has not been allowed to show views",
+                self.manifest.id
+            );
+        }
+        self.call(move |_extension, store| {
+            async move { lathe::dispatch_view_event(store, &view_id, &element_id, event).await }
+                .boxed()
         })
         .await?
     }
@@ -888,6 +968,14 @@ impl WasmHost {
                 init_result?;
                 let lathe_commands: Arc<[lathe::LatheCommand]> =
                     std::mem::take(&mut store.data_mut().lathe.commands).into();
+                let lathe_surfaces = (
+                    Arc::<[lathe::LathePanel]>::from(std::mem::take(
+                        &mut store.data_mut().lathe.panels,
+                    )),
+                    Arc::<[lathe::LathePreview]>::from(std::mem::take(
+                        &mut store.data_mut().lathe.previews,
+                    )),
+                );
 
                 let (tx, mut rx) = mpsc::unbounded::<ExtensionCall>();
                 let extension_task = async move {
@@ -904,6 +992,7 @@ impl WasmHost {
                     zed_api_version,
                     lathe_api_version,
                     lathe_commands,
+                    lathe_surfaces,
                 ))
             };
 
@@ -920,6 +1009,7 @@ impl WasmHost {
                 zed_api_version,
                 lathe_api_version,
                 lathe_commands,
+                (lathe_panels, lathe_previews),
             ) = gpui_tokio::Tokio::spawn(
                 cx,
                 load_extension(zed_api_version, lathe_api_version, component),
@@ -938,6 +1028,8 @@ impl WasmHost {
                 zed_api_version,
                 lathe_api_version,
                 lathe_commands,
+                lathe_panels,
+                lathe_previews,
                 lathe_capabilities: lathe_capabilities_for_handle,
                 lathe_declared_capabilities,
                 lathe_interrupt,

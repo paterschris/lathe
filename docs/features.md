@@ -7,18 +7,19 @@ There's a second reason this page exists. Every entry below is fork code sitting
 Roughly ordered by how far each one is from stock Zed. One caveat on the git entry: upstream already has a commit graph, a tabbed git panel, worktree support, and single-file history, so that section only covers what Lathe puts on top of them.
 
 1. [Mobile development](#mobile-development-expo--react-native) - a panel for Expo and bare React Native projects
-2. [Merge conflicts and interactive rebase](#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, drag-and-drop rebase
-3. [Pull request reviews](#pull-request-reviews) - GitHub, GitLab, Bitbucket, in the editor, with several accounts per host
-4. [Code navigation](#code-navigation) - definitions and references open in a peek instead of a new tab
-5. [AI agent integration](#ai-agent-integration) - multi-account sign-in, approval control
-6. [Theme and syntax highlighting](#theme-and-syntax-highlighting) - the default theme, plus a live customizer for all 200+ colors
-7. [Git additions](#git-additions) - explorer tab, branch tree, compare any two commits, multi-select, undo, Git Flow
-8. [Jupyter notebooks](#jupyter-notebooks) - a setting you can flip, instead of upstream's server-side feature flag
-9. [Docks and panels](#docks-and-panels) - two panels per dock, drag panels to any dock, every panel allowed in the bottom dock
-10. [Terminal, windows, and workspaces](#terminal-windows-and-workspaces) - extra windows for editors and terminals, an awaiting-input indicator, workspace groups, per-window zoom
-11. [Editor additions](#editor-additions) - color swatches and a color picker, Open Recent File, project panel refresh
-12. [AWS profiles](#aws-profiles) - a per-window profile selector
-13. [Separate data from Zed](#separate-data-from-zed) - Lathe's own settings and data folders, imported from Zed on first launch
+2. [Extensions](#extensions) - an extension API past Zed's (commands, buffer edits, file events, terminal tasks) behind per-extension permissions, more registries, install from a URL, disable and recommend extensions
+3. [Merge conflicts and interactive rebase](#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, drag-and-drop rebase
+4. [Pull request reviews](#pull-request-reviews) - GitHub, GitLab, Bitbucket, in the editor, with several accounts per host
+5. [Code navigation](#code-navigation) - definitions and references open in a peek instead of a new tab
+6. [AI agent integration](#ai-agent-integration) - multi-account sign-in, approval control
+7. [Theme and syntax highlighting](#theme-and-syntax-highlighting) - the default theme, plus a live customizer for all 200+ colors
+8. [Git additions](#git-additions) - explorer tab, branch tree, compare any two commits, multi-select, undo, Git Flow
+9. [Jupyter notebooks](#jupyter-notebooks) - a setting you can flip, instead of upstream's server-side feature flag
+10. [Docks and panels](#docks-and-panels) - two panels per dock, drag panels to any dock, every panel allowed in the bottom dock
+11. [Terminal, windows, and workspaces](#terminal-windows-and-workspaces) - extra windows for editors and terminals, an awaiting-input indicator, workspace groups, per-window zoom
+12. [Editor additions](#editor-additions) - color swatches and a color picker, Open Recent File, project panel refresh
+13. [AWS profiles](#aws-profiles) - a per-window profile selector
+14. [Separate data from Zed](#separate-data-from-zed) - Lathe's own settings and data folders, imported from Zed on first launch
 
 ---
 
@@ -35,6 +36,44 @@ The panel will also create Pixel phone, Pixel Tablet, and Pixel Fold AVDs withou
 Both toolchain sections report their own state, so you hear about a missing JDK or an unaccepted SDK license before a build fails instead of after. The action row follows whichever platform you're targeting: iOS gets **Boot simulator** and **Install pods**, Android swaps those out for **adb reverse** and builds against the emulator or device you've selected. Targets aren't exclusive either. An Android emulator and an iOS simulator can both be running, and both can take a build and deploy in the same pass. Physically connected devices show up in that same list, so live testing on real hardware doesn't mean leaving the editor either.
 
 ![Mobile Panel, Android](../assets/screenshots/mobile-panel-android.png)
+
+---
+
+## Extensions
+
+Zed extensions run in Lathe exactly as they do in Zed. On top of that, Lathe has its own extension API that lets an extension do things Zed's won't: add commands, read and edit the file you're in, react to files being opened or saved, and run commands in a terminal. It's an extra crate, [`lathe_extension_api`](../crates/lathe_extension_api/README.md) on crates.io, that sits next to `zed_extension_api` in the same extension, so one extension can use both.
+
+### What an extension can do
+- **Commands.** Registered commands show up in the command palette under the extension's name. Bind one to a key with `["extension::RunCommand", { "extension_id": "...", "command": "..." }]`.
+- **Read and edit the active file.** An extension gets a snapshot of the buffer (text, path, language, selections) and can apply edits as a single undo step or move the cursor. Every snapshot has a version, and an edit made against an older one is rejected, so an extension can't overwrite text it hasn't seen.
+- **File events.** Run something when a file is opened, saved, or changed (after typing pauses). A handler gets two seconds. One that hangs is interrupted and the extension reloaded, and after three timeouts in a row its events pause until you reinstall or rebuild it.
+- **Status bar text, notifications, text prompts, and pick lists.** Prompts can only come from a command you ran, never from an event, so nothing pops up on its own.
+- **Terminal tasks.** Commands run as ordinary Lathe tasks in a terminal tab. Starting one with the same label as a task that's still running waits for it and reuses its tab, so saving three times doesn't stack up three terminals.
+- **Settings.** `extension_settings.<extension id>` holds an extension's own settings, which it reads as JSON. A project's `.zed/settings.json` can set them too, but only once you've trusted the project.
+
+API 0.2 (in progress, not released yet) adds:
+
+- **Views**: an extension describes a small UI (text, buttons, list items and trees, text inputs, checkboxes, dropdowns, right-click menus, progress, markdown, and virtual lists that load rows as you scroll) and Lathe draws it with its own components so it follows the theme.
+- **File previews**: an extension can register a preview for file types (say `package.json`). On a matching file, click the extension button in the editor toolbar (or run "<Extension>: <Preview>" from the command palette) and the preview opens in a tab beside the editor, which stays open for editing. It redraws as you type, and comes back after a restart.
+- **Status bar items** that you can click. Extensions can also register panels, but Lathe doesn't show them yet.
+- **Opening files**: an extension can open a file at a line, but only while handling something you did (a command, a click in its view, or a click on its status item).
+- **Decorations**: highlights, underlines, gutter marks and short end-of-line messages in the editor, anchored to the text so they move with your edits.
+
+### Permissions
+Each of those abilities is a separate capability the extension has to declare in `lathe_capabilities` in its `extension.toml`: `buffer:read`, `buffer:write`, `events:open`, `events:save`, `events:change`, `ui:status`, `ui:prompt`, and `tasks:spawn`, plus `ui:views` and `ui:decorations` for API 0.2. Neither is released yet, and 1.19 won't load an extension that asks for them. Installing from a registry or a URL asks you to allow them first, and the extension's card lists them with **Allow** and **Revoke** buttons, one at a time. Dev extensions are allowed automatically, since that folder is yours. Grants are kept in `lathe-grants.json`.
+
+### Where extensions come from
+- **More registries.** `extension_registries` lists static `index.json` registries to search next to Zed's. Lathe's own registry is on the list by default. Results are merged by extension id, and if Zed's API is down the list still fills from the others. Indexes are cached, so the Extensions page works offline, and downloads are checked against the sha256 in the index.
+- **Install from a URL.** Paste a `.tar.gz` or a git URL into the Extensions page's search box to install from it.
+- **Lathe-only extensions** declare `requires = ["lathe"]` and get a **Lathe** chip on their card. Registry cards leave out the download count, since static registries don't have one.
+- **Submitting to the registry.** Extensions get into Lathe's registry by pull request to [lathe-extensions](https://github.com/paterschris/lathe-extensions), reviewed by the maintainer. The steps are in its [CONTRIBUTING.md](https://github.com/paterschris/lathe-extensions/blob/main/CONTRIBUTING.md).
+
+### Managing installed extensions (next beta)
+These aren't in a release yet. They're coming in the beta after 1.19.
+
+- **Disable without uninstalling.** An extension's menu on its card has **Disable**, which keeps it installed but stops loading it. It shows a **Disabled** chip and an **Enable** button. The setting behind it is `disabled_extensions`.
+- **Auto-update per extension.** The same menu has **Turn Off Auto-Update** / **Turn On Auto-Update**. `extension_auto_update` sets the default for everything, and `auto_update_extensions` overrides it per extension.
+- **Recommended extensions.** A project can list extension ids under `recommended_extensions` in `.zed/settings.json`. Opening the project offers to install whichever ones are missing (**Install**, or **Install All** for several). Dismiss it and it stays quiet until the list changes. Like other project settings, it only applies to trusted projects.
 
 ---
 
