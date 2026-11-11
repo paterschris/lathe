@@ -18,6 +18,10 @@ pub const FEATURE_CLOSE_THREADS: &str = "close_threads";
 /// Accepts `set_muted_workspaces` and leaves those workspaces out of the
 /// phone's pushes.
 pub const FEATURE_MUTED_WORKSPACES: &str = "muted_workspaces";
+/// Sends a phone whose `subscribe` lists it in `accepts` one `thread_deltas`
+/// per flush instead of a `thread_delta` per op, with `append_text` for
+/// streamed text.
+pub const FEATURE_THREAD_DELTAS: &str = "thread_deltas";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -57,6 +61,13 @@ pub enum DesktopMessage {
         thread_id: String,
         seq: u64,
         op: DeltaOp,
+    },
+    /// Several deltas at once, for a phone that accepts `thread_deltas`. Each
+    /// op takes one seq, and `seq` is the last op's.
+    ThreadDeltas {
+        thread_id: String,
+        seq: u64,
+        ops: Vec<DeltaOp>,
     },
     ToolAuthorization {
         thread_id: String,
@@ -185,6 +196,10 @@ pub enum PhoneMessage {
         thread_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         since_seq: Option<u64>,
+        /// Optional desktop messages this phone understands, such as
+        /// `thread_deltas`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        accepts: Vec<String>,
     },
     Unsubscribe {
         thread_id: String,
@@ -409,6 +424,9 @@ impl ThreadStatus {
 pub enum DeltaOp {
     NewEntry { entry: Entry },
     UpdateEntry { index: usize, entry: Entry },
+    /// Adds `text` to the end of the assistant message or thought at
+    /// `index`. Only in `thread_deltas`.
+    AppendText { index: usize, text: String },
     RemoveEntries { start: usize, end: usize },
     Status { status: ThreadStatus },
     Title { title: String },
@@ -803,6 +821,7 @@ mod tests {
             PhoneMessage::Subscribe {
                 thread_id: "t1".into(),
                 since_seq: None,
+                accepts: Vec::new(),
             }
         );
     }
@@ -840,6 +859,7 @@ mod tests {
             DesktopMessage::ThreadDelta { thread_id: "t".into(), seq: 1, op: DeltaOp::RemoveEntries { start: 1, end: 3 } },
             DesktopMessage::ThreadDelta { thread_id: "t".into(), seq: 2, op: DeltaOp::Status { status: ThreadStatus::WaitingAuthorization } },
             DesktopMessage::ThreadDelta { thread_id: "t".into(), seq: 3, op: DeltaOp::Title { title: "New".into() } },
+            DesktopMessage::ThreadDeltas { thread_id: "t".into(), seq: 6, ops: vec![DeltaOp::AppendText { index: 1, text: " More.".into() }, DeltaOp::NewEntry { entry: Entry::Thought { markdown: "Hm".into() } }, DeltaOp::Status { status: ThreadStatus::Idle }] },
             DesktopMessage::ToolAuthorization { thread_id: "t".into(), request_id: "r".into(), tool_title: "Run".into(), tool_kind: "execute".into(), options: vec![PermissionOption { option_id: "o".into(), label: "Allow".into(), kind: PermissionOptionKind::AllowOnce }], diff_preview: None },
             DesktopMessage::ToolAuthorizationResolved { thread_id: "t".into(), request_id: "r".into() },
             DesktopMessage::Elicitation { thread_id: "t".into(), elicitation_id: "e".into(), message: "Pick".into(), schema: serde_json::json!({ "type": "object", "properties": { "choice": { "type": "string", "enum": ["a", "b"] } }, "required": ["choice"] }) },

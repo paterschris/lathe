@@ -8,7 +8,7 @@ use crate::{
     entries,
     terminals::{Terminals, TerminalsEvent},
     protocol::{
-        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_CLOSE_THREADS, FEATURE_MUTED_WORKSPACES, FEATURE_PULL_REQUESTS, FEATURE_TERMINALS, PROTOCOL_VERSION, PhoneEnvelope,
+        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_CLOSE_THREADS, FEATURE_MUTED_WORKSPACES, FEATURE_PULL_REQUESTS, FEATURE_TERMINALS, FEATURE_THREAD_DELTAS, PROTOCOL_VERSION, PhoneEnvelope,
         PhoneMessage, ThreadStatus, ThreadSummary, WorkspaceSummary,
     },
 };
@@ -74,6 +74,8 @@ pub(crate) struct Bridge {
     streams: HashMap<acp::SessionId, Stream>,
     statuses: HashMap<acp::SessionId, ThreadStatus>,
     seen_messages: HashMap<String, VecDeque<String>>,
+    /// Phones whose last `subscribe` accepted `thread_deltas`.
+    batching: HashSet<String>,
     pending_loads: HashMap<acp::SessionId, Vec<PendingSubscribe>>,
     pending_new_threads: HashMap<ThreadId, PendingNewThread>,
     terminals: Option<Entity<Terminals>>,
@@ -144,6 +146,7 @@ impl Bridge {
             streams: HashMap::default(),
             statuses: HashMap::default(),
             seen_messages: HashMap::default(),
+            batching: HashSet::default(),
             pending_loads: HashMap::default(),
             pending_new_threads: HashMap::default(),
             terminals,
@@ -236,6 +239,7 @@ impl Bridge {
                 FEATURE_CLOSE_THREADS.to_string(),
                 FEATURE_TERMINALS.to_string(),
                 FEATURE_MUTED_WORKSPACES.to_string(),
+                FEATURE_THREAD_DELTAS.to_string(),
             ],
         };
         self.send(device_id, &hello, cx);
@@ -598,17 +602,21 @@ impl Bridge {
         stream.flush = None;
         let thread = thread.read(cx);
         let current = thread.entries();
-        let mut ops = Vec::new();
+        // Each op with the shorter form a `thread_deltas` phone gets, if any.
+        let mut ops: Vec<(DeltaOp, Option<DeltaOp>)> = Vec::new();
         let tail_start = current.len().saturating_sub(TAIL_ENTRIES);
         stream.dirty.extend(tail_start..current.len().min(stream.sent.len()));
 
         if let Some(from) = stream.removed_from.take()
             && from < stream.sent.len()
         {
-            ops.push(DeltaOp::RemoveEntries {
-                start: from,
-                end: stream.sent.len(),
-            });
+            ops.push((
+                DeltaOp::RemoveEntries {
+                    start: from,
+                    end: stream.sent.len(),
+                },
+                None,
+            ));
             stream.sent.truncate(from);
         }
         for index in std::mem::take(&mut stream.dirty) {
@@ -617,14 +625,16 @@ impl Bridge {
             }
             let entry = entries::entry(thread, &current[index], cx);
             if entry != stream.sent[index] {
+                let appended = appended_text(&stream.sent[index], &entry)
+                    .map(|text| DeltaOp::AppendText { index, text: text.to_string() });
                 stream.sent[index] = entry.clone();
-                ops.push(DeltaOp::UpdateEntry { index, entry });
+                ops.push((DeltaOp::UpdateEntry { index, entry }, appended));
             }
         }
         for index in stream.sent.len()..current.len() {
             let entry = entries::entry(thread, &current[index], cx);
             stream.sent.push(entry.clone());
-            ops.push(DeltaOp::NewEntry { entry });
+            ops.push((DeltaOp::NewEntry { entry }, None));
         }
         // Keep looking while the agent works or its text is still being
         // revealed (which can run past the turn's last event), and once more
@@ -633,9 +643,7 @@ impl Bridge {
             || thread.is_revealing_text()
             || thread.foreground_activity().is_active();
 
-        for op in ops {
-            self.send_delta(session_id, op, cx);
-        }
+        self.send_deltas(session_id, ops, cx);
         if keep_looking {
             self.mark_dirty(session_id, |_| {}, cx);
         }
@@ -671,18 +679,53 @@ impl Bridge {
     }
 
     fn send_delta(&mut self, session_id: &acp::SessionId, op: DeltaOp, cx: &mut Context<Self>) {
+        self.send_deltas(session_id, vec![(op, None)], cx);
+    }
+
+    /// Sends ops in order, each taking the next seq. A phone that accepts
+    /// `thread_deltas` gets them in one message, using each op's shorter form
+    /// where there is one; any other phone gets a `thread_delta` per op.
+    fn send_deltas(&mut self, session_id: &acp::SessionId, ops: Vec<(DeltaOp, Option<DeltaOp>)>, cx: &mut Context<Self>) {
         let Some(stream) = self.streams.get_mut(session_id) else {
             return;
         };
-        stream.seq += 1;
-        let message = DesktopMessage::ThreadDelta {
-            thread_id: stream.thread_id.clone(),
-            seq: stream.seq,
-            op,
-        };
-        let subscribers = stream.subscribers.iter().cloned().collect::<Vec<_>>();
-        for device_id in subscribers {
-            self.send(&device_id, &message, cx);
+        if ops.is_empty() {
+            return;
+        }
+        let first_seq = stream.seq + 1;
+        stream.seq += ops.len() as u64;
+        let thread_id = stream.thread_id.clone();
+        let (batching, single): (Vec<String>, Vec<String>) = stream
+            .subscribers
+            .iter()
+            .cloned()
+            .partition(|device_id| self.batching.contains(device_id));
+
+        if !single.is_empty() {
+            let messages = ops
+                .iter()
+                .zip(first_seq..)
+                .map(|((op, _), seq)| DesktopMessage::ThreadDelta {
+                    thread_id: thread_id.clone(),
+                    seq,
+                    op: op.clone(),
+                })
+                .collect::<Vec<_>>();
+            for device_id in &single {
+                for message in &messages {
+                    self.send(device_id, message, cx);
+                }
+            }
+        }
+        if !batching.is_empty() {
+            let message = DesktopMessage::ThreadDeltas {
+                thread_id,
+                seq: first_seq + ops.len() as u64 - 1,
+                ops: ops.into_iter().map(|(op, short)| short.unwrap_or(op)).collect(),
+            };
+            for device_id in &batching {
+                self.send(device_id, &message, cx);
+            }
         }
     }
 
@@ -715,7 +758,14 @@ impl Bridge {
 
         let client_msg_id = envelope.client_msg_id;
         let result = match envelope.message {
-            PhoneMessage::Subscribe { thread_id, .. } => {
+            PhoneMessage::Subscribe { thread_id, accepts, .. } => {
+                // Every subscribe says it again, so an app downgraded in
+                // place stops getting what it no longer reads.
+                if accepts.iter().any(|feature| feature == FEATURE_THREAD_DELTAS) {
+                    self.batching.insert(device_id.to_string());
+                } else {
+                    self.batching.remove(device_id);
+                }
                 // A deferred subscribe acks once the thread has loaded.
                 match self.subscribe(device_id, &client_msg_id, &thread_id, cx) {
                     Ok(true) => return,
@@ -1312,6 +1362,16 @@ impl Bridge {
     }
 }
 
+/// The text `new` adds to the end of `old`, when both are the same kind of
+/// streamed message and nothing before the end changed.
+fn appended_text<'a>(old: &Entry, new: &'a Entry) -> Option<&'a str> {
+    match (old, new) {
+        (Entry::AssistantMessage { markdown: old }, Entry::AssistantMessage { markdown: new })
+        | (Entry::Thought { markdown: old }, Entry::Thought { markdown: new }) => new.strip_prefix(old.as_str()),
+        _ => None,
+    }
+}
+
 /// Where a page ending at `end` starts: at most `PAGE_SIZE` entries, and no
 /// more than fit in one frame. Always at least one entry, which `fit` keeps
 /// small enough on its own.
@@ -1681,8 +1741,9 @@ mod tests {
     /// after the update that brought it, without an event. The phone must still
     /// end up with all of it, and a resubscribe (Refresh) must repair a cache
     /// that missed some.
-    #[gpui::test]
-    async fn text_revealed_without_an_event_reaches_the_phone(cx: &mut TestAppContext) {
+    /// A bridge with one online phone and one saved, live thread the phone
+    /// hasn't subscribed to yet. Returns the thread's key.
+    async fn streaming_thread(cx: &mut TestAppContext) -> (Harness, Rc<StubAgentConnection>, Entity<AcpThread>, String) {
         let (companion, outgoing, identity) = connected_companion(cx);
         cx.update(|cx| {
             crate::tests::enable_companion_for_test(cx);
@@ -1739,7 +1800,12 @@ mod tests {
             companion.handle_relay_message(json!({ "type": "presence", "device_id": device_id, "online": true }), cx)
         });
         cx.run_until_parked();
-        let thread_key = thread_id.to_key_string();
+        (harness, connection, thread, thread_id.to_key_string())
+    }
+
+    #[gpui::test]
+    async fn text_revealed_without_an_event_reaches_the_phone(cx: &mut TestAppContext) {
+        let (mut harness, connection, thread, thread_key) = streaming_thread(cx).await;
         harness.say(json!({ "type": "subscribe", "client_msg_id": "m1", "thread_id": thread_key }), cx);
         drain(&mut harness.outgoing);
 
@@ -1793,6 +1859,85 @@ mod tests {
         harness.say(json!({ "type": "subscribe", "client_msg_id": "m3", "thread_id": thread_key, "since_seq": 0 }), cx);
         let received = harness.received();
         assert_eq!(last_text(&received), Some(format!("{full} Done.")));
+    }
+
+    /// A phone that accepts `thread_deltas` gets one message per flush, with
+    /// text added to a message as `append_text`, and the ops add up to the
+    /// whole reply with no gap in seq.
+    #[gpui::test]
+    async fn batched_deltas_append_streamed_text(cx: &mut TestAppContext) {
+        let (mut harness, connection, thread, thread_key) = streaming_thread(cx).await;
+        harness.say(
+            json!({ "type": "subscribe", "client_msg_id": "m1", "thread_id": thread_key, "accepts": [FEATURE_THREAD_DELTAS] }),
+            cx,
+        );
+        let received = harness.received();
+        let snapshot = of_type(&received, "thread_snapshot")[0];
+        let mut seq = snapshot["seq"].as_u64().unwrap();
+        let mut entries = snapshot["entries"].as_array().unwrap().clone();
+        // Applies the batches the way the app does; returns how many ops were appends.
+        let mut apply = |received: &[Value]| {
+            assert!(of_type(received, "thread_delta").is_empty());
+            let mut appends = 0;
+            for batch in of_type(received, "thread_deltas") {
+                let ops = batch["ops"].as_array().unwrap();
+                for op in ops {
+                    let index = op["index"].as_u64().unwrap_or_default() as usize;
+                    match op["kind"].as_str().unwrap() {
+                        "new_entry" => entries.push(op["entry"].clone()),
+                        "update_entry" => entries[index] = op["entry"].clone(),
+                        "append_text" => {
+                            appends += 1;
+                            let text = format!("{}{}", entries[index]["markdown"].as_str().unwrap(), op["text"].as_str().unwrap());
+                            entries[index]["markdown"] = json!(text);
+                        }
+                        _ => {}
+                    }
+                }
+                seq += ops.len() as u64;
+                assert_eq!(batch["seq"].as_u64(), Some(seq));
+            }
+            let last = entries.iter().rev().find_map(|entry| entry["markdown"].as_str().map(str::to_string));
+            (appends, last)
+        };
+
+        let full = "Hello, this reply is revealed a little at a time, the way Lathe streams agent text.";
+        connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::AgentMessageChunk(
+            acp_v1::ContentChunk::new(full.into()),
+        )]);
+        harness.say(json!({ "type": "send_message", "client_msg_id": "m2", "thread_id": thread_key, "text": "Hi" }), cx);
+        for _ in 0..20 {
+            cx.executor().advance_clock(ENTRY_FLUSH_DELAY);
+            cx.run_until_parked();
+        }
+        assert_eq!(apply(&harness.received()).1.as_deref(), Some(full));
+
+        // More text on the same message goes out as only the new part.
+        let (session_id, index) = thread.update(cx, |thread, cx| {
+            let index = thread.entries().len() - 1;
+            let acp_thread::AgentThreadEntry::AssistantMessage(message) = &thread.entries()[index] else {
+                panic!("an agent message");
+            };
+            let Some(acp_thread::AssistantMessageChunk::Message { block, .. }) = message.chunks.last() else {
+                panic!("a message chunk");
+            };
+            let markdown = block.markdowns().last().cloned().unwrap();
+            markdown.update(cx, |markdown, cx| markdown.append(" Done.", cx));
+            (thread.session_id().clone(), index)
+        });
+        harness.bridge.update(cx, |bridge, cx| {
+            bridge.mark_dirty(&session_id, |stream| {
+                stream.dirty.insert(index);
+            }, cx)
+        });
+        cx.executor().advance_clock(ENTRY_FLUSH_DELAY * 2);
+        cx.run_until_parked();
+        let received = harness.received();
+        let (appends, last) = apply(&received);
+        assert_eq!(appends, 1);
+        assert_eq!(last, Some(format!("{full} Done.")));
+        let append = &of_type(&received, "thread_deltas")[0]["ops"][0];
+        assert_eq!(append["text"], json!(" Done."));
     }
 
     #[gpui::test]
@@ -1866,7 +2011,7 @@ mod tests {
         let received = harness.received();
         assert_eq!(received[0]["type"], "hello");
         assert_eq!(received[0]["lathe_version"], "1.2.3");
-        assert_eq!(received[0]["features"], json!(["pull_requests", "close_threads", "terminals", "muted_workspaces"]));
+        assert_eq!(received[0]["features"], json!(["pull_requests", "close_threads", "terminals", "muted_workspaces", "thread_deltas"]));
         let workspaces = of_type(&received, "workspaces");
         assert_eq!(workspaces[0]["list"][0]["name"], "test");
         let listed = &of_type(&received, "threads")[0]["list"][0];
