@@ -29,6 +29,12 @@ Two things this time. You can manage extensions properly now (turn them off, con
 - The command palette shows Lathe's own commands as `lathe: ...` now. Typing `zed:` still finds them, and keymaps that say `zed::` keep working.
 - The welcome screen says "Craft your masterpiece".
 
+### Lathe Companion
+
+- **Lighter streaming to the phone.** While an agent is writing, Lathe sends just the new text, batched into one update per burst, instead of resending the whole message for every change. Long replies take far less data.
+
+Needs a companion app update that supports batched updates. Until then, the phone gets updates the same way as before.
+
 ## v1.19.0-beta - 2026-11-09
 
 Extensions can do a lot more in Lathe now. They can add commands, work with the file you're in, react when files are saved or edited, and run commands in the terminal. Each of those is a permission you approve. Zed extensions work exactly as before.
