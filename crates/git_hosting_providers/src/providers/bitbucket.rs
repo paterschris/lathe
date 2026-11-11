@@ -80,6 +80,22 @@ pub struct Bitbucket {
     base_url: Url,
 }
 
+const BITBUCKET_CLOUD_HOST: &str = "bitbucket.org";
+
+/// Bitbucket Cloud serves Git over SSH from `ssh.bitbucket.org` as well as
+/// `bitbucket.org`. Both are the same Cloud instance, so the SSH hostname has
+/// to resolve to `bitbucket.org` for provider detection, web links, the API and
+/// account matching; otherwise the `bitbucket` substring check in
+/// `from_remote_url` mistakes it for a self-hosted server. The remote itself is
+/// left untouched, so Git keeps using the SSH hostname.
+fn canonical_cloud_host(host: &str) -> &str {
+    if host.eq_ignore_ascii_case("ssh.bitbucket.org") {
+        BITBUCKET_CLOUD_HOST
+    } else {
+        host
+    }
+}
+
 impl Bitbucket {
     pub fn new(name: impl Into<String>, base_url: Url) -> Self {
         Self {
@@ -94,7 +110,7 @@ impl Bitbucket {
 
     pub fn from_remote_url(remote_url: &str) -> Result<Self> {
         let host = get_host_from_git_remote_url(remote_url)?;
-        if host == "bitbucket.org" {
+        if canonical_cloud_host(&host) == BITBUCKET_CLOUD_HOST {
             bail!("the BitBucket instance is not self-hosted");
         }
 
@@ -114,7 +130,7 @@ impl Bitbucket {
     fn is_self_hosted(&self) -> bool {
         self.base_url
             .host_str()
-            .is_some_and(|host| host != "bitbucket.org")
+            .is_some_and(|host| host != BITBUCKET_CLOUD_HOST)
     }
 
     async fn fetch_bitbucket_commit_author(
@@ -176,7 +192,8 @@ impl GitHostingProvider for Bitbucket {
         // API (`/rest/api/1.0`) that the calls below do not speak, so offering
         // to connect a self-hosted instance would advertise support that does
         // not exist.
-        (self.base_url.host_str() == Some("bitbucket.org")).then_some(GitHostAuthKind::Bitbucket)
+        (self.base_url.host_str() == Some(BITBUCKET_CLOUD_HOST))
+            .then_some(GitHostAuthKind::Bitbucket)
     }
 
     fn name(&self) -> String {
@@ -208,7 +225,7 @@ impl GitHostingProvider for Bitbucket {
     fn parse_remote_url(&self, url: &str) -> Option<ParsedGitRemote> {
         let url = RemoteUrl::from_str(url).ok()?;
 
-        let host = url.host_str()?;
+        let host = canonical_cloud_host(url.host_str()?);
         if host != self.base_url.host_str()? {
             return None;
         }
@@ -1239,6 +1256,87 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_remote_url_given_cloud_ssh_hostname() {
+        let remote_url = "git@ssh.bitbucket.org:tommycarwash/site-deployment.git";
+        let bitbucket = Bitbucket::public_instance();
+
+        let parsed_remote = bitbucket.parse_remote_url(remote_url).unwrap();
+
+        assert_eq!(
+            parsed_remote,
+            ParsedGitRemote {
+                owner: "tommycarwash".into(),
+                repo: "site-deployment".into(),
+            }
+        );
+        assert_eq!(bitbucket.auth_kind(), Some(GitHostAuthKind::Bitbucket));
+        assert_eq!(bitbucket.base_url().as_str(), "https://bitbucket.org/");
+        assert_eq!(
+            bitbucket
+                .build_create_pull_request_url(&parsed_remote, "feature")
+                .unwrap()
+                .as_str(),
+            "https://bitbucket.org/tommycarwash/site-deployment/pull-requests/new?source=feature"
+        );
+    }
+
+    #[test]
+    fn test_parse_remote_url_given_cloud_ssh_hostname_url_forms() {
+        for remote_url in [
+            "ssh://git@ssh.bitbucket.org/tommycarwash/site-deployment.git",
+            "ssh://git@ssh.bitbucket.org:22/tommycarwash/site-deployment.git",
+            "git@SSH.Bitbucket.org:tommycarwash/site-deployment.git",
+        ] {
+            assert_eq!(
+                Bitbucket::public_instance().parse_remote_url(remote_url),
+                Some(ParsedGitRemote {
+                    owner: "tommycarwash".into(),
+                    repo: "site-deployment".into(),
+                }),
+                "{remote_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cloud_remotes_are_not_self_hosted() {
+        for remote_url in [
+            "git@ssh.bitbucket.org:tommycarwash/site-deployment.git",
+            "ssh://git@ssh.bitbucket.org/tommycarwash/site-deployment.git",
+            "git@bitbucket.org:tommycarwash/site-deployment.git",
+            "https://bitbucket.org/tommycarwash/site-deployment.git",
+            "https://someone@bitbucket.org/tommycarwash/site-deployment.git",
+        ] {
+            assert!(
+                Bitbucket::from_remote_url(remote_url).is_err(),
+                "{remote_url} should resolve to Bitbucket Cloud"
+            );
+        }
+    }
+
+    #[test]
+    fn test_self_hosted_remotes_stay_self_hosted() {
+        for remote_url in [
+            "git@bitbucket.company.com:project/repo.git",
+            "https://bitbucket.company.com/scm/project/repo.git",
+            "ssh://git@ssh.bitbucket.company.com:7999/project/repo.git",
+        ] {
+            let bitbucket = Bitbucket::from_remote_url(remote_url).unwrap();
+            assert_eq!(bitbucket.name(), "BitBucket Self-Hosted", "{remote_url}");
+            assert_eq!(bitbucket.auth_kind(), None, "{remote_url}");
+            assert!(
+                bitbucket.parse_remote_url(remote_url).is_some(),
+                "{remote_url}"
+            );
+            assert_eq!(
+                Bitbucket::public_instance().parse_remote_url(remote_url),
+                None,
+                "{remote_url}"
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_remote_url_given_https_url_with_username() {
         let parsed_remote = Bitbucket::public_instance()
             .parse_remote_url("https://thorstenballzed@bitbucket.org/zed-industries/zed.git")
@@ -1740,15 +1838,14 @@ mod tests {
             username: "user".into(),
             secret: "secret".into(),
         });
-        let reviewers = futures::executor::block_on(
-            Bitbucket::public_instance().pull_request_reviewers(
+        let reviewers =
+            futures::executor::block_on(Bitbucket::public_instance().pull_request_reviewers(
                 &remote,
                 7,
                 auth.clone(),
                 client.clone(),
-            ),
-        )
-        .unwrap();
+            ))
+            .unwrap();
 
         assert_eq!(reviewers.len(), 3);
         assert_eq!(reviewers[0].login.to_string(), "Me");
