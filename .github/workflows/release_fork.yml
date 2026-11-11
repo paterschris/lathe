@@ -9,9 +9,18 @@ on:
       version:
         description: "Release version (e.g. 0.1.0). Leave blank to use Cargo.toml version."
         required: false
+      macos_built_locally:
+        # script/release-local builds, notarizes and validates macOS on a Mac,
+        # then puts it on a draft release pinned to the commit it built. This
+        # run then skips the macOS jobs, adds Linux and Windows to that draft
+        # and publishes it.
+        description: "macOS is already on a draft release from script/release-local"
+        type: boolean
+        default: false
 
 jobs:
   build-macos:
+    if: ${{ !inputs.macos_built_locally }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
@@ -547,6 +556,15 @@ jobs:
 
   create-release:
     needs: [build-macos, build-linux, build-windows, validate-macos]
+    # Skipped macOS jobs would skip this job too, so spell the condition out:
+    # Linux and Windows must have built, and macOS must either have built and
+    # validated here or be on the draft from script/release-local.
+    if: >-
+      ${{ !cancelled()
+      && needs.build-linux.result == 'success'
+      && needs.build-windows.result == 'success'
+      && ((inputs.macos_built_locally && needs.build-macos.result == 'skipped')
+          || (!inputs.macos_built_locally && needs.validate-macos.result == 'success')) }}
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -587,6 +605,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          MACOS_BUILT_LOCALLY: ${{ inputs.macos_built_locally }}
         run: |
           version="$RELEASE_VERSION"
 
@@ -601,11 +620,35 @@ jobs:
             tag="v${version}-${channel}"
           fi
 
+          # With macOS built locally, its files are already on a draft of this
+          # release. Check the draft is there and was built from this commit,
+          # so Linux and Windows can't be published next to a different macOS.
+          if [ "$MACOS_BUILT_LOCALLY" = "true" ]; then
+            draft=$(gh release view "$tag" --json isDraft,targetCommitish,assets \
+              --jq '"\(.isDraft) \(.targetCommitish) \([.assets[].name | select(endswith("-macos.zip") or endswith("-macos.dmg") or startswith("lathe-remote-server-macos-"))] | length)"' \
+              2>/dev/null || true)
+            read -r is_draft target macos_assets <<<"$draft"
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::No draft ${tag} release. Run script/release-local first."
+              exit 1
+            fi
+            if [ "$target" != "$GITHUB_SHA" ]; then
+              echo "::error::Draft ${tag} was built from ${target}, but this run built ${GITHUB_SHA}."
+              exit 1
+            fi
+            if [ "$macos_assets" != "3" ]; then
+              echo "::error::Draft ${tag} has ${macos_assets} of the 3 macOS assets."
+              exit 1
+            fi
+          fi
+
           # Collect all release files
           mkdir -p release-files
-          cp artifacts/lathe-macos/Lathe-*.zip release-files/
-          cp artifacts/lathe-macos/Lathe-*.dmg release-files/
-          cp artifacts/lathe-macos/lathe-remote-server-*.gz release-files/
+          if [ "$MACOS_BUILT_LOCALLY" != "true" ]; then
+            cp artifacts/lathe-macos/Lathe-*.zip release-files/
+            cp artifacts/lathe-macos/Lathe-*.dmg release-files/
+            cp artifacts/lathe-macos/lathe-remote-server-*.gz release-files/
+          fi
           cp artifacts/lathe-linux-x86_64/lathe-remote-server-*.gz release-files/
           cp artifacts/lathe-linux-x86_64/Lathe-*-linux.tar.gz release-files/
           cp artifacts/lathe-linux-x86_64/Lathe-*-linux.AppImage release-files/
@@ -683,6 +726,12 @@ jobs:
             fi
             if [ -n "$prerelease_flag" ]; then
               gh release edit "$tag" --prerelease
+            fi
+            # A draft from script/release-local is published last, once every
+            # platform is on it. Publishing creates the tag on the commit the
+            # draft targets.
+            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" = "true" ]; then
+              gh release edit "$tag" --draft=false
             fi
           else
             gh release create "$tag" release-files/* \

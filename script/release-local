@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+#
+# Builds, signs, notarizes and validates the macOS release on this Mac, puts it
+# on a draft GitHub release pinned to the commit it built, then starts the
+# release workflow to build Linux and Windows and publish the draft.
+#
+# This replaces the workflow's macOS jobs, which keep failing for lack of
+# hosted macOS runners. Linux and Windows still build on GitHub: Linux x86_64
+# needs an x86 machine, and Windows is signed through Azure with a GitHub-only
+# credential.
+#
+# Usage: script/release-local [--no-dispatch]
+#   --no-dispatch  stop after uploading the macOS assets to the draft
+#
+# Needs: Xcode, the Developer ID certificate in the login keychain, the
+# `lathe-notarize` notarytool profile, and gh signed in to paterschris.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+repo="paterschris/lathe"
+dispatch=true
+for arg in "$@"; do
+    case "$arg" in
+        --no-dispatch) dispatch=false ;;
+        *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+step() { echo ""; echo "=== $* ==="; }
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+step "Checking the tree and the release"
+
+command -v gh >/dev/null || fail "gh is required (brew install gh)"
+[ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || fail "release from main"
+# .rules carries a local block that is never committed.
+dirty=$(git status --porcelain --untracked-files=no | grep -v ' \.rules$' || true)
+[ -z "$dirty" ] || fail "commit or stash these first:"$'\n'"$dirty"
+git fetch --quiet origin main
+sha=$(git rev-parse HEAD)
+[ "$sha" = "$(git rev-parse origin/main)" ] \
+    || fail "main is not the same as origin/main; push or pull first, since GitHub builds Linux and Windows from origin/main"
+
+version=$(grep '^version' crates/zed/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+channel=$(<crates/zed/RELEASE_CHANNEL)
+if [ "$channel" = "stable" ]; then tag="v${version}"; else tag="v${version}-${channel}"; fi
+
+notes_body="$(mktemp)"
+trap 'rm -f "$notes_body"' EXIT
+awk -v prefix="## ${tag}" '
+    index($0, prefix) == 1 { found = 1; next }
+    found && /^## / { exit }
+    found { print }
+' RELEASE_NOTES.md > "$notes_body"
+[ -s "$notes_body" ] || fail "RELEASE_NOTES.md has no '## ${tag}' section"
+
+existing=$(gh release view "$tag" --repo "$repo" --json isDraft,targetCommitish \
+    --jq '"\(.isDraft) \(.targetCommitish)"' 2>/dev/null || true)
+if [ -n "$existing" ]; then
+    read -r is_draft target <<<"$existing"
+    [ "$is_draft" = "true" ] || fail "${tag} is already published"
+    [ "$target" = "$sha" ] || fail "draft ${tag} targets ${target}, not ${sha}; delete it first"
+fi
+if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+    fail "tag ${tag} already exists on origin"
+fi
+
+signing_identity="Developer ID Application: Chris Paterson (Z2DJF8UWJG)"
+security find-identity -v -p codesigning | grep -q "$signing_identity" \
+    || fail "signing identity not found: ${signing_identity}"
+xcrun notarytool history --keychain-profile lathe-notarize >/dev/null 2>&1 \
+    || fail "notarytool profile 'lathe-notarize' not found"
+
+echo "  ${tag} from ${sha:0:10} (${channel})"
+
+step "Building"
+export LATHE_UPDATE_URL="https://updates.lathe-ide.com/releases"
+export ZED_COMMIT_SHA="$sha"
+script/build-fork
+
+step "Building the remote server"
+# Its own cargo invocation, as in CI, so feature unification with the app
+# doesn't leak into it.
+triple=$(rustc --version --verbose | sed -n 's/^host: //p')
+case "$triple" in
+    aarch64-*) arch="aarch64" ;;
+    x86_64-*) arch="x86_64" ;;
+    *) fail "unexpected host ${triple}" ;;
+esac
+cargo build --release --package remote_server --target "$triple"
+strip -x "target/$triple/release/remote-server"
+gzip -f --stdout --best "target/$triple/release/remote-server" \
+    > "target/release/lathe-remote-server-macos-${arch}.gz"
+
+step "Signing, notarizing and packaging"
+LATHE_REQUIRE_SIGNING=1 script/package-fork
+
+zip="target/release/Lathe-${version}-${arch}-macos.zip"
+dmg="target/release/Lathe-${version}-${arch}-macos.dmg"
+server="target/release/lathe-remote-server-macos-${arch}.gz"
+for asset in "$zip" "$dmg" "$server"; do
+    [ -s "$asset" ] || fail "missing ${asset}"
+done
+
+step "Validating"
+# The same checks as the workflow's validate-macos job, on the zip users get.
+check_dir=$(mktemp -d)
+ditto -x -k "$zip" "$check_dir"
+app=$(find "$check_dir" -maxdepth 1 -name '*.app' | head -1)
+[ -n "$app" ] || fail "no .app in ${zip}"
+
+plutil -lint "$app/Contents/Info.plist" >/dev/null
+for key in CFBundleIdentifier CFBundleShortVersionString CFBundleDocumentTypes \
+    CFBundleURLTypes CFBundleExecutable LSMinimumSystemVersion; do
+    /usr/libexec/PlistBuddy -c "Print :$key" "$app/Contents/Info.plist" >/dev/null \
+        || fail "Info.plist is missing ${key}"
+done
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$version" ] \
+    || fail "the bundle's version is not ${version}"
+extensions=""
+for i in 0 1 2 3 4 5 6 7 8 9; do
+    entry=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:${i}:CFBundleTypeExtensions" \
+        "$app/Contents/Info.plist" 2>/dev/null) || continue
+    extensions="${extensions}"$'\n'"${entry}"
+done
+for want in md json js ts rs py toml yaml sh env cjs mjs mdx; do
+    echo "$extensions" | grep -qw "$want" || fail "document types are missing .${want}"
+done
+strings "$app/Contents/MacOS/zed" | grep -q 'handleOpenDocumentsEvent:withReplyEvent:' \
+    || fail "the Open Documents Apple Event handler is missing"
+codesign --verify --verbose=2 "$app"
+codesign --verify --deep --strict "$app"
+xcrun stapler validate "$app"
+xcrun stapler validate "$dmg"
+echo "  bundle, signature and notarization ok"
+
+# Launch it once, with its own data directory so it can't touch an installed
+# Lathe's settings or database, and check it's still running after a few
+# seconds. A workspace gives it a window, so it doesn't quit on its own.
+launch_dir=$(mktemp -d)
+echo "release smoke test" > "$launch_dir/README.md"
+"$app/Contents/MacOS/zed" --user-data-dir "$launch_dir/data" "$launch_dir" \
+    >"$launch_dir/stdout" 2>"$launch_dir/stderr" &
+launch_pid=$!
+sleep 8
+if kill -0 "$launch_pid" 2>/dev/null; then
+    kill "$launch_pid" 2>/dev/null || true
+    wait "$launch_pid" 2>/dev/null || true
+    echo "  launched and stayed up"
+else
+    echo "--- stderr ---"
+    tail -40 "$launch_dir/stderr" || true
+    fail "the app exited during the launch check"
+fi
+rm -rf "$check_dir" "$launch_dir"
+
+step "Uploading to the draft release"
+prerelease=()
+[ "$channel" = "stable" ] || prerelease=(--prerelease)
+if [ -n "$existing" ]; then
+    gh release upload "$tag" "$zip" "$dmg" "$server" --clobber --repo "$repo"
+    gh release edit "$tag" --notes-file "$notes_body" --repo "$repo"
+else
+    # A draft has no tag yet; publishing creates it on this exact commit, so
+    # the tag always matches what was built.
+    gh release create "$tag" "$zip" "$dmg" "$server" \
+        --draft \
+        --target "$sha" \
+        --title "Lathe ${tag}" \
+        --notes-file "$notes_body" \
+        --repo "$repo" \
+        ${prerelease[@]+"${prerelease[@]}"}
+fi
+echo "  draft ${tag} has the macOS assets"
+
+if ! $dispatch; then
+    echo ""
+    echo "Stopped before starting the workflow. When ready:"
+    echo "  gh workflow run release_fork.yml --repo ${repo} --ref main -f macos_built_locally=true"
+    exit 0
+fi
+
+step "Starting the workflow for Linux and Windows"
+git fetch --quiet origin main
+[ "$(git rev-parse origin/main)" = "$sha" ] \
+    || fail "origin/main moved while building; the draft targets ${sha:0:10}. Start the workflow by hand once main is back, or delete the draft and rerun"
+gh workflow run release_fork.yml --repo "$repo" --ref main -f macos_built_locally=true
+sleep 10
+gh run list --repo "$repo" --workflow release_fork.yml --limit 1 \
+    --json url,headSha --jq '.[] | "  \(.url) (\(.headSha[0:10]))"'
+echo ""
+echo "The workflow publishes ${tag} once Linux and Windows are uploaded."
