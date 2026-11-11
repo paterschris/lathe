@@ -2,6 +2,33 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.20.0-beta - 2026-11-11
+
+Two things this time. You can manage extensions properly now (turn them off, control updates, recommend them per project). And extensions can draw their own UI: file previews, dock panels, clickable status items and highlights in the editor.
+
+### Managing extensions
+
+- **Turn an extension off without uninstalling it.** Disable and Enable are on its card and in its menu. Its settings and permissions stay put.
+- `extension_auto_update` turns automatic updates on or off for everything. The card's menu does it per extension.
+- **Recommended extensions per project.** List them in a project's `.zed/settings.json` under `recommended_extensions`. Opening the project offers to install the missing ones, with Don't Ask Again if you'd rather not.
+
+### Extension UI (API 0.2, preview)
+
+- **File previews.** An extension can preview a file type in a tab next to the editor, from a button in the editor toolbar or the command palette. The editor stays open, so you can still edit the file. Previews redraw as you type and come back after a restart.
+- **Dock panels.** Extensions can add panels to the left, right or bottom dock. Each side gets one Extension Panels button with a tab per panel, and each panel has a "Toggle" entry in the palette.
+- What extensions can draw: text, buttons, list items and trees, text inputs, checkboxes, dropdowns, right-click menus, progress bars, markdown, and lists that load as you scroll so a million rows doesn't send a million rows. It all uses Lathe's own components, so it follows your theme.
+- **Highlights in the editor.** Backgrounds, underlines, squiggles, gutter marks and short messages at the end of a line. They move with your edits. Needs the new `ui:decorations` permission.
+- Clickable status bar items.
+- An extension can open a file at a line, but only while handling something you did (a command, a click in its panel, a click on its status item).
+- Extensions can follow which files you have open in tabs, separately from files Lathe has loaded in the background.
+
+0.2 isn't on crates.io yet, because publishing freezes it. To try it, point `lathe_extension_api` at this repo with a git dependency. Extensions built against 0.2 only load in this beta; Lathe 1.19 and the current stable skip them. 0.1 extensions work as before.
+
+### Other changes
+
+- The command palette shows Lathe's own commands as `lathe: ...` now. Typing `zed:` still finds them, and keymaps that say `zed::` keep working.
+- The welcome screen says "Craft your masterpiece".
+
 ## v1.19.0-beta - 2026-11-09
 
 Extensions can do a lot more in Lathe now. They can add commands, work with the file you're in, react when files are saved or edited, and run commands in the terminal. Each of those is a permission you approve. Zed extensions work exactly as before.
