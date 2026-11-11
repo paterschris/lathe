@@ -55,7 +55,8 @@ API 0.2 (in progress, not released yet) adds:
 
 - **Views**: an extension describes a small UI (text, buttons, list items and trees, text inputs, checkboxes, dropdowns, right-click menus, progress, markdown, and virtual lists that load rows as you scroll) and Lathe draws it with its own components so it follows the theme.
 - **File previews**: an extension can register a preview for file types (say `package.json`). On a matching file, click the extension button in the editor toolbar (or run "<Extension>: <Preview>" from the command palette) and the preview opens in a tab beside the editor, which stays open for editing. It redraws as you type, and comes back after a restart.
-- **Status bar items** that you can click. Extensions can also register panels, but Lathe doesn't show them yet.
+- **Panels**: extensions can add panels to the left, right or bottom dock. Each side gets one Extension Panels button, with a tab per extension panel, and each panel also has a "<Extension>: Toggle <Panel>" palette entry.
+- **Status bar items** that you can click.
 - **Opening files**: an extension can open a file at a line, but only while handling something you did (a command, a click in its view, or a click on its status item).
 - **Decorations**: highlights, underlines, gutter marks and short end-of-line messages in the editor, anchored to the text so they move with your edits.
 

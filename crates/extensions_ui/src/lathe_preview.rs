@@ -72,7 +72,8 @@ type SendSurfaceEvent = Arc<
 >;
 
 /// Calls back whenever the set of available previews may have changed.
-type ObserveAvailability = Arc<dyn Fn(Box<dyn Fn(&mut App)>, &mut App) -> Option<Subscription>>;
+pub(crate) type ObserveAvailability =
+    Arc<dyn Fn(Box<dyn Fn(&mut App)>, &mut App) -> Option<Subscription>>;
 
 /// What previews need from the extension store. Tests swap in their own.
 #[derive(Clone)]

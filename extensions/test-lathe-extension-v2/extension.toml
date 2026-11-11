@@ -4,6 +4,6 @@ description = "An extension that uses Lathe API 0.2 views, for use in tests."
 version = "0.1.0"
 schema_version = 1
 requires = ["lathe"]
-lathe_capabilities = ["ui:views", "ui:status", "ui:decorations", "buffer:read"]
+lathe_capabilities = ["ui:views", "ui:status", "ui:decorations", "buffer:read", "events:open"]
 authors = ["Chris Paterson <chris.r.paterson@gmail.com>"]
 repository = "https://github.com/paterschris/lathe"

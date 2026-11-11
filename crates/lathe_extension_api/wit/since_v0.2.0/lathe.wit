@@ -142,7 +142,8 @@ interface views {
         column,
         /// Lays its children out left to right.
         row,
-        /// A column that scrolls when its children don't fit.
+        /// A column that scrolls when its children don't fit, sideways too:
+        /// rows keep their full width rather than being cut off.
         scroll,
         text(text-node),
         button(button-node),
@@ -225,7 +226,11 @@ interface surfaces {
         bottom,
     }
 
-    /// A dockable panel that shows the view whose id equals the panel's id.
+    /// A dock panel that shows the view whose id equals the panel's id. Each
+    /// dock side has one "Extension Panels" button, and the extension panels
+    /// on that side are tabs inside it; users also open a panel from the
+    /// command palette entry "<Extension Name>: Toggle <title>". `icon` shows
+    /// on its tab, and on the dock button when it's the side's only panel.
     /// Can only be registered while the extension initializes; up to 4 per
     /// extension. Registering always succeeds regardless of permissions, but
     /// the panel only appears while the user allows `ui:views`.
@@ -233,7 +238,7 @@ interface surfaces {
         /// Lowercase letters, digits and `-`. Also the id of the view shown.
         id: string,
         title: string,
-        /// One of Lathe's icon names, for the dock button.
+        /// One of Lathe's icon names, for the tab and dock button.
         icon: option<string>,
         dock: dock-side,
     }
@@ -334,6 +339,40 @@ interface decorations {
     set-decorations: func(version: u64, layer: string, decorations: list<decoration>) -> result<_, string>;
 }
 
+/// Implemented by the extension to hear about files coming and going, at two
+/// levels. Sent to extensions that declared `events:open`.
+///
+/// Buffers: the 0.1 `events.opened` fires when Lathe loads a file into memory,
+/// and `buffer-closed` when it lets it go. Lathe also loads files nobody has a
+/// tab for (go to definition, project search, language servers), and can keep
+/// a file loaded after its last tab closes.
+///
+/// Tabs: `tab-opened` fires when the first editor tab showing a file appears,
+/// in any window, and `tab-closed` when the last one closes. Moving a tab
+/// between panes sends neither. Use these to follow what the user has open.
+///
+/// When an extension loads, it gets `opened` for every loaded file and
+/// `tab-opened` for every file with a tab, so lists built from these start out
+/// complete.
+interface file-handler {
+    enum file-event {
+        buffer-closed,
+        tab-opened,
+        tab-closed,
+    }
+
+    record file-ref {
+        /// The file's path within its project.
+        path: option<string>,
+        /// The file's absolute path, for files on this machine.
+        abs-path: option<string>,
+    }
+
+    /// During `tab-opened`, `buffers.active-buffer` returns the file (with
+    /// `buffer:read`). During the closed events it returns none.
+    on-file-event: func(event: file-event, file: file-ref) -> result<_, string>;
+}
+
 /// Implemented by the extension to receive what users do in its views.
 interface view-handler {
     use views.{view-event, list-item-node};
@@ -356,4 +395,5 @@ world extension {
     import surfaces;
     import decorations;
     export view-handler;
+    export file-handler;
 }

@@ -221,6 +221,12 @@ pub enum LatheBufferEvent {
     Opened,
     Saved,
     Changed,
+    /// Lathe let go of the file's buffer. API 0.2 only.
+    BufferClosed,
+    /// The first editor tab showing the file appeared. API 0.2 only.
+    TabOpened,
+    /// The last editor tab showing the file closed. API 0.2 only.
+    TabClosed,
 }
 
 impl LatheBufferEvent {
@@ -229,14 +235,31 @@ impl LatheBufferEvent {
             Self::Opened => LatheCapability::EventsOpen,
             Self::Saved => LatheCapability::EventsSave,
             Self::Changed => LatheCapability::EventsChange,
+            // The other ends of, and finer views of, opening: no new permission.
+            Self::BufferClosed | Self::TabOpened | Self::TabClosed => LatheCapability::EventsOpen,
         }
     }
 
-    fn to_wit(self) -> WitBufferEvent {
+    /// The 0.1 event, or `None` for events 0.1 has no word for.
+    fn to_wit(self) -> Option<WitBufferEvent> {
         match self {
-            Self::Opened => WitBufferEvent::Opened,
-            Self::Saved => WitBufferEvent::Saved,
-            Self::Changed => WitBufferEvent::Changed,
+            Self::Opened => Some(WitBufferEvent::Opened),
+            Self::Saved => Some(WitBufferEvent::Saved),
+            Self::Changed => Some(WitBufferEvent::Changed),
+            Self::BufferClosed | Self::TabOpened | Self::TabClosed => None,
+        }
+    }
+
+    /// The 0.2 file event, for events 0.1 has no word for.
+    fn to_wit_file_event(
+        self,
+    ) -> Option<v0_2_0::exports::lathe::extension0_2_0::file_handler::FileEvent> {
+        use v0_2_0::exports::lathe::extension0_2_0::file_handler::FileEvent;
+        match self {
+            Self::BufferClosed => Some(FileEvent::BufferClosed),
+            Self::TabOpened => Some(FileEvent::TabOpened),
+            Self::TabClosed => Some(FileEvent::TabClosed),
+            Self::Opened | Self::Saved | Self::Changed => None,
         }
     }
 }
@@ -323,6 +346,12 @@ pub trait LatheEditorDelegate: Send + Sync + 'static {
         cx: &mut AsyncApp,
     ) -> Result<()>;
     fn select(&self, version: u64, ranges: Vec<Range<usize>>, cx: &mut AsyncApp) -> Result<()>;
+    /// The file's (project path, absolute path), for file events. A closed
+    /// file has no buffer, so `snapshot` returns `None` for it, but this still
+    /// says where it was.
+    fn file_paths(&self, _cx: &mut AsyncApp) -> (Option<String>, Option<String>) {
+        (None, None)
+    }
     /// Replaces one extension's decorations in `layer` for this buffer.
     /// Rejects a stale `version` and ranges outside the text.
     fn set_decorations(
@@ -826,20 +855,50 @@ pub(super) async fn dispatch_buffer_event(
         .bindings
         .take()
         .ok_or_else(|| anyhow!("extension does not use the Lathe API"))?;
+    let file_paths = if event.to_wit_file_event().is_some() {
+        let buffer = buffer.clone();
+        store
+            .data()
+            .on_main_thread(move |cx| async move { buffer.file_paths(cx) }.boxed_local())
+            .await
+    } else {
+        (None, None)
+    };
     store.data_mut().lathe.editor = Some(buffer);
-    let result = match &bindings {
-        LatheBindings::V0_1(bindings) => {
+    let result = match (&bindings, event.to_wit()) {
+        (LatheBindings::V0_1(bindings), Some(wit_event)) => {
             bindings
                 .lathe_extension_event_handler()
-                .call_on_buffer_event(&mut *store, event.to_wit())
+                .call_on_buffer_event(&mut *store, wit_event)
                 .await
         }
-        LatheBindings::V0_2(bindings) => {
+        (LatheBindings::V0_2(bindings), Some(wit_event)) => {
             bindings
                 .lathe_extension0_1_0_event_handler()
-                .call_on_buffer_event(&mut *store, event.to_wit())
+                .call_on_buffer_event(&mut *store, wit_event)
                 .await
         }
+        (LatheBindings::V0_2(bindings), None) => {
+            let (path, abs_path) = file_paths;
+            match event.to_wit_file_event() {
+                Some(file_event) => {
+                    bindings
+                        .lathe_extension0_2_0_file_handler()
+                        .call_on_file_event(
+                            &mut *store,
+                            file_event,
+                            &v0_2_0::exports::lathe::extension0_2_0::file_handler::FileRef {
+                                path,
+                                abs_path,
+                            },
+                        )
+                        .await
+                }
+                None => Ok(Ok(())),
+            }
+        }
+        // 0.1 has no event for this; 0.1 extensions don't hear it.
+        (LatheBindings::V0_1(_), None) => Ok(Ok(())),
     };
     store.data_mut().lathe.editor = None;
     store.data_mut().lathe.bindings = Some(bindings);

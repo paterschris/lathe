@@ -86,16 +86,109 @@ pub fn init(cx: &mut App) {
 
     let edited_by_extensions = ExtensionEditedBuffers::default();
     crate::lathe_preview::init(edited_by_extensions.clone(), cx);
+    crate::lathe_panels::init(cx);
+    let edited_by_extensions_for_catch_up = edited_by_extensions.clone();
+    let edited_by_extensions_for_tabs = edited_by_extensions.clone();
+    let open_tabs = crate::lathe_tabs::init(
+        Arc::new(move |event, buffer, (path, abs_path), cx| {
+            let wants = ExtensionStore::try_global(cx)
+                .is_some_and(|store| wants(store.read(cx), LatheCapability::EventsOpen));
+            if !wants {
+                return;
+            }
+            match buffer {
+                Some(buffer) => dispatch(event, &buffer, &edited_by_extensions_for_tabs, cx),
+                None => dispatch_without_buffer(event, path, abs_path, cx),
+            }
+        }),
+        cx,
+    );
     let sink = EventSink {
         wants: Arc::new(|capability, cx| {
             ExtensionStore::try_global(cx).is_some_and(|store| wants(store.read(cx), capability))
         }),
         dispatch: Arc::new(dispatch),
+        closed: Arc::new(dispatch_closed),
         edited_by_extensions,
     };
-    cx.observe_new(move |project: &mut Project, _window, cx| {
-        if project.is_local() {
-            watch_project_buffers(project, sink.clone(), cx);
+    let projects = Rc::new(RefCell::new(Vec::<WeakEntity<Project>>::new()));
+    cx.observe_new({
+        let projects = projects.clone();
+        move |project: &mut Project, _window, cx| {
+            if project.is_local() {
+                watch_project_buffers(project, sink.clone(), cx);
+                let mut projects = projects.borrow_mut();
+                projects.retain(|project| project.upgrade().is_some());
+                projects.push(cx.weak_entity());
+            }
+        }
+    })
+    .detach();
+
+    // An extension that loads after files are open (tabs restored at startup,
+    // or an extension installed mid-session) would otherwise never hear
+    // `opened` for them. Tell each newly loaded instance about them.
+    let caught_up = Rc::new(RefCell::new(
+        collections::HashSet::<(Arc<str>, usize)>::default(),
+    ));
+    cx.observe(&store, move |store, cx| {
+        let newly_loaded = store
+            .read(cx)
+            .wasm_extensions
+            .iter()
+            .filter(|(_, extension)| {
+                extension
+                    .lathe_capabilities
+                    .contains(&LatheCapability::EventsOpen)
+            })
+            .map(|(manifest, extension)| {
+                // Each load creates a new capability set, so its address
+                // tells a reloaded extension from the instance before it.
+                (
+                    manifest.id.clone(),
+                    Arc::as_ptr(&extension.lathe_capabilities) as usize,
+                )
+            })
+            .filter(|instance| !caught_up.borrow().contains(instance))
+            .collect::<Vec<_>>();
+        if newly_loaded.is_empty() {
+            return;
+        }
+        let open_files = projects
+            .borrow()
+            .iter()
+            .filter_map(|project| project.upgrade())
+            .flat_map(|project| {
+                project
+                    .read(cx)
+                    .buffer_store()
+                    .read(cx)
+                    .buffers()
+                    .filter(|buffer| buffer.read(cx).file().is_some())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let open_tabs = open_tabs.read(cx).open_files();
+        for instance in newly_loaded {
+            for buffer in &open_files {
+                dispatch_to(
+                    LatheBufferEvent::Opened,
+                    buffer,
+                    &edited_by_extensions_for_catch_up,
+                    Some(instance.0.clone()),
+                    cx,
+                );
+            }
+            for (_, buffer) in &open_tabs {
+                dispatch_to(
+                    LatheBufferEvent::TabOpened,
+                    buffer,
+                    &edited_by_extensions_for_catch_up,
+                    Some(instance.0.clone()),
+                    cx,
+                );
+            }
+            caught_up.borrow_mut().insert(instance);
         }
     })
     .detach();
@@ -107,7 +200,72 @@ pub fn init(cx: &mut App) {
 pub struct EventSink {
     pub wants: Arc<dyn Fn(LatheCapability, &App) -> bool>,
     pub dispatch: Arc<dyn Fn(LatheBufferEvent, &Entity<Buffer>, &ExtensionEditedBuffers, &mut App)>,
+    /// A file closed: (project path, absolute path) as it was when it opened.
+    pub closed: Arc<dyn Fn(Option<String>, Option<String>, &mut App)>,
     pub edited_by_extensions: ExtensionEditedBuffers,
+}
+
+/// Stands in for a file that has closed, so `closed` travels the same way as
+/// other buffer events (timeouts, pausing). There's no buffer to read.
+struct ClosedFileDelegate {
+    path: Option<String>,
+    abs_path: Option<String>,
+}
+
+impl extension_host::wasm_host::lathe::LatheEditorDelegate for ClosedFileDelegate {
+    fn snapshot(
+        &self,
+        _cx: &mut AsyncApp,
+    ) -> Result<Option<extension_host::wasm_host::lathe::ActiveBufferSnapshot>> {
+        Ok(None)
+    }
+
+    fn edit(
+        &self,
+        _version: u64,
+        _edits: Vec<(std::ops::Range<usize>, String)>,
+        _cx: &mut AsyncApp,
+    ) -> Result<()> {
+        anyhow::bail!("the file was closed")
+    }
+
+    fn select(
+        &self,
+        _version: u64,
+        _ranges: Vec<std::ops::Range<usize>>,
+        _cx: &mut AsyncApp,
+    ) -> Result<()> {
+        anyhow::bail!("the file was closed")
+    }
+
+    fn file_paths(&self, _cx: &mut AsyncApp) -> (Option<String>, Option<String>) {
+        (self.path.clone(), self.abs_path.clone())
+    }
+}
+
+fn dispatch_closed(path: Option<String>, abs_path: Option<String>, cx: &mut App) {
+    dispatch_without_buffer(LatheBufferEvent::BufferClosed, path, abs_path, cx);
+}
+
+/// Sends a file event that has no buffer to read: the file is gone, or
+/// (for `tab-closed`) no longer shown.
+fn dispatch_without_buffer(
+    event: LatheBufferEvent,
+    path: Option<String>,
+    abs_path: Option<String>,
+    cx: &mut App,
+) {
+    let Some(store) = ExtensionStore::try_global(cx) else {
+        return;
+    };
+    let delegate = Arc::new(ClosedFileDelegate { path, abs_path });
+    let task = store.update(cx, |store, cx| {
+        store.dispatch_lathe_buffer_event(event, delegate, cx)
+    });
+    cx.background_spawn(async move {
+        task.await;
+    })
+    .detach();
 }
 
 /// Asks the user to allow an extension's Lathe capabilities. Resolves to
@@ -925,6 +1083,17 @@ fn dispatch(
     edited_by_extensions: &ExtensionEditedBuffers,
     cx: &mut App,
 ) {
+    dispatch_to(event, buffer, edited_by_extensions, None, cx);
+}
+
+/// Sends a buffer event to extensions that declared it, or only to `only`.
+fn dispatch_to(
+    event: LatheBufferEvent,
+    buffer: &Entity<Buffer>,
+    edited_by_extensions: &ExtensionEditedBuffers,
+    only: Option<Arc<str>>,
+    cx: &mut App,
+) {
     let Some(store) = ExtensionStore::try_global(cx) else {
         return;
     };
@@ -933,7 +1102,7 @@ fn dispatch(
         edited_by_extensions.clone(),
     ));
     let task = store.update(cx, |store, cx| {
-        store.dispatch_lathe_buffer_event(event, delegate, cx)
+        store.dispatch_lathe_buffer_event_to(event, delegate, only.as_deref(), cx)
     });
     cx.spawn(async move |cx| {
         let paused = task.await;
@@ -979,6 +1148,12 @@ pub fn watch_project_buffers(project: &mut Project, sink: EventSink, cx: &mut Co
         (Subscription, Option<Task<()>>),
     >::default()));
 
+    // Where each watched file was, for `closed`: by then the buffer is gone.
+    let locations = Rc::new(RefCell::new(HashMap::<
+        text::BufferId,
+        (Option<String>, Option<String>),
+    >::default()));
+
     cx.subscribe(&buffer_store, move |_project, _buffer_store, event, cx| {
         match event {
             BufferStoreEvent::BufferAdded(buffer) => {
@@ -987,6 +1162,11 @@ pub fn watch_project_buffers(project: &mut Project, sink: EventSink, cx: &mut Co
                 if buffer.read(cx).file().is_none() {
                     return;
                 }
+                let location = crate::lathe_editor::file_location(buffer.read(cx), cx);
+                locations.borrow_mut().insert(
+                    buffer.read(cx).remote_id(),
+                    (location.path, location.abs_path),
+                );
                 send(&sink, LatheBufferEvent::Opened, buffer, cx);
                 let buffer_id = buffer.read(cx).remote_id();
                 let subscription = cx.subscribe(buffer, {
@@ -1001,6 +1181,12 @@ pub fn watch_project_buffers(project: &mut Project, sink: EventSink, cx: &mut Co
             BufferStoreEvent::BufferDropped(buffer_id) => {
                 watched.borrow_mut().remove(buffer_id);
                 sink.edited_by_extensions.forget(*buffer_id);
+                let location = locations.borrow_mut().remove(buffer_id);
+                if let Some((path, abs_path)) = location
+                    && (sink.wants)(LatheCapability::EventsOpen, cx)
+                {
+                    (sink.closed)(path, abs_path, cx);
+                }
             }
             _ => {}
         }
@@ -1086,6 +1272,7 @@ mod tests {
     /// A sink that records events, and on `changed` edits the buffer the way an
     /// extension's handler would, through the extension buffer delegate.
     fn recording_sink(recorded: Recorded, wants_changes: bool) -> EventSink {
+        let closed_recorded = recorded.clone();
         EventSink {
             wants: Arc::new(move |capability, _| {
                 wants_changes || capability != LatheCapability::EventsChange
@@ -1105,6 +1292,15 @@ mod tests {
                             .unwrap();
                     })
                     .detach();
+                }
+            }),
+            closed: Arc::new({
+                let recorded = closed_recorded;
+                move |path, _abs_path, _cx| {
+                    recorded
+                        .0
+                        .lock()
+                        .push((LatheBufferEvent::BufferClosed, path.unwrap_or_default()))
                 }
             }),
             edited_by_extensions: ExtensionEditedBuffers::default(),
@@ -1183,6 +1379,16 @@ mod tests {
                 |(event, text)| *event == LatheBufferEvent::Saved && text.starts_with(">hello")
             ),
             "{saved:?}"
+        );
+
+        // Closing the last handle to the file (its last tab) closes it.
+        drop(buffer);
+        cx.update(|_| {});
+        cx.run_until_parked();
+        assert_eq!(
+            recorded.take(),
+            vec![(LatheBufferEvent::BufferClosed, "notes.txt".into())],
+            "closing reports the file's project path"
         );
     }
 

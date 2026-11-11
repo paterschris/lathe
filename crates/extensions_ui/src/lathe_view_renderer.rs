@@ -34,6 +34,10 @@ use util::ResultExt as _;
 
 use crate::lathe_ui::ExtensionViews;
 
+/// Width of one tree indent level; matches the 1rem the arrow is drawn left of
+/// a row's content.
+const TREE_INDENT_STEP: gpui::Pixels = px(16.);
+
 /// How long typing must pause before an input sends `input-changed`.
 pub const INPUT_DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -178,6 +182,11 @@ impl ExtensionViewHost {
             _views_subscription: subscription,
             _release_subscription: release_subscription,
         }
+    }
+
+    /// (extension id, view id) of the view this host shows.
+    pub fn key(&self) -> (Arc<str>, Arc<str>) {
+        (self.extension_id.clone(), self.view_id.clone())
     }
 
     pub fn with_row_source(mut self, row_source: RowSource) -> Self {
@@ -422,18 +431,31 @@ impl ExtensionViewHost {
             // Grows into free space and shrinks to scroll when its parent has a
             // bounded height. `flex_1` would give it zero height inside a
             // column that sizes to its content.
+            // Scrolls both ways. The inner column is as wide as its widest
+            // row (and at least as wide as the scroll area), so long rows
+            // scroll sideways instead of being cut off, and short rows still
+            // fill the width.
             NodeKind::Scroll => v_flex()
                 .id(("lathe-view-scroll", index as usize))
+                .debug_selector(move || format!("lathe-view-scroll-{index}"))
                 .w_full()
                 .when(index == 0, |root| root.size_full())
                 .flex_auto()
                 .min_h_0()
-                .gap_1()
-                .overflow_y_scroll()
-                .children(
-                    node.children
-                        .iter()
-                        .map(|child| self.render_node(view, *child, false, window, cx)),
+                .items_start()
+                .overflow_scroll()
+                .child(
+                    v_flex()
+                        .debug_selector(move || format!("lathe-view-scroll-content-{index}"))
+                        .min_w_full()
+                        .flex_none()
+                        .gap_1()
+                        .whitespace_nowrap()
+                        .children(
+                            node.children
+                                .iter()
+                                .map(|child| self.render_node(view, *child, false, window, cx)),
+                        ),
                 )
                 .into_any_element(),
             NodeKind::Text { text, style, tone } => {
@@ -741,12 +763,16 @@ impl ExtensionViewHost {
         else {
             return div().into_any_element();
         };
+        // `ListItem` draws its arrow 1rem left of the row's content, so tree
+        // rows get one extra indent step to make room for it; otherwise a
+        // top-level row's arrow lands outside the row.
+        let in_tree = *disclosure != Disclosure::None || *indent > 0;
         let mut item = ListItem::new(element_id(&self.view_id, id))
             .spacing(ListItemSpacing::Sparse)
             .toggle_state(*selected)
             .disabled(*disabled)
-            .indent_level(*indent as usize)
-            .indent_step_size(px(12.))
+            .indent_level(*indent as usize + usize::from(in_tree))
+            .indent_step_size(TREE_INDENT_STEP)
             .start_slot::<Icon>(
                 icon.as_deref()
                     .and_then(icon_name)
@@ -764,10 +790,14 @@ impl ExtensionViewHost {
             }));
         if *disclosure != Disclosure::None {
             let expanded = *disclosure == Disclosure::Expanded;
-            item = item.toggle(expanded).on_toggle(cx.listener({
-                let id = id.clone();
-                move |this, _, _, cx| this.emit(id.clone(), ViewEvent::Toggled(!expanded), cx)
-            }));
+            // Expanded rows otherwise hide their arrow until hovered.
+            item = item
+                .always_show_disclosure_icon(true)
+                .toggle(expanded)
+                .on_toggle(cx.listener({
+                    let id = id.clone();
+                    move |this, _, _, cx| this.emit(id.clone(), ViewEvent::Toggled(!expanded), cx)
+                }));
         }
         if let Some(tooltip) = tooltip {
             item = item.tooltip(Tooltip::text(tooltip.to_string()));
@@ -1129,6 +1159,107 @@ mod tests {
     fn test_icon_names() {
         assert_eq!(icon_name("plus"), Some(IconName::Plus));
         assert_eq!(icon_name("not_an_icon"), None);
+    }
+
+    #[gpui::test]
+    async fn test_long_rows_scroll_sideways(cx: &mut TestAppContext) {
+        init_test(cx);
+        let long = "TODO: ".to_string() + &"a very long comment that goes on ".repeat(40);
+        let row = |id: &str, label: &str| {
+            leaf(NodeKind::ListItem {
+                id: id.into(),
+                label: label.into(),
+                detail: None,
+                icon: None,
+                tooltip: None,
+                selected: false,
+                disabled: false,
+                indent: 0,
+                disclosure: Disclosure::None,
+                menu: Vec::new(),
+            })
+        };
+        let view = validate(vec![
+            Node {
+                kind: NodeKind::Scroll,
+                children: vec![1, 2],
+            },
+            row("long", &long),
+            row("short", "short"),
+        ])
+        .expect("valid view");
+        let (_host, _views, _recorded, cx) = open(view, cx);
+        let area = cx.debug_bounds("lathe-view-scroll-0").expect("scroll area");
+        let content = cx
+            .debug_bounds("lathe-view-scroll-content-0")
+            .expect("scroll content");
+        let long_row = cx
+            .debug_bounds("lathe-view-element-long")
+            .expect("long row");
+        let short_row = cx
+            .debug_bounds("lathe-view-element-short")
+            .expect("short row");
+        assert!(
+            long_row.size.width > area.size.width,
+            "the long row keeps its width ({:?}) instead of being squeezed into the \
+             scroll area ({:?})",
+            long_row.size.width,
+            area.size.width
+        );
+        assert_eq!(content.size.width, long_row.size.width);
+        assert_eq!(
+            short_row.size.width, long_row.size.width,
+            "short rows stretch to the widest row, so highlights line up"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_tree_arrow_is_inside_the_row(cx: &mut TestAppContext) {
+        init_test(cx);
+        // `src` is a top-level tree row, expanded or collapsed.
+        for disclosure in [Disclosure::Expanded, Disclosure::Collapsed] {
+            let view = validate(vec![
+                Node {
+                    kind: NodeKind::Column,
+                    children: vec![1],
+                },
+                leaf(NodeKind::ListItem {
+                    id: "src".into(),
+                    label: "src".into(),
+                    detail: None,
+                    icon: None,
+                    tooltip: None,
+                    selected: false,
+                    disabled: false,
+                    indent: 0,
+                    disclosure,
+                    menu: Vec::new(),
+                }),
+            ])
+            .expect("valid view");
+            let (_host, _views, recorded, cx) = open(view, cx);
+            let bounds = cx
+                .debug_bounds("lathe-view-element-src")
+                .expect("the row is rendered");
+            // Without hovering, near the row's left edge: the arrow.
+            let near_left = gpui::point(bounds.origin.x + px(14.), bounds.center().y);
+            cx.simulate_click(near_left, gpui::Modifiers::default());
+            cx.run_until_parked();
+            assert_eq!(
+                take(&recorded),
+                vec![(
+                    "src".to_string(),
+                    ViewEvent::Toggled(disclosure == Disclosure::Collapsed)
+                )],
+                "the arrow is visible and clickable at the row's left edge ({disclosure:?})"
+            );
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            assert_eq!(
+                take(&recorded),
+                vec![("src".to_string(), ViewEvent::Clicked)]
+            );
+        }
     }
 
     #[gpui::test]

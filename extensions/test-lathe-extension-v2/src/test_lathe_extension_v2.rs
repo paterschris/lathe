@@ -127,6 +127,19 @@ impl zed::Extension for TestLatheExtensionV2 {
         })
         .expect("registering decorate");
 
+        lathe_extension_api::on_file_event(|event, file| {
+            let mut view = ViewBuilder::column();
+            view.text(
+                &format!(
+                    "{event:?} {} active_buffer={}",
+                    file.path.as_deref().unwrap_or("-"),
+                    lathe_extension_api::active_buffer()?.is_some()
+                ),
+                TextStyle::Body,
+            );
+            lathe_extension_api::update_view("file-events", &view.build())
+        });
+
         lathe_extension_api::on_provide_rows(|view_id, list_id, start, count| {
             if (view_id, list_id) != ("counter", "files") {
                 return Err(format!("unexpected list {view_id}/{list_id}"));

@@ -1446,6 +1446,19 @@ impl ExtensionStore {
         buffer: Arc<dyn wasm_host::lathe::LatheEditorDelegate>,
         cx: &mut Context<Self>,
     ) -> Task<Vec<(Arc<str>, Arc<str>)>> {
+        self.dispatch_lathe_buffer_event_to(event, buffer, None, cx)
+    }
+
+    /// Like [`Self::dispatch_lathe_buffer_event`], but only to `only` when it
+    /// is set. Used to tell an extension that just loaded about files that
+    /// were already open.
+    pub fn dispatch_lathe_buffer_event_to(
+        &mut self,
+        event: wasm_host::lathe::LatheBufferEvent,
+        buffer: Arc<dyn wasm_host::lathe::LatheEditorDelegate>,
+        only: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Task<Vec<(Arc<str>, Arc<str>)>> {
         let capability = event.capability();
         let targets = self
             .wasm_extensions
@@ -1453,6 +1466,7 @@ impl ExtensionStore {
             .filter(|(manifest, extension)| {
                 extension.lathe_capabilities.contains(&capability)
                     && !self.lathe_events_paused.contains(&manifest.id)
+                    && only.is_none_or(|only| manifest.id.as_ref() == only)
             })
             .map(|(manifest, extension)| (manifest.id.clone(), extension.clone()))
             .collect::<Vec<_>>();

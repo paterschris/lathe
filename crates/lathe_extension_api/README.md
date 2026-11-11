@@ -128,6 +128,7 @@ lathe_extension_api::on_view_event(|view_id, element_id, event| {
 - While the user is typing in an input, a new value from the extension
   doesn't overwrite what they've typed.
 - Markdown links open only for `http`, `https` and `mailto`.
+- A scroll area scrolls sideways too, so long rows aren't cut off.
 
 ### Long lists
 
@@ -178,9 +179,12 @@ lathe_extension_api::on_surface_event(|event| match event {
   both, `active_buffer()` returns the file (with `buffer:read`). Closing the
   tab sends `PreviewClosed` and Lathe drops the view. Open previews come back
   after a restart, once your extension has loaded.
-- `register_panel(id, title, icon, dock)` adds a dockable panel showing the
-  view with the same id. Lathe doesn't show panels yet; registering them
-  now is safe.
+- `register_panel(id, title, icon, dock)` adds a dock panel showing the
+  view with the same id. Each dock side has one Extension Panels button;
+  extension panels on that side are tabs inside it. Users open yours from
+  that button or the palette ("<Extension Name>: Toggle <title>"). Its view
+  gets `ViewShown` when the panel opens and `ViewHidden` when it closes or
+  another tab is picked, so you can skip work while nobody's looking.
 - Both are called from `zed::Extension::new`. Registering always works;
   they only appear while the user allows `ui:views`.
 - `set_status_item(Some(&StatusItem { .. }))` puts a clickable item in the
@@ -188,6 +192,17 @@ lathe_extension_api::on_surface_event(|event| match event {
   `SurfaceEvent::StatusItemClicked`.
 - `on_surface_event` also gets `ViewShown` and `ViewHidden`, so you can do
   work only while someone is looking.
+- `on_file_event` hears files come and go, at two levels (needs
+  `events:open`):
+  - **Tabs:** `TabOpened` when the first editor tab showing a file appears,
+    `TabClosed` when the last one closes. Moving a tab sends neither. Use
+    these to follow what the user has open; during `TabOpened`,
+    `active_buffer()` returns the file.
+  - **Buffers:** `BufferClosed` is the other end of `BufferEvent::Opened`.
+    Lathe also loads files nobody has a tab for (go to definition, search,
+    language servers) and can keep one loaded after its tabs close.
+  - When your extension loads, it gets `Opened` and `TabOpened` for what's
+    already open, so lists built from them start out complete.
 - `open_location(path, line, column)` opens a file (absolute, or relative to
   a folder in the window) with 1-based line and column. It only works while
   handling something the user did: a command, a view event or a status item

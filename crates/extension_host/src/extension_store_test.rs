@@ -4842,6 +4842,26 @@ async fn test_lathe_extension_commands(cx: &mut TestAppContext) {
         Some(("3 words".to_string(), Some("dir/file.txt".to_string())))
     );
 
+    // A targeted event only reaches the extension it names: how Lathe tells
+    // a newly loaded extension about files that were already open.
+    let dispatch_to = |only: &'static str, text: &str, cx: &mut TestAppContext| {
+        let buffer = Arc::new(FakeLatheEditor::new(text, vec![]));
+        store.update(cx, |store, cx| {
+            store.dispatch_lathe_buffer_event_to(LatheBufferEvent::Saved, buffer, Some(only), cx)
+        })
+    };
+    dispatch_to("some-other-extension", "a b c d e", cx).await;
+    assert_eq!(
+        ui.status_text("test-lathe-extension"),
+        Some(("3 words".to_string(), Some("dir/file.txt".to_string()))),
+        "an event for another extension doesn't arrive"
+    );
+    dispatch_to("test-lathe-extension", "a b c d e", cx).await;
+    assert_eq!(
+        ui.status_text("test-lathe-extension"),
+        Some(("5 words".to_string(), Some("dir/file.txt".to_string())))
+    );
+
     dispatch(LatheBufferEvent::Changed, "typing", cx).await;
     let (status, _) = ui.status_text("test-lathe-extension").unwrap();
     assert!(
@@ -5743,6 +5763,79 @@ async fn test_lathe_extension_v0_2_views(cx: &mut TestAppContext) {
         format!("{error:#}").contains("decorations need a buffer"),
         "{error:#}"
     );
+
+    // File events reach a 0.2 extension with the file's path. A tab opening
+    // has its buffer readable; a closed file has nothing to read.
+    struct ClosedFile;
+    impl crate::wasm_host::lathe::LatheEditorDelegate for ClosedFile {
+        fn snapshot(
+            &self,
+            _cx: &mut gpui::AsyncApp,
+        ) -> anyhow::Result<Option<crate::wasm_host::lathe::ActiveBufferSnapshot>> {
+            Ok(None)
+        }
+        fn edit(
+            &self,
+            _version: u64,
+            _edits: Vec<(std::ops::Range<usize>, String)>,
+            _cx: &mut gpui::AsyncApp,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("closed")
+        }
+        fn select(
+            &self,
+            _version: u64,
+            _ranges: Vec<std::ops::Range<usize>>,
+            _cx: &mut gpui::AsyncApp,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("closed")
+        }
+        fn file_paths(&self, _cx: &mut gpui::AsyncApp) -> (Option<String>, Option<String>) {
+            (
+                Some("src/todo.rs".into()),
+                Some("/project/src/todo.rs".into()),
+            )
+        }
+    }
+    let file_events_key = (
+        Arc::<str>::from("test-lathe-extension-v2"),
+        Arc::<str>::from("file-events"),
+    );
+    let file_event_text = |ui: &FakeLatheUi| {
+        ui.views
+            .lock()
+            .get(&file_events_key)
+            .and_then(|view| match &view.node(1).kind {
+                NodeKind::Text { text, .. } => Some(text.to_string()),
+                _ => None,
+            })
+    };
+    use crate::wasm_host::lathe::LatheBufferEvent;
+    for (event, buffer, expected) in [
+        (
+            LatheBufferEvent::BufferClosed,
+            Arc::new(ClosedFile) as Arc<dyn crate::wasm_host::lathe::LatheEditorDelegate>,
+            "FileEvent::BufferClosed src/todo.rs active_buffer=false",
+        ),
+        (
+            LatheBufferEvent::TabClosed,
+            Arc::new(ClosedFile),
+            "FileEvent::TabClosed src/todo.rs active_buffer=false",
+        ),
+        (
+            LatheBufferEvent::TabOpened,
+            Arc::new(FakeLatheEditor::new("// TODO: x", Vec::new())),
+            // The fake editor reports no paths; the buffer is readable.
+            "FileEvent::TabOpened - active_buffer=true",
+        ),
+    ] {
+        store
+            .update(cx, |store, cx| {
+                store.dispatch_lathe_buffer_event(event, buffer, cx)
+            })
+            .await;
+        assert_eq!(file_event_text(&ui).as_deref(), Some(expected));
+    }
 
     run("hide-counter", cx)
         .await

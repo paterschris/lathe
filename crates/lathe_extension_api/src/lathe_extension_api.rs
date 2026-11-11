@@ -30,6 +30,7 @@ type CommandHandler = Rc<dyn Fn() -> Result<()>>;
 type EventHandler = Rc<dyn Fn(BufferEvent) -> Result<()>>;
 type ViewEventHandler = Rc<dyn Fn(&str, &str, &ViewEvent) -> Result<()>>;
 type SurfaceEventHandler = Rc<dyn Fn(&SurfaceEvent) -> Result<()>>;
+type FileEventHandler = Rc<dyn Fn(FileEvent, &FileRef) -> Result<()>>;
 type RowsHandler = Rc<dyn Fn(&str, &str, u32, u32) -> Result<Vec<ListItemNode>>>;
 
 /// Tells Lathe which version of this API the extension was built against.
@@ -44,10 +45,21 @@ thread_local! {
     static VIEW_EVENT_HANDLER: RefCell<Option<ViewEventHandler>> = const { RefCell::new(None) };
     static SURFACE_EVENT_HANDLER: RefCell<Option<SurfaceEventHandler>> = const { RefCell::new(None) };
     static ROWS_HANDLER: RefCell<Option<RowsHandler>> = const { RefCell::new(None) };
+    static FILE_EVENT_HANDLER: RefCell<Option<FileEventHandler>> = const { RefCell::new(None) };
 }
 
+pub use wit::exports::lathe::extension0_2_0::file_handler::{FileEvent, FileRef};
 pub use wit::lathe::extension0_1_0::events::BufferEvent;
 pub use wit::lathe::extension0_2_0::decorations::{Decoration, DecorationStyle};
+
+/// Sets the handler for files coming and going: `TabOpened` and `TabClosed`
+/// follow the editor tabs the user has open; `BufferClosed` is the other end
+/// of [`BufferEvent::Opened`], which follows files Lathe has loaded, tab or
+/// not. During `TabOpened`, [`active_buffer`] returns the file. Needs
+/// `events:open`. A later call replaces it.
+pub fn on_file_event(handler: impl Fn(FileEvent, &FileRef) -> Result<()> + 'static) {
+    FILE_EVENT_HANDLER.with(|slot| *slot.borrow_mut() = Some(Rc::new(handler)));
+}
 pub use wit::lathe::extension0_2_0::surfaces::{
     DockSide, PanelSpec, PreviewFile, PreviewSpec, StatusItem, SurfaceEvent,
 };
@@ -620,6 +632,16 @@ impl wit::exports::lathe::extension0_2_0::view_handler::Guest for Component {
     fn on_surface_event(event: SurfaceEvent) -> Result<()> {
         match SURFACE_EVENT_HANDLER.with(|slot| slot.borrow().clone()) {
             Some(handler) => handler(&event),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl wit::exports::lathe::extension0_2_0::file_handler::Guest for Component {
+    fn on_file_event(event: FileEvent, file: FileRef) -> Result<()> {
+        match FILE_EVENT_HANDLER.with(|slot| slot.borrow().clone()) {
+            Some(handler) => handler(event, &file),
             None => Ok(()),
         }
     }

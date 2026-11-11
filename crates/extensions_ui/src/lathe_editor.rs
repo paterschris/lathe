@@ -137,6 +137,14 @@ impl LatheEditorDelegate for ExtensionEditorDelegate {
         )
     }
 
+    fn file_paths(&self, cx: &mut AsyncApp) -> (Option<String>, Option<String>) {
+        let Ok(Some((_, buffer))) = self.editor_and_buffer(cx) else {
+            return (None, None);
+        };
+        let location = buffer.read_with(cx, |buffer, cx| file_location(buffer, cx));
+        (location.path, location.abs_path)
+    }
+
     fn settings_location(
         &self,
         cx: &mut AsyncApp,
@@ -279,6 +287,14 @@ impl LatheEditorDelegate for ExtensionBufferDelegate {
             decorations,
             cx,
         )
+    }
+
+    fn file_paths(&self, cx: &mut AsyncApp) -> (Option<String>, Option<String>) {
+        let Some(buffer) = self.buffer.upgrade() else {
+            return (None, None);
+        };
+        let location = buffer.read_with(cx, |buffer, cx| file_location(buffer, cx));
+        (location.path, location.abs_path)
     }
 
     fn settings_location(
