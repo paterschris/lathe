@@ -83,11 +83,15 @@ not declare, or the user did not allow, returns an error.
 - `ActiveBuffer::abs_path` / `worktree_root`: absolute locations for files on
   this machine, for building command lines.
 
-## Views (API 0.2, not released yet)
+## Views (API 0.2, alpha)
+
+0.2 is an alpha: try it with `lathe_extension_api = "=0.2.0-alpha.1"`. It can
+still change between alphas, and an extension built against one alpha may
+need rebuilding for the next. It needs Lathe 1.20 beta or newer; 0.1 stays
+the stable choice.
 
 0.2 adds views: a small UI the extension describes and Lathe draws with its
-own components, so it follows the theme. It needs the `ui:views` capability,
-and an extension that uses it only loads in a Lathe build with API 0.2.
+own components, so it follows the theme. It needs the `ui:views` capability.
 
 ```rust
 use lathe_extension_api::{TextStyle, Tone, ViewBuilder, ViewEvent};
@@ -208,7 +212,7 @@ lathe_extension_api::on_surface_event(|event| match event {
   handling something the user did: a command, a view event or a status item
   click.
 
-## Decorations (API 0.2, not released yet)
+## Decorations (API 0.2, alpha)
 
 Highlights, underlines, gutter marks and short end-of-line messages in the
 editor. They're anchored to the text, so they move with edits, and every
