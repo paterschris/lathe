@@ -2,6 +2,16 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.21.0-beta - 2026-11-12
+
+Small one. The interactive rebase dialog can reorder commits now.
+
+- **Reorder commits before you rebase.** Drag a row by its sha and subject, or use the up and down arrows on each row. A reword message you've already typed moves with its commit.
+- Reordering alone is enough to start a rebase. Before, a plan that was all `pick` just closed the dialog.
+- If the first commit you're keeping is a `squash` or `fixup`, Start rebase is disabled and the dialog says why. Git would've refused it anyway, just after starting.
+
+Extension authors: API 0.2 is on crates.io now as `0.2.0-alpha.1`, so `lathe_extension_api = "=0.2.0-alpha.1"` replaces the git dependency. It can still change between alphas.
+
 ## v1.20.0-beta - 2026-11-11
 
 Two things this time. You can manage extensions properly now (turn them off, control updates, recommend them per project). And extensions can draw their own UI: file previews, dock panels, clickable status items and highlights in the editor.
