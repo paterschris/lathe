@@ -1,4 +1,5 @@
 mod event_coalescer;
+mod posthog;
 
 use crate::TelemetrySettings;
 use anyhow::{Context as _, Result};
@@ -663,7 +664,7 @@ impl Telemetry {
             state.first_event_date_time = None;
             let events = mem::take(&mut state.events_queue);
             state.flush_events_task.take();
-            if events.is_empty() {
+            if !state.settings.metrics || events.is_empty() {
                 return Ok(());
             }
 
@@ -698,6 +699,14 @@ impl Telemetry {
                 },
             )
         };
+
+        if let Some(request) = posthog::build_request(&request_body)? {
+            match self.http_client.send(request).await {
+                Ok(response) if response.status().is_success() => {}
+                Ok(response) => log::warn!("PostHog capture failed: HTTP {}", response.status()),
+                Err(error) => log::warn!("PostHog capture failed: {error}"),
+            }
+        }
 
         let request = self.build_request(json_bytes, &request_body)?;
         let response = self.http_client.send(request).await?;
