@@ -141,9 +141,12 @@ echo "  bundle, signature and notarization ok"
 # Launch it once, with its own data directory so it can't touch an installed
 # Lathe's settings or database, and check it's still running after a few
 # seconds. A workspace gives it a window, so it doesn't quit on its own.
+# ZED_STATELESS skips the single-instance check: the instance port is per
+# channel, not per data dir, so an installed Lathe of the same channel that's
+# already open would otherwise take the workspace and this copy would exit.
 launch_dir=$(mktemp -d)
 echo "release smoke test" > "$launch_dir/README.md"
-"$app/Contents/MacOS/zed" --user-data-dir "$launch_dir/data" "$launch_dir" \
+ZED_STATELESS=1 "$app/Contents/MacOS/zed" --user-data-dir "$launch_dir/data" "$launch_dir" \
     >"$launch_dir/stdout" 2>"$launch_dir/stderr" &
 launch_pid=$!
 sleep 8
