@@ -128,8 +128,10 @@ done
 for want in md json js ts rs py toml yaml sh env cjs mjs mdx; do
     echo "$extensions" | grep -qw "$want" || fail "document types are missing .${want}"
 done
-strings "$app/Contents/MacOS/zed" | grep -q 'handleOpenDocumentsEvent:withReplyEvent:' \
-    || fail "the Open Documents Apple Event handler is missing"
+# Count rather than `grep -q`: under pipefail, grep -q exiting at the first
+# match kills `strings` with SIGPIPE and fails the pipeline.
+handlers=$(strings "$app/Contents/MacOS/zed" | grep -c 'handleOpenDocumentsEvent:withReplyEvent:' || true)
+[ "${handlers:-0}" -gt 0 ] || fail "the Open Documents Apple Event handler is missing"
 codesign --verify --verbose=2 "$app"
 codesign --verify --deep --strict "$app"
 xcrun stapler validate "$app"
