@@ -5,16 +5,16 @@ use git::Oid;
 use git::repository::{RebaseAction, RebaseTodoEntry};
 use gpui::{
     DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, Subscription,
-    WeakEntity,
+    WeakEntity, px,
 };
 use project::git_store::{
     CommitDataState, GitStore, Repository, RepositoryId, undo_log::UndoAction,
 };
 use ui::{
     ActiveTheme, App, Button, ButtonCommon, ButtonStyle, Clickable, Color, Context, ContextMenu,
-    Divider, FluentBuilder, Icon, IconName, IconSize, InteractiveElement, IntoElement, Label,
-    LabelCommon, LabelSize, ParentElement, PopoverMenu, Render, SharedString, StyledExt, Window,
-    WithScrollbar, div, h_flex, prelude::*, v_flex,
+    Divider, FluentBuilder, Icon, IconButton, IconName, IconSize, InteractiveElement, IntoElement,
+    Label, LabelCommon, LabelSize, ParentElement, PopoverMenu, Render, SharedString, StyledExt,
+    Tooltip, Window, WithScrollbar, div, h_flex, prelude::*, v_flex,
 };
 use workspace::{ModalView, Workspace};
 
@@ -26,6 +26,42 @@ pub struct RebasePlanEntry {
     pub sha: SharedString,
     pub short_sha: SharedString,
     pub action: RebaseAction,
+}
+
+#[derive(Clone)]
+struct DraggedRebaseEntry {
+    index: usize,
+    short_sha: SharedString,
+    subject: SharedString,
+}
+
+struct DraggedRebaseEntryView {
+    short_sha: SharedString,
+    subject: SharedString,
+}
+
+impl Render for DraggedRebaseEntryView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .bg(cx.theme().colors().background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .rounded_md()
+            .px_2()
+            .py_0p5()
+            .gap_2()
+            .max_w(px(360.))
+            .child(
+                Label::new(self.short_sha.clone())
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            )
+            .child(
+                Label::new(self.subject.clone())
+                    .size(LabelSize::Small)
+                    .truncate(),
+            )
+    }
 }
 
 /// Actions exposed in the per-row dropdown. Ordered the same way the cycle
@@ -41,10 +77,13 @@ const SELECTABLE_ACTIONS: &[RebaseAction] = &[
 
 /// Modal that mirrors `git rebase -i`. The user sees the list of commits to be
 /// replayed (oldest at the top, matching git's own todo file), picks an action
-/// per row via a dropdown, and clicks "Start rebase" to run it.
+/// per row via a dropdown, optionally reorders rows, and clicks "Start rebase".
 pub struct InteractiveRebaseModal {
     focus_handle: FocusHandle,
     entries: Vec<RebasePlanEntry>,
+    /// Commit order as originally proposed, so an all-pick plan that was only
+    /// reordered still runs instead of being treated as a no-op.
+    original_order: Vec<SharedString>,
     /// Argument passed to `git rebase -i <upstream>` — the commit *just before*
     /// the oldest entry. Everything after this gets rewritten.
     upstream: SharedString,
@@ -58,10 +97,11 @@ pub struct InteractiveRebaseModal {
     pre_state: Option<(String, String)>,
     in_progress: bool,
     last_error: Option<SharedString>,
-    /// Per-entry editors for the reword text input. Allocated lazily the first
-    /// time the user switches that row's action to `Reword`. Kept across action
-    /// switches so the typed message survives picking another action and back.
-    reword_editors: HashMap<usize, Entity<Editor>>,
+    /// Per-commit editors for the reword text input, keyed by sha so they follow
+    /// their row when it's reordered. Allocated lazily the first time the user
+    /// switches that row's action to `Reword`. Kept across action switches so
+    /// the typed message survives picking another action and back.
+    reword_editors: HashMap<SharedString, Entity<Editor>>,
     scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -96,9 +136,11 @@ impl InteractiveRebaseModal {
             }
         });
         let repo_subscription = cx.observe(&repository, |_, _, cx| cx.notify());
+        let original_order = entries.iter().map(|entry| entry.sha.clone()).collect();
         Self {
             focus_handle: cx.focus_handle(),
             entries,
+            original_order,
             upstream: upstream.into(),
             repo_id,
             git_store,
@@ -150,18 +192,18 @@ impl InteractiveRebaseModal {
         let previous = entry.action;
         entry.action = action;
         if action == RebaseAction::Reword && previous != RebaseAction::Reword {
-            if !self.reword_editors.contains_key(&index) {
-                let sha = self.entries[index].sha.clone();
-                let short_sha = self.entries[index].short_sha.clone();
+            let sha = entry.sha.clone();
+            if !self.reword_editors.contains_key(&sha) {
+                let short_sha = entry.short_sha.clone();
                 let initial = self.entry_subject(&sha, &short_sha, cx).to_string();
                 let editor = cx.new(|cx| {
                     let mut editor = Editor::single_line(window, cx);
                     editor.set_text(initial.as_str(), window, cx);
                     editor
                 });
-                self.reword_editors.insert(index, editor);
+                self.reword_editors.insert(sha.clone(), editor);
             }
-            if let Some(editor) = self.reword_editors.get(&index).cloned() {
+            if let Some(editor) = self.reword_editors.get(&sha).cloned() {
                 editor.update(cx, |editor, cx| {
                     let handle = editor.focus_handle(cx);
                     handle.focus(window, cx);
@@ -172,13 +214,52 @@ impl InteractiveRebaseModal {
         cx.notify();
     }
 
-    fn start_rebase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.in_progress {
+    fn move_entry(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if self.in_progress || from == to || from >= self.entries.len() {
             return;
         }
-        // If every row is "pick", running the rebase would be a no-op and just
-        // potentially trigger conflicts. Treat as cancel.
-        if self.entries.iter().all(|e| e.action == RebaseAction::Pick) {
+        let to = to.min(self.entries.len() - 1);
+        let entry = self.entries.remove(from);
+        self.entries.insert(to, entry);
+        cx.notify();
+    }
+
+    fn is_reordered(&self) -> bool {
+        self.entries
+            .iter()
+            .map(|entry| &entry.sha)
+            .ne(self.original_order.iter())
+    }
+
+    /// Catches plans git would reject only after starting. A dropped commit
+    /// produces nothing to fold into, so the first row that isn't a drop is the
+    /// one that must not be a squash or fixup.
+    fn plan_error(&self) -> Option<SharedString> {
+        let first_kept = self
+            .entries
+            .iter()
+            .find(|entry| entry.action != RebaseAction::Drop)?;
+        match first_kept.action {
+            RebaseAction::Squash | RebaseAction::Fixup => Some(
+                format!(
+                    "{} can't {} into the commit before it, it's the first commit kept.",
+                    first_kept.short_sha,
+                    action_label(first_kept.action)
+                )
+                .into(),
+            ),
+            _ => None,
+        }
+    }
+
+    fn start_rebase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.in_progress || self.plan_error().is_some() {
+            return;
+        }
+        // If every row is "pick" in the original order, running the rebase
+        // would be a no-op and just potentially trigger conflicts. Treat as
+        // cancel.
+        if !self.is_reordered() && self.entries.iter().all(|e| e.action == RebaseAction::Pick) {
             cx.emit(DismissEvent);
             return;
         }
@@ -186,10 +267,9 @@ impl InteractiveRebaseModal {
         let todo: Vec<RebaseTodoEntry> = self
             .entries
             .iter()
-            .enumerate()
-            .map(|(idx, entry)| {
+            .map(|entry| {
                 let message = if entry.action == RebaseAction::Reword {
-                    self.reword_editors.get(&idx).and_then(|ed| {
+                    self.reword_editors.get(&entry.sha).and_then(|ed| {
                         let text = ed.read(cx).text(cx);
                         let trimmed = text.trim_end_matches('\n');
                         if trimmed.is_empty() {
@@ -305,11 +385,10 @@ impl Render for InteractiveRebaseModal {
         )> = self
             .entries
             .iter()
-            .enumerate()
-            .map(|(idx, entry)| {
+            .map(|entry| {
                 let subject = self.entry_subject(&entry.sha, &entry.short_sha, cx);
                 let editor = if entry.action == RebaseAction::Reword {
-                    self.reword_editors.get(&idx).cloned()
+                    self.reword_editors.get(&entry.sha).cloned()
                 } else {
                     None
                 };
@@ -355,9 +434,41 @@ impl Render for InteractiveRebaseModal {
                         }))
                     });
 
+                let move_buttons = h_flex()
+                    .flex_none()
+                    .child(
+                        IconButton::new(("rebase-move-up", idx), IconName::ArrowUp)
+                            .icon_size(IconSize::XSmall)
+                            .icon_color(Color::Muted)
+                            .disabled(in_progress || idx == 0)
+                            .tooltip(Tooltip::text("Move up"))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.move_entry(idx, idx.saturating_sub(1), cx);
+                            })),
+                    )
+                    .child(
+                        IconButton::new(("rebase-move-down", idx), IconName::ArrowDown)
+                            .icon_size(IconSize::XSmall)
+                            .icon_color(Color::Muted)
+                            .disabled(in_progress || idx + 1 >= entry_count)
+                            .tooltip(Tooltip::text("Move down"))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.move_entry(idx, idx + 1, cx);
+                            })),
+                    );
+
+                let drag_payload = DraggedRebaseEntry {
+                    index: idx,
+                    short_sha: short_sha.clone(),
+                    subject: subject.clone(),
+                };
+                // Only the header is draggable so text selection inside the
+                // reword editor below doesn't start a row drag.
                 let row_header = h_flex()
+                    .id(("rebase-row-header", idx))
                     .w_full()
                     .gap_2()
+                    .child(move_buttons)
                     .child(action_menu)
                     .child(
                         Label::new(short_sha)
@@ -366,13 +477,35 @@ impl Render for InteractiveRebaseModal {
                     )
                     .when(reword_editor.is_none(), |this| {
                         this.child(Label::new(subject).size(LabelSize::Small).truncate())
+                    })
+                    .when(!in_progress, |this| {
+                        this.cursor_grab()
+                            .on_drag(drag_payload, |payload, _, _, cx| {
+                                cx.new(|_| DraggedRebaseEntryView {
+                                    short_sha: payload.short_sha.clone(),
+                                    subject: payload.subject.clone(),
+                                })
+                            })
                     });
 
                 v_flex()
+                    .id(("rebase-row", idx))
                     .w_full()
                     .py_1()
                     .px_3()
                     .gap_1()
+                    .drag_over::<DraggedRebaseEntry>(move |style, payload, _window, cx| {
+                        if payload.index == idx {
+                            style
+                        } else {
+                            style.bg(cx.theme().colors().drop_target_background)
+                        }
+                    })
+                    .on_drop(
+                        cx.listener(move |this, payload: &DraggedRebaseEntry, _window, cx| {
+                            this.move_entry(payload.index, idx, cx);
+                        }),
+                    )
                     .child(row_header)
                     .when_some(reword_editor, |this, editor| {
                         this.child(
@@ -386,6 +519,13 @@ impl Render for InteractiveRebaseModal {
                     .into_any_element()
             })
             .collect();
+
+        // A live plan problem outranks a stale error from an earlier attempt,
+        // since it's what the user has to fix before they can start again.
+        let plan_error = self.plan_error();
+        let plan_is_valid = plan_error.is_none();
+        let footer_error = plan_error.or_else(|| self.last_error.clone());
+        let has_footer_error = footer_error.is_some();
 
         let count_label: SharedString =
             format!("{entry_count} commit(s) onto {}", self.upstream).into();
@@ -429,13 +569,13 @@ impl Render for InteractiveRebaseModal {
                     .p_3()
                     .gap_2()
                     .justify_between()
-                    .when_some(self.last_error.clone(), |this, error| {
+                    .when_some(footer_error, |this, error| {
                         this.child(Label::new(error).color(Color::Error).size(LabelSize::Small))
                     })
-                    .when(self.last_error.is_none(), |this| {
+                    .when(!has_footer_error, |this| {
                         this.child(
                             Label::new(
-                                "Pick an action per commit; for reword, edit the message inline.",
+                                "Pick an action per commit, drag or use the arrows to reorder.",
                             )
                             .color(Color::Muted)
                             .size(LabelSize::Small),
@@ -462,7 +602,7 @@ impl Render for InteractiveRebaseModal {
                                     },
                                 )
                                 .style(ButtonStyle::Filled)
-                                .disabled(in_progress)
+                                .disabled(in_progress || !plan_is_valid)
                                 .on_click(cx.listener(
                                     |this, _, window, cx| {
                                         this.start_rebase(window, cx);
