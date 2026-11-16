@@ -105,3 +105,20 @@ Update checks continue with version, channel, operating system, and architecture
 but the Worker records no usage point without an install hash. Asset downloads
 continue directly from GitHub. These update pings are separate from the inherited
 Zed telemetry described above.
+
+## Lathe Usage Counts {#lathe-usage-counts}
+
+Starting with Lathe 1.22, Lathe sends a small set of anonymous usage counts to
+PostHog so the maintainer can see which features get used. Only these events are
+sent: app opened, agent thread started, agent message sent, agent turn completed,
+agent tool call authorized, and agent error shown.
+
+Each event carries only the event name, the Lathe version, operating system,
+processor architecture, whether it's a development or release build, and an
+identifier made from a SHA-256 hash of your installation ID. The properties are
+rebuilt from scratch rather than forwarded from Lathe's internal events, so
+prompts, messages, file names, paths and code are never included. PostHog person
+profiles and GeoIP lookup are turned off for these events.
+
+Turning off metrics (`"telemetry": { "metrics": false }`, shown above) stops
+these events too, including any that were queued before you turned it off.

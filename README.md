@@ -1,6 +1,6 @@
 # Lathe
 
-A code editor. It's a fork of [Zed](https://zed.dev) with my own changes stacked on top: a mobile dev panel for React Native and Expo, an extension API that goes further than Zed's, more git tooling than upstream ships, pull request review inside the editor, and a theme I actually want to look at all day.
+A code editor. It's a fork of [Zed](https://zed.dev) with my own changes stacked on top: a mobile dev panel for React Native and Expo, an extension API that goes further than Zed's, more git tooling than upstream ships, pull request review inside the editor, a phone app for keeping tabs on your agents, and a theme I actually want to look at all day.
 
 ### [Download Lathe](https://github.com/paterschris/lathe/releases/latest)
 
@@ -24,18 +24,19 @@ Roughly ordered by how far each one is from stock Zed. One caveat on the git ent
 
 1. [Mobile development](docs/features.md#mobile-development-expo--react-native) - a panel for Expo and bare React Native projects
 2. [Extensions](docs/features.md#extensions) - an extension API past Zed's (commands, buffer edits, file events, terminal tasks, and in the 0.2 alpha, panels, previews and editor highlights) with per-extension permissions, more registries, install from a URL, disable and recommend extensions. Build one from the [template](https://github.com/paterschris/lathe-extension-template) with [`lathe_extension_api`](https://crates.io/crates/lathe_extension_api), and publish it to the [registry](https://github.com/paterschris/lathe-extensions)
-3. [Merge conflicts and interactive rebase](docs/features.md#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, drag-and-drop rebase
+3. [Merge conflicts and interactive rebase](docs/features.md#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, a rebase dialog you can reorder, drag-and-drop rebase
 4. [Pull request reviews](docs/features.md#pull-request-reviews) - GitHub, GitLab, Bitbucket, in the editor, with several accounts per host
 5. [Code navigation](docs/features.md#code-navigation) - definitions and references open in a peek instead of a new tab
 6. [AI agent integration](docs/features.md#ai-agent-integration) - sign into several accounts, control approval levels, per-workspace thread history
-7. [Theme and syntax highlighting](docs/features.md#theme-and-syntax-highlighting) - the default theme, plus a live customizer for all 200+ colors
-8. [Git additions](docs/features.md#git-additions) - explorer tab, branch tree, compare any two commits, graph context menus, multi-select, undo, Git Flow
-9. [Jupyter notebooks](docs/features.md#jupyter-notebooks) - saving keeps your outputs, cells share one document, and the kernel picker finds your project's venv
-10. [Docks and panels](docs/features.md#docks-and-panels) - two panels per dock, drag panels to any dock, every panel allowed in the bottom dock
-11. [Terminal, windows, and workspaces](docs/features.md#terminal-windows-and-workspaces) - extra windows for editors and terminals, an awaiting-input indicator, workspace groups, per-window zoom
-12. [Editor additions](docs/features.md#editor-additions) - color swatches and a color picker, Open Recent File, project panel refresh
-13. [AWS profiles](docs/features.md#aws-profiles) - a per-window profile selector
-14. [Separate data from Zed](docs/features.md#separate-data-from-zed) - Lathe's own settings and data folders, imported from Zed on first launch
+7. [Lathe Companion](docs/features.md#lathe-companion) - follow and answer your agents, terminals and pull requests from your phone
+8. [Theme and syntax highlighting](docs/features.md#theme-and-syntax-highlighting) - the default theme, plus a live customizer for all 200+ colors
+9. [Git additions](docs/features.md#git-additions) - explorer tab, branch tree, compare any two commits, graph context menus, multi-select, undo, Git Flow
+10. [Jupyter notebooks](docs/features.md#jupyter-notebooks) - saving keeps your outputs, cells share one document, and the kernel picker finds your project's venv
+11. [Docks and panels](docs/features.md#docks-and-panels) - two panels per dock, drag panels to any dock, every panel allowed in the bottom dock
+12. [Terminal, windows, and workspaces](docs/features.md#terminal-windows-and-workspaces) - extra windows for editors and terminals, an awaiting-input indicator, workspace groups, per-window zoom
+13. [Editor additions](docs/features.md#editor-additions) - color swatches and a color picker, Search Everywhere, Open Recent File, project panel refresh
+14. [AWS profiles](docs/features.md#aws-profiles) - a per-window profile selector
+15. [Separate data from Zed](docs/features.md#separate-data-from-zed) - Lathe's own settings and data folders, imported from Zed on first launch
 
 Screenshots and the long version live in **[docs/features.md](docs/features.md)**.
 
@@ -149,11 +150,13 @@ script/install-fork-linux
 
 In-app update checks go to Lathe's own server at `updates.lathe-ide.com`, which is how I count installs that are actually in use. Each check sends the Lathe version, channel, OS and architecture, plus a salted hash of an anonymous install ID; the raw ID and IP addresses aren't stored. Turn off `telemetry.metrics` and the hash isn't sent. Downloads still come straight from GitHub, and if Lathe's server is down the check falls back to GitHub. Details are in the [telemetry docs](docs/src/telemetry.md#lathe-update-checks).
 
+Since 1.22, Lathe also sends a few anonymous usage counts to PostHog: app opened, agent thread started, message sent, turn completed, tool approved, agent error shown. Each carries the Lathe version, OS, architecture and a hashed install ID. No prompts, file names or code. The same `telemetry.metrics` setting turns them off; the [telemetry docs](docs/src/telemetry.md#lathe-usage-counts) have the details.
+
 ## Relationship to Zed
 
 Lathe merges from [upstream Zed](https://github.com/zed-industries/zed) every few weeks to pick up new features and fixes. My changes live in their own commits, which is what keeps those merges manageable.
 
-**Last synced with upstream Zed: 2026-11-13.**
+**Last synced with upstream Zed: 2026-11-16.**
 
 > **2026-04-24:** `main` was rewritten to fix a long-standing ancestry tangle that made the fork display as ~37k commits ahead and ~37k behind upstream. The new history is 9 thematic commits on top of `upstream/main`, and the source tree is unchanged. Original SHAs are preserved on the `archive/pre-rebuild-20260424` branch. Existing clones can recover with:
 >

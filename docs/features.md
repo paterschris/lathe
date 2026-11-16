@@ -7,19 +7,20 @@ There's a second reason this page exists. Every entry below is fork code sitting
 Roughly ordered by how far each one is from stock Zed. One caveat on the git entry: upstream already has a commit graph, a tabbed git panel, worktree support, and single-file history, so that section only covers what Lathe puts on top of them.
 
 1. [Mobile development](#mobile-development-expo--react-native) - a panel for Expo and bare React Native projects
-2. [Extensions](#extensions) - an extension API past Zed's (commands, buffer edits, file events, terminal tasks) behind per-extension permissions, more registries, install from a URL, disable and recommend extensions
-3. [Merge conflicts and interactive rebase](#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, drag-and-drop rebase
+2. [Extensions](#extensions) - an extension API past Zed's (commands, buffer edits, file events, terminal tasks, and in the 0.2 alpha, panels, previews and editor highlights) behind per-extension permissions, more registries, install from a URL, disable and recommend extensions
+3. [Merge conflicts and interactive rebase](#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, a rebase dialog you can reorder, drag-and-drop rebase
 4. [Pull request reviews](#pull-request-reviews) - GitHub, GitLab, Bitbucket, in the editor, with several accounts per host
 5. [Code navigation](#code-navigation) - definitions and references open in a peek instead of a new tab
-6. [AI agent integration](#ai-agent-integration) - multi-account sign-in, approval control
-7. [Theme and syntax highlighting](#theme-and-syntax-highlighting) - the default theme, plus a live customizer for all 200+ colors
-8. [Git additions](#git-additions) - explorer tab, branch tree, compare any two commits, multi-select, undo, Git Flow
-9. [Jupyter notebooks](#jupyter-notebooks) - a setting you can flip, instead of upstream's server-side feature flag
-10. [Docks and panels](#docks-and-panels) - two panels per dock, drag panels to any dock, every panel allowed in the bottom dock
-11. [Terminal, windows, and workspaces](#terminal-windows-and-workspaces) - extra windows for editors and terminals, an awaiting-input indicator, workspace groups, per-window zoom
-12. [Editor additions](#editor-additions) - color swatches and a color picker, Open Recent File, project panel refresh
-13. [AWS profiles](#aws-profiles) - a per-window profile selector
-14. [Separate data from Zed](#separate-data-from-zed) - Lathe's own settings and data folders, imported from Zed on first launch
+6. [AI agent integration](#ai-agent-integration) - sign into several accounts, control approval levels, per-workspace thread history
+7. [Lathe Companion](#lathe-companion) - follow and answer your agents, terminals and pull requests from your phone
+8. [Theme and syntax highlighting](#theme-and-syntax-highlighting) - the default theme, plus a live customizer for all 200+ colors
+9. [Git additions](#git-additions) - explorer tab, branch tree, compare any two commits, graph context menus, multi-select, undo, Git Flow
+10. [Jupyter notebooks](#jupyter-notebooks) - saving keeps your outputs, cells share one document, and the kernel picker finds your project's venv
+11. [Docks and panels](#docks-and-panels) - two panels per dock, drag panels to any dock, every panel allowed in the bottom dock
+12. [Terminal, windows, and workspaces](#terminal-windows-and-workspaces) - extra windows for editors and terminals, an awaiting-input indicator, workspace groups, per-window zoom
+13. [Editor additions](#editor-additions) - color swatches and a color picker, Search Everywhere, Open Recent File, project panel refresh
+14. [AWS profiles](#aws-profiles) - a per-window profile selector
+15. [Separate data from Zed](#separate-data-from-zed) - Lathe's own settings and data folders, imported from Zed on first launch
 
 ---
 
@@ -51,7 +52,7 @@ Zed extensions run in Lathe exactly as they do in Zed. On top of that, Lathe has
 - **Terminal tasks.** Commands run as ordinary Lathe tasks in a terminal tab. Starting one with the same label as a task that's still running waits for it and reuses its tab, so saving three times doesn't stack up three terminals.
 - **Settings.** `extension_settings.<extension id>` holds an extension's own settings, which it reads as JSON. A project's `.zed/settings.json` can set them too, but only once you've trusted the project.
 
-API 0.2 (an alpha, `lathe_extension_api = "=0.2.0-alpha.1"`, in Lathe 1.20 beta and newer) adds:
+API 0.2 is in Lathe 1.20 beta and 1.22 stable onward. It's still an alpha that can change between releases, so pin it exactly with `lathe_extension_api = "=0.2.0-alpha.1"`. It adds:
 
 - **Views**: an extension describes a small UI (text, buttons, list items and trees, text inputs, checkboxes, dropdowns, right-click menus, progress, markdown, and virtual lists that load rows as you scroll) and Lathe draws it with its own components so it follows the theme.
 - **File previews**: an extension can register a preview for file types (say `package.json`). On a matching file, click the extension button in the editor toolbar (or run "<Extension>: <Preview>" from the command palette) and the preview opens in a tab beside the editor, which stays open for editing. It redraws as you type, and comes back after a restart.
@@ -91,13 +92,15 @@ A merge, rebase, cherry-pick, revert, pull, or stash pop that stops on conflicts
 ![Merge Editor Split View](../assets/screenshots/conflict-split-view.png)
 
 ### Interactive rebase with drag-and-drop
-The interactive rebase modal does drag-and-drop reordering, with pick / squash / edit / drop inline on each row. Drag a commit or a branch onto another one in the commit graph and you get a confirmation modal previewing what the rebase will do before anything runs. Select a range of commits in the graph and the context menu offers **Squash N commits into one** and **Interactive rebase N commits onto here**, so a history cleanup pass starts from the graph you were already reading. Not from `git rebase -i` and an editor session.
+The interactive rebase dialog lists the commits oldest first, the way git's own todo file does, with pick / reword / squash / fixup / drop / edit on each row. Reorder them by dragging a row by its sha and subject, or with the up and down arrows on the row. Reword edits the message inline, and a message you've typed moves with its commit when you reorder. Reordering on its own is enough to run the rebase. If the first commit you're keeping is a squash or fixup, which git would refuse partway in, **Start rebase** is disabled and the dialog says why.
+
+Drag a commit or a branch onto another one in the commit graph and you get a confirmation modal previewing what the rebase will do before anything runs. Select a range of commits in the graph and the context menu offers **Squash N commits into one** and **Interactive rebase N commits onto here**, so a history cleanup pass starts from the graph you were already reading. Not from `git rebase -i` and an editor session.
 
 ---
 
 ## Pull request reviews
 
-A pull request panel for GitHub, GitLab, and Bitbucket, including GitHub Enterprise and self-hosted GitLab. Browse PRs, read and leave review comments, check reviewers and CI status, approve or request changes, all without leaving the editor. GitHub and Bitbucket Cloud sign in through the browser; enterprise hosts and GitLab want a personal access token. Verdict buttons toggle, so hitting Approve a second time retracts your approval. A checks chip sums up the host's CI for the branch, passed or failed or still running with counts, which tells you whether a PR is even worth opening yet.
+A pull request panel for GitHub, GitLab, and Bitbucket, including GitHub Enterprise and self-hosted GitLab. Remotes on `ssh.bitbucket.org` count as Bitbucket Cloud too. Browse PRs, read and leave review comments, check reviewers and CI status, approve or request changes, all without leaving the editor. GitHub and Bitbucket Cloud sign in through the browser; enterprise hosts and GitLab want a personal access token. Verdict buttons toggle, so hitting Approve a second time retracts your approval. A checks chip sums up the host's CI for the branch, passed or failed or still running with counts, which tells you whether a PR is even worth opening yet.
 
 Every git repository in the workspace gets its own collapsible section, headed by the repo name and its open count. So a workspace holding a backend and a frontend shows you both at once instead of whichever one happens to be active.
 
@@ -141,6 +144,27 @@ Sign into multiple subscription accounts for the external agents in the Agent Pa
 Each agent's own settings sit inline in the composer, and the row adapts to the agent instead of showing some lowest-common-denominator set. Codex gets sandbox access, model, reasoning effort, and a fast-mode toggle. Claude Agent gets permission mode, model, thinking level, and its own fast-mode toggle.
 
 When approval and sandbox level take effect depends on the agent, because the two paths are genuinely different. Codex and Gemini receive theirs as launch arguments (`-c approval_policy=` and `-c sandbox_mode=` for Codex, `--approval-mode` for Gemini), so **Full access** and its siblings bind when the thread's agent process spawns and a change applies to the next thread. Claude Agent has native mode support and goes over ACP `session/set_mode`, so **Bypass permissions** takes effect on the thread you're already in. Model, thinking level, and fast mode apply as you go, no new thread needed.
+
+---
+
+## Lathe Companion
+
+Lathe Companion is a phone app for keeping an eye on your agents when you're not at your desk. Approve a tool call from the couch, answer a question from the grocery store, get pinged when a long run finishes. It's on the [App Store](https://apps.apple.com/us/app/lathe-companion/id6825627989) and Google Play, with a 7-day free trial and then a subscription.
+
+### Pairing
+It's off until you turn it on. Run **lathe companion: open companion** from the command palette, choose **Turn on**, and scan the QR code with the app. Lathe asks you to **Allow** a phone before it pairs, so someone else scanning your code doesn't get in. **New code** replaces an expired one and kills the old one. **Copy link** gives you something to open on the phone instead of scanning. Once it's on, a phone icon in the title bar opens the same dialog, which also lists your paired phones.
+
+### What the phone can do
+- **Agent threads.** See every thread in your open projects and follow them live. Approve or deny tool calls, answer questions, send messages, start a new thread with any agent the project has, and rename, cancel or close threads. Closing archives, same as Lathe's archive. You can change a thread's model and effort from the phone. Modes stay on the desktop, since some of them skip permission prompts.
+- **Terminals**, including Claude Code, Codex and other CLI agents running in the agent panel. Open one to watch its screen live with scrollback and colors. Typing into them is off until you turn on "Allow typing into terminals from the phone" (or `companion.terminal_input`), since it can run anything.
+- **Pull requests** per workspace, including the ones waiting on your review. Read the diff and comments, reply, leave inline comments and submit a review. It all goes through the git accounts you've connected in Lathe, so no host token ever leaves your computer.
+- **Mute a workspace** to stop its threads and terminals notifying you.
+
+### Notifications
+Pushes go out when a thread needs you or finishes, or a terminal starts waiting for input, titled with the thread or terminal. Not while you're at Lathe, though. Phones only get notified once you've been away 5 minutes, and the title bar says **Idle** once they would. `companion.idle_minutes` changes the wait, 0 means always. Answering a terminal from the phone clears its waiting-for-input marker, same as typing at the desktop.
+
+### Privacy and power
+Everything between Lathe and the phone is end-to-end encrypted. The relay in the middle (`companion.lathe-ide.com`) only sees enough to route messages, not what's in them, and Lathe's pairing identity lives in the system keychain. While an agent writes, Lathe sends just the new text in batches rather than the whole message on every change. Your Mac stays awake while an agent is running and a phone is paired, so a long run doesn't stall with nobody touching the machine; `companion.keep_awake_while_agents_run` turns that off.
 
 ---
 
