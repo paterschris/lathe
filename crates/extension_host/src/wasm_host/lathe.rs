@@ -530,18 +530,25 @@ const MAX_SUFFIX_CHARS: usize = 64;
 
 /// Whether this build accepts extensions that use the given Lathe API version.
 pub fn is_supported_api_version(release_channel: ReleaseChannel, version: &Version) -> bool {
-    [API_VERSION_V0_1, API_VERSION_V0_2]
+    enabled_api_versions(release_channel)
         .iter()
         .any(|supported| version.major == supported.major && version.minor == supported.minor)
-        && is_api_enabled(release_channel)
 }
 
-/// The Lathe API ships on Beta first, then Preview and Stable once it is frozen.
-fn is_api_enabled(release_channel: ReleaseChannel) -> bool {
+/// A Lathe API version ships on Beta first, then reaches Preview and Stable
+/// once it's frozen by a non-prerelease crates.io publish. 0.1 is; 0.2 is still
+/// an alpha that can change.
+fn enabled_api_versions(release_channel: ReleaseChannel) -> &'static [Version] {
+    const ALL: &[Version] = &[API_VERSION_V0_1, API_VERSION_V0_2];
+    const FROZEN: &[Version] = &[API_VERSION_V0_1];
     match release_channel {
-        ReleaseChannel::Dev | ReleaseChannel::Nightly | ReleaseChannel::Beta => true,
+        ReleaseChannel::Dev | ReleaseChannel::Nightly | ReleaseChannel::Beta => ALL,
         ReleaseChannel::Stable | ReleaseChannel::Preview => {
-            cfg!(any(test, feature = "test-support"))
+            if cfg!(any(test, feature = "test-support")) {
+                ALL
+            } else {
+                FROZEN
+            }
         }
     }
 }
@@ -1815,6 +1822,14 @@ mod tests {
         );
         assert!(!is_supported_api_version(
             ReleaseChannel::Beta,
+            &Version::new(0, 3, 0)
+        ));
+        assert!(
+            is_supported_api_version(ReleaseChannel::Stable, &Version::new(0, 1, 2)),
+            "the frozen 0.1 API loads on Stable"
+        );
+        assert!(!is_supported_api_version(
+            ReleaseChannel::Stable,
             &Version::new(0, 3, 0)
         ));
     }
