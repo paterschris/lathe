@@ -29,10 +29,14 @@ const PING: &str = r#"{"type":"ping"}"#;
 #[derive(Debug)]
 pub enum RelayEvent {
     Connected,
-    Disconnected { error: Option<String> },
+    Disconnected {
+        error: Option<String>,
+    },
     /// The relay refused this desktop for a reason retrying won't fix (another
     /// Lathe took over the identity, or the key was rejected).
-    Stopped { reason: String },
+    Stopped {
+        reason: String,
+    },
     Message(Value),
 }
 
@@ -367,7 +371,10 @@ mod tests {
                 .await
                 .unwrap();
             let devices = next_json(&mut socket).await.unwrap();
-            assert_eq!(devices, serde_json::json!({ "type": "devices", "list": [] }));
+            assert_eq!(
+                devices,
+                serde_json::json!({ "type": "devices", "list": [] })
+            );
 
             // A second connection with the same identity takes over, and the
             // first must treat that as permanent rather than reconnect.

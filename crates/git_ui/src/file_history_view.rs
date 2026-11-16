@@ -22,7 +22,7 @@ use workspace::{
 };
 
 use crate::commit_tooltip::CommitAvatar;
-use crate::commit_view::CommitView;
+use crate::commit_view::{CommitView, CommitViewOptions};
 
 const PAGE_SIZE: usize = 50;
 
@@ -262,8 +262,10 @@ impl FileHistoryView {
                 sha_str,
                 repo.downgrade(),
                 self.workspace.clone(),
-                None,
-                Some(self.history.path.clone()),
+                CommitViewOptions {
+                    file_filter: Some(self.history.path.clone()),
+                    ..Default::default()
+                },
                 window,
                 cx,
             );

@@ -3,7 +3,7 @@ use std::{cmp, collections::BTreeMap, sync::Arc};
 use anyhow::Context as _;
 use client::{Client, accounts::CollabAccount};
 use db::kvp::KeyValueStore;
-use fuzzy_nucleo::{Case, LengthPenalty, StringMatch, StringMatchCandidate};
+use fuzzy_nucleo::{StringMatch, StringMatchCandidate};
 use gpui::{
     App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     IntoElement, ParentElement, PromptLevel, Render, Styled, Subscription, Task, WeakEntity,
@@ -452,9 +452,10 @@ impl PickerDelegate for SaveWorkspaceGroupDelegate {
                 fuzzy_nucleo::match_strings(
                     &candidates,
                     &query,
-                    Case::Smart,
-                    LengthPenalty::On,
-                    200,
+                    fuzzy_nucleo::StringMatchOptions {
+                        max_results: fuzzy_nucleo::MaxResults::limit::<200>(),
+                        ..Default::default()
+                    },
                 )
             };
             picker
@@ -705,9 +706,10 @@ impl PickerDelegate for OpenWorkspaceGroupDelegate {
                 fuzzy_nucleo::match_strings(
                     &candidates,
                     &query,
-                    Case::Smart,
-                    LengthPenalty::On,
-                    200,
+                    fuzzy_nucleo::StringMatchOptions {
+                        max_results: fuzzy_nucleo::MaxResults::limit::<200>(),
+                        ..Default::default()
+                    },
                 )
             };
             picker

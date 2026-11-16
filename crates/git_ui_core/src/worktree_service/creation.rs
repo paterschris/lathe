@@ -302,7 +302,7 @@ pub(super) async fn do_create_worktree(
                     {
                         existing_worktree_names.push(name.to_string());
                     }
-                    existing_worktree_paths.insert(worktree.path.clone());
+                    existing_worktree_paths.insert(worktree.path);
                 }
             }
             Ok(Err(err)) => {

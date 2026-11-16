@@ -841,7 +841,7 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${{PATH:-\3}}/g' /etc/profile || true
             ];
 
             for entrypoint in self.features.iter().filter_map(|f| f.entrypoint()) {
-                entrypoint_script_lines.push(entrypoint.clone());
+                entrypoint_script_lines.push(entrypoint);
             }
             entrypoint_script_lines.append(&mut vec![
                 "exec \"$@\"".to_string(),
@@ -1443,7 +1443,7 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${{PATH:-\3}}/g' /etc/profile || true
                     if let Some(service) = service_declarations.get_mut(network_service_name) {
                         service.ports.push(DockerComposeServicePort {
                             target: port.clone(),
-                            published: port.clone(),
+                            published: port,
                             ..Default::default()
                         });
                     } else {
@@ -1452,7 +1452,7 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${{PATH:-\3}}/g' /etc/profile || true
                             DockerComposeService {
                                 ports: vec![DockerComposeServicePort {
                                     target: port.clone(),
-                                    published: port.clone(),
+                                    published: port,
                                     ..Default::default()
                                 }],
                                 ..Default::default()
@@ -1462,7 +1462,7 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${{PATH:-\3}}/g' /etc/profile || true
                 } else {
                     main_service.ports.push(DockerComposeServicePort {
                         target: port.clone(),
-                        published: port.clone(),
+                        published: port,
                         ..Default::default()
                     });
                 }

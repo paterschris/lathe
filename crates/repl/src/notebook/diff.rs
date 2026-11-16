@@ -23,15 +23,8 @@ use super::shadow_document::ShadowDocument;
 /// `contents` is a serialized `.ipynb`, typically the committed version of the file.
 /// Used as the base text of a diff against the working copy's projection.
 pub fn projection_of_notebook(contents: &str, comment_prefix: &str) -> Result<String> {
-    let notebook = match nbformat::parse_notebook(contents) {
-        Ok(nbformat::Notebook::V4(notebook)) => notebook,
-        Ok(nbformat::Notebook::Legacy(legacy)) => nbformat::upgrade_legacy_notebook(legacy)
-            .context("notebook is in an older format that could not be upgraded")?,
-        Ok(nbformat::Notebook::V3(_)) => {
-            anyhow::bail!("nbformat v3 notebooks are not supported")
-        }
-        Err(error) => return Err(error).context("could not parse notebook"),
-    };
+    let notebook = nbformat::parse_notebook(contents).context("could not parse notebook")?;
+    let notebook = super::notebook_ui::upgrade_notebook(notebook)?;
 
     Ok(ShadowDocument::from_cells(&notebook.cells, comment_prefix)
         .text()

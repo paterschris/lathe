@@ -133,7 +133,7 @@ pub struct TerminalSettingsContent {
 
     /// Sets the terminal's line height.
     ///
-    /// Default: comfortable
+    /// Default: standard
     pub line_height: Option<TerminalLineHeight>,
     pub font_features: Option<FontFeaturesContent>,
     /// Sets the terminal's font weight in CSS weight units 0-900.

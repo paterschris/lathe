@@ -1,7 +1,8 @@
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui::Transformation;
 use gpui::{App, IntoElement, Rems, RenderOnce, Size, Styled, Window, svg};
+use gpui::{TimedTransformation, Transformation};
 use serde::{Deserialize, Serialize};
 use strum::{EnumIter, EnumString, IntoStaticStr};
 
@@ -41,6 +42,7 @@ pub struct Vector {
     color: Color,
     size: Size<Rems>,
     transformation: Transformation,
+    rotation_period: Option<Duration>,
 }
 
 impl Vector {
@@ -51,6 +53,7 @@ impl Vector {
             color: Color::default(),
             size: Size { width, height },
             transformation: Transformation::default(),
+            rotation_period: None,
         }
     }
 
@@ -78,6 +81,11 @@ impl Transformable for Vector {
         self.transformation = transformation;
         self
     }
+
+    fn animate_rotation(mut self, period: Duration) -> Self {
+        self.rotation_period = Some(period);
+        self
+    }
 }
 
 impl RenderOnce for Vector {
@@ -94,6 +102,12 @@ impl RenderOnce for Vector {
             .path(self.path)
             .text_color(self.color.color(cx))
             .with_transformation(self.transformation)
+            .when_some(self.rotation_period, |svg, period| {
+                svg.with_timed_transformation(TimedTransformation::rotation(
+                    period,
+                    self.transformation,
+                ))
+            })
     }
 }
 

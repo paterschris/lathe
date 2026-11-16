@@ -198,9 +198,11 @@ impl PickerDelegate for RecentFilesDelegate {
             match_strings(
                 &candidates,
                 query,
-                fuzzy_nucleo::Case::smart_if_uppercase_in(query),
-                fuzzy_nucleo::LengthPenalty::On,
-                100,
+                fuzzy_nucleo::StringMatchOptions {
+                    max_results: fuzzy_nucleo::MaxResults::limit::<100>(),
+                    case: fuzzy_nucleo::Case::smart_if_uppercase_in(query),
+                    ..Default::default()
+                },
             )
         };
         self.selected_index = 0;

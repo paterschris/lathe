@@ -8,11 +8,11 @@ use gpui::{
     App, Entity, EventEmitter, Focusable, Hsla, InteractiveElement, RetainAllImageCache,
     StatefulInteractiveElement, Task, prelude::*,
 };
+use jupyter_protocol::{JupyterMessage, JupyterMessageContent, Stdio};
 use language::{Buffer, Capability, Language, LanguageRegistry, Point};
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use nbformat::v4::{CellId, CellMetadata, CellType};
 use project::Project;
-use runtimelib::{JupyterMessage, JupyterMessageContent, Stdio};
 use settings::Settings as _;
 use ui::{CommonAnimationExt, IconButtonShape, prelude::*};
 use util::ResultExt;

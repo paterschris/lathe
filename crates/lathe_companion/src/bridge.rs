@@ -2,26 +2,28 @@
 //! transcripts, applies what phones ask for, and triggers pushes.
 
 use crate::{
-    activity,
     Companion, CompanionEvent, CompanionSettings, CompanionThreads, CompanionThreadsEvent,
+    activity,
     crypto::encode_url_safe,
     entries,
-    terminals::{Terminals, TerminalsEvent},
     protocol::{
-        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp, DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_CLOSE_THREADS, FEATURE_MUTED_WORKSPACES, FEATURE_PULL_REQUESTS, FEATURE_TERMINALS, FEATURE_THREAD_DELTAS, PROTOCOL_VERSION, PhoneEnvelope,
-        PhoneMessage, ThreadStatus, ThreadSummary, WorkspaceSummary,
+        AgentSummary, ConfigCategory, ConfigChoice, ConfigKind, ConfigOption, DeltaOp,
+        DesktopMessage, Entry, ErrorBody, ErrorCode, FEATURE_CLOSE_THREADS,
+        FEATURE_MUTED_WORKSPACES, FEATURE_PULL_REQUESTS, FEATURE_TERMINALS, FEATURE_THREAD_DELTAS,
+        PROTOCOL_VERSION, PhoneEnvelope, PhoneMessage, ThreadStatus, ThreadSummary,
+        WorkspaceSummary,
     },
+    terminals::{Terminals, TerminalsEvent},
 };
 use acp_thread::{AcpThread, AcpThreadEvent, ElicitationEntryId, SelectedPermissionOutcome};
-use agent_client_protocol::schema::v2 as acp;
+use agent_client_protocol::v2::schema as acp;
 use agent_ui::{
     Agent, AgentInitialContent, AgentPanel, AgentThreadSource, CreateThreadOptions,
     thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore},
 };
 use collections::{BTreeSet, HashMap, HashSet};
 use gpui::{
-    App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task,
-    WeakEntity,
+    App, AppContext as _, Context, Entity, Global, SharedString, Subscription, Task, WeakEntity,
 };
 use release_channel::ReleaseChannel;
 use settings::Settings as _;
@@ -127,7 +129,9 @@ impl Bridge {
             cx.subscribe(&companion, |this, _, event, cx| {
                 this.handle_companion_event(event, cx)
             }),
-            cx.subscribe(&threads, |this, _, event, cx| this.handle_threads_event(event, cx)),
+            cx.subscribe(&threads, |this, _, event, cx| {
+                this.handle_threads_event(event, cx)
+            }),
         ];
         let mut subscriptions = subscriptions;
         if let Some(store) = ThreadMetadataStore::try_global(cx) {
@@ -172,7 +176,9 @@ impl Bridge {
             return;
         };
         self.companion
-            .update(cx, |companion, _| companion.send_to_device(device_id, &value))
+            .update(cx, |companion, _| {
+                companion.send_to_device(device_id, &value)
+            })
             .log_err();
     }
 
@@ -187,7 +193,13 @@ impl Bridge {
         self.companion.read(cx).online_devices().cloned().collect()
     }
 
-    fn ack(&self, device_id: &str, client_msg_id: &str, result: Result<(), ErrorBody>, cx: &mut Context<Self>) {
+    fn ack(
+        &self,
+        device_id: &str,
+        client_msg_id: &str,
+        result: Result<(), ErrorBody>,
+        cx: &mut Context<Self>,
+    ) {
         self.ack_with_thread(device_id, client_msg_id, result.map(|()| None), cx);
     }
 
@@ -254,7 +266,11 @@ impl Bridge {
             stream.subscribers.remove(device_id);
             !stream.subscribers.is_empty()
         });
-        let watched = self.terminal_subscribers.keys().cloned().collect::<Vec<_>>();
+        let watched = self
+            .terminal_subscribers
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         for terminal_id in watched {
             self.unfollow_terminal(device_id, &terminal_id, cx);
         }
@@ -268,7 +284,14 @@ impl Bridge {
         };
         let list = terminals.read(cx).list(cx);
         let input_enabled = CompanionSettings::get_global(cx).terminal_input;
-        self.send(device_id, &DesktopMessage::Terminals { list, input_enabled }, cx);
+        self.send(
+            device_id,
+            &DesktopMessage::Terminals {
+                list,
+                input_enabled,
+            },
+            cx,
+        );
     }
 
     fn handle_terminals_event(&mut self, event: &TerminalsEvent, cx: &mut Context<Self>) {
@@ -278,7 +301,10 @@ impl Bridge {
                     self.send_terminals(&device_id, cx);
                 }
             }
-            TerminalsEvent::Screen { terminal_id, message } => {
+            TerminalsEvent::Screen {
+                terminal_id,
+                message,
+            } => {
                 let subscribers = self
                     .terminal_subscribers
                     .get(terminal_id)
@@ -306,16 +332,24 @@ impl Bridge {
                 self.companion.read(cx).push_terminal(
                     terminal_id,
                     terminal.as_ref().map(|terminal| terminal.title.as_str()),
-                    terminal.as_ref().map(|terminal| terminal.workspace_id.as_str()),
+                    terminal
+                        .as_ref()
+                        .map(|terminal| terminal.workspace_id.as_str()),
                 );
             }
         }
     }
 
-    fn follow_terminal(&mut self, device_id: &str, terminal_id: &str, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
-        let terminals = self.terminals.clone().ok_or_else(|| {
-            ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed.")
-        })?;
+    fn follow_terminal(
+        &mut self,
+        device_id: &str,
+        terminal_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ErrorBody> {
+        let terminals = self
+            .terminals
+            .clone()
+            .ok_or_else(|| ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed."))?;
         self.terminal_subscribers
             .entry(terminal_id.to_string())
             .or_default()
@@ -343,8 +377,18 @@ impl Bridge {
     fn send_lists(&self, device_id: &str, cx: &mut Context<Self>) {
         let threads = self.thread_list(cx);
         let workspaces = workspace_list(&threads, cx);
-        self.send(device_id, &DesktopMessage::Workspaces { list: workspaces }, cx);
-        self.send(device_id, &DesktopMessage::Threads { list: threads.into_iter().map(|(summary, _)| summary).collect() }, cx);
+        self.send(
+            device_id,
+            &DesktopMessage::Workspaces { list: workspaces },
+            cx,
+        );
+        self.send(
+            device_id,
+            &DesktopMessage::Threads {
+                list: threads.into_iter().map(|(summary, _)| summary).collect(),
+            },
+            cx,
+        );
     }
 
     fn schedule_list_flush(&mut self, cx: &mut Context<Self>) {
@@ -415,7 +459,11 @@ impl Bridge {
             .cloned()
     }
 
-    fn live_thread(&self, thread_id: &str, cx: &App) -> Option<(acp::SessionId, Entity<AcpThread>)> {
+    fn live_thread(
+        &self,
+        thread_id: &str,
+        cx: &App,
+    ) -> Option<(acp::SessionId, Entity<AcpThread>)> {
         let session_id = self.thread_metadata(thread_id, cx)?.session_id?;
         let thread = self.threads.read(cx).thread(&session_id)?;
         Some((session_id, thread))
@@ -464,7 +512,12 @@ impl Bridge {
         }
     }
 
-    fn status_changed(&mut self, session_id: &acp::SessionId, status: ThreadStatus, cx: &mut Context<Self>) {
+    fn status_changed(
+        &mut self,
+        session_id: &acp::SessionId,
+        status: ThreadStatus,
+        cx: &mut Context<Self>,
+    ) {
         if !self.watched.contains_key(session_id) {
             return;
         }
@@ -495,7 +548,12 @@ impl Bridge {
             let metadata = self.thread_metadata(&thread_id, cx);
             let title = metadata.as_ref().and_then(|metadata| metadata.title());
             let workspace_id = metadata.map(|metadata| workspace_id(metadata.folder_paths()));
-            self.companion.read(cx).push(kind, &thread_id, title.as_deref(), workspace_id.as_deref());
+            self.companion.read(cx).push(
+                kind,
+                &thread_id,
+                title.as_deref(),
+                workspace_id.as_deref(),
+            );
         }
     }
 
@@ -509,21 +567,34 @@ impl Bridge {
         match event {
             AcpThreadEvent::NewEntry => {
                 let index = thread.read(cx).entries().len().saturating_sub(1);
-                self.mark_dirty(session_id, |stream| {
-                    stream.dirty.insert(index);
-                }, cx);
+                self.mark_dirty(
+                    session_id,
+                    |stream| {
+                        stream.dirty.insert(index);
+                    },
+                    cx,
+                );
             }
             AcpThreadEvent::EntryUpdated(index) => {
                 let index = *index;
-                self.mark_dirty(session_id, |stream| {
-                    stream.dirty.insert(index);
-                }, cx);
+                self.mark_dirty(
+                    session_id,
+                    |stream| {
+                        stream.dirty.insert(index);
+                    },
+                    cx,
+                );
             }
             AcpThreadEvent::EntriesRemoved(range) => {
                 let start = range.start;
-                self.mark_dirty(session_id, |stream| {
-                    stream.removed_from = Some(stream.removed_from.map_or(start, |from| from.min(start)));
-                }, cx);
+                self.mark_dirty(
+                    session_id,
+                    |stream| {
+                        stream.removed_from =
+                            Some(stream.removed_from.map_or(start, |from| from.min(start)));
+                    },
+                    cx,
+                );
             }
             AcpThreadEvent::ToolAuthorizationRequested(request_id) => {
                 let Some(thread_id) = CompanionThreads::thread_id(session_id, cx) else {
@@ -543,7 +614,13 @@ impl Bridge {
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_string))
                     .unwrap_or_default();
-                self.broadcast(&DesktopMessage::ToolAuthorizationResolved { thread_id, request_id }, cx);
+                self.broadcast(
+                    &DesktopMessage::ToolAuthorizationResolved {
+                        thread_id,
+                        request_id,
+                    },
+                    cx,
+                );
             }
             AcpThreadEvent::ElicitationRequested(id) => {
                 let Some(thread_id) = CompanionThreads::thread_id(session_id, cx) else {
@@ -552,7 +629,9 @@ impl Bridge {
                 let message = thread
                     .read(cx)
                     .elicitation(id)
-                    .and_then(|(_, elicitation)| entries::elicitation_prompt(&thread_id, elicitation));
+                    .and_then(|(_, elicitation)| {
+                        entries::elicitation_prompt(&thread_id, elicitation)
+                    });
                 if let Some(message) = message {
                     self.broadcast(&message, cx);
                 }
@@ -577,7 +656,12 @@ impl Bridge {
         }
     }
 
-    fn mark_dirty(&mut self, session_id: &acp::SessionId, mark: impl FnOnce(&mut Stream), cx: &mut Context<Self>) {
+    fn mark_dirty(
+        &mut self,
+        session_id: &acp::SessionId,
+        mark: impl FnOnce(&mut Stream),
+        cx: &mut Context<Self>,
+    ) {
         let Some(stream) = self.streams.get_mut(session_id) else {
             return;
         };
@@ -588,7 +672,8 @@ impl Bridge {
         let session_id = session_id.clone();
         stream.flush = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(ENTRY_FLUSH_DELAY).await;
-            this.update(cx, |this, cx| this.flush_entries(&session_id, cx)).log_err();
+            this.update(cx, |this, cx| this.flush_entries(&session_id, cx))
+                .log_err();
         }));
     }
 
@@ -605,7 +690,9 @@ impl Bridge {
         // Each op with the shorter form a `thread_deltas` phone gets, if any.
         let mut ops: Vec<(DeltaOp, Option<DeltaOp>)> = Vec::new();
         let tail_start = current.len().saturating_sub(TAIL_ENTRIES);
-        stream.dirty.extend(tail_start..current.len().min(stream.sent.len()));
+        stream
+            .dirty
+            .extend(tail_start..current.len().min(stream.sent.len()));
 
         if let Some(from) = stream.removed_from.take()
             && from < stream.sent.len()
@@ -625,8 +712,11 @@ impl Bridge {
             }
             let entry = entries::entry(thread, &current[index], cx);
             if entry != stream.sent[index] {
-                let appended = appended_text(&stream.sent[index], &entry)
-                    .map(|text| DeltaOp::AppendText { index, text: text.to_string() });
+                let appended =
+                    appended_text(&stream.sent[index], &entry).map(|text| DeltaOp::AppendText {
+                        index,
+                        text: text.to_string(),
+                    });
                 stream.sent[index] = entry.clone();
                 ops.push((DeltaOp::UpdateEntry { index, entry }, appended));
             }
@@ -649,7 +739,12 @@ impl Bridge {
         }
     }
 
-    fn send_config(&mut self, session_id: &acp::SessionId, options: Vec<ConfigOption>, cx: &mut Context<Self>) {
+    fn send_config(
+        &mut self,
+        session_id: &acp::SessionId,
+        options: Vec<ConfigOption>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(stream) = self.streams.get_mut(session_id) else {
             return;
         };
@@ -685,7 +780,12 @@ impl Bridge {
     /// Sends ops in order, each taking the next seq. A phone that accepts
     /// `thread_deltas` gets them in one message, using each op's shorter form
     /// where there is one; any other phone gets a `thread_delta` per op.
-    fn send_deltas(&mut self, session_id: &acp::SessionId, ops: Vec<(DeltaOp, Option<DeltaOp>)>, cx: &mut Context<Self>) {
+    fn send_deltas(
+        &mut self,
+        session_id: &acp::SessionId,
+        ops: Vec<(DeltaOp, Option<DeltaOp>)>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(stream) = self.streams.get_mut(session_id) else {
             return;
         };
@@ -721,7 +821,10 @@ impl Bridge {
             let message = DesktopMessage::ThreadDeltas {
                 thread_id,
                 seq: first_seq + ops.len() as u64 - 1,
-                ops: ops.into_iter().map(|(op, short)| short.unwrap_or(op)).collect(),
+                ops: ops
+                    .into_iter()
+                    .map(|(op, short)| short.unwrap_or(op))
+                    .collect(),
             };
             for device_id in &batching {
                 self.send(device_id, &message, cx);
@@ -729,7 +832,12 @@ impl Bridge {
         }
     }
 
-    fn handle_phone_message(&mut self, device_id: &str, message: &serde_json::Value, cx: &mut Context<Self>) {
+    fn handle_phone_message(
+        &mut self,
+        device_id: &str,
+        message: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
         let envelope = match serde_json::from_value::<PhoneEnvelope>(message.clone()) {
             Ok(envelope) => envelope,
             Err(error) => {
@@ -738,7 +846,10 @@ impl Bridge {
                     self.ack(
                         device_id,
                         client_msg_id,
-                        Err(ErrorBody::new(ErrorCode::BadMessage, "Lathe doesn't understand this request. Update Lathe or the app.")),
+                        Err(ErrorBody::new(
+                            ErrorCode::BadMessage,
+                            "Lathe doesn't understand this request. Update Lathe or the app.",
+                        )),
                         cx,
                     );
                 }
@@ -748,7 +859,10 @@ impl Bridge {
 
         let seen = self.seen_messages.entry(device_id.to_string()).or_default();
         if seen.contains(&envelope.client_msg_id) {
-            log::warn!("companion: ignored a repeated message {}", envelope.client_msg_id);
+            log::warn!(
+                "companion: ignored a repeated message {}",
+                envelope.client_msg_id
+            );
             return;
         }
         seen.push_back(envelope.client_msg_id.clone());
@@ -758,10 +872,15 @@ impl Bridge {
 
         let client_msg_id = envelope.client_msg_id;
         let result = match envelope.message {
-            PhoneMessage::Subscribe { thread_id, accepts, .. } => {
+            PhoneMessage::Subscribe {
+                thread_id, accepts, ..
+            } => {
                 // Every subscribe says it again, so an app downgraded in
                 // place stops getting what it no longer reads.
-                if accepts.iter().any(|feature| feature == FEATURE_THREAD_DELTAS) {
+                if accepts
+                    .iter()
+                    .any(|feature| feature == FEATURE_THREAD_DELTAS)
+                {
                     self.batching.insert(device_id.to_string());
                 } else {
                     self.batching.remove(device_id);
@@ -788,16 +907,23 @@ impl Bridge {
                 self.send_terminals(device_id, cx);
                 Ok(())
             }
-            PhoneMessage::LoadOlder { thread_id, before_index } => {
-                self.load_older(device_id, &thread_id, before_index, cx)
+            PhoneMessage::LoadOlder {
+                thread_id,
+                before_index,
+            } => self.load_older(device_id, &thread_id, before_index, cx),
+            PhoneMessage::SendMessage { thread_id, text } => {
+                self.send_message(&thread_id, text, cx)
             }
-            PhoneMessage::SendMessage { thread_id, text } => self.send_message(&thread_id, text, cx),
-            PhoneMessage::Authorize { thread_id, request_id, option_id } => {
-                self.authorize(&thread_id, &request_id, &option_id, cx)
-            }
-            PhoneMessage::RespondElicitation { thread_id, elicitation_id, value } => {
-                self.respond_elicitation(&thread_id, &elicitation_id, value, cx)
-            }
+            PhoneMessage::Authorize {
+                thread_id,
+                request_id,
+                option_id,
+            } => self.authorize(&thread_id, &request_id, &option_id, cx),
+            PhoneMessage::RespondElicitation {
+                thread_id,
+                elicitation_id,
+                value,
+            } => self.respond_elicitation(&thread_id, &elicitation_id, value, cx),
             PhoneMessage::Cancel { thread_id } => match self.live_thread(&thread_id, cx) {
                 Some((_, thread)) => {
                     thread.update(cx, |thread, cx| thread.cancel(cx)).detach();
@@ -807,15 +933,37 @@ impl Bridge {
             },
             PhoneMessage::RenameThread { thread_id, title } => self.rename(&thread_id, &title, cx),
             PhoneMessage::CloseThreads { thread_ids } => self.close_threads(&thread_ids, cx),
-            PhoneMessage::SetConfigOption { thread_id, config_id, value } => {
-                match self.set_config_option(device_id, &client_msg_id, &thread_id, &config_id, &value, cx) {
+            PhoneMessage::SetConfigOption {
+                thread_id,
+                config_id,
+                value,
+            } => {
+                match self.set_config_option(
+                    device_id,
+                    &client_msg_id,
+                    &thread_id,
+                    &config_id,
+                    &value,
+                    cx,
+                ) {
                     // Acked once the agent has applied it.
                     Ok(()) => return,
                     Err(error) => Err(error),
                 }
             }
-            PhoneMessage::NewThread { workspace_id, agent_id, text } => {
-                match self.new_thread(device_id, &client_msg_id, &workspace_id, &agent_id, text, cx) {
+            PhoneMessage::NewThread {
+                workspace_id,
+                agent_id,
+                text,
+            } => {
+                match self.new_thread(
+                    device_id,
+                    &client_msg_id,
+                    &workspace_id,
+                    &agent_id,
+                    text,
+                    cx,
+                ) {
                     // Acked once the thread has started.
                     Ok(()) => return,
                     Err(error) => Err(error),
@@ -861,25 +1009,41 @@ impl Bridge {
                     ))
                 } else {
                     match &self.terminals {
-                        Some(terminals) => terminals.update(cx, |terminals, cx| terminals.rename(&terminal_id, title, cx)),
-                        None => Err(ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed.")),
+                        Some(terminals) => terminals.update(cx, |terminals, cx| {
+                            terminals.rename(&terminal_id, title, cx)
+                        }),
+                        None => Err(ErrorBody::new(
+                            ErrorCode::TerminalNotFound,
+                            "That terminal closed.",
+                        )),
                     }
                 }
             }
-            PhoneMessage::TerminalInput { terminal_id, text, key } => match &self.terminals {
-                Some(terminals) => terminals.update(cx, |terminals, cx| terminals.input(&terminal_id, text, key, cx)),
-                None => Err(ErrorBody::new(ErrorCode::TerminalNotFound, "That terminal closed.")),
+            PhoneMessage::TerminalInput {
+                terminal_id,
+                text,
+                key,
+            } => match &self.terminals {
+                Some(terminals) => terminals.update(cx, |terminals, cx| {
+                    terminals.input(&terminal_id, text, key, cx)
+                }),
+                None => Err(ErrorBody::new(
+                    ErrorCode::TerminalNotFound,
+                    "That terminal closed.",
+                )),
             },
             PhoneMessage::SetMutedWorkspaces { workspace_ids } => {
                 let device_id = device_id.to_string();
-                self.companion
-                    .update(cx, |companion, cx| companion.set_muted_workspaces(&device_id, workspace_ids, cx));
+                self.companion.update(cx, |companion, cx| {
+                    companion.set_muted_workspaces(&device_id, workspace_ids, cx)
+                });
                 Ok(())
             }
             PhoneMessage::Unpair {} => {
                 self.ack(device_id, &client_msg_id, Ok(()), cx);
                 let device_id = device_id.to_string();
-                self.companion.update(cx, |companion, cx| companion.revoke(&device_id, cx));
+                self.companion
+                    .update(cx, |companion, cx| companion.revoke(&device_id, cx));
                 return;
             }
         };
@@ -894,13 +1058,12 @@ impl Bridge {
         thread_id: &str,
         cx: &mut Context<Self>,
     ) -> Result<bool, ErrorBody> {
-        let metadata = self
-            .thread_metadata(thread_id, cx)
-            .ok_or_else(|| ErrorBody::new(ErrorCode::ThreadNotFound, "This thread no longer exists."))?;
-        let session_id = metadata
-            .session_id
-            .clone()
-            .ok_or_else(|| ErrorBody::new(ErrorCode::ThreadNotFound, "This thread hasn't started yet."))?;
+        let metadata = self.thread_metadata(thread_id, cx).ok_or_else(|| {
+            ErrorBody::new(ErrorCode::ThreadNotFound, "This thread no longer exists.")
+        })?;
+        let session_id = metadata.session_id.clone().ok_or_else(|| {
+            ErrorBody::new(ErrorCode::ThreadNotFound, "This thread hasn't started yet.")
+        })?;
 
         if self.threads.read(cx).thread(&session_id).is_some() {
             self.start_stream(device_id, &session_id, thread_id, cx);
@@ -920,16 +1083,21 @@ impl Bridge {
             let client_msg_id = client_msg_id.to_string();
             async move |this, cx| {
                 cx.background_executor().timer(LOAD_TIMEOUT).await;
-                this.update(cx, |this, cx| this.fail_pending_load(&session_id, &client_msg_id, cx))
-                    .log_err();
+                this.update(cx, |this, cx| {
+                    this.fail_pending_load(&session_id, &client_msg_id, cx)
+                })
+                .log_err();
             }
         });
-        self.pending_loads.entry(session_id).or_default().push(PendingSubscribe {
-            device_id: device_id.to_string(),
-            client_msg_id: client_msg_id.to_string(),
-            thread_id: thread_id.to_string(),
-            _timeout: timeout,
-        });
+        self.pending_loads
+            .entry(session_id)
+            .or_default()
+            .push(PendingSubscribe {
+                device_id: device_id.to_string(),
+                client_msg_id: client_msg_id.to_string(),
+                thread_id: thread_id.to_string(),
+                _timeout: timeout,
+            });
         Ok(true)
     }
 
@@ -937,34 +1105,58 @@ impl Bridge {
         let Some(pending) = self.pending_loads.remove(session_id) else {
             return;
         };
-        log::info!("companion: thread for session {session_id} loaded for {} request(s)", pending.len());
+        log::info!(
+            "companion: thread for session {session_id} loaded for {} request(s)",
+            pending.len()
+        );
         for pending in pending {
             self.start_stream(&pending.device_id, session_id, &pending.thread_id, cx);
             self.ack(&pending.device_id, &pending.client_msg_id, Ok(()), cx);
         }
     }
 
-    fn fail_pending_load(&mut self, session_id: &acp::SessionId, client_msg_id: &str, cx: &mut Context<Self>) {
+    fn fail_pending_load(
+        &mut self,
+        session_id: &acp::SessionId,
+        client_msg_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(pending) = self.pending_loads.get_mut(session_id) else {
             return;
         };
-        let Some(index) = pending.iter().position(|pending| pending.client_msg_id == client_msg_id) else {
+        let Some(index) = pending
+            .iter()
+            .position(|pending| pending.client_msg_id == client_msg_id)
+        else {
             return;
         };
         let failed = pending.remove(index);
-        log::warn!("companion: thread {} didn't load within {}s", failed.thread_id, LOAD_TIMEOUT.as_secs());
+        log::warn!(
+            "companion: thread {} didn't load within {}s",
+            failed.thread_id,
+            LOAD_TIMEOUT.as_secs()
+        );
         if pending.is_empty() {
             self.pending_loads.remove(session_id);
         }
         self.ack(
             &failed.device_id,
             &failed.client_msg_id,
-            Err(ErrorBody::new(ErrorCode::ThreadNotFound, "Lathe couldn't open this thread.")),
+            Err(ErrorBody::new(
+                ErrorCode::ThreadNotFound,
+                "Lathe couldn't open this thread.",
+            )),
             cx,
         );
     }
 
-    fn start_stream(&mut self, device_id: &str, session_id: &acp::SessionId, thread_id: &str, cx: &mut Context<Self>) {
+    fn start_stream(
+        &mut self,
+        device_id: &str,
+        session_id: &acp::SessionId,
+        thread_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(thread) = self.threads.read(cx).thread(session_id) else {
             return;
         };
@@ -1023,7 +1215,13 @@ impl Bridge {
         self.send_pending_prompts(device_id, Some(session_id), cx);
     }
 
-    fn load_older(&mut self, device_id: &str, thread_id: &str, before_index: usize, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
+    fn load_older(
+        &mut self,
+        device_id: &str,
+        thread_id: &str,
+        before_index: usize,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ErrorBody> {
         let stream = self
             .streams
             .values()
@@ -1041,7 +1239,12 @@ impl Bridge {
         Ok(())
     }
 
-    fn send_message(&mut self, thread_id: &str, text: String, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
+    fn send_message(
+        &mut self,
+        thread_id: &str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ErrorBody> {
         let (_, thread) = self.live_thread(thread_id, cx).ok_or_else(not_loaded)?;
         let submission = thread.update(cx, |thread, cx| thread.send(vec![text.into()], cx));
         cx.spawn(async move |_, _| {
@@ -1051,9 +1254,20 @@ impl Bridge {
         Ok(())
     }
 
-    fn authorize(&mut self, thread_id: &str, request_id: &str, option_id: &str, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
+    fn authorize(
+        &mut self,
+        thread_id: &str,
+        request_id: &str,
+        option_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ErrorBody> {
         let (_, thread) = self.live_thread(thread_id, cx).ok_or_else(not_loaded)?;
-        let not_found = || ErrorBody::new(ErrorCode::RequestNotFound, "This request was already answered.");
+        let not_found = || {
+            ErrorBody::new(
+                ErrorCode::RequestNotFound,
+                "This request was already answered.",
+            )
+        };
         let (id, kind) = {
             let thread = thread.read(cx);
             let request = thread
@@ -1069,8 +1283,12 @@ impl Bridge {
         // Standing rules change what agents may do without asking, so they're
         // only set at the desk.
         let kind = match kind {
-            crate::protocol::PermissionOptionKind::AllowOnce => acp::PermissionOptionKind::AllowOnce,
-            crate::protocol::PermissionOptionKind::RejectOnce => acp::PermissionOptionKind::RejectOnce,
+            crate::protocol::PermissionOptionKind::AllowOnce => {
+                acp::PermissionOptionKind::AllowOnce
+            }
+            crate::protocol::PermissionOptionKind::RejectOnce => {
+                acp::PermissionOptionKind::RejectOnce
+            }
             crate::protocol::PermissionOptionKind::AllowAlways
             | crate::protocol::PermissionOptionKind::RejectAlways => {
                 return Err(ErrorBody::new(
@@ -1079,8 +1297,13 @@ impl Bridge {
                 ));
             }
         };
-        let outcome = SelectedPermissionOutcome::new(acp::PermissionOptionId::new(option_id.to_string()), kind);
-        thread.update(cx, |thread, cx| thread.authorize_permission_request(id, outcome, cx));
+        let outcome = SelectedPermissionOutcome::new(
+            acp::PermissionOptionId::new(option_id.to_string()),
+            kind,
+        );
+        thread.update(cx, |thread, cx| {
+            thread.authorize_permission_request(id, outcome, cx)
+        });
         Ok(())
     }
 
@@ -1096,10 +1319,17 @@ impl Bridge {
         cx: &mut Context<Self>,
     ) -> Result<(), ErrorBody> {
         let (session_id, thread) = self.live_thread(thread_id, cx).ok_or_else(not_loaded)?;
-        let unavailable = || ErrorBody::new(ErrorCode::BadMessage, "That setting can't be changed from the phone.");
+        let unavailable = || {
+            ErrorBody::new(
+                ErrorCode::BadMessage,
+                "That setting can't be changed from the phone.",
+            )
+        };
         let provider = {
             let thread = thread.read(cx);
-            thread.connection().session_config_options(thread.session_id(), cx)
+            thread
+                .connection()
+                .session_config_options(thread.session_id(), cx)
         }
         .ok_or_else(unavailable)?;
         let option = convert_config_options(&provider.config_options())
@@ -1108,7 +1338,8 @@ impl Bridge {
             .ok_or_else(unavailable)?;
         let value = config_value(&option, value)?;
         log::info!("companion: phone {device_id} set {config_id} on thread {thread_id}");
-        let task = provider.set_config_option(acp::SessionConfigId::new(config_id.to_string()), value, cx);
+        let task =
+            provider.set_config_option(acp::SessionConfigId::new(config_id.to_string()), value, cx);
         let device_id = device_id.to_string();
         let client_msg_id = client_msg_id.to_string();
         cx.spawn(async move |this, cx| {
@@ -1123,7 +1354,10 @@ impl Bridge {
                     this.ack(
                         &device_id,
                         &client_msg_id,
-                        Err(ErrorBody::new(ErrorCode::Internal, format!("The agent didn't accept the change: {error}"))),
+                        Err(ErrorBody::new(
+                            ErrorCode::Internal,
+                            format!("The agent didn't accept the change: {error}"),
+                        )),
                         cx,
                     );
                 }
@@ -1145,27 +1379,42 @@ impl Bridge {
     ) -> Result<(), ErrorBody> {
         let text = text.trim().to_string();
         if text.is_empty() {
-            return Err(ErrorBody::new(ErrorCode::BadMessage, "Write a first message for the thread."));
+            return Err(ErrorBody::new(
+                ErrorCode::BadMessage,
+                "Write a first message for the thread.",
+            ));
         }
         let (_, workspace, window) = open_workspace_paths(cx)
             .into_iter()
             .find(|(paths, _, _)| self::workspace_id(paths) == workspace_id)
-            .ok_or_else(|| ErrorBody::new(ErrorCode::WorkspaceNotOpen, "Open this project in Lathe to start a thread."))?;
+            .ok_or_else(|| {
+                ErrorBody::new(
+                    ErrorCode::WorkspaceNotOpen,
+                    "Open this project in Lathe to start a thread.",
+                )
+            })?;
         let created = window
             .update(cx, |_, window, cx| -> Result<ThreadId, ErrorBody> {
-                let workspace = workspace
-                    .upgrade()
-                    .ok_or_else(|| ErrorBody::new(ErrorCode::WorkspaceNotOpen, "That Lathe window closed."))?;
-                let panel = workspace
-                    .read(cx)
-                    .panel::<AgentPanel>(cx)
-                    .ok_or_else(|| ErrorBody::new(ErrorCode::WorkspaceNotOpen, "This project has no agent panel open."))?;
+                let workspace = workspace.upgrade().ok_or_else(|| {
+                    ErrorBody::new(ErrorCode::WorkspaceNotOpen, "That Lathe window closed.")
+                })?;
+                let panel = workspace.read(cx).panel::<AgentPanel>(cx).ok_or_else(|| {
+                    ErrorBody::new(
+                        ErrorCode::WorkspaceNotOpen,
+                        "This project has no agent panel open.",
+                    )
+                })?;
                 let available = available_agents(&workspace, cx);
                 let agent = available
                     .into_iter()
                     .find(|(agent, _)| agent.id().0.as_ref() == agent_id)
                     .map(|(agent, _)| agent)
-                    .ok_or_else(|| ErrorBody::new(ErrorCode::AgentNotFound, "That agent isn't available in this project."))?;
+                    .ok_or_else(|| {
+                        ErrorBody::new(
+                            ErrorCode::AgentNotFound,
+                            "That agent isn't available in this project.",
+                        )
+                    })?;
                 // Created alongside the panel's other threads, so the thread
                 // showing on the desk stays put.
                 Ok(panel.update(cx, |panel, cx| {
@@ -1184,8 +1433,13 @@ impl Bridge {
                     )
                 }))
             })
-            .map_err(|_| ErrorBody::new(ErrorCode::WorkspaceNotOpen, "That Lathe window closed."))??;
-        log::info!("companion: phone {device_id} started thread {} with {agent_id}", created.to_key_string());
+            .map_err(|_| {
+                ErrorBody::new(ErrorCode::WorkspaceNotOpen, "That Lathe window closed.")
+            })??;
+        log::info!(
+            "companion: phone {device_id} started thread {} with {agent_id}",
+            created.to_key_string()
+        );
 
         let timeout = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(NEW_THREAD_TIMEOUT).await;
@@ -1193,11 +1447,18 @@ impl Bridge {
                 let Some(pending) = this.pending_new_threads.remove(&created) else {
                     return;
                 };
-                log::warn!("companion: thread {} didn't start within {}s", created.to_key_string(), NEW_THREAD_TIMEOUT.as_secs());
+                log::warn!(
+                    "companion: thread {} didn't start within {}s",
+                    created.to_key_string(),
+                    NEW_THREAD_TIMEOUT.as_secs()
+                );
                 this.ack(
                     &pending.device_id,
                     &pending.client_msg_id,
-                    Err(ErrorBody::new(ErrorCode::Internal, "The agent didn't start. Check Lathe.")),
+                    Err(ErrorBody::new(
+                        ErrorCode::Internal,
+                        "The agent didn't start. Check Lathe.",
+                    )),
                     cx,
                 );
             })
@@ -1227,12 +1488,22 @@ impl Bridge {
         let started = self
             .pending_new_threads
             .keys()
-            .filter(|thread_id| store.read(cx).entry(**thread_id).is_some_and(|metadata| metadata.session_id.is_some()))
+            .filter(|thread_id| {
+                store
+                    .read(cx)
+                    .entry(**thread_id)
+                    .is_some_and(|metadata| metadata.session_id.is_some())
+            })
             .copied()
             .collect::<Vec<_>>();
         for thread_id in started {
             if let Some(pending) = self.pending_new_threads.remove(&thread_id) {
-                self.ack_with_thread(&pending.device_id, &pending.client_msg_id, Ok(Some(thread_id.to_key_string())), cx);
+                self.ack_with_thread(
+                    &pending.device_id,
+                    &pending.client_msg_id,
+                    Ok(Some(thread_id.to_key_string())),
+                    cx,
+                );
             }
         }
         self.schedule_list_flush(cx);
@@ -1245,12 +1516,20 @@ impl Bridge {
     /// is put away. Unlike archiving from the sidebar, no worktree or workspace
     /// is removed, which a phone can't see to confirm. Threads already gone are
     /// skipped, so a repeat after a reconnect is harmless.
-    fn close_threads(&mut self, thread_ids: &[String], cx: &mut Context<Self>) -> Result<(), ErrorBody> {
+    fn close_threads(
+        &mut self,
+        thread_ids: &[String],
+        cx: &mut Context<Self>,
+    ) -> Result<(), ErrorBody> {
         if thread_ids.is_empty() || thread_ids.len() > MAX_LISTED_THREADS {
-            return Err(ErrorBody::new(ErrorCode::BadMessage, "Pick between 1 and 100 threads to close."));
+            return Err(ErrorBody::new(
+                ErrorCode::BadMessage,
+                "Pick between 1 and 100 threads to close.",
+            ));
         }
-        let store = ThreadMetadataStore::try_global(cx)
-            .ok_or_else(|| ErrorBody::new(ErrorCode::Internal, "Lathe's thread list isn't available."))?;
+        let store = ThreadMetadataStore::try_global(cx).ok_or_else(|| {
+            ErrorBody::new(ErrorCode::Internal, "Lathe's thread list isn't available.")
+        })?;
         let ids = thread_ids
             .iter()
             .filter_map(|thread_id| self.thread_metadata(thread_id, cx))
@@ -1267,7 +1546,12 @@ impl Bridge {
         Ok(())
     }
 
-    fn rename(&mut self, thread_id: &str, title: &str, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
+    fn rename(
+        &mut self,
+        thread_id: &str,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ErrorBody> {
         let title = title.trim();
         if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
             return Err(ErrorBody::new(
@@ -1275,9 +1559,9 @@ impl Bridge {
                 format!("A thread name has to be 1 to {MAX_TITLE_CHARS} characters."),
             ));
         }
-        let metadata = self
-            .thread_metadata(thread_id, cx)
-            .ok_or_else(|| ErrorBody::new(ErrorCode::ThreadNotFound, "This thread no longer exists."))?;
+        let metadata = self.thread_metadata(thread_id, cx).ok_or_else(|| {
+            ErrorBody::new(ErrorCode::ThreadNotFound, "This thread no longer exists.")
+        })?;
         let title = SharedString::from(title.to_string());
         if !rename_in_open_views(metadata.thread_id, &title, cx)
             && let Some(store) = ThreadMetadataStore::try_global(cx)
@@ -1316,26 +1600,40 @@ impl Bridge {
         let (_, thread) = self.live_thread(thread_id, cx).ok_or_else(not_loaded)?;
         let id = ElicitationEntryId(Arc::from(elicitation_id));
         if thread.read(cx).elicitation(&id).is_none() {
-            return Err(ErrorBody::new(ErrorCode::RequestNotFound, "This question was already answered."));
+            return Err(ErrorBody::new(
+                ErrorCode::RequestNotFound,
+                "This question was already answered.",
+            ));
         }
-        let content = serde_json::from_value(serde_json::Value::Object(value))
-            .map_err(|_| ErrorBody::new(ErrorCode::BadMessage, "The answer doesn't match the form."))?;
+        let content = serde_json::from_value(serde_json::Value::Object(value)).map_err(|_| {
+            ErrorBody::new(ErrorCode::BadMessage, "The answer doesn't match the form.")
+        })?;
         let response = acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
             acp::ElicitationAcceptAction::new().content(Some(content)),
         ));
-        thread.update(cx, |thread, cx| thread.respond_to_elicitation(&id, response, cx));
+        thread.update(cx, |thread, cx| {
+            thread.respond_to_elicitation(&id, response, cx)
+        });
         Ok(())
     }
 
     /// Prompts waiting for an answer. Sent to every phone, not only those
     /// following the thread, so a push tap or a reconnect shows the sheet.
-    fn send_pending_prompts(&self, device_id: &str, only: Option<&acp::SessionId>, cx: &mut Context<Self>) {
+    fn send_pending_prompts(
+        &self,
+        device_id: &str,
+        only: Option<&acp::SessionId>,
+        cx: &mut Context<Self>,
+    ) {
         let mut messages = Vec::new();
         for (session_id, thread, _) in self.threads.read(cx).top_level_threads() {
             if only.is_some_and(|only| only != session_id) {
                 continue;
             }
-            let (Some(thread), Some(thread_id)) = (thread.upgrade(), CompanionThreads::thread_id(session_id, cx)) else {
+            let (Some(thread), Some(thread_id)) = (
+                thread.upgrade(),
+                CompanionThreads::thread_id(session_id, cx),
+            ) else {
                 continue;
             };
             let thread = thread.read(cx);
@@ -1353,7 +1651,10 @@ impl Bridge {
         let wanted = cfg!(target_os = "macos")
             && CompanionSettings::get_global(cx).keep_awake_while_agents_run
             && !self.companion.read(cx).devices().is_empty()
-            && self.statuses.values().any(|status| *status != ThreadStatus::Idle && *status != ThreadStatus::Error);
+            && self
+                .statuses
+                .values()
+                .any(|status| *status != ThreadStatus::Idle && *status != ThreadStatus::Error);
         if wanted && self.keep_awake.is_none() {
             self.keep_awake = keep_awake::Assertion::acquire().log_err();
         } else if !wanted {
@@ -1367,7 +1668,9 @@ impl Bridge {
 fn appended_text<'a>(old: &Entry, new: &'a Entry) -> Option<&'a str> {
     match (old, new) {
         (Entry::AssistantMessage { markdown: old }, Entry::AssistantMessage { markdown: new })
-        | (Entry::Thought { markdown: old }, Entry::Thought { markdown: new }) => new.strip_prefix(old.as_str()),
+        | (Entry::Thought { markdown: old }, Entry::Thought { markdown: new }) => {
+            new.strip_prefix(old.as_str())
+        }
         _ => None,
     }
 }
@@ -1393,21 +1696,31 @@ fn page_start(entries: &[Entry], end: usize) -> usize {
 /// The thread's model and effort choices, as the phone sees them. Modes and
 /// anything else stay on the desk: some modes skip permission prompts.
 fn phone_config_options(thread: &AcpThread, cx: &App) -> Option<Vec<ConfigOption>> {
-    let provider = thread.connection().session_config_options(thread.session_id(), cx)?;
+    let provider = thread
+        .connection()
+        .session_config_options(thread.session_id(), cx)?;
     let options = convert_config_options(&provider.config_options());
     (!options.is_empty()).then_some(options)
 }
 
 /// Only a value the agent offered is passed on.
-fn config_value(option: &ConfigOption, value: &serde_json::Value) -> Result<acp::SessionConfigOptionValue, ErrorBody> {
+fn config_value(
+    option: &ConfigOption,
+    value: &serde_json::Value,
+) -> Result<acp::SessionConfigOptionValue, ErrorBody> {
     match (&option.kind, value) {
         (ConfigKind::Select { options, .. }, serde_json::Value::String(value))
             if options.iter().any(|choice| &choice.value == value) =>
         {
             Ok(acp::SessionConfigOptionValue::id(value.clone()))
         }
-        (ConfigKind::Boolean { .. }, serde_json::Value::Bool(value)) => Ok(acp::SessionConfigOptionValue::boolean(*value)),
-        _ => Err(ErrorBody::new(ErrorCode::BadMessage, "That choice isn't offered for this thread.")),
+        (ConfigKind::Boolean { .. }, serde_json::Value::Bool(value)) => {
+            Ok(acp::SessionConfigOptionValue::boolean(*value))
+        }
+        _ => Err(ErrorBody::new(
+            ErrorCode::BadMessage,
+            "That choice isn't offered for this thread.",
+        )),
     }
 }
 
@@ -1422,11 +1735,13 @@ fn convert_config_options(options: &[acp::SessionConfigOption]) -> Vec<ConfigOpt
             };
             let kind = match &option.kind {
                 acp::SessionConfigKind::Select(select) => {
-                    let choice = |choice: &acp::SessionConfigSelectOption, group: Option<&str>| ConfigChoice {
-                        value: choice.value.0.to_string(),
-                        name: choice.name.clone(),
-                        description: choice.description.clone(),
-                        group: group.map(str::to_string),
+                    let choice = |choice: &acp::SessionConfigSelectOption, group: Option<&str>| {
+                        ConfigChoice {
+                            value: choice.value.0.to_string(),
+                            name: choice.name.clone(),
+                            description: choice.description.clone(),
+                            group: group.map(str::to_string),
+                        }
                     };
                     let options = match &select.options {
                         acp::SessionConfigSelectOptions::Ungrouped(options) => {
@@ -1434,7 +1749,12 @@ fn convert_config_options(options: &[acp::SessionConfigOption]) -> Vec<ConfigOpt
                         }
                         acp::SessionConfigSelectOptions::Grouped(groups) => groups
                             .iter()
-                            .flat_map(|group| group.options.iter().map(|option| choice(option, Some(&group.name))))
+                            .flat_map(|group| {
+                                group
+                                    .options
+                                    .iter()
+                                    .map(|option| choice(option, Some(&group.name)))
+                            })
                             .collect(),
                         _ => return None,
                     };
@@ -1477,7 +1797,10 @@ pub(crate) fn workspace_id(paths: &PathList) -> String {
 fn workspace_name(paths: &PathList) -> String {
     let names = paths
         .ordered_paths()
-        .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .filter_map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
         .collect::<Vec<_>>();
     if names.is_empty() {
         "No project".into()
@@ -1486,7 +1809,13 @@ fn workspace_name(paths: &PathList) -> String {
     }
 }
 
-pub(crate) fn open_workspace_paths(cx: &App) -> Vec<(PathList, WeakEntity<workspace::Workspace>, gpui::WindowHandle<MultiWorkspace>)> {
+pub(crate) fn open_workspace_paths(
+    cx: &App,
+) -> Vec<(
+    PathList,
+    WeakEntity<workspace::Workspace>,
+    gpui::WindowHandle<MultiWorkspace>,
+)> {
     cx.windows()
         .into_iter()
         .filter_map(|window| window.downcast::<MultiWorkspace>())
@@ -1525,7 +1854,12 @@ pub(crate) fn open_workspace(workspace_id: &str, cx: &App) -> Option<Entity<work
 /// workspace's project. Lathe's built-in agent isn't offered there.
 fn available_agents(workspace: &Entity<workspace::Workspace>, cx: &App) -> Vec<(Agent, String)> {
     let mut agents = Vec::new();
-    let store = workspace.read(cx).project().read(cx).agent_server_store().read(cx);
+    let store = workspace
+        .read(cx)
+        .project()
+        .read(cx)
+        .agent_server_store()
+        .read(cx);
     for agent_id in store.external_agents() {
         let name = store
             .agent_display_name(agent_id)
@@ -1535,7 +1869,10 @@ fn available_agents(workspace: &Entity<workspace::Workspace>, cx: &App) -> Vec<(
     agents
 }
 
-fn workspace_agents(workspace: &WeakEntity<workspace::Workspace>, cx: &App) -> Option<(Vec<AgentSummary>, String)> {
+fn workspace_agents(
+    workspace: &WeakEntity<workspace::Workspace>,
+    cx: &App,
+) -> Option<(Vec<AgentSummary>, String)> {
     let workspace = workspace.upgrade()?;
     let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
     let agents = available_agents(&workspace, cx)
@@ -1609,7 +1946,9 @@ fn rename_in_open_views(thread_id: ThreadId, title: &SharedString, cx: &mut App)
                 else {
                     return false;
                 };
-                thread_view.update(cx, |thread_view, cx| thread_view.rename(title.clone(), window, cx));
+                thread_view.update(cx, |thread_view, cx| {
+                    thread_view.rename(title.clone(), window, cx)
+                });
                 true
             })
             .unwrap_or(false);
@@ -1687,7 +2026,7 @@ mod tests {
     use super::*;
     use crate::companion::tests::{FakePhone, add_paired, connected_companion, drain, phone_says};
     use acp_thread::{AgentConnection as _, PermissionOptions, StubAgentConnection};
-    use agent_client_protocol::schema::v1 as acp_v1;
+    use agent_client_protocol::v1::schema as acp_v1;
     use agent_ui::thread_metadata_store::ThreadId;
     use gpui::TestAppContext;
     use project::{FakeFs, Project, WorktreePaths};
@@ -1717,8 +2056,9 @@ mod tests {
         /// Messages sent to the relay itself, such as pushes.
         fn split(&mut self) -> (Vec<Value>, Vec<Value>) {
             let all = drain(&mut self.outgoing);
-            let (frames, relay): (Vec<_>, Vec<_>) =
-                all.into_iter().partition(|message| message["type"] == "frame");
+            let (frames, relay): (Vec<_>, Vec<_>) = all
+                .into_iter()
+                .partition(|message| message["type"] == "frame");
             let frames = frames
                 .into_iter()
                 .map(|frame| self.phone.open(&self.identity.box_public_key(), &frame))
@@ -1728,13 +2068,23 @@ mod tests {
 
         fn say(&mut self, message: Value, cx: &mut TestAppContext) {
             self.seq += 1;
-            phone_says(&self.companion, &self.phone, &self.identity.box_public_key(), self.seq, message, cx);
+            phone_says(
+                &self.companion,
+                &self.phone,
+                &self.identity.box_public_key(),
+                self.seq,
+                message,
+                cx,
+            );
             cx.run_until_parked();
         }
     }
 
     fn of_type<'a>(messages: &'a [Value], kind: &str) -> Vec<&'a Value> {
-        messages.iter().filter(|message| message["type"] == kind).collect()
+        messages
+            .iter()
+            .filter(|message| message["type"] == kind)
+            .collect()
     }
 
     /// Lathe reveals streamed agent text gradually, appending to the message
@@ -1743,7 +2093,9 @@ mod tests {
     /// that missed some.
     /// A bridge with one online phone and one saved, live thread the phone
     /// hasn't subscribed to yet. Returns the thread's key.
-    async fn streaming_thread(cx: &mut TestAppContext) -> (Harness, Rc<StubAgentConnection>, Entity<AcpThread>, String) {
+    async fn streaming_thread(
+        cx: &mut TestAppContext,
+    ) -> (Harness, Rc<StubAgentConnection>, Entity<AcpThread>, String) {
         let (companion, outgoing, identity) = connected_companion(cx);
         cx.update(|cx| {
             crate::tests::enable_companion_for_test(cx);
@@ -1764,7 +2116,8 @@ mod tests {
         let thread_id = ThreadId::new();
         // The store reloads from disk on startup, which would replace a thread
         // saved before the reload finishes.
-        cx.update(|cx| ThreadMetadataStore::global(cx).read(cx).reload_task()).await;
+        cx.update(|cx| ThreadMetadataStore::global(cx).read(cx).reload_task())
+            .await;
         cx.update(|cx| {
             ThreadMetadataStore::global(cx).update(cx, |store, cx| {
                 store.save(
@@ -1792,12 +2145,22 @@ mod tests {
         let bridge = cx.new(|cx| Bridge::new(companion.clone(), threads, cx));
         let phone = FakePhone::new();
         add_paired(&companion, &phone, cx);
-        let mut harness = Harness { bridge, companion, outgoing, identity, phone, seq: 0 };
+        let mut harness = Harness {
+            bridge,
+            companion,
+            outgoing,
+            identity,
+            phone,
+            seq: 0,
+        };
         drain(&mut harness.outgoing);
 
         let device_id = harness.phone.device_id();
         harness.companion.update(cx, |companion, cx| {
-            companion.handle_relay_message(json!({ "type": "presence", "device_id": device_id, "online": true }), cx)
+            companion.handle_relay_message(
+                json!({ "type": "presence", "device_id": device_id, "online": true }),
+                cx,
+            )
         });
         cx.run_until_parked();
         (harness, connection, thread, thread_id.to_key_string())
@@ -1806,11 +2169,15 @@ mod tests {
     #[gpui::test]
     async fn text_revealed_without_an_event_reaches_the_phone(cx: &mut TestAppContext) {
         let (mut harness, connection, thread, thread_key) = streaming_thread(cx).await;
-        harness.say(json!({ "type": "subscribe", "client_msg_id": "m1", "thread_id": thread_key }), cx);
+        harness.say(
+            json!({ "type": "subscribe", "client_msg_id": "m1", "thread_id": thread_key }),
+            cx,
+        );
         drain(&mut harness.outgoing);
 
         // A message long enough that Lathe reveals it over several flushes.
-        let full = "Hello, this reply is revealed a little at a time, the way Lathe streams agent text.";
+        let full =
+            "Hello, this reply is revealed a little at a time, the way Lathe streams agent text.";
         connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::AgentMessageChunk(
             acp_v1::ContentChunk::new(full.into()),
         )]);
@@ -1820,7 +2187,9 @@ mod tests {
                 .iter()
                 .rev()
                 .find_map(|message| match message["type"].as_str() {
-                    Some("thread_delta") => message["op"]["entry"]["markdown"].as_str().map(str::to_string),
+                    Some("thread_delta") => message["op"]["entry"]["markdown"]
+                        .as_str()
+                        .map(str::to_string),
                     Some("thread_snapshot") => message["entries"]
                         .as_array()?
                         .iter()
@@ -1845,10 +2214,14 @@ mod tests {
                 .iter()
                 .rev()
                 .find_map(|entry| match entry {
-                    acp_thread::AgentThreadEntry::AssistantMessage(message) => message.chunks.last().and_then(|chunk| match chunk {
-                        acp_thread::AssistantMessageChunk::Message { block, .. } => block.markdowns().last().cloned(),
-                        _ => None,
-                    }),
+                    acp_thread::AgentThreadEntry::AssistantMessage(message) => {
+                        message.chunks.last().and_then(|chunk| match chunk {
+                            acp_thread::AssistantMessageChunk::Message { block, .. } => {
+                                block.markdowns().last().cloned()
+                            }
+                            _ => None,
+                        })
+                    }
                     _ => None,
                 })
                 .expect("an agent message");
@@ -1888,7 +2261,11 @@ mod tests {
                         "update_entry" => entries[index] = op["entry"].clone(),
                         "append_text" => {
                             appends += 1;
-                            let text = format!("{}{}", entries[index]["markdown"].as_str().unwrap(), op["text"].as_str().unwrap());
+                            let text = format!(
+                                "{}{}",
+                                entries[index]["markdown"].as_str().unwrap(),
+                                op["text"].as_str().unwrap()
+                            );
                             entries[index]["markdown"] = json!(text);
                         }
                         _ => {}
@@ -1897,11 +2274,15 @@ mod tests {
                 seq += ops.len() as u64;
                 assert_eq!(batch["seq"].as_u64(), Some(seq));
             }
-            let last = entries.iter().rev().find_map(|entry| entry["markdown"].as_str().map(str::to_string));
+            let last = entries
+                .iter()
+                .rev()
+                .find_map(|entry| entry["markdown"].as_str().map(str::to_string));
             (appends, last)
         };
 
-        let full = "Hello, this reply is revealed a little at a time, the way Lathe streams agent text.";
+        let full =
+            "Hello, this reply is revealed a little at a time, the way Lathe streams agent text.";
         connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::AgentMessageChunk(
             acp_v1::ContentChunk::new(full.into()),
         )]);
@@ -1915,10 +2296,13 @@ mod tests {
         // More text on the same message goes out as only the new part.
         let (session_id, index) = thread.update(cx, |thread, cx| {
             let index = thread.entries().len() - 1;
-            let acp_thread::AgentThreadEntry::AssistantMessage(message) = &thread.entries()[index] else {
+            let acp_thread::AgentThreadEntry::AssistantMessage(message) = &thread.entries()[index]
+            else {
                 panic!("an agent message");
             };
-            let Some(acp_thread::AssistantMessageChunk::Message { block, .. }) = message.chunks.last() else {
+            let Some(acp_thread::AssistantMessageChunk::Message { block, .. }) =
+                message.chunks.last()
+            else {
                 panic!("a message chunk");
             };
             let markdown = block.markdowns().last().cloned().unwrap();
@@ -1926,9 +2310,13 @@ mod tests {
             (thread.session_id().clone(), index)
         });
         harness.bridge.update(cx, |bridge, cx| {
-            bridge.mark_dirty(&session_id, |stream| {
-                stream.dirty.insert(index);
-            }, cx)
+            bridge.mark_dirty(
+                &session_id,
+                |stream| {
+                    stream.dirty.insert(index);
+                },
+                cx,
+            )
         });
         cx.executor().advance_clock(ENTRY_FLUSH_DELAY * 2);
         cx.run_until_parked();
@@ -1957,8 +2345,16 @@ mod tests {
             HashMap::from_iter([(
                 tool_call_id.clone(),
                 PermissionOptions::Flat(vec![
-                    acp::PermissionOption::new("once", "Allow", acp::PermissionOptionKind::AllowOnce),
-                    acp::PermissionOption::new("always", "Always allow", acp::PermissionOptionKind::AllowAlways),
+                    acp::PermissionOption::new(
+                        "once",
+                        "Allow",
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
+                    acp::PermissionOption::new(
+                        "always",
+                        "Always allow",
+                        acp::PermissionOptionKind::AllowAlways,
+                    ),
                 ]),
             )]),
         ));
@@ -1971,7 +2367,8 @@ mod tests {
         let thread_id = ThreadId::new();
         // The store reloads from disk on startup, which would replace a thread
         // saved before the reload finishes.
-        cx.update(|cx| ThreadMetadataStore::global(cx).read(cx).reload_task()).await;
+        cx.update(|cx| ThreadMetadataStore::global(cx).read(cx).reload_task())
+            .await;
         cx.update(|cx| {
             ThreadMetadataStore::global(cx).update(cx, |store, cx| {
                 store.save(
@@ -1999,19 +2396,38 @@ mod tests {
         let bridge = cx.new(|cx| Bridge::new(companion.clone(), threads, cx));
         let phone = FakePhone::new();
         add_paired(&companion, &phone, cx);
-        let mut harness = Harness { bridge, companion, outgoing, identity, phone, seq: 0 };
+        let mut harness = Harness {
+            bridge,
+            companion,
+            outgoing,
+            identity,
+            phone,
+            seq: 0,
+        };
         drain(&mut harness.outgoing);
 
         // Connecting gets the phone the full picture.
         let device_id = harness.phone.device_id();
         harness.companion.update(cx, |companion, cx| {
-            companion.handle_relay_message(json!({ "type": "presence", "device_id": device_id, "online": true }), cx)
+            companion.handle_relay_message(
+                json!({ "type": "presence", "device_id": device_id, "online": true }),
+                cx,
+            )
         });
         cx.run_until_parked();
         let received = harness.received();
         assert_eq!(received[0]["type"], "hello");
         assert_eq!(received[0]["lathe_version"], "1.2.3");
-        assert_eq!(received[0]["features"], json!(["pull_requests", "close_threads", "terminals", "muted_workspaces", "thread_deltas"]));
+        assert_eq!(
+            received[0]["features"],
+            json!([
+                "pull_requests",
+                "close_threads",
+                "terminals",
+                "muted_workspaces",
+                "thread_deltas"
+            ])
+        );
         let workspaces = of_type(&received, "workspaces");
         assert_eq!(workspaces[0]["list"][0]["name"], "test");
         let listed = &of_type(&received, "threads")[0]["list"][0];
@@ -2019,16 +2435,25 @@ mod tests {
         assert_eq!(listed["title"], "Fix the relay");
         assert_eq!(listed["is_loaded"], true);
         assert_eq!(listed["status"], "idle");
-        assert_eq!(listed["workspace_id"], workspaces[0]["list"][0]["workspace_id"]);
+        assert_eq!(
+            listed["workspace_id"],
+            workspaces[0]["list"][0]["workspace_id"]
+        );
 
         let thread_key = thread_id.to_key_string();
-        harness.say(json!({ "type": "subscribe", "client_msg_id": "m1", "thread_id": thread_key }), cx);
+        harness.say(
+            json!({ "type": "subscribe", "client_msg_id": "m1", "thread_id": thread_key }),
+            cx,
+        );
         let received = harness.received();
         assert_eq!(
             of_type(&received, "thread_snapshot")[0],
             &json!({ "type": "thread_snapshot", "thread_id": thread_key, "seq": 0, "start_index": 0, "entries": [], "has_more_before": false })
         );
-        assert_eq!(of_type(&received, "ack")[0], &json!({ "type": "ack", "client_msg_id": "m1", "ok": true }));
+        assert_eq!(
+            of_type(&received, "ack")[0],
+            &json!({ "type": "ack", "client_msg_id": "m1", "ok": true })
+        );
 
         // Renaming sticks as a user title, reaches subscribers as a delta, and
         // shows in the next thread list.
@@ -2036,12 +2461,18 @@ mod tests {
         cx.executor().advance_clock(LIST_FLUSH_DELAY * 2);
         cx.run_until_parked();
         let received = harness.received();
-        assert_eq!(of_type(&received, "ack")[0], &json!({ "type": "ack", "client_msg_id": "r1", "ok": true }));
+        assert_eq!(
+            of_type(&received, "ack")[0],
+            &json!({ "type": "ack", "client_msg_id": "r1", "ok": true })
+        );
         assert_eq!(
             of_type(&received, "thread_delta")[0]["op"],
             json!({ "kind": "title", "title": "Relay ping fix" })
         );
-        assert_eq!(of_type(&received, "threads").last().unwrap()["list"][0]["title"], "Relay ping fix");
+        assert_eq!(
+            of_type(&received, "threads").last().unwrap()["list"][0]["title"],
+            "Relay ping fix"
+        );
         cx.update(|cx| {
             let store = ThreadMetadataStore::global(cx);
             let metadata = store.read(cx).entry(thread_id).unwrap();
@@ -2059,7 +2490,8 @@ mod tests {
 
         // The phone sends a message; the agent asks for permission.
         connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::ToolCall(
-            acp_v1::ToolCall::new(acp_v1::ToolCallId::new("1"), "Edit relay.rs").kind(acp_v1::ToolKind::Edit),
+            acp_v1::ToolCall::new(acp_v1::ToolCallId::new("1"), "Edit relay.rs")
+                .kind(acp_v1::ToolKind::Edit),
         )]);
         harness.say(json!({ "type": "send_message", "client_msg_id": "m2", "thread_id": thread_key, "text": "Fix it" }), cx);
         cx.executor().advance_clock(ENTRY_FLUSH_DELAY * 2);
@@ -2071,11 +2503,26 @@ mod tests {
             .map(|delta| delta["op"].clone())
             .collect::<Vec<_>>();
         assert!(ops.contains(&json!({ "kind": "new_entry", "entry": { "kind": "user_message", "text": "Fix it" } })), "{ops:#?}");
-        assert!(ops.iter().any(|op| op["entry"]["kind"] == "tool_call" && op["entry"]["title"] == "Edit relay.rs"), "{ops:#?}");
-        assert!(ops.contains(&json!({ "kind": "status", "status": "waiting_authorization" })), "{ops:#?}");
-        let seqs = of_type(&received, "thread_delta").iter().map(|delta| delta["seq"].as_u64().unwrap()).collect::<Vec<_>>();
+        assert!(
+            ops.iter()
+                .any(|op| op["entry"]["kind"] == "tool_call"
+                    && op["entry"]["title"] == "Edit relay.rs"),
+            "{ops:#?}"
+        );
+        assert!(
+            ops.contains(&json!({ "kind": "status", "status": "waiting_authorization" })),
+            "{ops:#?}"
+        );
+        let seqs = of_type(&received, "thread_delta")
+            .iter()
+            .map(|delta| delta["seq"].as_u64().unwrap())
+            .collect::<Vec<_>>();
         // The rename above was seq 1, so these continue from 2 without gaps.
-        assert_eq!(seqs, (2..2 + seqs.len() as u64).collect::<Vec<_>>(), "deltas must be contiguous");
+        assert_eq!(
+            seqs,
+            (2..2 + seqs.len() as u64).collect::<Vec<_>>(),
+            "deltas must be contiguous"
+        );
         let prompt = of_type(&received, "tool_authorization")[0].clone();
         assert_eq!(prompt["tool_title"], "Edit relay.rs");
         assert_eq!(prompt["options"].as_array().unwrap().len(), 2);
@@ -2092,19 +2539,36 @@ mod tests {
         cx.executor().advance_clock(ENTRY_FLUSH_DELAY * 2);
         cx.run_until_parked();
         let received = harness.received();
-        assert_eq!(of_type(&received, "ack")[0], &json!({ "type": "ack", "client_msg_id": "m4", "ok": true }));
-        assert_eq!(of_type(&received, "tool_authorization_resolved")[0]["request_id"], request_id);
-        thread.read_with(cx, |thread, _| assert_eq!(thread.pending_permission_requests().count(), 0));
+        assert_eq!(
+            of_type(&received, "ack")[0],
+            &json!({ "type": "ack", "client_msg_id": "m4", "ok": true })
+        );
+        assert_eq!(
+            of_type(&received, "tool_authorization_resolved")[0]["request_id"],
+            request_id
+        );
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.pending_permission_requests().count(), 0)
+        });
 
         // A replayed message is ignored rather than acted on twice.
         harness.seq += 1;
-        phone_says(&harness.companion, &harness.phone, &harness.identity.box_public_key(), harness.seq,
-            json!({ "type": "authorize", "client_msg_id": "m4", "thread_id": thread_key, "request_id": request_id, "option_id": "once" }), cx);
+        phone_says(
+            &harness.companion,
+            &harness.phone,
+            &harness.identity.box_public_key(),
+            harness.seq,
+            json!({ "type": "authorize", "client_msg_id": "m4", "thread_id": thread_key, "request_id": request_id, "option_id": "once" }),
+            cx,
+        );
         cx.run_until_parked();
         assert!(harness.received().is_empty());
 
         // Once nobody is watching, the next stop is pushed.
-        harness.say(json!({ "type": "unsubscribe", "client_msg_id": "m5", "thread_id": thread_key }), cx);
+        harness.say(
+            json!({ "type": "unsubscribe", "client_msg_id": "m5", "thread_id": thread_key }),
+            cx,
+        );
         harness.received();
         harness.bridge.update(cx, |bridge, cx| {
             bridge.status_changed(&session_id, ThreadStatus::Running, cx);
@@ -2113,13 +2577,20 @@ mod tests {
         let (_, relay) = harness.split();
         assert_eq!(
             of_type(&relay, "push"),
-            [&json!({ "type": "push", "kind": "finished", "thread_id": thread_key, "title": "Relay ping fix" })]
+            [
+                &json!({ "type": "push", "kind": "finished", "thread_id": thread_key, "title": "Relay ping fix" })
+            ]
         );
 
         // Once the phone mutes the thread's workspace, its stops aren't pushed.
-        let workspace = harness
-            .bridge
-            .read_with(cx, |bridge, cx| workspace_id(bridge.thread_metadata(&thread_key, cx).unwrap().folder_paths()));
+        let workspace = harness.bridge.read_with(cx, |bridge, cx| {
+            workspace_id(
+                bridge
+                    .thread_metadata(&thread_key, cx)
+                    .unwrap()
+                    .folder_paths(),
+            )
+        });
         harness.say(json!({ "type": "set_muted_workspaces", "client_msg_id": "w1", "workspace_ids": [workspace] }), cx);
         assert_eq!(of_type(&harness.received(), "ack")[0]["ok"], true);
         harness.bridge.update(cx, |bridge, cx| {
@@ -2128,7 +2599,10 @@ mod tests {
         });
         let (_, relay) = harness.split();
         assert!(of_type(&relay, "push").is_empty());
-        harness.say(json!({ "type": "set_muted_workspaces", "client_msg_id": "w2", "workspace_ids": [] }), cx);
+        harness.say(
+            json!({ "type": "set_muted_workspaces", "client_msg_id": "w2", "workspace_ids": [] }),
+            cx,
+        );
         harness.received();
 
         // Closing archives the thread, as Lathe's archive does, and it leaves the
@@ -2140,23 +2614,44 @@ mod tests {
         cx.executor().advance_clock(LIST_FLUSH_DELAY * 2);
         cx.run_until_parked();
         let received = harness.received();
-        assert_eq!(of_type(&received, "ack")[0], &json!({ "type": "ack", "client_msg_id": "c1", "ok": true }));
-        assert_eq!(of_type(&received, "threads").last().unwrap()["list"], json!([]));
+        assert_eq!(
+            of_type(&received, "ack")[0],
+            &json!({ "type": "ack", "client_msg_id": "c1", "ok": true })
+        );
+        assert_eq!(
+            of_type(&received, "threads").last().unwrap()["list"],
+            json!([])
+        );
         cx.update(|cx| {
             let store = ThreadMetadataStore::global(cx);
             assert!(store.read(cx).entry(thread_id).unwrap().archived);
         });
-        harness.say(json!({ "type": "close_threads", "client_msg_id": "c2", "thread_ids": [thread_key] }), cx);
-        harness.say(json!({ "type": "close_threads", "client_msg_id": "c3", "thread_ids": [] }), cx);
+        harness.say(
+            json!({ "type": "close_threads", "client_msg_id": "c2", "thread_ids": [thread_key] }),
+            cx,
+        );
+        harness.say(
+            json!({ "type": "close_threads", "client_msg_id": "c3", "thread_ids": [] }),
+            cx,
+        );
         let codes = harness
             .received()
             .iter()
             .filter(|message| message["type"] == "ack")
-            .map(|ack| (ack["client_msg_id"].clone(), ack["ok"].clone(), ack["error"]["code"].clone()))
+            .map(|ack| {
+                (
+                    ack["client_msg_id"].clone(),
+                    ack["ok"].clone(),
+                    ack["error"]["code"].clone(),
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             codes,
-            [(json!("c2"), json!(true), Value::Null), (json!("c3"), json!(false), json!("bad_message"))]
+            [
+                (json!("c2"), json!(true), Value::Null),
+                (json!("c3"), json!(false), json!("bad_message"))
+            ]
         );
     }
 
@@ -2171,13 +2666,26 @@ mod tests {
         let bridge = cx.new(|cx| Bridge::new(companion.clone(), threads, cx));
         let phone = FakePhone::new();
         add_paired(&companion, &phone, cx);
-        let mut harness = Harness { bridge, companion, outgoing, identity, phone, seq: 0 };
+        let mut harness = Harness {
+            bridge,
+            companion,
+            outgoing,
+            identity,
+            phone,
+            seq: 0,
+        };
         drain(&mut harness.outgoing);
 
-        harness.say(json!({ "type": "subscribe", "client_msg_id": "m1", "thread_id": "missing" }), cx);
+        harness.say(
+            json!({ "type": "subscribe", "client_msg_id": "m1", "thread_id": "missing" }),
+            cx,
+        );
         harness.say(json!({ "type": "new_thread", "client_msg_id": "m2", "workspace_id": "w", "agent_id": "a", "text": "hi" }), cx);
         harness.say(json!({ "type": "new_thread", "client_msg_id": "m4", "workspace_id": "w", "agent_id": "a", "text": "   " }), cx);
-        harness.say(json!({ "type": "launch_missiles", "client_msg_id": "m3" }), cx);
+        harness.say(
+            json!({ "type": "launch_missiles", "client_msg_id": "m3" }),
+            cx,
+        );
         harness.say(json!({ "type": "list_pull_requests", "client_msg_id": "p1", "workspace_id": "w", "filter": "open", "reviewing": false }), cx);
         harness.say(json!({ "type": "get_pull_request_diff", "client_msg_id": "p2", "workspace_id": "w", "repo_id": "r", "number": 1 }), cx);
         harness.say(
@@ -2227,12 +2735,20 @@ mod tests {
             crate::init_threads(cx);
             ThreadMetadataStore::init_global(cx);
         });
-        cx.update(|cx| ThreadMetadataStore::global(cx).read(cx).reload_task()).await;
+        cx.update(|cx| ThreadMetadataStore::global(cx).read(cx).reload_task())
+            .await;
         let threads = cx.update(|cx| CompanionThreads::global(cx).unwrap());
         let bridge = cx.new(|cx| Bridge::new(companion.clone(), threads, cx));
         let phone = FakePhone::new();
         add_paired(&companion, &phone, cx);
-        let mut harness = Harness { bridge, companion, outgoing, identity, phone, seq: 0 };
+        let mut harness = Harness {
+            bridge,
+            companion,
+            outgoing,
+            identity,
+            phone,
+            seq: 0,
+        };
         drain(&mut harness.outgoing);
 
         // What `new_thread` leaves behind after asking the panel for a thread.
@@ -2262,7 +2778,9 @@ mod tests {
                             created_at: None,
                             interacted_at: None,
                             workspace_id: None,
-                            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[Path::new(path!("/test"))])),
+                            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[
+                                Path::new(path!("/test")),
+                            ])),
                             remote_connection: None,
                             archived: false,
                         },
@@ -2275,24 +2793,45 @@ mod tests {
 
         // A draft without a session can't be subscribed to yet.
         save(None, cx);
-        assert!(harness.received().iter().all(|message| message["type"] != "ack"));
+        assert!(
+            harness
+                .received()
+                .iter()
+                .all(|message| message["type"] != "ack")
+        );
 
         save(Some(acp::SessionId::new("s1")), cx);
         let received = harness.received();
-        let ack = received.iter().find(|message| message["type"] == "ack").unwrap();
+        let ack = received
+            .iter()
+            .find(|message| message["type"] == "ack")
+            .unwrap();
         assert_eq!(
             ack,
             &json!({ "type": "ack", "client_msg_id": "n1", "ok": true, "thread_id": thread_id.to_key_string() })
         );
-        harness.bridge.read_with(cx, |bridge, _| assert!(bridge.pending_new_threads.is_empty()));
+        harness.bridge.read_with(cx, |bridge, _| {
+            assert!(bridge.pending_new_threads.is_empty())
+        });
     }
 
-    fn select(id: &str, category: Option<acp::SessionConfigOptionCategory>, values: &[&str]) -> acp::SessionConfigOption {
+    fn select(
+        id: &str,
+        category: Option<acp::SessionConfigOptionCategory>,
+        values: &[&str],
+    ) -> acp::SessionConfigOption {
         let options = values
             .iter()
-            .map(|value| acp::SessionConfigSelectOption::new(value.to_string(), value.to_uppercase()))
+            .map(|value| {
+                acp::SessionConfigSelectOption::new(value.to_string(), value.to_uppercase())
+            })
             .collect::<Vec<_>>();
-        let mut option = acp::SessionConfigOption::select(id.to_string(), id.to_uppercase(), values[0].to_string(), options);
+        let mut option = acp::SessionConfigOption::select(
+            id.to_string(),
+            id.to_uppercase(),
+            values[0].to_string(),
+            options,
+        );
         option.category = category;
         option
     }
@@ -2300,14 +2839,29 @@ mod tests {
     #[test]
     fn only_model_and_effort_reach_the_phone() {
         let options = convert_config_options(&[
-            select("model", Some(acp::SessionConfigOptionCategory::Model), &["opus", "sonnet"]),
-            select("effort", Some(acp::SessionConfigOptionCategory::ThoughtLevel), &["low", "high"]),
+            select(
+                "model",
+                Some(acp::SessionConfigOptionCategory::Model),
+                &["opus", "sonnet"],
+            ),
+            select(
+                "effort",
+                Some(acp::SessionConfigOptionCategory::ThoughtLevel),
+                &["low", "high"],
+            ),
             // Some modes skip permission prompts, so they stay on the desk.
-            select("mode", Some(acp::SessionConfigOptionCategory::Mode), &["default", "bypassPermissions"]),
+            select(
+                "mode",
+                Some(acp::SessionConfigOptionCategory::Mode),
+                &["default", "bypassPermissions"],
+            ),
             select("uncategorized", None, &["a"]),
         ]);
         assert_eq!(
-            options.iter().map(|option| option.config_id.as_str()).collect::<Vec<_>>(),
+            options
+                .iter()
+                .map(|option| option.config_id.as_str())
+                .collect::<Vec<_>>(),
             ["model", "effort"]
         );
         assert_eq!(options[1].category, ConfigCategory::ThoughtLevel);
@@ -2316,8 +2870,18 @@ mod tests {
             ConfigKind::Select {
                 current_value: "opus".into(),
                 options: vec![
-                    ConfigChoice { value: "opus".into(), name: "OPUS".into(), description: None, group: None },
-                    ConfigChoice { value: "sonnet".into(), name: "SONNET".into(), description: None, group: None },
+                    ConfigChoice {
+                        value: "opus".into(),
+                        name: "OPUS".into(),
+                        description: None,
+                        group: None
+                    },
+                    ConfigChoice {
+                        value: "sonnet".into(),
+                        name: "SONNET".into(),
+                        description: None,
+                        group: None
+                    },
                 ],
             }
         );
@@ -2325,9 +2889,16 @@ mod tests {
 
     #[test]
     fn only_offered_values_are_passed_on() {
-        let options = convert_config_options(&[select("effort", Some(acp::SessionConfigOptionCategory::ThoughtLevel), &["low", "high"])]);
+        let options = convert_config_options(&[select(
+            "effort",
+            Some(acp::SessionConfigOptionCategory::ThoughtLevel),
+            &["low", "high"],
+        )]);
         let effort = &options[0];
-        assert_eq!(config_value(effort, &json!("high")).ok(), Some(acp::SessionConfigOptionValue::id("high")));
+        assert_eq!(
+            config_value(effort, &json!("high")).ok(),
+            Some(acp::SessionConfigOptionValue::id("high"))
+        );
         assert!(config_value(effort, &json!("max")).is_err());
         assert!(config_value(effort, &json!(true)).is_err());
         assert!(config_value(effort, &json!(null)).is_err());
@@ -2335,15 +2906,24 @@ mod tests {
 
     #[test]
     fn pages_stay_within_one_frame() {
-        let big = |index: usize| Entry::AssistantMessage { markdown: format!("{index}{}", "x".repeat(40_000)) };
+        let big = |index: usize| Entry::AssistantMessage {
+            markdown: format!("{index}{}", "x".repeat(40_000)),
+        };
         let entries = (0..120).map(big).collect::<Vec<_>>();
         let start = page_start(&entries, entries.len());
         let page = &entries[start..];
         let size: usize = page.iter().map(entries::entry_size).sum();
-        assert!(size <= crate::companion::MAX_FRAME_PLAINTEXT_BYTES, "{size}");
+        assert!(
+            size <= crate::companion::MAX_FRAME_PLAINTEXT_BYTES,
+            "{size}"
+        );
         assert!(page.len() >= 3 && page.len() < PAGE_SIZE, "{}", page.len());
 
-        let small = (0..120).map(|index| Entry::UserMessage { text: index.to_string() }).collect::<Vec<_>>();
+        let small = (0..120)
+            .map(|index| Entry::UserMessage {
+                text: index.to_string(),
+            })
+            .collect::<Vec<_>>();
         assert_eq!(page_start(&small, small.len()), 120 - PAGE_SIZE);
         assert_eq!(page_start(&small, 10), 0);
         assert_eq!(page_start(&small, 0), 0);
@@ -2355,7 +2935,13 @@ mod tests {
         let second = PathList::new(&[Path::new("/b")]);
         assert_eq!(workspace_id(&first), workspace_id(&first.clone()));
         assert_ne!(workspace_id(&first), workspace_id(&second));
-        assert_eq!(workspace_name(&PathList::new(&[Path::new("/code/lathe"), Path::new("/code/app")])), "lathe, app");
+        assert_eq!(
+            workspace_name(&PathList::new(&[
+                Path::new("/code/lathe"),
+                Path::new("/code/app")
+            ])),
+            "lathe, app"
+        );
     }
 }
 
@@ -2379,11 +2965,15 @@ mod off_tests {
         let project = Project::test(fs, [], cx).await;
         let connection = Rc::new(StubAgentConnection::new());
         let _thread = cx
-            .update(|cx| connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx))
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
             .await
             .unwrap();
         cx.run_until_parked();
         let threads = cx.update(|cx| CompanionThreads::global(cx).unwrap());
-        threads.read_with(cx, |threads, _| assert_eq!(threads.top_level_threads().count(), 0));
+        threads.read_with(cx, |threads, _| {
+            assert_eq!(threads.top_level_threads().count(), 0)
+        });
     }
 }

@@ -1,8 +1,7 @@
 use crate::{Companion, CompanionSettings, ConnectionStatus, PairingState, activity};
 use gpui::{
-    Bounds, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla, Subscription, Task,
-    canvas,
-    fill, point, px, size,
+    Bounds, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    Subscription, Task, canvas, fill, point, px, size,
 };
 use qrcodegen::{QrCode, QrCodeEcc};
 use settings::Settings as _;
@@ -24,7 +23,9 @@ pub fn register(workspace: &mut Workspace) {
         let Some(companion) = Companion::global(cx) else {
             return;
         };
-        workspace.toggle_modal(window, cx, |window, cx| CompanionModal::new(companion, window, cx));
+        workspace.toggle_modal(window, cx, |window, cx| {
+            CompanionModal::new(companion, window, cx)
+        });
     });
 }
 
@@ -86,19 +87,23 @@ impl Render for TitleBarIndicator {
             .map(|device| device.name.clone())
             .collect::<Vec<_>>();
         let (color, tooltip): (Color, SharedString) = match companion.status() {
-            ConnectionStatus::Connected if !online.is_empty() => {
-                (Color::Accent, format!("Lathe Companion: {} connected", online.join(", ")).into())
-            }
+            ConnectionStatus::Connected if !online.is_empty() => (
+                Color::Accent,
+                format!("Lathe Companion: {} connected", online.join(", ")).into(),
+            ),
             ConnectionStatus::Connected if companion.devices().is_empty() => {
                 (Color::Muted, "Lathe Companion: no phone paired".into())
             }
-            ConnectionStatus::Connected => (Color::Muted, "Lathe Companion: no phone connected".into()),
+            ConnectionStatus::Connected => {
+                (Color::Muted, "Lathe Companion: no phone connected".into())
+            }
             ConnectionStatus::Off | ConnectionStatus::Connecting => {
                 (Color::Muted, "Lathe Companion: connecting…".into())
             }
-            ConnectionStatus::Reconnecting { .. } => {
-                (Color::Warning, "Lathe Companion: reconnecting to the relay…".into())
-            }
+            ConnectionStatus::Reconnecting { .. } => (
+                Color::Warning,
+                "Lathe Companion: reconnecting to the relay…".into(),
+            ),
             ConnectionStatus::Stopped { .. } | ConnectionStatus::Failed { .. } => {
                 (Color::Error, "Lathe Companion: not connected".into())
             }
@@ -117,7 +122,11 @@ impl Render for TitleBarIndicator {
             // No tooltip: reaching for it with the mouse makes you active, and
             // the label goes before you could read one. The dialog explains it.
             .when(self.idle && minutes > 0, |this| {
-                this.child(Label::new("Idle").size(LabelSize::XSmall).color(Color::Muted))
+                this.child(
+                    Label::new("Idle")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
             })
     }
 }
@@ -151,19 +160,31 @@ impl CompanionModal {
         let idle_minutes_subscription = editor.subscribe(
             Box::new(move |event, window, cx| {
                 let text = field.read(cx).text(cx);
-                let parsed = text.trim().parse::<u32>().ok().filter(|minutes| *minutes <= MAX_IDLE_MINUTES);
+                let parsed = text
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|minutes| *minutes <= MAX_IDLE_MINUTES);
                 match (event, parsed) {
                     (ErasedEditorEvent::BufferEdited, Some(minutes)) => {
                         field.update(cx, |field, cx| field.set_error(None::<SharedString>, cx));
                         if minutes != CompanionSettings::get_global(cx).idle_minutes {
-                            settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
-                                settings.companion.get_or_insert_default().idle_minutes = Some(minutes);
-                            });
+                            settings::update_settings_file(
+                                <dyn fs::Fs>::global(cx),
+                                cx,
+                                move |settings, _| {
+                                    settings.companion.get_or_insert_default().idle_minutes =
+                                        Some(minutes);
+                                },
+                            );
                         }
                     }
                     (ErasedEditorEvent::BufferEdited, None) if !text.trim().is_empty() => {
                         field.update(cx, |field, cx| {
-                            field.set_error(Some(format!("A whole number from 0 to {MAX_IDLE_MINUTES}")), cx)
+                            field.set_error(
+                                Some(format!("A whole number from 0 to {MAX_IDLE_MINUTES}")),
+                                cx,
+                            )
                         });
                     }
                     (ErasedEditorEvent::Blurred, None) => {
@@ -190,7 +211,9 @@ impl CompanionModal {
         // Keeps the pairing code's expiry countdown current.
         let countdown = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(15)).await;
+                cx.background_executor()
+                    .timer(Duration::from_secs(15))
+                    .await;
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     return;
                 }
@@ -225,11 +248,17 @@ impl CompanionModal {
                     .child(
                         Switch::new(
                             "companion-terminal-input",
-                            if allowed { ToggleState::Selected } else { ToggleState::Unselected },
+                            if allowed {
+                                ToggleState::Selected
+                            } else {
+                                ToggleState::Unselected
+                            },
                         )
-                        .on_click(cx.listener(|this, state: &ToggleState, _, cx| {
-                            this.set_terminal_input(matches!(state, ToggleState::Selected), cx)
-                        })),
+                        .on_click(cx.listener(
+                            |this, state: &ToggleState, _, cx| {
+                                this.set_terminal_input(matches!(state, ToggleState::Selected), cx)
+                            },
+                        )),
                     ),
             )
             .child(
@@ -430,9 +459,17 @@ impl CompanionModal {
             .collect::<Vec<_>>();
         v_flex()
             .gap_1()
-            .child(Label::new("Paired phones").size(LabelSize::Small).color(Color::Muted))
+            .child(
+                Label::new("Paired phones")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
             .when(rows.is_empty(), |this| {
-                this.child(Label::new("None yet").size(LabelSize::Small).color(Color::Muted))
+                this.child(
+                    Label::new("None yet")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
             })
             .children(rows)
     }

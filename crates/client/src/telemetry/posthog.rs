@@ -101,6 +101,7 @@ mod tests {
             app_version: "1.0.0".into(),
             os_name: "macOS".into(),
             os_version: None,
+            desktop_environment: None,
             architecture: "aarch64".into(),
             release_channel: None,
             events: names

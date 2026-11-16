@@ -124,14 +124,6 @@ impl PaintAboveMinimap {
     }
 }
 
-impl IntoElement for PaintAboveMinimap {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for PaintAboveMinimap {
     type RequestLayoutState = ();
     type PrepaintState = ();

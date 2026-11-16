@@ -65,7 +65,9 @@ impl Identity {
     /// Answers the relay's authentication challenge by signing the decoded
     /// nonce bytes.
     pub fn sign_challenge(&self, nonce: &str) -> Result<String> {
-        let nonce = STANDARD.decode(nonce).context("challenge nonce is not base64")?;
+        let nonce = STANDARD
+            .decode(nonce)
+            .context("challenge nonce is not base64")?;
         Ok(STANDARD.encode(self.signing_key.sign(&nonce).to_bytes()))
     }
 
@@ -78,8 +80,15 @@ impl Identity {
         Ok((STANDARD.encode(nonce), STANDARD.encode(ciphertext)))
     }
 
-    pub fn decrypt_from(&self, sender: &PublicKey, nonce: &str, ciphertext: &str) -> Result<Vec<u8>> {
-        let nonce = STANDARD.decode(nonce).context("frame nonce is not base64")?;
+    pub fn decrypt_from(
+        &self,
+        sender: &PublicKey,
+        nonce: &str,
+        ciphertext: &str,
+    ) -> Result<Vec<u8>> {
+        let nonce = STANDARD
+            .decode(nonce)
+            .context("frame nonce is not base64")?;
         let nonce: [u8; 24] = nonce
             .try_into()
             .map_err(|_| anyhow!("frame nonce has the wrong length"))?;
@@ -161,7 +170,8 @@ mod tests {
     const SIGN_SEED: &str = "MzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVI=";
     const SIGN_PUBLIC: &str = "TjDlN9oNdK3AZCssMw2ncymUxGBYXjmnCh3VEaYIxHs=";
     const CHALLENGE_NONCE: &str = "BwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSY=";
-    const SIGNATURE: &str = "p8xLfysH/XDe+9UAfP/IW0t+cYeg1CLmZlovDbSluDGFkSeYaXmaki1hZwOhJx4jY5wehdLkX1RcympKrCDdCw==";
+    const SIGNATURE: &str =
+        "p8xLfysH/XDe+9UAfP/IW0t+cYeg1CLmZlovDbSluDGFkSeYaXmaki1hZwOhJx4jY5wehdLkX1RcympKrCDdCw==";
 
     fn identity(box_secret: &str) -> Identity {
         let mut bytes = STANDARD.decode(SIGN_SEED).unwrap();
@@ -183,7 +193,10 @@ mod tests {
             identity(BOX_RECIPIENT_SECRET).box_public_key(),
             public_key(BOX_RECIPIENT_PUBLIC)
         );
-        assert_eq!(identity(BOX_SENDER_SECRET).signing_public_key(), SIGN_PUBLIC);
+        assert_eq!(
+            identity(BOX_SENDER_SECRET).signing_public_key(),
+            SIGN_PUBLIC
+        );
     }
 
     #[test]

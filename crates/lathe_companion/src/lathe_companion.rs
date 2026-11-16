@@ -6,14 +6,14 @@ mod bridge;
 mod companion;
 mod companion_modal;
 mod connection;
+pub mod crypto;
 mod entries;
+pub mod protocol;
 mod pull_requests;
 mod terminals;
-pub mod crypto;
-pub mod protocol;
 
 use acp_thread::{AcpThread, AcpThreadEvent, ForegroundActivity};
-use agent_client_protocol::schema::v2 as acp;
+use agent_client_protocol::v2::schema as acp;
 use agent_ui::thread_metadata_store::ThreadMetadataStore;
 use collections::HashMap;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, WeakEntity};
@@ -43,8 +43,8 @@ impl Settings for CompanionSettings {
     }
 }
 
-pub use companion_modal::OpenCompanion;
 pub use companion::{Companion, CompanionEvent, ConnectionStatus, PairedDevice, PairingState};
+pub use companion_modal::OpenCompanion;
 
 pub fn init(cx: &mut App) {
     companion::init(cx);
@@ -244,14 +244,16 @@ fn thread_status(thread: &AcpThread, errored: bool) -> ThreadStatus {
     match thread.foreground_activity() {
         ForegroundActivity::RequiresAction => ThreadStatus::WaitingInput,
         ForegroundActivity::Running => ThreadStatus::Running,
-        ForegroundActivity::Idle | ForegroundActivity::Unconfirmed | ForegroundActivity::Unknown
+        ForegroundActivity::Idle
+        | ForegroundActivity::Unconfirmed
+        | ForegroundActivity::Unknown
             if errored =>
         {
             ThreadStatus::Error
         }
-        ForegroundActivity::Idle | ForegroundActivity::Unconfirmed | ForegroundActivity::Unknown => {
-            ThreadStatus::Idle
-        }
+        ForegroundActivity::Idle
+        | ForegroundActivity::Unconfirmed
+        | ForegroundActivity::Unknown => ThreadStatus::Idle,
     }
 }
 
@@ -261,7 +263,7 @@ mod tests {
     use acp_thread::{
         AgentConnection as _, PermissionOptions, SelectedPermissionOutcome, StubAgentConnection,
     };
-    use agent_client_protocol::schema::v1 as acp_v1;
+    use agent_client_protocol::v1::schema as acp_v1;
     use gpui::TestAppContext;
     use project::{FakeFs, Project};
     use settings::SettingsStore;
@@ -338,10 +340,14 @@ mod tests {
                 Some(ThreadStatus::WaitingAuthorization)
             );
         });
-        assert!(events.borrow().contains(&CompanionThreadsEvent::StatusChanged {
-            session_id: session_id.clone(),
-            status: ThreadStatus::WaitingAuthorization,
-        }));
+        assert!(
+            events
+                .borrow()
+                .contains(&CompanionThreadsEvent::StatusChanged {
+                    session_id: session_id.clone(),
+                    status: ThreadStatus::WaitingAuthorization,
+                })
+        );
 
         thread.update(cx, |thread, cx| {
             thread.authorize_tool_call(

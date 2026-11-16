@@ -11,7 +11,7 @@ use acp_thread::{
     AcpThread, AgentThreadEntry, AssistantMessageChunk, ElicitationStatus, PermissionOptions,
     PermissionRequest, ToolCall, ToolCallContent,
 };
-use agent_client_protocol::schema::v2 as acp;
+use agent_client_protocol::v2::schema as acp;
 use gpui::App;
 
 /// Diffs bigger than this are left out; the phone shows the tool call without
@@ -37,7 +37,9 @@ pub fn entry_size(entry: &Entry) -> usize {
 fn fit(mut entry: Entry) -> Entry {
     while entry_size(&entry) > MAX_ENTRY_BYTES {
         match &mut entry {
-            Entry::ToolCall { diff: Some(diffs), .. } if !diffs.is_empty() => {
+            Entry::ToolCall {
+                diff: Some(diffs), ..
+            } if !diffs.is_empty() => {
                 diffs.pop();
             }
             _ => break,
@@ -56,12 +58,18 @@ fn fit(mut entry: Entry) -> Entry {
         Entry::UserMessage { text: content }
         | Entry::AssistantMessage { markdown: content }
         | Entry::Thought { markdown: content }
-        | Entry::ToolCall { title: content, .. } => truncate_with_note(content, MAX_ENTRY_BYTES / 2),
+        | Entry::ToolCall { title: content, .. } => {
+            truncate_with_note(content, MAX_ENTRY_BYTES / 2)
+        }
         Entry::Plan { items } => {
             for item in items.iter_mut() {
                 truncate_with_note(&mut item.text, 512);
             }
-            while items.len() > 1 && entry_size(&Entry::Plan { items: items.clone() }) > MAX_ENTRY_BYTES {
+            while items.len() > 1
+                && entry_size(&Entry::Plan {
+                    items: items.clone(),
+                }) > MAX_ENTRY_BYTES
+            {
                 items.pop();
             }
         }
@@ -90,7 +98,9 @@ fn full_entry(thread: &AcpThread, entry: &AgentThreadEntry, cx: &App) -> Entry {
             let (mut text, mut thoughts) = (Vec::new(), Vec::new());
             for chunk in &message.chunks {
                 match chunk {
-                    AssistantMessageChunk::Message { block, .. } => text.push(block.to_markdown(cx)),
+                    AssistantMessageChunk::Message { block, .. } => {
+                        text.push(block.to_markdown(cx))
+                    }
                     AssistantMessageChunk::Thought { block, .. } => {
                         thoughts.push(block.to_markdown(cx))
                     }
@@ -142,7 +152,8 @@ fn tool_call(call: &ToolCall, cx: &App) -> Entry {
         tool_kind: tool_kind(call.kind()),
         status: match call.status() {
             acp_thread::ToolCallStatus::Pending
-            | acp_thread::ToolCallStatus::WaitingForConfirmation => ToolCallStatus::Pending,
+            | acp_thread::ToolCallStatus::WaitingForConfirmation
+            | acp_thread::ToolCallStatus::Paused => ToolCallStatus::Pending,
             acp_thread::ToolCallStatus::InProgress => ToolCallStatus::Running,
             acp_thread::ToolCallStatus::Completed => ToolCallStatus::Completed,
             acp_thread::ToolCallStatus::Failed => ToolCallStatus::Failed,
@@ -193,10 +204,8 @@ fn file_diff(path: String, old_text: &str, new_text: &str) -> Option<FileDiff> {
         return None;
     }
     let unified_diff = language::unified_diff(old_text, new_text);
-    (!unified_diff.is_empty() && unified_diff.len() <= MAX_DIFF_BYTES).then_some(FileDiff {
-        path,
-        unified_diff,
-    })
+    (!unified_diff.is_empty() && unified_diff.len() <= MAX_DIFF_BYTES)
+        .then_some(FileDiff { path, unified_diff })
 }
 
 pub fn request_id(request: &PermissionRequest) -> String {
@@ -239,24 +248,22 @@ pub fn tool_authorization(
 }
 
 pub fn permission_options(request: &PermissionRequest) -> Vec<PermissionOption> {
-    let options: Vec<&acp::PermissionOption> = match (
-        request.legacy_options(),
-        request.generic_request(),
-    ) {
-        (Some(PermissionOptions::Flat(options)), _) => options.iter().collect(),
-        (
-            Some(
-                PermissionOptions::Dropdown(choices)
-                | PermissionOptions::DropdownWithPatterns { choices, .. },
-            ),
-            _,
-        ) => choices
-            .iter()
-            .flat_map(|choice| [&choice.allow, &choice.deny])
-            .collect(),
-        (None, Some(generic)) => generic.options.iter().collect(),
-        (None, None) => Vec::new(),
-    };
+    let options: Vec<&acp::PermissionOption> =
+        match (request.legacy_options(), request.generic_request()) {
+            (Some(PermissionOptions::Flat(options)), _) => options.iter().collect(),
+            (
+                Some(
+                    PermissionOptions::Dropdown(choices)
+                    | PermissionOptions::DropdownWithPatterns { choices, .. },
+                ),
+                _,
+            ) => choices
+                .iter()
+                .flat_map(|choice| [&choice.allow, &choice.deny])
+                .collect(),
+            (None, Some(generic)) => generic.options.iter().collect(),
+            (None, None) => Vec::new(),
+        };
     options
         .into_iter()
         .filter_map(|option| {
@@ -318,7 +325,9 @@ mod tests {
 
     #[test]
     fn leaves_small_entries_alone() {
-        let entry = Entry::AssistantMessage { markdown: "Done.".into() };
+        let entry = Entry::AssistantMessage {
+            markdown: "Done.".into(),
+        };
         assert_eq!(fit(entry.clone()), entry);
     }
 
@@ -332,23 +341,35 @@ mod tests {
             diff: Some(vec![diff(20_000), diff(20_000), diff(20_000)]),
         });
         assert!(entry_size(&entry) <= MAX_ENTRY_BYTES);
-        let Entry::ToolCall { title, diff, .. } = entry else { panic!() };
+        let Entry::ToolCall { title, diff, .. } = entry else {
+            panic!()
+        };
         assert_eq!(title, "Edit");
         assert_eq!(diff.map(|diffs| diffs.len()), Some(2));
     }
 
     #[test]
     fn truncates_long_text_with_a_note() {
-        let entry = fit(Entry::UserMessage { text: "é".repeat(100_000) });
+        let entry = fit(Entry::UserMessage {
+            text: "é".repeat(100_000),
+        });
         assert!(entry_size(&entry) <= MAX_ENTRY_BYTES);
-        let Entry::UserMessage { text } = entry else { panic!() };
+        let Entry::UserMessage { text } = entry else {
+            panic!()
+        };
         assert!(text.ends_with(TRUNCATED_NOTE));
     }
 
     #[test]
     fn caps_text_that_escaping_inflates() {
         // Each control character becomes six bytes of JSON.
-        let entry = fit(Entry::AssistantMessage { markdown: "\u{1}".repeat(40_000) });
-        assert!(entry_size(&entry) <= MAX_ENTRY_BYTES * 3, "{}", entry_size(&entry));
+        let entry = fit(Entry::AssistantMessage {
+            markdown: "\u{1}".repeat(40_000),
+        });
+        assert!(
+            entry_size(&entry) <= MAX_ENTRY_BYTES * 3,
+            "{}",
+            entry_size(&entry)
+        );
     }
 }

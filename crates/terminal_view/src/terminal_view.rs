@@ -14,9 +14,9 @@ use editor::{
 use gpui::{
     Action, AnyElement, App, ClipboardEntry, Corners, DismissEvent, Entity, EventEmitter,
     ExternalPaths, FocusHandle, Focusable, Font, Hsla, KeyContext, KeyDownEvent, Keystroke,
-    MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Rems, Render, ScrollEvent,
-    Styled, Subscription, Task, TaskExt, WeakEntity, WindowId, actions, anchored, deferred, div,
-    hsla,
+    MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, Rems, Render, ScrollDelta,
+    ScrollEvent, Styled, Subscription, Task, TaskExt, WeakEntity, WindowId, actions, anchored,
+    deferred, div, hsla, px,
 };
 use menu;
 use persistence::TerminalDb;
@@ -953,7 +953,23 @@ impl TerminalView {
         max_scroll_top_in_lines as f32 * line_height
     }
 
-    fn scroll_wheel(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
+    fn scroll_wheel(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.modifiers.secondary(cx)
+            && matches!(self.mode, TerminalMode::Standalone)
+            && EditorSettings::get_global(cx).mouse_wheel_zoom
+        {
+            let delta_y = match event.delta {
+                ScrollDelta::Pixels(pixels) => pixels.y.into(),
+                ScrollDelta::Lines(lines) => lines.y,
+            };
+            if delta_y > 0.0 {
+                theme_settings::adjust_all_font_sizes(window, cx, px(1.0));
+            } else if delta_y < 0.0 {
+                theme_settings::adjust_all_font_sizes(window, cx, px(-1.0));
+            }
+            return cx.stop_propagation();
+        }
+
         let terminal_content = self.terminal.read(cx).last_content();
 
         if self.block_below_cursor.is_some() && terminal_content.display_offset == 0 {
@@ -2561,7 +2577,7 @@ fn first_project_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, UpdateGlobal, VisualTestContext};
+    use gpui::{ScrollDelta, TestAppContext, UpdateGlobal, VisualTestContext};
     use project::{Entry, Project, ProjectPath, Worktree};
     use remote::RemoteClient;
     use std::path::{Path, PathBuf};
@@ -2659,6 +2675,93 @@ mod tests {
             assert!(!view.blinking_terminal_enabled);
             assert!(terminal.read(cx).matches.is_empty());
         });
+    }
+
+    #[gpui::test]
+    async fn test_mouse_wheel_zoom(cx: &mut TestAppContext) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        let (_pane, _terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, false, cx);
+
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+
+        let set_mouse_wheel_zoom = |enabled: bool, cx: &mut VisualTestContext| {
+            cx.update(|_window, cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.editor.mouse_wheel_zoom = Some(enabled);
+                    });
+                });
+            });
+        };
+
+        // Lathe zooms per window, so read the window's size rather than the global setting.
+        let buffer_font_size = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                theme_settings::ThemeSettings::get_global(cx).buffer_font_size_in_window(window, cx)
+            })
+        };
+
+        let zoom_scroll =
+            |position: gpui::Point<Pixels>, lines: f32, cx: &mut VisualTestContext| {
+                let modifiers = cx.read(|cx| gpui::Modifiers::secondary_key(cx));
+
+                cx.simulate_event(ScrollEvent {
+                    position,
+                    delta: ScrollDelta::Lines(gpui::point(0., lines)),
+                    modifiers,
+                    ..Default::default()
+                });
+            };
+
+        cx.simulate_resize(gpui::size(px(400.), px(200.)));
+        cx.draw(
+            gpui::Point::default(),
+            gpui::size(px(400.), px(200.)),
+            |_, _| terminal_view.clone().into_any_element(),
+        );
+        cx.run_until_parked();
+
+        let position =
+            terminal_view.read_with(&cx, |view, cx| view.terminal_bounds(cx).bounds.center());
+
+        set_mouse_wheel_zoom(true, &mut cx);
+        let initial_font_size = buffer_font_size(&mut cx);
+        zoom_scroll(position, 1., &mut cx);
+        assert!(buffer_font_size(&mut cx) > initial_font_size);
+        zoom_scroll(position, -1., &mut cx);
+        assert_eq!(buffer_font_size(&mut cx), initial_font_size);
+        zoom_scroll(position, -1., &mut cx);
+        assert!(buffer_font_size(&mut cx) < initial_font_size);
+
+        set_mouse_wheel_zoom(false, &mut cx);
+        let initial_font_size = buffer_font_size(&mut cx);
+        zoom_scroll(position, 1., &mut cx);
+        assert_eq!(buffer_font_size(&mut cx), initial_font_size);
+
+        set_mouse_wheel_zoom(true, &mut cx);
+        cx.update(|window, cx| {
+            terminal_view.update(cx, |terminal_view, cx| {
+                terminal_view.set_embedded_mode(None, cx);
+
+                // Embedded terminals ignore scroll events unless focused.
+                window.focus(&terminal_view.focus_handle, cx)
+            });
+        });
+
+        cx.draw(
+            gpui::Point::default(),
+            gpui::size(px(400.), px(200.)),
+            |_, _| terminal_view.clone().into_any_element(),
+        );
+        cx.run_until_parked();
+
+        let position =
+            terminal_view.read_with(&cx, |view, cx| view.terminal_bounds(cx).bounds.center());
+
+        let initial_font_size = buffer_font_size(&mut cx);
+        zoom_scroll(position, 1., &mut cx);
+        assert_eq!(buffer_font_size(&mut cx), initial_font_size);
     }
 
     #[gpui::test]

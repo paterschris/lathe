@@ -15,32 +15,26 @@ pub(super) enum WorktreeOperation {
     Switch,
 }
 
-fn maybe_propagate_worktree_trust(
+async fn maybe_propagate_worktree_trust(
     source_workspace: &WeakEntity<Workspace>,
     new_workspace: &Entity<Workspace>,
     paths: &[PathBuf],
     cx: &mut AsyncWindowContext,
 ) {
-    cx.update(|_, cx| {
+    let inherit_restriction = cx.update(|window, cx| {
         if ProjectSettings::get_global(cx).session.trust_all_worktrees {
-            return;
+            return None;
         }
-        let Some(trusted_store) = TrustedWorktrees::try_get_global(cx) else {
-            return;
-        };
-
-        let source_is_trusted = source_workspace
-            .upgrade()
-            .map(|workspace| {
-                let source_worktree_store = workspace.read(cx).project().read(cx).worktree_store();
-                !trusted_store
-                    .read(cx)
-                    .has_restricted_worktrees(&source_worktree_store, cx)
-            })
-            .unwrap_or(false);
-
-        if !source_is_trusted {
-            return;
+        let source_workspace = source_workspace.upgrade()?;
+        let source_worktree_store = source_workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .worktree_store();
+        if TrustedWorktrees::has_restricted_worktrees(&source_worktree_store, cx) {
+            return Some(new_workspace.update(cx, |new_workspace, cx| {
+                new_workspace.inherit_restricted_worktrees(&source_workspace, window, cx)
+            }));
         }
 
         let worktree_store = new_workspace.read(cx).project().read(cx).worktree_store();
@@ -53,10 +47,24 @@ fn maybe_propagate_worktree_trust(
             .collect();
 
         if !paths_to_trust.is_empty() {
-            trusted_store.update(cx, |store, cx| {
-                store.trust(&worktree_store, paths_to_trust, cx);
-            });
+            if let Some(trusted_store) = TrustedWorktrees::try_get_global(cx) {
+                trusted_store.update(cx, |store, cx| {
+                    store.trust(&worktree_store, paths_to_trust, cx);
+                });
+            }
         }
+        None
+    });
+    if let Ok(Some(inherit_restriction)) = inherit_restriction {
+        inherit_restriction.await;
+    }
+
+    // After trust propagation, refresh the security modal on the new workspace
+    // so it dismisses itself if there are no more restricted worktrees.
+    cx.update(|window, cx| {
+        new_workspace.update(cx, |workspace, cx| {
+            workspace.show_worktree_trust_security_modal(false, window, cx);
+        });
     })
     .ok();
 }
@@ -203,7 +211,7 @@ pub(super) async fn open_worktree_workspace(
         })
         .await;
 
-    maybe_propagate_worktree_trust(&workspace, &new_workspace, &all_paths, cx);
+    maybe_propagate_worktree_trust(&workspace, &new_workspace, &all_paths, cx).await;
 
     if transfer_state {
         window_handle.update(cx, |_multi_workspace, window, cx| {

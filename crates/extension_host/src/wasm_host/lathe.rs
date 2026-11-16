@@ -9,7 +9,6 @@ use super::wit::{since_v0_6_0, since_v0_8_0};
 use super::{WasmState, wit::new_linker};
 use anyhow::{Context as _, Result, anyhow, bail};
 use collections::BTreeSet;
-use futures::FutureExt as _;
 use gpui::AsyncApp;
 use gpui::BackgroundExecutor;
 use release_channel::ReleaseChannel;
@@ -702,7 +701,7 @@ impl lathe::extension::buffers::Host for WasmState {
             return Ok(Ok(None));
         };
         let snapshot = self
-            .on_main_thread(move |cx| async move { editor.snapshot(cx) }.boxed_local())
+            .on_main_thread(async move |cx| editor.snapshot(cx))
             .await;
         Ok(snapshot
             .map(|snapshot| {
@@ -739,7 +738,7 @@ impl lathe::extension::buffers::Host for WasmState {
             Err(error) => return Ok(Err(error.to_string())),
         };
         let result = self
-            .on_main_thread(move |cx| async move { editor.edit(version, edits, cx) }.boxed_local())
+            .on_main_thread(async move |cx| editor.edit(version, edits, cx))
             .await;
         Ok(result.map_err(|error| format!("{error:#}")))
     }
@@ -764,9 +763,7 @@ impl lathe::extension::buffers::Host for WasmState {
             Err(error) => return Ok(Err(error.to_string())),
         };
         let result = self
-            .on_main_thread(move |cx| {
-                async move { editor.select(version, ranges, cx) }.boxed_local()
-            })
+            .on_main_thread(async move |cx| editor.select(version, ranges, cx))
             .await;
         Ok(result.map_err(|error| format!("{error:#}")))
     }
@@ -859,7 +856,7 @@ pub(super) async fn dispatch_buffer_event(
         let buffer = buffer.clone();
         store
             .data()
-            .on_main_thread(move |cx| async move { buffer.file_paths(cx) }.boxed_local())
+            .on_main_thread(async move |cx| buffer.file_paths(cx))
             .await
     } else {
         (None, None)
@@ -1202,10 +1199,8 @@ impl v0_2_0::lathe::extension0_2_0::views::Host for WasmState {
             return Ok(Ok(()));
         };
         let extension_id = self.manifest.id.clone();
-        self.on_main_thread(move |cx| {
-            async move { ui.update_view(extension_id, view_id, view, cx) }.boxed_local()
-        })
-        .await;
+        self.on_main_thread(async move |cx| ui.update_view(extension_id, view_id, view, cx))
+            .await;
         Ok(Ok(()))
     }
 
@@ -1237,7 +1232,7 @@ impl v0_2_0::lathe::extension0_2_0::views::Host for WasmState {
             column: location.column.map(|column| column - 1),
         };
         let result = self
-            .on_main_thread(move |cx| async move { ui.open_location(location, cx) }.boxed_local())
+            .on_main_thread(async move |cx| ui.open_location(location, cx))
             .await;
         Ok(result.map_err(|error| format!("{error:#}")))
     }
@@ -1254,10 +1249,8 @@ impl v0_2_0::lathe::extension0_2_0::views::Host for WasmState {
             return Ok(Ok(()));
         };
         let extension_id = self.manifest.id.clone();
-        self.on_main_thread(move |cx| {
-            async move { ui.remove_view(extension_id, view_id, cx) }.boxed_local()
-        })
-        .await;
+        self.on_main_thread(async move |cx| ui.remove_view(extension_id, view_id, cx))
+            .await;
         Ok(Ok(()))
     }
 }
@@ -1292,10 +1285,8 @@ impl v0_2_0::lathe::extension0_2_0::surfaces::Host for WasmState {
             return Ok(Ok(()));
         };
         let extension_id = self.manifest.id.clone();
-        self.on_main_thread(move |cx| {
-            async move { ui.set_status_item(extension_id, item, cx) }.boxed_local()
-        })
-        .await;
+        self.on_main_thread(async move |cx| ui.set_status_item(extension_id, item, cx))
+            .await;
         Ok(Ok(()))
     }
 }
@@ -1435,9 +1426,8 @@ impl v0_2_0::lathe::extension0_2_0::decorations::Host for WasmState {
         let extension_id = self.manifest.id.clone();
         let layer: Arc<str> = layer.into();
         let result = self
-            .on_main_thread(move |cx| {
-                async move { editor.set_decorations(version, extension_id, layer, decorations, cx) }
-                    .boxed_local()
+            .on_main_thread(async move |cx| {
+                editor.set_decorations(version, extension_id, layer, decorations, cx)
             })
             .await;
         Ok(result.map_err(|error| format!("{error:#}")))
@@ -1500,10 +1490,8 @@ impl lathe::extension::ui::Host for WasmState {
             .map(|text| truncate_chars(text.trim(), MAX_STATUS_CHARS))
             .filter(|text| !text.is_empty());
         let extension_id = self.manifest.id.clone();
-        self.on_main_thread(move |cx| {
-            async move { ui.set_status_text(extension_id, text, tooltip, cx) }.boxed_local()
-        })
-        .await;
+        self.on_main_thread(async move |cx| ui.set_status_text(extension_id, text, tooltip, cx))
+            .await;
         Ok(Ok(()))
     }
 
@@ -1520,8 +1508,8 @@ impl lathe::extension::ui::Host for WasmState {
         };
         let extension_name: Arc<str> = self.manifest.name.as_str().into();
         let message = truncate_chars(&message, MAX_NOTIFICATION_CHARS);
-        self.on_main_thread(move |cx| {
-            async move { ui.show_notification(extension_name, level, message, cx) }.boxed_local()
+        self.on_main_thread(async move |cx| {
+            ui.show_notification(extension_name, level, message, cx)
         })
         .await;
         Ok(Ok(()))
@@ -1538,9 +1526,7 @@ impl lathe::extension::ui::Host for WasmState {
         };
         let extension_name: Arc<str> = self.manifest.name.as_str().into();
         let receiver = self
-            .on_main_thread(move |cx| {
-                async move { ui.prompt_input(extension_name, label, placeholder, cx) }.boxed_local()
-            })
+            .on_main_thread(async move |cx| ui.prompt_input(extension_name, label, placeholder, cx))
             .await;
         Ok(match receiver {
             Ok(receiver) => Ok(receiver.await.unwrap_or(None)),
@@ -1562,9 +1548,7 @@ impl lathe::extension::ui::Host for WasmState {
         }
         let extension_name: Arc<str> = self.manifest.name.as_str().into();
         let receiver = self
-            .on_main_thread(move |cx| {
-                async move { ui.quick_pick(extension_name, label, items, cx) }.boxed_local()
-            })
+            .on_main_thread(async move |cx| ui.quick_pick(extension_name, label, items, cx))
             .await;
         Ok(match receiver {
             Ok(receiver) => Ok(receiver.await.unwrap_or(None)),
@@ -1583,7 +1567,7 @@ impl lathe::extension::tasks::Host for WasmState {
             return Ok(Err("tasks are not available in this build of Lathe".into()));
         };
         let result = self
-            .on_main_thread(move |cx| async move { ui.spawn_task(task, cx) }.boxed_local())
+            .on_main_thread(async move |cx| ui.spawn_task(task, cx))
             .await;
         Ok(result.map_err(|error| format!("{error:#}")))
     }
@@ -1598,23 +1582,21 @@ impl lathe::extension::extension_settings::Host for WasmState {
         let extension_id = self.manifest.id.clone();
         let editor = self.lathe.editor();
         let value = self
-            .on_main_thread(move |cx| {
-                async move {
-                    let location = editor.and_then(|editor| editor.settings_location(cx));
-                    cx.update(|cx| {
-                        let location = location.as_ref().map(|(worktree_id, path)| {
-                            settings::SettingsLocation {
+            .on_main_thread(async move |cx| {
+                let location = editor.and_then(|editor| editor.settings_location(cx));
+                cx.update(|cx| {
+                    let location =
+                        location
+                            .as_ref()
+                            .map(|(worktree_id, path)| settings::SettingsLocation {
                                 worktree_id: *worktree_id,
                                 path: path.as_ref(),
-                            }
-                        });
-                        <crate::ExtensionSettings as settings::Settings>::get(location, cx)
-                            .extension_settings
-                            .get(&extension_id)
-                            .cloned()
-                    })
-                }
-                .boxed_local()
+                            });
+                    <crate::ExtensionSettings as settings::Settings>::get(location, cx)
+                        .extension_settings
+                        .get(&extension_id)
+                        .cloned()
+                })
             })
             .await;
         Ok(value

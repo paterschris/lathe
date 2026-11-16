@@ -35,9 +35,9 @@
 
 use editor::{Editor, MultiBuffer};
 use gpui::{AnyElement, ClipboardItem, Entity, EventEmitter, Render, WeakEntity};
+use jupyter_protocol::{ExecutionState, JupyterMessage, JupyterMessageContent, Media, MediaType};
 use language::Buffer;
 use menu;
-use runtimelib::{ExecutionState, JupyterMessage, JupyterMessageContent, MimeBundle, MimeType};
 use ui::{CommonAnimationExt, CopyButton, IconButton, Tooltip, prelude::*};
 
 mod image;
@@ -75,19 +75,19 @@ fn html_needs_scripting(html: &str) -> bool {
 }
 
 /// When deciding what to render from a collection of mediatypes, we need to rank them in order of importance
-fn rank_mime_type(mimetype: &MimeType) -> usize {
+fn rank_mime_type(mimetype: &MediaType) -> usize {
     match mimetype {
-        MimeType::DataTable(_) => 11,
-        MimeType::Html(html) if !html_needs_scripting(html) => 10,
-        MimeType::Json(_) => 9,
-        MimeType::Svg(_) => 8,
-        MimeType::Png(_) => 7,
-        MimeType::Gif(_) => 6,
-        MimeType::Jpeg(_) => 5,
-        MimeType::Html(_) => 4,
-        MimeType::Markdown(_) => 3,
-        MimeType::Latex(_) => 2,
-        MimeType::Plain(_) => 1,
+        MediaType::DataTable(_) => 11,
+        MediaType::Html(html) if !html_needs_scripting(html) => 10,
+        MediaType::Json(_) => 9,
+        MediaType::Svg(_) => 8,
+        MediaType::Png(_) => 7,
+        MediaType::Gif(_) => 6,
+        MediaType::Jpeg(_) => 5,
+        MediaType::Html(_) => 4,
+        MediaType::Markdown(_) => 3,
+        MediaType::Latex(_) => 2,
+        MediaType::Plain(_) => 1,
         // All other media types are not supported in Zed at this time
         _ => 0,
     }
@@ -373,31 +373,31 @@ impl Output {
     }
 
     pub fn new(
-        data: &MimeBundle,
+        data: &Media,
         display_id: Option<String>,
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
         match data.richest(rank_mime_type) {
-            Some(MimeType::Json(json_value)) => match JsonView::from_value(json_value.clone()) {
+            Some(MediaType::Json(json_value)) => match JsonView::from_value(json_value.clone()) {
                 Ok(json_view) => Output::Json {
                     content: cx.new(|_| json_view),
                     display_id,
                 },
                 Err(_) => Output::Message("Failed to parse JSON".to_string()),
             },
-            Some(MimeType::Plain(text)) => Output::Plain {
+            Some(MediaType::Plain(text)) => Output::Plain {
                 content: cx.new(|cx| TerminalOutput::from(text, window, cx)),
                 display_id,
             },
-            Some(MimeType::Markdown(text)) => {
+            Some(MediaType::Markdown(text)) => {
                 let content = cx.new(|cx| MarkdownView::from(text.clone(), cx));
                 Output::Markdown {
                     content,
                     display_id,
                 }
             }
-            Some(MimeType::Png(data)) | Some(MimeType::Jpeg(data)) | Some(MimeType::Gif(data)) => {
+            Some(MediaType::Png(data)) | Some(MediaType::Jpeg(data)) | Some(MediaType::Gif(data)) => {
                 match ImageView::from(data) {
                     Ok(view) => Output::Image {
                         content: cx.new(|_| view),
@@ -406,7 +406,7 @@ impl Output {
                     Err(error) => Output::Message(format!("Failed to load image: {}", error)),
                 }
             }
-            Some(MimeType::Svg(source)) => match ImageView::from_svg(source, cx) {
+            Some(MediaType::Svg(source)) => match ImageView::from_svg(source, cx) {
                 Ok(view) => Output::Image {
                     content: cx.new(|_| view),
                     display_id,
@@ -415,15 +415,15 @@ impl Output {
             },
             // Rendered as monospace text until Zed can typeset math. SymPy and other
             // symbolic libraries emit this, and showing the source beats showing nothing.
-            Some(MimeType::Latex(source)) => Output::Plain {
+            Some(MediaType::Latex(source)) => Output::Plain {
                 content: cx.new(|cx| TerminalOutput::from(source, window, cx)),
                 display_id,
             },
-            Some(MimeType::DataTable(data)) => Output::Table {
+            Some(MediaType::DataTable(data)) => Output::Table {
                 content: cx.new(|cx| TableView::new(data, window, cx)),
                 display_id,
             },
-            Some(MimeType::Html(html_content)) => match html::html_to_markdown(html_content) {
+            Some(MediaType::Html(html_content)) => match html::html_to_markdown(html_content) {
                 Ok(markdown_text) => {
                     let content = cx.new(|cx| MarkdownView::from(markdown_text, cx));
                     Output::Markdown {
@@ -589,7 +589,7 @@ impl ExecutionView {
             }
             JupyterMessageContent::ExecuteReply(reply) => {
                 for payload in reply.payload.iter() {
-                    if let runtimelib::Payload::Page { data, .. } = payload {
+                    if let jupyter_protocol::Payload::Page { data, .. } = payload {
                         let output = Output::new(data, None, window, cx);
                         self.outputs.push(output);
                     }
@@ -657,7 +657,7 @@ impl ExecutionView {
 
     pub fn update_display_data(
         &mut self,
-        data: &MimeBundle,
+        data: &Media,
         display_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -842,9 +842,9 @@ impl Render for ExecutionView {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
-    use runtimelib::{
+    use jupyter_protocol::{
         ClearOutput, ErrorOutput, ExecutionState, InputRequest, JupyterMessage,
-        JupyterMessageContent, MimeType, Status, Stdio, StreamContent,
+        JupyterMessageContent, MediaType, Status, Stdio, StreamContent,
     };
     use settings::SettingsStore;
     use std::path::Path;
@@ -852,16 +852,16 @@ mod tests {
 
     #[test]
     fn test_rank_mime_type_ordering() {
-        let data_table = MimeType::DataTable(Box::default());
-        let html = MimeType::Html("<table><tr><td>1</td></tr></table>".to_string());
-        let json = MimeType::Json(serde_json::json!({}));
-        let svg = MimeType::Svg("<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_string());
-        let png = MimeType::Png(String::new());
-        let gif = MimeType::Gif(String::new());
-        let jpeg = MimeType::Jpeg(String::new());
-        let markdown = MimeType::Markdown(String::new());
-        let latex = MimeType::Latex(String::new());
-        let plain = MimeType::Plain(String::new());
+        let data_table = MediaType::DataTable(Box::default());
+        let html = MediaType::Html("<table><tr><td>1</td></tr></table>".to_string());
+        let json = MediaType::Json(serde_json::json!({}));
+        let svg = MediaType::Svg("<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_string());
+        let png = MediaType::Png(String::new());
+        let gif = MediaType::Gif(String::new());
+        let jpeg = MediaType::Jpeg(String::new());
+        let markdown = MediaType::Markdown(String::new());
+        let latex = MediaType::Latex(String::new());
+        let plain = MediaType::Plain(String::new());
 
         let ranked_high_to_low = [
             &data_table,
@@ -885,17 +885,17 @@ mod tests {
             );
         }
 
-        assert!(rank_mime_type(&plain) > rank_mime_type(&MimeType::Javascript(String::new())));
+        assert!(rank_mime_type(&plain) > rank_mime_type(&MediaType::Javascript(String::new())));
     }
 
     #[test]
     fn test_script_driven_html_ranks_below_images() {
-        let plotly_html = MimeType::Html(
+        let plotly_html = MediaType::Html(
             "<div id=\"chart\"></div><script>Plotly.newPlot('chart', data);</script>".to_string(),
         );
-        let static_html = MimeType::Html("<table><tr><td>1</td></tr></table>".to_string());
-        let png = MimeType::Png(String::new());
-        let markdown = MimeType::Markdown(String::new());
+        let static_html = MediaType::Html("<table><tr><td>1</td></tr></table>".to_string());
+        let png = MediaType::Png(String::new());
+        let markdown = MediaType::Markdown(String::new());
 
         // Converting script-driven HTML to markdown strips the script and renders
         // nothing, so the static image the kernel sends alongside must win.

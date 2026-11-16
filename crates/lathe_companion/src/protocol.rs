@@ -422,14 +422,29 @@ impl ThreadStatus {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeltaOp {
-    NewEntry { entry: Entry },
-    UpdateEntry { index: usize, entry: Entry },
+    NewEntry {
+        entry: Entry,
+    },
+    UpdateEntry {
+        index: usize,
+        entry: Entry,
+    },
     /// Adds `text` to the end of the assistant message or thought at
     /// `index`. Only in `thread_deltas`.
-    AppendText { index: usize, text: String },
-    RemoveEntries { start: usize, end: usize },
-    Status { status: ThreadStatus },
-    Title { title: String },
+    AppendText {
+        index: usize,
+        text: String,
+    },
+    RemoveEntries {
+        start: usize,
+        end: usize,
+    },
+    Status {
+        status: ThreadStatus,
+    },
+    Title {
+        title: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -720,7 +735,10 @@ mod tests {
         let message = DesktopMessage::Ack {
             client_msg_id: "m1".into(),
             ok: false,
-            error: Some(ErrorBody::new(ErrorCode::WorkspaceNotOpen, "Open it in Lathe")),
+            error: Some(ErrorBody::new(
+                ErrorCode::WorkspaceNotOpen,
+                "Open it in Lathe",
+            )),
             thread_id: None,
         };
         assert_eq!(
@@ -836,37 +854,172 @@ mod tests {
             return;
         };
         let entries = vec![
-            Entry::UserMessage { text: "Fix it".into() },
-            Entry::AssistantMessage { markdown: "Done.".into() },
-            Entry::Thought { markdown: "Thinking".into() },
+            Entry::UserMessage {
+                text: "Fix it".into(),
+            },
+            Entry::AssistantMessage {
+                markdown: "Done.".into(),
+            },
+            Entry::Thought {
+                markdown: "Thinking".into(),
+            },
             Entry::ToolCall {
                 tool_call_id: "1".into(),
                 title: "Edit relay.rs".into(),
                 tool_kind: "edit".into(),
                 status: ToolCallStatus::Completed,
-                diff: Some(vec![FileDiff { path: "relay.rs".into(), unified_diff: "@@ -1 +1 @@\n-a\n+b\n".into() }]),
+                diff: Some(vec![FileDiff {
+                    path: "relay.rs".into(),
+                    unified_diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
+                }]),
             },
-            Entry::Plan { items: vec![PlanItem { text: "Step".into(), status: PlanItemStatus::InProgress }] },
+            Entry::Plan {
+                items: vec![PlanItem {
+                    text: "Step".into(),
+                    status: PlanItemStatus::InProgress,
+                }],
+            },
         ];
         let messages = vec![
-            DesktopMessage::Hello { protocol_version: 1, lathe_version: "1.13.0".into(), channel: "beta".into(), desktop_name: "Lathe Beta on Mac".into(), features: vec![FEATURE_PULL_REQUESTS.into()] },
-            DesktopMessage::Workspaces { list: vec![WorkspaceSummary { workspace_id: "w".into(), name: "lathe".into(), paths: vec!["/code/lathe".into()], is_open: true, agents: Some(vec![AgentSummary { agent_id: "claude-acp".into(), name: "Claude Code".into() }]), default_agent_id: Some("claude-acp".into()) }] },
-            DesktopMessage::Threads { list: vec![ThreadSummary { thread_id: "t".into(), session_id: Some("s".into()), agent_id: "claude-acp".into(), title: "T".into(), workspace_id: "w".into(), updated_at: "2026-10-21T10:00:00+00:00".into(), status: ThreadStatus::Running, needs_attention: false, is_loaded: true }] },
-            DesktopMessage::ThreadSnapshot { thread_id: "t".into(), seq: 0, start_index: 0, entries: entries.clone(), has_more_before: false, config_options: Some(sample_config_options()) },
-            DesktopMessage::ThreadSnapshot { thread_id: "t".into(), seq: 0, start_index: 0, entries: Vec::new(), has_more_before: false, config_options: None },
-            DesktopMessage::ThreadConfig { thread_id: "t".into(), options: sample_config_options() },
-            DesktopMessage::ThreadOlder { thread_id: "t".into(), start_index: 0, entries, has_more_before: false },
-            DesktopMessage::ThreadDelta { thread_id: "t".into(), seq: 1, op: DeltaOp::RemoveEntries { start: 1, end: 3 } },
-            DesktopMessage::ThreadDelta { thread_id: "t".into(), seq: 2, op: DeltaOp::Status { status: ThreadStatus::WaitingAuthorization } },
-            DesktopMessage::ThreadDelta { thread_id: "t".into(), seq: 3, op: DeltaOp::Title { title: "New".into() } },
-            DesktopMessage::ThreadDeltas { thread_id: "t".into(), seq: 6, ops: vec![DeltaOp::AppendText { index: 1, text: " More.".into() }, DeltaOp::NewEntry { entry: Entry::Thought { markdown: "Hm".into() } }, DeltaOp::Status { status: ThreadStatus::Idle }] },
-            DesktopMessage::ToolAuthorization { thread_id: "t".into(), request_id: "r".into(), tool_title: "Run".into(), tool_kind: "execute".into(), options: vec![PermissionOption { option_id: "o".into(), label: "Allow".into(), kind: PermissionOptionKind::AllowOnce }], diff_preview: None },
-            DesktopMessage::ToolAuthorizationResolved { thread_id: "t".into(), request_id: "r".into() },
-            DesktopMessage::Elicitation { thread_id: "t".into(), elicitation_id: "e".into(), message: "Pick".into(), schema: serde_json::json!({ "type": "object", "properties": { "choice": { "type": "string", "enum": ["a", "b"] } }, "required": ["choice"] }) },
-            DesktopMessage::ElicitationResolved { thread_id: "t".into(), elicitation_id: "e".into() },
-            DesktopMessage::Ack { client_msg_id: "m".into(), ok: true, error: None, thread_id: Some("t".into()) },
-            DesktopMessage::Ack { client_msg_id: "m".into(), ok: false, error: Some(ErrorBody::new(ErrorCode::AgentNotFound, "No")), thread_id: None },
-            DesktopMessage::Error { code: ErrorCode::Internal, message: "Oops".into(), thread_id: Some("t".into()) },
+            DesktopMessage::Hello {
+                protocol_version: 1,
+                lathe_version: "1.13.0".into(),
+                channel: "beta".into(),
+                desktop_name: "Lathe Beta on Mac".into(),
+                features: vec![FEATURE_PULL_REQUESTS.into()],
+            },
+            DesktopMessage::Workspaces {
+                list: vec![WorkspaceSummary {
+                    workspace_id: "w".into(),
+                    name: "lathe".into(),
+                    paths: vec!["/code/lathe".into()],
+                    is_open: true,
+                    agents: Some(vec![AgentSummary {
+                        agent_id: "claude-acp".into(),
+                        name: "Claude Code".into(),
+                    }]),
+                    default_agent_id: Some("claude-acp".into()),
+                }],
+            },
+            DesktopMessage::Threads {
+                list: vec![ThreadSummary {
+                    thread_id: "t".into(),
+                    session_id: Some("s".into()),
+                    agent_id: "claude-acp".into(),
+                    title: "T".into(),
+                    workspace_id: "w".into(),
+                    updated_at: "2026-10-21T10:00:00+00:00".into(),
+                    status: ThreadStatus::Running,
+                    needs_attention: false,
+                    is_loaded: true,
+                }],
+            },
+            DesktopMessage::ThreadSnapshot {
+                thread_id: "t".into(),
+                seq: 0,
+                start_index: 0,
+                entries: entries.clone(),
+                has_more_before: false,
+                config_options: Some(sample_config_options()),
+            },
+            DesktopMessage::ThreadSnapshot {
+                thread_id: "t".into(),
+                seq: 0,
+                start_index: 0,
+                entries: Vec::new(),
+                has_more_before: false,
+                config_options: None,
+            },
+            DesktopMessage::ThreadConfig {
+                thread_id: "t".into(),
+                options: sample_config_options(),
+            },
+            DesktopMessage::ThreadOlder {
+                thread_id: "t".into(),
+                start_index: 0,
+                entries,
+                has_more_before: false,
+            },
+            DesktopMessage::ThreadDelta {
+                thread_id: "t".into(),
+                seq: 1,
+                op: DeltaOp::RemoveEntries { start: 1, end: 3 },
+            },
+            DesktopMessage::ThreadDelta {
+                thread_id: "t".into(),
+                seq: 2,
+                op: DeltaOp::Status {
+                    status: ThreadStatus::WaitingAuthorization,
+                },
+            },
+            DesktopMessage::ThreadDelta {
+                thread_id: "t".into(),
+                seq: 3,
+                op: DeltaOp::Title {
+                    title: "New".into(),
+                },
+            },
+            DesktopMessage::ThreadDeltas {
+                thread_id: "t".into(),
+                seq: 6,
+                ops: vec![
+                    DeltaOp::AppendText {
+                        index: 1,
+                        text: " More.".into(),
+                    },
+                    DeltaOp::NewEntry {
+                        entry: Entry::Thought {
+                            markdown: "Hm".into(),
+                        },
+                    },
+                    DeltaOp::Status {
+                        status: ThreadStatus::Idle,
+                    },
+                ],
+            },
+            DesktopMessage::ToolAuthorization {
+                thread_id: "t".into(),
+                request_id: "r".into(),
+                tool_title: "Run".into(),
+                tool_kind: "execute".into(),
+                options: vec![PermissionOption {
+                    option_id: "o".into(),
+                    label: "Allow".into(),
+                    kind: PermissionOptionKind::AllowOnce,
+                }],
+                diff_preview: None,
+            },
+            DesktopMessage::ToolAuthorizationResolved {
+                thread_id: "t".into(),
+                request_id: "r".into(),
+            },
+            DesktopMessage::Elicitation {
+                thread_id: "t".into(),
+                elicitation_id: "e".into(),
+                message: "Pick".into(),
+                schema: serde_json::json!({ "type": "object", "properties": { "choice": { "type": "string", "enum": ["a", "b"] } }, "required": ["choice"] }),
+            },
+            DesktopMessage::ElicitationResolved {
+                thread_id: "t".into(),
+                elicitation_id: "e".into(),
+            },
+            DesktopMessage::Ack {
+                client_msg_id: "m".into(),
+                ok: true,
+                error: None,
+                thread_id: Some("t".into()),
+            },
+            DesktopMessage::Ack {
+                client_msg_id: "m".into(),
+                ok: false,
+                error: Some(ErrorBody::new(ErrorCode::AgentNotFound, "No")),
+                thread_id: None,
+            },
+            DesktopMessage::Error {
+                code: ErrorCode::Internal,
+                message: "Oops".into(),
+                thread_id: Some("t".into()),
+            },
         ];
         let lines = messages
             .iter()
@@ -886,8 +1039,18 @@ mod tests {
                 kind: ConfigKind::Select {
                     current_value: "opus".into(),
                     options: vec![
-                        ConfigChoice { value: "opus".into(), name: "Opus".into(), description: None, group: None },
-                        ConfigChoice { value: "sonnet".into(), name: "Sonnet".into(), description: Some("Faster".into()), group: None },
+                        ConfigChoice {
+                            value: "opus".into(),
+                            name: "Opus".into(),
+                            description: None,
+                            group: None,
+                        },
+                        ConfigChoice {
+                            value: "sonnet".into(),
+                            name: "Sonnet".into(),
+                            description: Some("Faster".into()),
+                            group: None,
+                        },
                     ],
                 },
             },
@@ -898,7 +1061,12 @@ mod tests {
                 category: ConfigCategory::ThoughtLevel,
                 kind: ConfigKind::Select {
                     current_value: "high".into(),
-                    options: vec![ConfigChoice { value: "high".into(), name: "High".into(), description: None, group: None }],
+                    options: vec![ConfigChoice {
+                        value: "high".into(),
+                        name: "High".into(),
+                        description: None,
+                        group: None,
+                    }],
                 },
             },
         ]
@@ -927,13 +1095,22 @@ mod tests {
         .unwrap();
         assert_eq!(
             parsed.message,
-            PhoneMessage::SetConfigOption { thread_id: "t1".into(), config_id: "effort".into(), value: json!("low") }
+            PhoneMessage::SetConfigOption {
+                thread_id: "t1".into(),
+                config_id: "effort".into(),
+                value: json!("low")
+            }
         );
     }
 
     #[test]
     fn rejects_unknown_types_and_missing_message_ids() {
-        assert!(serde_json::from_value::<PhoneEnvelope>(json!({ "type": "rm_rf", "client_msg_id": "m" })).is_err());
+        assert!(
+            serde_json::from_value::<PhoneEnvelope>(
+                json!({ "type": "rm_rf", "client_msg_id": "m" })
+            )
+            .is_err()
+        );
         assert!(serde_json::from_value::<PhoneEnvelope>(json!({ "type": "refresh" })).is_err());
     }
 }

@@ -131,15 +131,16 @@ pub(crate) fn init(cx: &mut App) {
         let mut companion = Companion::new(channel, load_devices(channel, cx));
         let mut enabled = CompanionSettings::get_global(cx).enabled;
         let mut relay_url = CompanionSettings::get_global(cx).relay_url.clone();
-        companion._settings_subscription =
-            Some(cx.observe_global::<settings::SettingsStore>(move |this: &mut Companion, cx| {
+        companion._settings_subscription = Some(cx.observe_global::<settings::SettingsStore>(
+            move |this: &mut Companion, cx| {
                 let settings = CompanionSettings::get_global(cx);
                 if settings.enabled != enabled || settings.relay_url != relay_url {
                     enabled = settings.enabled;
                     relay_url = settings.relay_url.clone();
                     this.restart(cx);
                 }
-            }));
+            },
+        ));
         companion.restart(cx);
         companion
     });
@@ -194,7 +195,13 @@ impl Companion {
     /// sends fixed text under the thread's `title`, so the title is the only
     /// thing about the thread that leaves this machine, never its messages.
     /// Phones that muted `workspace_id` are left out.
-    pub fn push(&self, kind: &str, thread_id: &str, title: Option<&str>, workspace_id: Option<&str>) {
+    pub fn push(
+        &self,
+        kind: &str,
+        thread_id: &str,
+        title: Option<&str>,
+        workspace_id: Option<&str>,
+    ) {
         let push = json!({ "type": "push", "kind": kind, "thread_id": thread_id });
         self.push_to_unmuted(with_title(push, title), workspace_id);
     }
@@ -203,7 +210,12 @@ impl Companion {
     /// relay sends fixed text under the terminal's `title`, so nothing else
     /// about the terminal leaves this machine but its random id. Phones that
     /// muted `workspace_id` are left out.
-    pub fn push_terminal(&self, terminal_id: &str, title: Option<&str>, workspace_id: Option<&str>) {
+    pub fn push_terminal(
+        &self,
+        terminal_id: &str,
+        title: Option<&str>,
+        workspace_id: Option<&str>,
+    ) {
         let push = json!({ "type": "push", "kind": "terminal_input", "terminal_id": terminal_id });
         self.push_to_unmuted(with_title(push, title), workspace_id);
     }
@@ -230,8 +242,17 @@ impl Companion {
     }
 
     /// Records the workspaces a phone wants no pushes for.
-    pub fn set_muted_workspaces(&mut self, device_id: &str, workspace_ids: Vec<String>, cx: &mut Context<Self>) {
-        let Some(device) = self.devices.iter_mut().find(|device| device.device_id == device_id) else {
+    pub fn set_muted_workspaces(
+        &mut self,
+        device_id: &str,
+        workspace_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(device) = self
+            .devices
+            .iter_mut()
+            .find(|device| device.device_id == device_id)
+        else {
             return;
         };
         if device.muted_workspaces == workspace_ids {
@@ -359,7 +380,11 @@ impl Companion {
                 // Phones count frame `seq` per connection, so a phone that
                 // reconnected starts over at 1.
                 self.last_received_seq.remove(device_id);
-                if !self.devices.iter().any(|device| device.device_id == device_id) {
+                if !self
+                    .devices
+                    .iter()
+                    .any(|device| device.device_id == device_id)
+                {
                     return;
                 }
                 if message["online"].as_bool() == Some(true) {
@@ -403,7 +428,11 @@ impl Companion {
                 continue;
             };
             known_to_relay.insert(device_id.to_string());
-            if !self.devices.iter().any(|device| device.device_id == device_id) {
+            if !self
+                .devices
+                .iter()
+                .any(|device| device.device_id == device_id)
+            {
                 self.send(json!({ "type": "revoke_device", "device_id": device_id }));
                 continue;
             }
@@ -468,7 +497,9 @@ impl Companion {
         let relay_device_id = message["device_id"]
             .as_str()
             .context("sealed request has no device id")?;
-        let ciphertext = message["ciphertext"].as_str().context("missing ciphertext")?;
+        let ciphertext = message["ciphertext"]
+            .as_str()
+            .context("missing ciphertext")?;
         let request: SealedPairRequest = serde_json::from_slice(&identity.unseal(ciphertext)?)
             .context("malformed pairing request")?;
         if request.kind != "pair_request" {
@@ -524,7 +555,8 @@ impl Companion {
                 muted_workspaces: Vec::new(),
             };
             self.send(authorize_message(&device));
-            self.devices.retain(|existing| existing.device_id != device.device_id);
+            self.devices
+                .retain(|existing| existing.device_id != device.device_id);
             self.devices.push(device);
             save_devices(self.channel, &self.devices, cx);
             json!({
@@ -610,7 +642,9 @@ impl Companion {
 
     fn handle_frame(&mut self, message: &Value, cx: &mut Context<Self>) -> Result<()> {
         let identity = self.identity.as_ref().context("no desktop identity")?;
-        let device_id = message["device_id"].as_str().context("frame has no sender")?;
+        let device_id = message["device_id"]
+            .as_str()
+            .context("frame has no sender")?;
         let seq = message["seq"].as_u64().context("frame has no seq")?;
         if self
             .last_received_seq
@@ -753,7 +787,10 @@ async fn load_or_create_identity(channel: ReleaseChannel, cx: &mut AsyncApp) -> 
     provider
         .write_credentials(&url, "desktop", &identity.to_bytes(), cx)
         .await?;
-    log::info!("companion: created desktop identity {}", identity.desktop_id());
+    log::info!(
+        "companion: created desktop identity {}",
+        identity.desktop_id()
+    );
     Ok(identity)
 }
 
@@ -782,7 +819,6 @@ fn save_devices(channel: ReleaseChannel, devices: &[PairedDevice], cx: &App) {
     .detach();
 }
 
-
 /// Longest title a push carries, in characters. The phone shows one line.
 const MAX_PUSH_TITLE_CHARS: usize = 100;
 
@@ -805,7 +841,10 @@ fn with_title(mut push: Value, title: Option<&str>) -> Value {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crypto_box::{SalsaBox, SecretKey, aead::{Aead as _, OsRng}};
+    use crypto_box::{
+        SalsaBox, SecretKey,
+        aead::{Aead as _, OsRng},
+    };
     use ed25519_dalek::SigningKey;
     use futures::channel::mpsc;
     use gpui::TestAppContext;
@@ -845,7 +884,11 @@ pub(crate) mod tests {
                 "device_box_pk": STANDARD.encode(self.box_secret.public_key().as_bytes()),
                 "device_sign_pk": STANDARD.encode(self.signing.verifying_key().as_bytes()),
             });
-            STANDARD.encode(desktop.seal(&mut OsRng, request.to_string().as_bytes()).unwrap())
+            STANDARD.encode(
+                desktop
+                    .seal(&mut OsRng, request.to_string().as_bytes())
+                    .unwrap(),
+            )
         }
 
         pub fn open(&self, desktop: &PublicKey, frame: &Value) -> Value {
@@ -855,7 +898,9 @@ pub(crate) mod tests {
                 .unwrap()
                 .try_into()
                 .unwrap();
-            let ciphertext = STANDARD.decode(frame["ciphertext"].as_str().unwrap()).unwrap();
+            let ciphertext = STANDARD
+                .decode(frame["ciphertext"].as_str().unwrap())
+                .unwrap();
             let plaintext = SalsaBox::new(desktop, &self.box_secret)
                 .decrypt(&nonce.into(), ciphertext.as_slice())
                 .unwrap();
@@ -865,7 +910,11 @@ pub(crate) mod tests {
 
     pub(crate) fn connected_companion(
         cx: &mut TestAppContext,
-    ) -> (Entity<Companion>, mpsc::UnboundedReceiver<String>, Arc<Identity>) {
+    ) -> (
+        Entity<Companion>,
+        mpsc::UnboundedReceiver<String>,
+        Arc<Identity>,
+    ) {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
@@ -884,7 +933,11 @@ pub(crate) mod tests {
         (companion, outgoing, identity)
     }
 
-    pub(crate) fn add_paired(companion: &Entity<Companion>, phone: &FakePhone, cx: &mut TestAppContext) {
+    pub(crate) fn add_paired(
+        companion: &Entity<Companion>,
+        phone: &FakePhone,
+        cx: &mut TestAppContext,
+    ) {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
         companion.update(cx, |companion, _| {
             companion.devices.push(PairedDevice {
@@ -949,7 +1002,9 @@ pub(crate) mod tests {
         let (companion, mut outgoing, identity) = connected_companion(cx);
         assert_eq!(drain(&mut outgoing), [json!({ "type": "list_devices" })]);
 
-        companion.update(cx, |companion, cx| companion.start_pairing(cx)).unwrap();
+        companion
+            .update(cx, |companion, cx| companion.start_pairing(cx))
+            .unwrap();
         assert_eq!(
             drain(&mut outgoing),
             [json!({ "type": "pairing_open", "ttl_seconds": 300 })]
@@ -1008,15 +1063,22 @@ pub(crate) mod tests {
         let payload = "lathe-companion://pair?v=1&relay=wss%3A%2F%2Fcompanion.lathe-ide.com&desktop_id=abc&token=t0k&name=Lathe%20Beta";
         assert_eq!(
             pairing_web_link("wss://companion.lathe-ide.com", payload).as_deref(),
-            Some("https://companion.lathe-ide.com/pair#v=1&relay=wss%3A%2F%2Fcompanion.lathe-ide.com&desktop_id=abc&token=t0k&name=Lathe%20Beta")
+            Some(
+                "https://companion.lathe-ide.com/pair#v=1&relay=wss%3A%2F%2Fcompanion.lathe-ide.com&desktop_id=abc&token=t0k&name=Lathe%20Beta"
+            )
         );
         // A local relay keeps its port and plain http.
         assert_eq!(
             pairing_web_link("ws://localhost:8799/v1/connect?x=1", payload).as_deref(),
-            Some("http://localhost:8799/pair#v=1&relay=wss%3A%2F%2Fcompanion.lathe-ide.com&desktop_id=abc&token=t0k&name=Lathe%20Beta")
+            Some(
+                "http://localhost:8799/pair#v=1&relay=wss%3A%2F%2Fcompanion.lathe-ide.com&desktop_id=abc&token=t0k&name=Lathe%20Beta"
+            )
         );
         assert_eq!(pairing_web_link("https://not-a-relay", payload), None);
-        assert_eq!(pairing_web_link("wss://companion.lathe-ide.com", "no query"), None);
+        assert_eq!(
+            pairing_web_link("wss://companion.lathe-ide.com", "no query"),
+            None
+        );
     }
 
     #[gpui::test]
@@ -1028,9 +1090,13 @@ pub(crate) mod tests {
                 other => panic!("unexpected pairing state {other:?}"),
             })
         };
-        companion.update(cx, |companion, cx| companion.start_pairing(cx)).unwrap();
+        companion
+            .update(cx, |companion, cx| companion.start_pairing(cx))
+            .unwrap();
         let first = payload(&companion, cx);
-        companion.update(cx, |companion, cx| companion.start_pairing(cx)).unwrap();
+        companion
+            .update(cx, |companion, cx| companion.start_pairing(cx))
+            .unwrap();
         let second = payload(&companion, cx);
         assert_ne!(query_param(&first, "token"), query_param(&second, "token"));
         // Each code reopens pairing on the relay for its full window.
@@ -1042,7 +1108,8 @@ pub(crate) mod tests {
 
         // A phone that scanned the old code is turned away.
         let phone = FakePhone::new();
-        let sealed = phone.sealed_request(&identity.box_public_key(), &query_param(&first, "token"));
+        let sealed =
+            phone.sealed_request(&identity.box_public_key(), &query_param(&first, "token"));
         companion.update(cx, |companion, cx| {
             companion.handle_relay_message(
                 json!({ "type": "sealed", "device_id": phone.device_id(), "ciphertext": sealed }),
@@ -1055,7 +1122,9 @@ pub(crate) mod tests {
     #[gpui::test]
     async fn ignores_pairing_requests_with_the_wrong_token(cx: &mut TestAppContext) {
         let (companion, mut outgoing, identity) = connected_companion(cx);
-        companion.update(cx, |companion, cx| companion.start_pairing(cx)).unwrap();
+        companion
+            .update(cx, |companion, cx| companion.start_pairing(cx))
+            .unwrap();
         drain(&mut outgoing);
         let phone = FakePhone::new();
         let sealed = phone.sealed_request(&identity.box_public_key(), "Z3Vlc3NlZA");
@@ -1098,9 +1167,7 @@ pub(crate) mod tests {
         };
         use crypto_box::aead::AeadCore as _;
         let (nonce, ciphertext) = encrypt(&json!({ "type": "cancel", "thread_id": "t1" }));
-        let frame = |device_id: &str, seq: u64| {
-            json!({ "type": "frame", "device_id": device_id, "seq": seq, "nonce": nonce, "ciphertext": ciphertext })
-        };
+        let frame = |device_id: &str, seq: u64| json!({ "type": "frame", "device_id": device_id, "seq": seq, "nonce": nonce, "ciphertext": ciphertext });
         companion.update(cx, |companion, cx| {
             companion.handle_relay_message(frame(&phone.device_id(), 1), cx);
             companion.handle_relay_message(frame("someone-else", 1), cx);
@@ -1157,9 +1224,15 @@ pub(crate) mod tests {
         let push = || json!({ "type": "push", "kind": "finished", "thread_id": "t1" });
         assert_eq!(with_title(push(), None), push());
         assert_eq!(with_title(push(), Some("   ")), push());
-        assert_eq!(with_title(push(), Some(" Fix login ")), json!({ "type": "push", "kind": "finished", "thread_id": "t1", "title": "Fix login" }));
+        assert_eq!(
+            with_title(push(), Some(" Fix login ")),
+            json!({ "type": "push", "kind": "finished", "thread_id": "t1", "title": "Fix login" })
+        );
         let long = "é".repeat(MAX_PUSH_TITLE_CHARS + 5);
-        let capped = with_title(push(), Some(&long))["title"].as_str().unwrap().to_string();
+        let capped = with_title(push(), Some(&long))["title"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert_eq!(capped.chars().count(), MAX_PUSH_TITLE_CHARS);
         assert!(capped.ends_with('\u{2026}'));
     }
@@ -1174,11 +1247,18 @@ pub(crate) mod tests {
         drain(&mut outgoing);
 
         // Nobody muted it: one push for every phone.
-        companion.read_with(cx, |companion, _| companion.push("finished", "t1", None, Some("ws")));
-        assert_eq!(drain(&mut outgoing), [json!({ "type": "push", "kind": "finished", "thread_id": "t1" })]);
+        companion.read_with(cx, |companion, _| {
+            companion.push("finished", "t1", None, Some("ws"))
+        });
+        assert_eq!(
+            drain(&mut outgoing),
+            [json!({ "type": "push", "kind": "finished", "thread_id": "t1" })]
+        );
 
         // One phone muted it: the push is addressed to the other only.
-        companion.update(cx, |companion, cx| companion.set_muted_workspaces(&quiet.device_id(), vec!["ws".into()], cx));
+        companion.update(cx, |companion, cx| {
+            companion.set_muted_workspaces(&quiet.device_id(), vec!["ws".into()], cx)
+        });
         companion.read_with(cx, |companion, _| {
             companion.push("finished", "t1", None, Some("ws"));
             companion.push_terminal("term", None, Some("ws"));
@@ -1194,8 +1274,12 @@ pub(crate) mod tests {
         );
 
         // Both muted it: nothing goes out.
-        companion.update(cx, |companion, cx| companion.set_muted_workspaces(&loud.device_id(), vec!["ws".into()], cx));
-        companion.read_with(cx, |companion, _| companion.push("finished", "t1", None, Some("ws")));
+        companion.update(cx, |companion, cx| {
+            companion.set_muted_workspaces(&loud.device_id(), vec!["ws".into()], cx)
+        });
+        companion.read_with(cx, |companion, _| {
+            companion.push("finished", "t1", None, Some("ws"))
+        });
         assert!(drain(&mut outgoing).is_empty());
     }
 
@@ -1221,7 +1305,10 @@ pub(crate) mod tests {
         });
         let sent = drain(&mut outgoing);
         assert!(sent.contains(&json!({ "type": "revoke_device", "device_id": "stranger" })));
-        assert!(sent.iter().any(|message| message["type"] == "authorize_device"
-            && message["device_id"] == json!(phone.device_id())));
+        assert!(
+            sent.iter()
+                .any(|message| message["type"] == "authorize_device"
+                    && message["device_id"] == json!(phone.device_id()))
+        );
     }
 }

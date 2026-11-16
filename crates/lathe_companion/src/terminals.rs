@@ -15,8 +15,7 @@ use agent_ui::AgentPanel;
 use collections::HashMap;
 use gpui::{
     App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global, Hsla, Keystroke, Rgba,
-    SharedString,
-    Subscription, Task, WeakEntity,
+    SharedString, Subscription, Task, WeakEntity,
 };
 use settings::Settings as _;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
@@ -43,14 +42,16 @@ pub const MAX_INPUT_BYTES: usize = 4096;
 pub(crate) fn init(cx: &mut App) {
     let terminals = cx.new(|_| Terminals::default());
     cx.set_global(GlobalTerminals(terminals.clone()));
-    cx.observe_new(move |_: &mut TerminalView, _, cx: &mut Context<TerminalView>| {
-        let view = cx.entity();
-        let terminals = terminals.clone();
-        // The view is still being built; reading it waits for that to finish.
-        App::defer(cx, move |cx| {
-            terminals.update(cx, |terminals, cx| terminals.track(view, cx));
-        });
-    })
+    cx.observe_new(
+        move |_: &mut TerminalView, _, cx: &mut Context<TerminalView>| {
+            let view = cx.entity();
+            let terminals = terminals.clone();
+            // The view is still being built; reading it waits for that to finish.
+            App::defer(cx, move |cx| {
+                terminals.update(cx, |terminals, cx| terminals.track(view, cx));
+            });
+        },
+    )
     .detach();
 }
 
@@ -116,7 +117,10 @@ impl Terminals {
             // The view notifies when its waiting state or title may have moved.
             cx.observe(&view, move |this, view, cx| this.view_changed(&view, cx)),
             cx.subscribe(&terminal, move |this, _, event, cx| {
-                if matches!(event, terminal::Event::Wakeup | terminal::Event::TitleChanged) {
+                if matches!(
+                    event,
+                    terminal::Event::Wakeup | terminal::Event::TitleChanged
+                ) {
                     this.output(entity_id, cx);
                 }
             }),
@@ -162,7 +166,11 @@ impl Terminals {
     }
 
     fn output(&mut self, entity_id: EntityId, cx: &mut Context<Self>) {
-        let Some(id) = self.tracked.get(&entity_id).map(|tracked| tracked.id.clone()) else {
+        let Some(id) = self
+            .tracked
+            .get(&entity_id)
+            .map(|tracked| tracked.id.clone())
+        else {
             return;
         };
         let Some(watch) = self.watched.get_mut(&id) else {
@@ -201,7 +209,10 @@ impl Terminals {
     pub fn watch(&mut self, terminal_id: &str, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
         self.view(terminal_id, cx).ok_or_else(not_found)?;
         // The new follower's first screen carries the scrollback.
-        self.watched.entry(terminal_id.to_string()).or_default().scrollback = None;
+        self.watched
+            .entry(terminal_id.to_string())
+            .or_default()
+            .scrollback = None;
         self.send_screen(terminal_id, cx);
         Ok(())
     }
@@ -236,7 +247,14 @@ impl Terminals {
         let hash = hasher.finish();
         let send_history = watch.scrollback != Some(hash);
         watch.scrollback = Some(hash);
-        if let DesktopMessage::TerminalScreen { scrollback, scrollback_styles, styles, colors, .. } = &mut message {
+        if let DesktopMessage::TerminalScreen {
+            scrollback,
+            scrollback_styles,
+            styles,
+            colors,
+            ..
+        } = &mut message
+        {
             if send_history {
                 if history_spans.iter().any(|spans| !spans.is_empty()) {
                     *scrollback_styles = Some(history_spans);
@@ -261,7 +279,12 @@ impl Terminals {
 
     /// Renames a terminal as renaming it in Lathe does: an agent panel
     /// terminal thread through the panel, any other through its tab.
-    pub fn rename(&mut self, terminal_id: &str, title: &str, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
+    pub fn rename(
+        &mut self,
+        terminal_id: &str,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ErrorBody> {
         let view = self.view(terminal_id, cx).ok_or_else(not_found)?;
         let title = SharedString::from(title.to_string());
         let panels = open_workspace_paths(cx)
@@ -269,11 +292,15 @@ impl Terminals {
             .filter_map(|(_, workspace, _)| workspace.upgrade()?.read(cx).panel::<AgentPanel>(cx))
             .collect::<Vec<_>>();
         for panel in panels {
-            if panel.update(cx, |panel, cx| panel.rename_terminal_thread(&view, title.clone(), cx)) {
+            if panel.update(cx, |panel, cx| {
+                panel.rename_terminal_thread(&view, title.clone(), cx)
+            }) {
                 return Ok(());
             }
         }
-        view.update(cx, |view, cx| view.set_custom_title(Some(title.to_string()), cx));
+        view.update(cx, |view, cx| {
+            view.set_custom_title(Some(title.to_string()), cx)
+        });
         Ok(())
     }
 
@@ -300,7 +327,8 @@ impl Terminals {
             }
             (None, Some(key)) => {
                 let keystroke = Keystroke::parse(key.keystroke()).map_err(|_| bad_input())?;
-                let handled = terminal.update(cx, |terminal, _| terminal.try_keystroke(&keystroke, false));
+                let handled =
+                    terminal.update(cx, |terminal, _| terminal.try_keystroke(&keystroke, false));
                 if handled { Ok(()) } else { Err(bad_input()) }
             }
             _ => Err(bad_input()),
@@ -328,7 +356,11 @@ impl Terminals {
                 for (view, title) in panel.read(cx).terminal_threads(cx) {
                     placed.insert(
                         view.entity_id(),
-                        (workspace_id.clone(), TerminalKind::Agent, Some(title.to_string())),
+                        (
+                            workspace_id.clone(),
+                            TerminalKind::Agent,
+                            Some(title.to_string()),
+                        ),
                     );
                 }
             }
@@ -343,9 +375,11 @@ impl Terminals {
             {
                 for item in pane.read(cx).items() {
                     if let Some(view) = item.downcast::<TerminalView>() {
-                        placed
-                            .entry(view.entity_id())
-                            .or_insert((workspace_id.clone(), kind, None));
+                        placed.entry(view.entity_id()).or_insert((
+                            workspace_id.clone(),
+                            kind,
+                            None,
+                        ));
                     }
                 }
             }
@@ -369,15 +403,19 @@ impl Terminals {
             })
             .collect::<Vec<_>>();
         list.sort_by(|left, right| {
-            (left.workspace_id.as_str(), left.kind as u8, left.title.as_str()).cmp(&(
-                right.workspace_id.as_str(),
-                right.kind as u8,
-                right.title.as_str(),
-            ))
+            (
+                left.workspace_id.as_str(),
+                left.kind as u8,
+                left.title.as_str(),
+            )
+                .cmp(&(
+                    right.workspace_id.as_str(),
+                    right.kind as u8,
+                    right.title.as_str(),
+                ))
         });
         list
     }
-
 }
 
 /// The name Lathe shows on a terminal's tab: the one it was given, or else
@@ -414,7 +452,13 @@ pub(crate) struct Styler<'a> {
 impl<'a> Styler<'a> {
     pub(crate) fn new(color: &'a dyn Fn(&Color) -> Hsla, minimum_contrast: f32) -> Self {
         let foreground = hex(color(&Color::Named(NamedColor::Foreground)));
-        Self { color, minimum_contrast, foreground, styles: Vec::new(), index: HashMap::default() }
+        Self {
+            color,
+            minimum_contrast,
+            foreground,
+            styles: Vec::new(),
+            index: HashMap::default(),
+        }
     }
 
     pub(crate) fn colors(&self) -> TerminalColors {
@@ -455,7 +499,10 @@ impl<'a> Styler<'a> {
 
     /// One row as text, trailing spaces trimmed and wide characters once, and
     /// its spans as flat `[start, length, style]` triples in characters.
-    pub(crate) fn row<'c>(&mut self, cells: impl IntoIterator<Item = &'c Cell>) -> (String, Vec<u32>) {
+    pub(crate) fn row<'c>(
+        &mut self,
+        cells: impl IntoIterator<Item = &'c Cell>,
+    ) -> (String, Vec<u32>) {
         let mut text = String::new();
         let mut spans: Vec<u32> = Vec::new();
         let mut at = 0u32;
@@ -488,7 +535,10 @@ impl<'a> Styler<'a> {
             if let Some(style) = style {
                 let index = self.intern(style);
                 match spans.len() {
-                    len if len >= 3 && spans[len - 1] == index && spans[len - 3] + spans[len - 2] == at => {
+                    len if len >= 3
+                        && spans[len - 1] == index
+                        && spans[len - 3] + spans[len - 2] == at =>
+                    {
                         spans[len - 2] += width;
                     }
                     _ => spans.extend([at, width, index]),
@@ -522,7 +572,12 @@ impl<'a> Styler<'a> {
 fn hex(color: Hsla) -> String {
     let rgba = Rgba::from(color);
     let byte = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
-    let mut out = format!("#{:02x}{:02x}{:02x}", byte(rgba.r), byte(rgba.g), byte(rgba.b));
+    let mut out = format!(
+        "#{:02x}{:02x}{:02x}",
+        byte(rgba.r),
+        byte(rgba.g),
+        byte(rgba.b)
+    );
     if rgba.a < 0.995 {
         out.push_str(&format!("{:02x}", byte(rgba.a)));
     }
@@ -645,8 +700,14 @@ mod tests {
     }
 
     fn lines(message: &DesktopMessage) -> Vec<String> {
-        let DesktopMessage::TerminalScreen { lines, .. } = message else { panic!() };
-        lines.iter().filter(|line| !line.is_empty()).cloned().collect()
+        let DesktopMessage::TerminalScreen { lines, .. } = message else {
+            panic!()
+        };
+        lines
+            .iter()
+            .filter(|line| !line.is_empty())
+            .cloned()
+            .collect()
     }
 
     #[gpui::test]
@@ -660,9 +721,23 @@ mod tests {
         let message = render(&terminal, cx);
         assert_eq!(
             lines(&message),
-            vec!["$ claude", "Do you want to proceed?", "> 1. Yes", "  2. No", "你好 ok"]
+            vec![
+                "$ claude",
+                "Do you want to proceed?",
+                "> 1. Yes",
+                "  2. No",
+                "你好 ok"
+            ]
         );
-        let DesktopMessage::TerminalScreen { seq, rows, columns, cursor, terminal_id, .. } = &message else {
+        let DesktopMessage::TerminalScreen {
+            seq,
+            rows,
+            columns,
+            cursor,
+            terminal_id,
+            ..
+        } = &message
+        else {
             panic!()
         };
         assert_eq!((terminal_id.as_str(), *seq), ("t1", 3));
@@ -682,7 +757,12 @@ mod tests {
         });
         let message = render(&terminal, cx);
         assert_eq!(lines(&message), vec!["    TUI view"]);
-        let DesktopMessage::TerminalScreen { lines: all, cursor, .. } = &message else { panic!() };
+        let DesktopMessage::TerminalScreen {
+            lines: all, cursor, ..
+        } = &message
+        else {
+            panic!()
+        };
         assert_eq!(all[2], "    TUI view");
         assert_eq!(*cursor, None);
     }
@@ -691,9 +771,12 @@ mod tests {
     fn reads_the_lines_above_the_screen(cx: &mut TestAppContext) {
         let terminal = test_terminal(cx);
         let output: String = (1..=200).map(|n| format!("line {n}\r\n")).collect();
-        terminal.update(cx, |terminal, cx| terminal.write_output(output.as_bytes(), cx));
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(output.as_bytes(), cx)
+        });
         let (rows, history) = terminal.read_with(cx, |terminal, _| {
-            let DesktopMessage::TerminalScreen { rows, .. } = screen("t1", 1, terminal, None) else {
+            let DesktopMessage::TerminalScreen { rows, .. } = screen("t1", 1, terminal, None)
+            else {
                 panic!()
             };
             let mut styler = Styler::new(&test_color, 0.);
@@ -702,19 +785,27 @@ mod tests {
         // Scrollback and screen together hold every line, oldest first, with nothing repeated.
         let screen_lines = lines(&render(&terminal, cx));
         let all: Vec<String> = history.iter().cloned().chain(screen_lines).collect();
-        assert_eq!(all, (1..=200).map(|n| format!("line {n}")).collect::<Vec<_>>());
+        assert_eq!(
+            all,
+            (1..=200).map(|n| format!("line {n}")).collect::<Vec<_>>()
+        );
         assert_eq!(history.len(), 200 + 1 - rows);
     }
 
     #[gpui::test]
     fn sends_colors_as_styled_spans(cx: &mut TestAppContext) {
         let terminal = test_terminal(cx);
-        let output: String = (1..=60).map(|n| format!("\x1b[31mold {n}\x1b[0m\r\n")).collect();
+        let output: String = (1..=60)
+            .map(|n| format!("\x1b[31mold {n}\x1b[0m\r\n"))
+            .collect();
         terminal.update(cx, |terminal, cx| {
             terminal.write_output(output.as_bytes(), cx);
             // Plain, then green, bold blue, reversed (black on white), and an
             // underlined space, which is trailing whitespace and gets trimmed.
-            terminal.write_output(b"ok \x1b[32m+add\x1b[0m \x1b[1;34mB\x1b[0m \x1b[7mR\x1b[0m\x1b[4m \x1b[0m", cx);
+            terminal.write_output(
+                b"ok \x1b[32m+add\x1b[0m \x1b[1;34mB\x1b[0m \x1b[7mR\x1b[0m\x1b[4m \x1b[0m",
+                cx,
+            );
         });
         let (message, history, history_spans, styles) = terminal.read_with(cx, |terminal, _| {
             let mut styler = Styler::new(&test_color, 0.);
@@ -722,7 +813,13 @@ mod tests {
             let (history, spans) = scrollback(terminal, &mut styler);
             (message, history, spans, styler.styles)
         });
-        let DesktopMessage::TerminalScreen { lines, line_styles, cursor, .. } = &message else {
+        let DesktopMessage::TerminalScreen {
+            lines,
+            line_styles,
+            cursor,
+            ..
+        } = &message
+        else {
             panic!()
         };
         let row = cursor.unwrap().row as usize;
@@ -732,12 +829,29 @@ mod tests {
             .chunks(3)
             .map(|span| (span[0], span[1], styles[span[2] as usize].clone()))
             .collect();
-        let green = TerminalStyle { fg: Some("#00ff00".into()), ..Default::default() };
-        let bold_blue = TerminalStyle { fg: Some("#0000ff".into()), bold: true, ..Default::default() };
-        let reversed = TerminalStyle { fg: Some("#000000".into()), bg: Some("#ffffff".into()), ..Default::default() };
-        assert_eq!(runs, vec![(3, 4, green), (8, 1, bold_blue), (10, 1, reversed)]);
+        let green = TerminalStyle {
+            fg: Some("#00ff00".into()),
+            ..Default::default()
+        };
+        let bold_blue = TerminalStyle {
+            fg: Some("#0000ff".into()),
+            bold: true,
+            ..Default::default()
+        };
+        let reversed = TerminalStyle {
+            fg: Some("#000000".into()),
+            bg: Some("#ffffff".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            runs,
+            vec![(3, 4, green), (8, 1, bold_blue), (10, 1, reversed)]
+        );
         // Scrollback carries its colors too: each red line is one span.
-        let red = TerminalStyle { fg: Some("#ff0000".into()), ..Default::default() };
+        let red = TerminalStyle {
+            fg: Some("#ff0000".into()),
+            ..Default::default()
+        };
         let first = history.iter().position(|line| line == "old 1").unwrap();
         assert_eq!(history_spans[first][..2], [0, 5]);
         assert_eq!(styles[history_spans[first][2] as usize], red);

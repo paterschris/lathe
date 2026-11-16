@@ -1,6 +1,6 @@
 use crate::{AgentServer, AgentServerDelegate, load_proxy_env};
 use acp_thread::{AgentConnection, AgentModelId};
-use agent_client_protocol::schema::v2 as acp_v2;
+use agent_client_protocol::v2::schema as acp_v2;
 use ai_accounts::{
     AiAccountsSettings, WorkspaceAccountBindings, api_key_keychain_url, load_index,
 };

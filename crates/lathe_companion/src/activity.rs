@@ -19,7 +19,9 @@ pub fn is_active(cx: &App) -> bool {
 /// `minutes` at 0, or before any input since launch, you're always idle.
 pub(crate) fn active_at(last_input: Option<Instant>, now: Instant, minutes: u32) -> bool {
     minutes > 0
-        && last_input.is_some_and(|at| now.saturating_duration_since(at) < Duration::from_secs(u64::from(minutes) * 60))
+        && last_input.is_some_and(|at| {
+            now.saturating_duration_since(at) < Duration::from_secs(u64::from(minutes) * 60)
+        })
 }
 
 #[cfg(test)]
