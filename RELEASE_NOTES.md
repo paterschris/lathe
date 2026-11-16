@@ -4,18 +4,19 @@ Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-re
 
 ## v1.22.0 - 2026-11-16
 
-Everything from the 1.19, 1.20 and 1.21 betas. The big one is extensions: Lathe has its own extension API now, and you can manage extensions properly.
+Everything from the 1.19, 1.20 and 1.21 betas. The big one is extensions: Lathe has its own extension API now, extensions can draw their own UI, and you can manage extensions properly.
 
 ### Extensions
 
 - **Lathe extensions.** Extensions built with `lathe_extension_api` 0.1 can add palette commands, read and edit the file you're in, react to files being opened, saved or changed, show status bar text, notifications, prompts and pick lists, and run commands in the terminal. Every one of those is a separate permission. Lathe asks before installing, lists them on the extension's card, and has Allow and Revoke buttons.
+- **Extensions can draw their own UI (API 0.2, preview).** File previews in a tab next to the editor, dock panels, clickable status bar items, and highlights in the editor (backgrounds, underlines, squiggles, gutter marks). It all uses Lathe's own components, so it follows your theme. Highlights need the `ui:decorations` permission.
 - **Turn an extension off without uninstalling it.** Disable and Enable are on its card and in its menu. Settings and permissions stay put.
 - `extension_auto_update` turns automatic updates on or off for everything. The card's menu does it per extension.
 - **Recommended extensions per project.** List them under `recommended_extensions` in a project's `.zed/settings.json`, and opening the project offers to install the missing ones.
 - More places to get extensions. Lathe's registry is listed next to Zed's, `extension_registries` adds more, and you can paste a `.tar.gz` or git URL into the Extensions search box.
 - `extension_settings` holds per-extension settings, keyed by extension id.
 
-API 0.2 (file previews, dock panels, editor highlights) stays beta-only. It's still an alpha on crates.io and can change, so Stable skips extensions built against it. 0.1 extensions and Zed extensions work as usual.
+0.2 is on crates.io as `0.2.0-alpha.1` and can still change between alphas, so pin it with `"=0.2.0-alpha.1"`. 0.1 extensions and Zed extensions work as usual.
 
 ### Git
 
