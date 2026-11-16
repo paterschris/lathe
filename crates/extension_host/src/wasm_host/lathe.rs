@@ -529,28 +529,15 @@ const MAX_TITLE_CHARS: usize = 100;
 const MAX_SUFFIX_CHARS: usize = 64;
 
 /// Whether this build accepts extensions that use the given Lathe API version.
+///
+/// Every channel accepts every version, including 0.2 while it's still an
+/// alpha on crates.io. The channel stays a parameter so a future version can
+/// be staged on Beta first.
 pub fn is_supported_api_version(release_channel: ReleaseChannel, version: &Version) -> bool {
-    enabled_api_versions(release_channel)
+    let _ = release_channel;
+    [API_VERSION_V0_1, API_VERSION_V0_2]
         .iter()
         .any(|supported| version.major == supported.major && version.minor == supported.minor)
-}
-
-/// A Lathe API version ships on Beta first, then reaches Preview and Stable
-/// once it's frozen by a non-prerelease crates.io publish. 0.1 is; 0.2 is still
-/// an alpha that can change.
-fn enabled_api_versions(release_channel: ReleaseChannel) -> &'static [Version] {
-    const ALL: &[Version] = &[API_VERSION_V0_1, API_VERSION_V0_2];
-    const FROZEN: &[Version] = &[API_VERSION_V0_1];
-    match release_channel {
-        ReleaseChannel::Dev | ReleaseChannel::Nightly | ReleaseChannel::Beta => ALL,
-        ReleaseChannel::Stable | ReleaseChannel::Preview => {
-            if cfg!(any(test, feature = "test-support")) {
-                ALL
-            } else {
-                FROZEN
-            }
-        }
-    }
 }
 
 /// Instantiates a component that implements the Lathe world on top of the Zed
@@ -1826,7 +1813,11 @@ mod tests {
         ));
         assert!(
             is_supported_api_version(ReleaseChannel::Stable, &Version::new(0, 1, 2)),
-            "the frozen 0.1 API loads on Stable"
+            "0.1 extensions load on Stable"
+        );
+        assert!(
+            is_supported_api_version(ReleaseChannel::Stable, &Version::new(0, 2, 0)),
+            "0.2 alpha extensions load on Stable"
         );
         assert!(!is_supported_api_version(
             ReleaseChannel::Stable,
