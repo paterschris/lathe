@@ -28,7 +28,7 @@ Roughly ordered by how far each one is from stock Zed. One caveat on the git ent
 4. [Pull request reviews](docs/features.md#pull-request-reviews) - GitHub, GitLab, Bitbucket, in the editor, with several accounts per host
 5. [Code navigation](docs/features.md#code-navigation) - definitions and references open in a peek instead of a new tab
 6. [AI agent integration](docs/features.md#ai-agent-integration) - sign into several accounts, control approval levels, per-workspace thread history
-7. [Lathe Companion](docs/features.md#lathe-companion) - follow and answer your agents, terminals and pull requests from your phone
+7. [Lathe Companion](docs/features.md#lathe-companion) - follow and answer your agents, terminals and pull requests from your phone ([iPhone](https://apps.apple.com/us/app/lathe-companion/id6825627989), [Android](https://play.google.com/store/apps/details?id=com.lathe.companion))
 8. [Theme and syntax highlighting](docs/features.md#theme-and-syntax-highlighting) - the default theme, plus a live customizer for all 200+ colors
 9. [Git additions](docs/features.md#git-additions) - explorer tab, branch tree, compare any two commits, graph context menus, multi-select, undo, Git Flow
 10. [Jupyter notebooks](docs/features.md#jupyter-notebooks) - saving keeps your outputs, cells share one document, and the kernel picker finds your project's venv

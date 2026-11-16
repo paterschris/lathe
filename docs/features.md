@@ -149,7 +149,7 @@ When approval and sandbox level take effect depends on the agent, because the tw
 
 ## Lathe Companion
 
-Lathe Companion is a phone app for keeping an eye on your agents when you're not at your desk. Approve a tool call from the couch, answer a question from the grocery store, get pinged when a long run finishes. It's on the [App Store](https://apps.apple.com/us/app/lathe-companion/id6825627989) and Google Play, with a 7-day free trial and then a subscription.
+Lathe Companion is a phone app for keeping an eye on your agents when you're not at your desk. Approve a tool call from the couch, answer a question from the grocery store, get pinged when a long run finishes. It's on the [App Store](https://apps.apple.com/us/app/lathe-companion/id6825627989) and [Google Play](https://play.google.com/store/apps/details?id=com.lathe.companion). 7-day free trial, then $1.99 a month on either.
 
 ### Pairing
 It's off until you turn it on. Run **lathe companion: open companion** from the command palette, choose **Turn on**, and scan the QR code with the app. Lathe asks you to **Allow** a phone before it pairs, so someone else scanning your code doesn't get in. **New code** replaces an expired one and kills the old one. **Copy link** gives you something to open on the phone instead of scanning. Once it's on, a phone icon in the title bar opens the same dialog, which also lists your paired phones.
