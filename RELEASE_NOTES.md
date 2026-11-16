@@ -39,6 +39,8 @@ Muting and batched streaming need a companion app update. Until then, the phone 
 - The command palette shows Lathe's commands as `lathe: ...`. Typing `zed:` still finds them and `zed::` keymaps keep working.
 - The welcome screen says "Craft your masterpiece".
 - Caught up with upstream Zed (197 commits).
+- Borders, indent guides, text and the editor's gutter snap to whole pixels again, so they look crisper. An earlier upstream sync had quietly put back the old way of placing them.
+- The README and [features page](docs/features.md) cover Lathe Companion now, and the [telemetry docs](docs/src/telemetry.md#lathe-usage-counts) spell out exactly what the usage counts send.
 
 ## v1.21.0-beta - 2026-11-12
 
