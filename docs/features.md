@@ -41,7 +41,7 @@ Both toolchain sections report their own state, so you hear about a missing JDK 
 
 ## Extensions
 
-Zed extensions run in Lathe exactly as they do in Zed. On top of that, Lathe has its own extension API that lets an extension do things Zed's won't: add commands, read and edit the file you're in, react to files being opened or saved, and run commands in a terminal. It's an extra crate, [`lathe_extension_api`](../crates/lathe_extension_api/README.md) on crates.io, that sits next to `zed_extension_api` in the same extension, so one extension can use both.
+Zed extensions run in Lathe exactly as they do in Zed. On top of that, Lathe has its own extension API that lets an extension do things Zed's won't: add commands, read and edit the file you're in, react to files being opened or saved, and run commands in a terminal. It's an extra crate, [`lathe_extension_api`](https://crates.io/crates/lathe_extension_api) on crates.io ([API docs](https://docs.rs/lathe_extension_api)), that sits next to `zed_extension_api` in the same extension, so one extension can use both.
 
 ### What an extension can do
 - **Commands.** Registered commands show up in the command palette under the extension's name. Bind one to a key with `["extension::RunCommand", { "extension_id": "...", "command": "..." }]`.
@@ -51,7 +51,7 @@ Zed extensions run in Lathe exactly as they do in Zed. On top of that, Lathe has
 - **Terminal tasks.** Commands run as ordinary Lathe tasks in a terminal tab. Starting one with the same label as a task that's still running waits for it and reuses its tab, so saving three times doesn't stack up three terminals.
 - **Settings.** `extension_settings.<extension id>` holds an extension's own settings, which it reads as JSON. A project's `.zed/settings.json` can set them too, but only once you've trusted the project.
 
-API 0.2 (in progress, not released yet) adds:
+API 0.2 (an alpha, `lathe_extension_api = "=0.2.0-alpha.1"`, in Lathe 1.20 beta and newer) adds:
 
 - **Views**: an extension describes a small UI (text, buttons, list items and trees, text inputs, checkboxes, dropdowns, right-click menus, progress, markdown, and virtual lists that load rows as you scroll) and Lathe draws it with its own components so it follows the theme.
 - **File previews**: an extension can register a preview for file types (say `package.json`). On a matching file, click the extension button in the editor toolbar (or run "<Extension>: <Preview>" from the command palette) and the preview opens in a tab beside the editor, which stays open for editing. It redraws as you type, and comes back after a restart.
@@ -61,16 +61,16 @@ API 0.2 (in progress, not released yet) adds:
 - **Decorations**: highlights, underlines, gutter marks and short end-of-line messages in the editor, anchored to the text so they move with your edits.
 
 ### Permissions
-Each of those abilities is a separate capability the extension has to declare in `lathe_capabilities` in its `extension.toml`: `buffer:read`, `buffer:write`, `events:open`, `events:save`, `events:change`, `ui:status`, `ui:prompt`, and `tasks:spawn`, plus `ui:views` and `ui:decorations` for API 0.2. Neither is released yet, and 1.19 won't load an extension that asks for them. Installing from a registry or a URL asks you to allow them first, and the extension's card lists them with **Allow** and **Revoke** buttons, one at a time. Dev extensions are allowed automatically, since that folder is yours. Grants are kept in `lathe-grants.json`.
+Each of those abilities is a separate capability the extension has to declare in `lathe_capabilities` in its `extension.toml`: `buffer:read`, `buffer:write`, `events:open`, `events:save`, `events:change`, `ui:status`, `ui:prompt`, and `tasks:spawn`, plus `ui:views` and `ui:decorations` for API 0.2. Lathe 1.19 and older won't load an extension that asks for those two. Installing from a registry or a URL asks you to allow them first, and the extension's card lists them with **Allow** and **Revoke** buttons, one at a time. Dev extensions are allowed automatically, since that folder is yours. Grants are kept in `lathe-grants.json`.
 
 ### Where extensions come from
 - **More registries.** `extension_registries` lists static `index.json` registries to search next to Zed's. Lathe's own registry is on the list by default. Results are merged by extension id, and if Zed's API is down the list still fills from the others. Indexes are cached, so the Extensions page works offline, and downloads are checked against the sha256 in the index.
 - **Install from a URL.** Paste a `.tar.gz` or a git URL into the Extensions page's search box to install from it.
 - **Lathe-only extensions** declare `requires = ["lathe"]` and get a **Lathe** chip on their card. Registry cards leave out the download count, since static registries don't have one.
+- **Building your own.** Start from [lathe-extension-template](https://github.com/paterschris/lathe-extension-template). It has a language-server starter and, in `examples/lathe-command`, a Lathe-only command built on the API. The crate's [README](../crates/lathe_extension_api/README.md) covers every call and permission.
 - **Submitting to the registry.** Extensions get into Lathe's registry by pull request to [lathe-extensions](https://github.com/paterschris/lathe-extensions), reviewed by the maintainer. The steps are in its [CONTRIBUTING.md](https://github.com/paterschris/lathe-extensions/blob/main/CONTRIBUTING.md).
 
-### Managing installed extensions (next beta)
-These aren't in a release yet. They're coming in the beta after 1.19.
+### Managing installed extensions
 
 - **Disable without uninstalling.** An extension's menu on its card has **Disable**, which keeps it installed but stops loading it. It shows a **Disabled** chip and an **Enable** button. The setting behind it is `disabled_extensions`.
 - **Auto-update per extension.** The same menu has **Turn Off Auto-Update** / **Turn On Auto-Update**. `extension_auto_update` sets the default for everything, and `auto_update_extensions` overrides it per extension.

@@ -23,7 +23,7 @@ This is a personal fork. I maintain it because I wanted a handful of editor twea
 Roughly ordered by how far each one is from stock Zed. One caveat on the git entry: upstream already has a commit graph, a tabbed git panel, worktree support, and single-file history, so that section only covers what Lathe puts on top of them.
 
 1. [Mobile development](docs/features.md#mobile-development-expo--react-native) - a panel for Expo and bare React Native projects
-2. [Extensions](docs/features.md#extensions) - an extension API past Zed's (commands, buffer edits, file events, terminal tasks) with per-extension permissions, more registries, install from a URL, disable and recommend extensions
+2. [Extensions](docs/features.md#extensions) - an extension API past Zed's (commands, buffer edits, file events, terminal tasks, and in the 0.2 alpha, panels, previews and editor highlights) with per-extension permissions, more registries, install from a URL, disable and recommend extensions. Build one from the [template](https://github.com/paterschris/lathe-extension-template) with [`lathe_extension_api`](https://crates.io/crates/lathe_extension_api), and publish it to the [registry](https://github.com/paterschris/lathe-extensions)
 3. [Merge conflicts and interactive rebase](docs/features.md#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, drag-and-drop rebase
 4. [Pull request reviews](docs/features.md#pull-request-reviews) - GitHub, GitLab, Bitbucket, in the editor, with several accounts per host
 5. [Code navigation](docs/features.md#code-navigation) - definitions and references open in a peek instead of a new tab
