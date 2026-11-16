@@ -346,7 +346,10 @@ impl Element for IndentGuidesElement {
                         self.colors.default
                     };
 
-                    window.paint_quad(fill(indent_guide.bounds, fill_color));
+                    window.paint_quad(fill(
+                        window.pixel_snap_bounds(indent_guide.bounds),
+                        fill_color,
+                    ));
                 }
             }
             IndentGuidesElementPrepaintState::Interactive {
@@ -392,7 +395,10 @@ impl Element for IndentGuidesElement {
                         self.colors.default
                     };
 
-                    window.paint_quad(fill(indent_guide.bounds, fill_color));
+                    window.paint_quad(fill(
+                        window.pixel_snap_bounds(indent_guide.bounds),
+                        fill_color,
+                    ));
                 }
 
                 window.on_mouse_event({
