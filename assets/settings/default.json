@@ -2457,7 +2457,7 @@
   // registry. When several registries offer the same extension id, the
   // registry listed last wins. Set to [] to use only the Zed registry.
   "extension_registries": [
-    "https://paterschris.github.io/lathe-extensions/index.json",
+    "https://updates.lathe-ide.com/extensions/index.json",
   ],
   // Settings for individual extensions, keyed by extension id. Extensions
   // that use the Lathe extension API can read their own entry. A project's

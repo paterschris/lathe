@@ -816,6 +816,13 @@ impl ExtensionStore {
             return Task::ready(HashMap::default());
         }
 
+        let install_hash = self
+            .telemetry
+            .as_ref()
+            .filter(|telemetry| telemetry.metrics_enabled())
+            .and_then(|telemetry| telemetry.installation_id())
+            .filter(|installation_id| !installation_id.is_empty())
+            .map(|installation_id| registry::install_hash(&installation_id));
         let http_client = self.http_client.clone();
         let fs = self.fs.clone();
         let cache_dir = self.registry_cache_dir.clone();
@@ -824,12 +831,14 @@ impl ExtensionStore {
                 let http_client = http_client.clone();
                 let fs = fs.clone();
                 let cache_dir = cache_dir.clone();
+                let install_hash = install_hash.clone();
                 async move {
                     let index = registry::fetch_static_index(
                         http_client.as_ref(),
                         fs.as_ref(),
                         &cache_dir,
                         &url,
+                        install_hash.as_deref(),
                     )
                     .await;
                     (url, index)

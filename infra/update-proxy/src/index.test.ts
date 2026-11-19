@@ -53,7 +53,7 @@ describe("release proxy", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(response.headers.has("x-lathe-proxy-fetched-at")).toBe(false);
     expect(writeDataPoint).toHaveBeenCalledWith({
-      indexes: ["a".repeat(64)], blobs: ["1.0bad", "stable", "macos", "aarch64", "US"], doubles: [1],
+      indexes: ["a".repeat(64)], blobs: ["1.0bad", "stable", "macos", "aarch64", "US", "update"], doubles: [1],
     });
     expect(fetchMock.mock.calls[0][0]).toBe(upstreamUrl);
     const headers = fetchMock.mock.calls[0][1].headers as Headers;
@@ -144,9 +144,63 @@ describe("release proxy", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects non-GET registry requests without analytics", async () => {
+    const context = { waitUntil: vi.fn() };
+    const response = await worker.fetch(
+      new Request("https://lathe.example/extensions/index.json", { method: "POST" }) as never,
+      {} as never, context as never,
+    );
+    expect(response.status).toBe(405);
+    expect(context.waitUntil).not.toHaveBeenCalled();
+  });
+
   it("filters and bounds untrusted headers", () => {
     expect(cleanHeader("abc /@é._-123")).toBe("abc._-123");
     expect(cleanHeader("a".repeat(1000))).toHaveLength(64);
     expect(cleanHeader(null)).toBe("");
+  });
+});
+
+describe("registry proxy", () => {
+  const registryUrl = "https://paterschris.github.io/lathe-extensions/index.json";
+  const index = '{ "schema": 1, "extensions": [] }';
+
+  async function fetchRegistry(headers: Record<string, string> = {}) {
+    const request = new Request("https://lathe.example/extensions/index.json", { headers });
+    Object.defineProperty(request, "cf", { value: { country: "PT" } });
+    const response = await worker.fetch(request as never, {
+      LATHE_PINGS: { writeDataPoint },
+    } as never, { waitUntil: (promise: Promise<unknown>) => pending.push(promise) } as never);
+    await Promise.all(pending);
+    return response;
+  }
+
+  it("passes the index through and records a registry ping", async () => {
+    fetchMock.mockResolvedValue(new Response(index, {
+      headers: { "Content-Type": "application/json", ETag: '"v1"' },
+    }));
+    const response = await fetchRegistry({ "x-lathe-install": "b".repeat(64) });
+    expect(await response.text()).toBe(index);
+    expect(response.headers.get("ETag")).toBe('"v1"');
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(fetchMock.mock.calls[0][0]).toBe(registryUrl);
+    expect((fetchMock.mock.calls[0][1].headers as Headers).has("x-lathe-install")).toBe(false);
+    expect(writeDataPoint).toHaveBeenCalledWith({
+      indexes: ["b".repeat(64)], blobs: ["", "", "", "", "PT", "registry"], doubles: [1],
+    });
+    expect(cachePut).not.toHaveBeenCalled();
+  });
+
+  it("forwards If-None-Match and returns 304 without a body", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 304, headers: { ETag: '"v1"' } }));
+    const response = await fetchRegistry({ "If-None-Match": '"v1"' });
+    expect(response.status).toBe(304);
+    expect((fetchMock.mock.calls[0][1].headers as Headers).get("If-None-Match")).toBe('"v1"');
+    expect(writeDataPoint).not.toHaveBeenCalled();
+  });
+
+  it("returns 502 when the registry cannot be reached", async () => {
+    fetchMock.mockRejectedValue(new Error("offline"));
+    expect((await fetchRegistry()).status).toBe(502);
   });
 });

@@ -14,6 +14,20 @@ use util::ResultExt as _;
 /// The only static index schema this client understands.
 pub const STATIC_INDEX_SCHEMA: u32 = 1;
 
+/// Registry fetches through this host carry the anonymous install hash so the
+/// update proxy can count installs that load the registry. Other hosts never
+/// receive it.
+const LATHE_PROXY_HOST: &str = "updates.lathe-ide.com";
+
+/// Hashes an installation id the same way update checks do, so registry
+/// fetches and update checks from one install count as the same install.
+pub fn install_hash(installation_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"lathe-update-ping-v1");
+    digest.update(installation_id.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
 /// Host requirements this build can satisfy. An extension lists the hosts it
 /// needs in `requires` in its `extension.toml`; `"lathe"` marks an extension
 /// that only works in Lathe. Anything not listed here comes from a newer
@@ -233,6 +247,7 @@ pub async fn fetch_static_index(
     fs: &dyn Fs,
     cache_dir: &Path,
     url: &str,
+    install_hash: Option<&str>,
 ) -> Result<StaticIndex> {
     let path = cache_path(cache_dir, url);
     let cached = load_cached_index(fs, &path, url).await;
@@ -241,6 +256,7 @@ pub async fn fetch_static_index(
         http_client,
         url,
         cached.as_ref().and_then(|cached| cached.etag.as_deref()),
+        install_hash,
     )
     .await
     {
@@ -283,12 +299,27 @@ async fn fetch_static_index_from_network(
     http_client: &dyn HttpClient,
     url: &str,
     etag: Option<&str>,
+    install_hash: Option<&str>,
 ) -> Result<Option<(StaticIndex, Option<String>)>> {
+    let install_hash = install_hash.filter(|_| {
+        url::Url::parse(url)
+            .ok()
+            .is_some_and(|url| url.host_str() == Some(LATHE_PROXY_HOST))
+    });
+    // The install hash must not follow a redirect to another host.
+    let redirect_policy = if install_hash.is_some() {
+        http_client::RedirectPolicy::NoFollow
+    } else {
+        http_client::RedirectPolicy::FollowAll
+    };
     let mut request = http_client::Builder::new()
         .uri(url)
-        .follow_redirects(http_client::RedirectPolicy::FollowAll);
+        .follow_redirects(redirect_policy);
     if let Some(etag) = etag {
         request = request.header(http_client::http::header::IF_NONE_MATCH, etag);
+    }
+    if let Some(install_hash) = install_hash {
+        request = request.header("x-lathe-install", install_hash);
     }
     let request = request.body(AsyncBody::empty())?;
 
@@ -681,7 +712,7 @@ mod tests {
         let fs = fs::FakeFs::new(cx.executor());
         let cache_dir = Path::new("/extensions/registry-cache");
 
-        let fetch = || fetch_static_index(http_client.as_ref(), fs.as_ref(), cache_dir, URL);
+        let fetch = || fetch_static_index(http_client.as_ref(), fs.as_ref(), cache_dir, URL, None);
 
         let index = fetch().await.expect("first fetch downloads the index");
         assert_eq!(index.extensions[0].id.as_ref(), "cached");
@@ -705,9 +736,75 @@ mod tests {
             fs.as_ref(),
             cache_dir,
             "https://other.example/index.json",
+            None,
         )
         .await;
         assert!(other_url_fails.is_err(), "no cache exists for another URL");
+    }
+
+    #[gpui::test]
+    async fn test_install_hash_only_sent_to_lathe_proxy(cx: &mut gpui::TestAppContext) {
+        use http_client::{FakeHttpClient, Response};
+        use parking_lot::Mutex;
+
+        let seen = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let http_client = FakeHttpClient::create({
+            let seen = seen.clone();
+            move |request| {
+                seen.lock().push((
+                    request.uri().to_string(),
+                    request
+                        .headers()
+                        .get("x-lathe-install")
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToOwned::to_owned),
+                ));
+                async move {
+                    let body = serde_json::to_string(&StaticIndex {
+                        schema: STATIC_INDEX_SCHEMA,
+                        extensions: Vec::new(),
+                    })?;
+                    Ok(Response::builder().body(body.into())?)
+                }
+            }
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        let cache_dir = Path::new("/extensions/registry-cache");
+        let hash = install_hash("test-install");
+
+        for url in [
+            "https://updates.lathe-ide.com/extensions/index.json",
+            "https://paterschris.github.io/lathe-extensions/index.json",
+        ] {
+            fetch_static_index(
+                http_client.as_ref(),
+                fs.as_ref(),
+                cache_dir,
+                url,
+                Some(&hash),
+            )
+            .await
+            .expect("fetch succeeds");
+        }
+
+        assert_eq!(
+            *seen.lock(),
+            vec![
+                (
+                    "https://updates.lathe-ide.com/extensions/index.json".to_string(),
+                    Some(hash.clone())
+                ),
+                (
+                    "https://paterschris.github.io/lathe-extensions/index.json".to_string(),
+                    None
+                ),
+            ]
+        );
+        assert_eq!(
+            hash,
+            format!("{:x}", Sha256::digest(b"lathe-update-ping-v1test-install")),
+            "matches the hash update checks send"
+        );
     }
 
     #[test]

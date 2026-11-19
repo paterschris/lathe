@@ -8,9 +8,9 @@ if [[ ! "$CF_ACCOUNT_ID" =~ ^[a-fA-F0-9]{32}$ ]]; then
 fi
 query_name="${1:-all}"
 case "$query_name" in
-  all) query_names=(daily weekly versions channels platforms sampling) ;;
-  daily|weekly|versions|channels|platforms|sampling) query_names=("$query_name") ;;
-  *) echo 'Usage: stats.sh [all|daily|weekly|versions|channels|platforms|sampling]' >&2; exit 1 ;;
+  all) query_names=(daily weekly versions channels platforms sampling registry_daily registry_installs) ;;
+  daily|weekly|versions|channels|platforms|sampling|registry_daily|registry_installs) query_names=("$query_name") ;;
+  *) echo 'Usage: stats.sh [all|daily|weekly|versions|channels|platforms|sampling|registry_daily|registry_installs]' >&2; exit 1 ;;
 esac
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 for query_name in "${query_names[@]}"; do

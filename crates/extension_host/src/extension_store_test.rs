@@ -4636,7 +4636,7 @@ fn test_extension_registries_default_survives_unrelated_user_settings(cx: &mut T
                 .iter()
                 .map(|url| url.as_ref())
                 .collect::<Vec<_>>(),
-            vec!["https://paterschris.github.io/lathe-extensions/index.json"]
+            vec!["https://updates.lathe-ide.com/extensions/index.json"]
         );
 
         cx.update_global::<SettingsStore, _>(|store, cx| {

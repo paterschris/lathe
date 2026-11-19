@@ -106,6 +106,12 @@ but the Worker records no usage point without an install hash. Asset downloads
 continue directly from GitHub. These update pings are separate from the inherited
 Zed telemetry described above.
 
+The default extension registry is fetched through the same Worker. When metrics
+are on, that request carries the same install hash, so the Worker can count how
+many installs load the registry. It records the hash, the country, and that the
+request was a registry fetch. Turning off metrics removes the hash from registry
+fetches too. Registries you add yourself on other hosts never receive it.
+
 ## Lathe Usage Counts {#lathe-usage-counts}
 
 Starting with Lathe 1.22, Lathe sends a small set of anonymous usage counts to

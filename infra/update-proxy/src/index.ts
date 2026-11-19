@@ -4,6 +4,7 @@ interface Env {
 }
 
 const UPSTREAM = "https://api.github.com/repos/paterschris/lathe/releases?per_page=30";
+const REGISTRY_UPSTREAM = "https://paterschris.github.io/lathe-extensions/index.json";
 const FRESH_SECONDS = 300;
 const RETAIN_SECONDS = 86400;
 const FETCHED_AT = "x-lathe-proxy-fetched-at";
@@ -12,7 +13,9 @@ export function cleanHeader(value: string | null, limit = 64): string {
   return (value ?? "").replace(/[^A-Za-z0-9._-]/g, "").slice(0, limit);
 }
 
-function recordPing(request: Request, env: Env): void {
+type PingKind = "update" | "registry";
+
+function recordPing(request: Request, env: Env, kind: PingKind): void {
   const installation = cleanHeader(request.headers.get("x-lathe-install"));
   if (!installation) return;
   env.LATHE_PINGS.writeDataPoint({
@@ -23,9 +26,33 @@ function recordPing(request: Request, env: Env): void {
       cleanHeader(request.headers.get("x-lathe-os")),
       cleanHeader(request.headers.get("x-lathe-arch")),
       cleanHeader(typeof request.cf?.country === "string" ? request.cf.country : null, 2),
+      kind,
     ],
     doubles: [1],
   });
+}
+
+// GitHub Pages already serves the registry from a CDN, so this route only
+// counts the fetch and passes the index (and its ETag revalidation) through.
+async function serveRegistry(request: Request, env: Env, context: ExecutionContext): Promise<Response> {
+  context.waitUntil(Promise.resolve().then(() => recordPing(request, env, "registry")).catch(() => {}));
+
+  const headers = new Headers({ "User-Agent": "lathe-update-proxy" });
+  const ifNoneMatch = request.headers.get("If-None-Match");
+  if (ifNoneMatch) headers.set("If-None-Match", ifNoneMatch);
+
+  try {
+    const upstream = await fetch(REGISTRY_UPSTREAM, { headers, signal: AbortSignal.timeout(10000) });
+    const responseHeaders = new Headers({ "Cache-Control": "no-store" });
+    for (const name of ["Content-Type", "ETag"]) {
+      const value = upstream.headers.get(name);
+      if (value) responseHeaders.set(name, value);
+    }
+    const body = upstream.status === 304 ? null : await upstream.arrayBuffer();
+    return new Response(body, { status: upstream.status, headers: responseHeaders });
+  } catch {
+    return new Response("Registry unavailable", { status: 502 });
+  }
 }
 
 function publicResponse(response: Response): Response {
@@ -38,14 +65,16 @@ function publicResponse(response: Response): Response {
 
 export default {
   async fetch(request: Request, env: Env, context: ExecutionContext): Promise<Response> {
-    if (new URL(request.url).pathname !== "/releases") {
+    const pathname = new URL(request.url).pathname;
+    if (pathname !== "/releases" && pathname !== "/extensions/index.json") {
       return new Response("Not found", { status: 404 });
     }
     if (request.method !== "GET") {
       return new Response("Method not allowed", { status: 405, headers: { Allow: "GET" } });
     }
+    if (pathname === "/extensions/index.json") return serveRegistry(request, env, context);
 
-    context.waitUntil(Promise.resolve().then(() => recordPing(request, env)).catch(() => {}));
+    context.waitUntil(Promise.resolve().then(() => recordPing(request, env, "update")).catch(() => {}));
 
     const cache = caches.default;
     const cacheKey = new Request(new URL("/releases", request.url).toString());

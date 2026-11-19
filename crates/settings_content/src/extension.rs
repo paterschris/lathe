@@ -38,7 +38,7 @@ pub struct ExtensionSettingsContent {
     pub suggest_extensions: bool,
     /// Additional extension registries, given as URLs of static `index.json` files.
     ///
-    /// Default: ["https://paterschris.github.io/lathe-extensions/index.json"]
+    /// Default: ["https://updates.lathe-ide.com/extensions/index.json"]
     pub extension_registries: Option<Vec<String>>,
     /// The capabilities granted to extensions.
     pub granted_extension_capabilities: Option<Vec<ExtensionCapabilityContent>>,
