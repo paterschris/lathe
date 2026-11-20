@@ -19,6 +19,12 @@ export const MAX_PAIRING_SECONDS = 300;
 export const STALE_SOCKET_MS = 75_000;
 export const SWEEP_INTERVAL_MS = 60_000;
 export const PUSHES_PER_HOUR = 60;
+// Lathe's connection drops every few minutes and comes back a second or two
+// later. For this long, phones aren't told the desktop left, and the frames they
+// send wait for it instead of being turned away.
+export const DESKTOP_GRACE_MS = 5_000;
+export const MAX_HELD_FRAMES = 20;
+export const MAX_HELD_BYTES = 512 * 1024;
 const MESSAGES_PER_SECOND = 50;
 const MESSAGE_BURST = 200;
 const MAX_PAIRING_MESSAGES = 3;
@@ -108,6 +114,22 @@ interface DeviceRecord {
 
 type Message = Record<string, unknown> & { type?: unknown };
 
+/** Runs `run` after `ms`; the Durable Object passes `setTimeout`, tests a fake clock. */
+export type Schedule = (ms: number, run: () => void) => { cancel(): void };
+
+const realSchedule: Schedule = (ms, run) => {
+  const timer = setTimeout(run, ms);
+  return { cancel: () => clearTimeout(timer) };
+};
+
+/** How a socket closed, as the runtime reports it. Only logged. */
+export interface CloseInfo {
+  code?: number;
+  reason?: string;
+  wasClean?: boolean;
+  error?: string;
+}
+
 export function base64ToBytes(value: string): Uint8Array {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
   const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
@@ -160,6 +182,12 @@ export class Relay {
   private buckets = new WeakMap<Socket, { tokens: number; at: number }>();
   private entitlements: Entitlements;
   private index: DesktopIndex;
+  // Set while a desktop that just dropped may still come back (DESKTOP_GRACE_MS).
+  // A pending timer keeps the Durable Object from hibernating, so this memory
+  // lasts as long as the grace does.
+  private grace: { cancel(): void } | null = null;
+  private desktopLeftAt = 0;
+  private held: { socket: Socket; frame: Record<string, unknown>; bytes: number }[] = [];
 
   constructor(
     private state: RelayState,
@@ -167,6 +195,7 @@ export class Relay {
     private desktopId: string,
     private now: () => number = Date.now,
     private fetcher: typeof fetch = (...args) => fetch(...args),
+    private schedule: Schedule = realSchedule,
   ) {
     this.entitlements = new Entitlements(env, now, fetcher);
     this.index = new DesktopIndex(env.SUBSCRIPTIONS);
@@ -222,14 +251,47 @@ export class Relay {
     return this.phoneMessage(socket, attachment, message);
   }
 
-  close(socket: Socket): void {
+  close(socket: Socket, info: CloseInfo = {}): void {
+    this.socketGone(socket, info, true);
+  }
+
+  // `grace` is false for a desktop the sweep found silent: it has been gone for
+  // over a minute already, so phones hear about it at once.
+  private socketGone(socket: Socket, info: CloseInfo, grace: boolean): void {
     const attachment = socket.deserializeAttachment() as Attachment | null;
     if (!attachment?.authed) return;
     if (attachment.role === "phone") {
       this.toDesktop({ type: "presence", device_id: attachment.id, online: this.phoneOnline(attachment.id, socket) });
-    } else if (attachment.role === "desktop" && !this.desktopOnline(socket)) {
-      for (const phone of this.authedSockets("phone")) send(phone, { type: "desktop_status", online: false });
+      return;
     }
+    if (attachment.role !== "desktop") return;
+    const pinged = this.state.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? null;
+    console.log(
+      `companion relay: desktop socket closed (code ${info.code ?? "none"}, reason "${info.reason ?? ""}", clean ${info.wasClean ?? "unknown"}${info.error ? `, error ${info.error}` : ""}), connected ${Math.round((this.now() - attachment.connectedAt) / 1000)}s, last ping ${pinged === null ? "never" : `${Math.round((this.now() - pinged) / 1000)}s ago`}`,
+    );
+    if (this.desktopOnline(socket)) return;
+    this.desktopLeftAt = this.now();
+    if (!grace) return this.graceOver();
+    this.grace?.cancel();
+    this.grace = this.schedule(DESKTOP_GRACE_MS, () => this.graceOver());
+  }
+
+  // The desktop didn't come back in time: phones learn it's offline, and the
+  // frames they sent meanwhile are turned away as they would have been at once.
+  private graceOver(): void {
+    this.grace?.cancel();
+    this.grace = null;
+    if (this.desktopOnline()) return;
+    for (const phone of this.authedSockets("phone")) send(phone, { type: "desktop_status", online: false });
+    for (const { socket } of this.held.splice(0)) this.reject(socket, "desktop_offline");
+  }
+
+  private hold(socket: Socket, frame: Record<string, unknown>): boolean {
+    const bytes = JSON.stringify(frame).length;
+    const total = this.held.reduce((sum, held) => sum + held.bytes, 0);
+    if (this.held.length >= MAX_HELD_FRAMES || total + bytes > MAX_HELD_BYTES) return false;
+    this.held.push({ socket, frame, bytes });
+    return true;
   }
 
   // Runs from the Durable Object alarm. A dead socket never sends a close
@@ -248,7 +310,7 @@ export class Relay {
           // Already gone.
         }
         // The runtime doesn't report a close the relay started itself.
-        this.close(socket);
+        this.socketGone(socket, { code: 1001, reason: "connection timed out" }, false);
         // A peer that vanished never answers the close, so the runtime keeps
         // listing the socket; marking it unauthenticated keeps later sweeps
         // and routing from treating it as a connection again.
@@ -313,14 +375,25 @@ export class Relay {
         if (other !== socket) other.close(CLOSE_REPLACED, "replaced by a newer connection");
       }
       send(socket, { type: "auth_ok" });
+      const away = this.desktopLeftAt ? `${Math.round((this.now() - this.desktopLeftAt) / 1000)}s after the last one ended` : "first since the relay woke";
+      console.log(`companion relay: desktop connected, ${away}, ${this.held.length} frame(s) held`);
+      this.grace?.cancel();
+      this.grace = null;
       for (const phone of this.authedSockets("phone")) send(phone, { type: "desktop_status", online: true });
       const livePhones = this.authedSockets("phone").filter((phone) => this.isLive(phone));
       for (const device_id of new Set(livePhones.map((phone) => this.attachment(phone).id))) {
         send(socket, { type: "presence", device_id, online: true });
       }
+      // After presence, which tells Lathe the phone's frame count starts again
+      // for this connection, so it takes them.
+      for (const { socket: phone, frame } of this.held.splice(0)) {
+        if (this.state.getWebSockets("phone").includes(phone) && isOpen(phone)) send(socket, { ...frame, device_id: this.attachment(phone).id });
+      }
     } else {
       send(socket, { type: "auth_ok" });
-      send(socket, { type: "desktop_status", online: this.desktopOnline() });
+      // A desktop in its grace period is about to be back; calling it offline
+      // would only flash a banner.
+      send(socket, { type: "desktop_status", online: this.desktopOnline() || this.grace !== null });
       this.toDesktop({ type: "presence", device_id: attachment.id, online: true });
     }
   }
@@ -405,7 +478,9 @@ export class Relay {
       case "frame": {
         const frame = this.frame(message);
         if (!frame) return this.reject(socket, "invalid_frame");
-        if (!this.toDesktop({ ...frame, device_id: attachment.id })) this.reject(socket, "desktop_offline");
+        if (this.toDesktop({ ...frame, device_id: attachment.id })) return;
+        if (this.grace && this.hold(socket, frame)) return;
+        this.reject(socket, "desktop_offline");
         return;
       }
       case "register_push": {

@@ -4,7 +4,7 @@ import {
   OUTAGE_GRACE_MS, affectedDeviceIds, handleWebhook, type Kv,
 } from "./entitlements";
 import {
-  STALE_SOCKET_MS, SWEEP_INTERVAL_MS,
+  STALE_SOCKET_MS, SWEEP_INTERVAL_MS, DESKTOP_GRACE_MS, MAX_HELD_FRAMES, type Schedule,
   CLOSE_PAIRING_DONE, CLOSE_SUBSCRIPTION_REQUIRED, CLOSE_REPLACED, CLOSE_REVOKED, CLOSE_UNAUTHORIZED, MAX_DEVICES, PUSHES_PER_HOUR, Relay,
   base64ToBytes, bytesToBase64, idForPublicKey, type Attachment, type Role, type Socket,
 } from "./relay";
@@ -66,6 +66,21 @@ let relay: Relay;
 let desktop: Identity;
 let now: number;
 let fetcher: ReturnType<typeof vi.fn>;
+// Timers the relay scheduled, run by `advance`.
+let timers: { at: number; run: () => void; cancelled: boolean }[];
+const schedule: Schedule = (ms, run) => {
+  const timer = { at: now + ms, run, cancelled: false };
+  timers.push(timer);
+  return { cancel: () => { timer.cancelled = true; } };
+};
+function advance(ms: number) {
+  now += ms;
+  for (const timer of timers.splice(0)) {
+    if (timer.cancelled) continue;
+    if (timer.at <= now) timer.run();
+    else timers.push(timer);
+  }
+}
 
 function connect(role: Role, id: string): FakeSocket {
   const socket = new FakeSocket(role);
@@ -109,9 +124,10 @@ beforeEach(async () => {
   desktop = await identity();
   now = 1_800_000_000_000;
   fetcher = vi.fn();
+  timers = [];
   // The routing tests run with the subscription gate off, as local
   // development does. The gate has its own tests below.
-  relay = new Relay(state, { REVENUECAT_DISABLED: "1" }, desktop.id, () => now, fetcher as unknown as typeof fetch);
+  relay = new Relay(state, { REVENUECAT_DISABLED: "1" }, desktop.id, () => now, fetcher as unknown as typeof fetch, schedule);
 });
 
 // The app backgrounded: the phone keeps its push token but has no socket.
@@ -207,9 +223,77 @@ describe("routing", () => {
     const phoneSocket = await connectPhone(phone);
     desktopSocket.close();
     relay.close(desktopSocket);
+    advance(DESKTOP_GRACE_MS);
     expect(phoneSocket.last()).toEqual({ type: "desktop_status", online: false });
     await say(phoneSocket, frame);
     expect(phoneSocket.last()).toEqual({ type: "error", code: "desktop_offline" });
+  });
+
+  describe("while a dropped desktop may come back", () => {
+    async function dropDesktop() {
+      const desktopSocket = await connectDesktop();
+      const phone = await pairPhone(desktopSocket);
+      const phoneSocket = await connectPhone(phone);
+      desktopSocket.close();
+      relay.close(desktopSocket, { code: 1006, wasClean: false });
+      return { phone, phoneSocket };
+    }
+
+    it("holds phone frames and hands them to the desktop when it's back, after presence", async () => {
+      const { phone, phoneSocket } = await dropDesktop();
+      await say(phoneSocket, frame);
+      await say(phoneSocket, { ...frame, seq: 2 });
+      expect(phoneSocket.types()).toEqual(["challenge", "auth_ok", "desktop_status"]);
+
+      advance(1500);
+      const back = await connectDesktop();
+      expect(back.sent.slice(-3)).toEqual([
+        { type: "presence", device_id: phone.id, online: true },
+        { ...frame, device_id: phone.id },
+        { ...frame, seq: 2, device_id: phone.id },
+      ]);
+      // The grace ended with the reconnect, so nothing more reaches the phone.
+      advance(DESKTOP_GRACE_MS);
+      expect(phoneSocket.types()).toEqual(["challenge", "auth_ok", "desktop_status", "desktop_status"]);
+      expect(phoneSocket.last()).toEqual({ type: "desktop_status", online: true });
+    });
+
+    it("turns the frames away and reports the desktop offline once the grace runs out", async () => {
+      const { phoneSocket } = await dropDesktop();
+      await say(phoneSocket, frame);
+      advance(DESKTOP_GRACE_MS - 1);
+      expect(phoneSocket.last()).toEqual({ type: "desktop_status", online: true });
+      advance(1);
+      expect(phoneSocket.sent.slice(-2)).toEqual([
+        { type: "desktop_status", online: false },
+        { type: "error", code: "desktop_offline" },
+      ]);
+      await say(phoneSocket, frame);
+      expect(phoneSocket.last()).toEqual({ type: "error", code: "desktop_offline" });
+    });
+
+    it("tells a phone that connects meanwhile that the desktop is online", async () => {
+      const { phone } = await dropDesktop();
+      const late = await connectPhone(phone);
+      expect(late.last()).toEqual({ type: "desktop_status", online: true });
+    });
+
+    it("drops frames from a phone that left before the desktop came back", async () => {
+      const { phone, phoneSocket } = await dropDesktop();
+      await say(phoneSocket, frame);
+      disconnect(phoneSocket);
+      const back = await connectDesktop();
+      expect(back.sent.filter((message) => message.type === "frame")).toEqual([]);
+      expect(back.sent.some((message) => message.type === "presence" && message.device_id === phone.id)).toBe(false);
+    });
+
+    it("turns frames away at once when too many are waiting", async () => {
+      const { phoneSocket } = await dropDesktop();
+      for (let seq = 1; seq <= MAX_HELD_FRAMES; seq++) await say(phoneSocket, { ...frame, seq });
+      expect(phoneSocket.types().filter((type) => type === "error")).toEqual([]);
+      await say(phoneSocket, { ...frame, seq: MAX_HELD_FRAMES + 1 });
+      expect(phoneSocket.last()).toEqual({ type: "error", code: "desktop_offline" });
+    });
   });
 
   it("reports a phone going offline only when its last socket closes", async () => {

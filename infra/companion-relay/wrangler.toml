@@ -20,8 +20,11 @@ id = "7a80c69fadcb4024b747329e23c3066f"
 tag = "v1"
 new_sqlite_classes = ["DesktopRelay"]
 
+# On while the desktop's dropped connections are being investigated: keeps the
+# relay's console.log lines (socket closes, object restarts) for querying.
 [observability]
-enabled = false
+enabled = true
+head_sampling_rate = 1
 
 [[routes]]
 pattern = "companion.lathe-ide.com"

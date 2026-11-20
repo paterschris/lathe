@@ -24,6 +24,12 @@ export class DesktopRelay extends DurableObject<Env> {
     // Answered by the runtime without waking the object, so idle connections
     // cost no Durable Object duration. Clients must send exactly this text.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
+    // Waking from hibernation keeps the sockets; a reset (a crash, an eviction,
+    // a deploy) drops them all. Zero here while a desktop was connected means the
+    // object restarted under it.
+    const desktops = ctx.getWebSockets("desktop").length;
+    const phones = ctx.getWebSockets("phone").length;
+    console.log(`companion relay: object started with ${desktops} desktop and ${phones} phone socket(s)`);
   }
 
   private core(desktopId: string): Relay {
@@ -70,12 +76,12 @@ export class DesktopRelay extends DurableObject<Env> {
     await (await this.wakeCore()).sweep();
   }
 
-  async webSocketClose(socket: WebSocket): Promise<void> {
-    (await this.wakeCore()).close(socket);
+  async webSocketClose(socket: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
+    (await this.wakeCore()).close(socket, { code, reason, wasClean });
   }
 
-  async webSocketError(socket: WebSocket): Promise<void> {
-    (await this.wakeCore()).close(socket);
+  async webSocketError(socket: WebSocket, error: unknown): Promise<void> {
+    (await this.wakeCore()).close(socket, { error: error instanceof Error ? error.message : String(error) });
   }
 
   // After hibernation the object is rebuilt without the request that created
