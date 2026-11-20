@@ -8,7 +8,7 @@ Roughly ordered by how far each one is from stock Zed. One caveat on the git ent
 
 1. [Mobile development](#mobile-development-expo--react-native) - a panel for Expo and bare React Native projects
 2. [Extensions](#extensions) - an extension API past Zed's (commands, buffer edits, file events, terminal tasks, and in the 0.2 alpha, panels, previews and editor highlights) behind per-extension permissions, more registries, install from a URL, disable and recommend extensions
-3. [Merge conflicts and interactive rebase](#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, full-file split view, a rebase dialog you can reorder, drag-and-drop rebase
+3. [Merge conflicts and interactive rebase](#merge-conflicts-and-interactive-rebase) - a conflict resolution tab, a three-way merge editor with checkboxes, a rebase dialog you can reorder, drag-and-drop rebase
 4. [Pull request reviews](#pull-request-reviews) - GitHub, GitLab, Bitbucket, in the editor, with several accounts per host
 5. [Code navigation](#code-navigation) - definitions and references open in a peek instead of a new tab
 6. [AI agent integration](#ai-agent-integration) - sign into several accounts, control approval levels, per-workspace thread history
@@ -82,14 +82,20 @@ Each of those abilities is a separate capability the extension has to declare in
 ## Merge conflicts and interactive rebase
 
 ### Conflict reporting and resolution
-A merge, rebase, cherry-pick, revert, pull, or stash pop that stops on conflicts gets you a notification naming the conflicted files, with a **Resolve** button on it. That opens a tab listing every conflicted file beside the merge editor for whichever one is selected. Resolve a whole file as ours or theirs, stage files as you finish them, abort or continue the operation from the same header. No dropping to a terminal. The same tab is reachable any time from the git panel's Conflicts section, or `git: resolve conflicts`.
+A merge, rebase, cherry-pick, revert, pull, or stash pop that stops on conflicts gets you a notification naming the conflicted files, with a **Resolve** button on it. That opens a tab listing every conflicted file beside the merge editor for whichever one is selected. Resolve a whole file as ours or theirs, stage files as you finish them, abort, continue, or skip the commit being applied, all from the same header. No dropping to a terminal. The same tab is reachable any time from the git panel's Conflicts section, or `git: resolve conflicts`.
 
-![Conflict Resolution](../assets/screenshots/conflict-resolution.png)
+Conflicts that have no markers get handled too. One side deleted the file and the other changed it, both sides renamed it differently, or it's binary: you get a panel that says which of those happened and offers only the choices that make sense (keep ours, keep theirs, delete). A `.gitattributes` rule like `-merge` makes git skip the line merge for text files and leave ours in place. Lathe merges those itself so they open like any other conflict, and nothing hits the disk until you save.
 
-### Merge conflict editor with full-file split view
-**Take ours** / **Take theirs** / **Take both** per conflict, or step through them with previous/next navigation. A **Split view** toggle flips between per-conflict cards and full-file panes. In split view each side is shown as a complete file, every conflict region replaced by that side's kept content, and the two panes scroll in lockstep with the selected conflict highlighted across both. When the buttons aren't enough, "Edit manually" drops you into the buffer.
+![Deleted File Conflict](../assets/screenshots/conflict-deleted-file.png)
 
-![Merge Editor Split View](../assets/screenshots/conflict-split-view.png)
+### Three-way merge editor
+Ours and theirs side by side, the file you're actually resolving in an editable **Result** pane across the bottom. Check the box above a conflict in ours or theirs to take it. Check both and you get both, ours first. Uncheck to change your mind, and with neither checked the markers come back. A checkbox in each pane's header takes that side for the whole file, and **Reset** undoes all the checkbox picks at once. Or just type in the result; it's a real editor with the usual language features.
+
+The selected conflict gets a stripe in every pane's gutter, the others fade back in the two sides, and the Result header says which one you're on and where ("Conflict 1 of 2, lines 11-15"). All the panes scroll together. Outside the conflicts, the side panes color whatever differs from the result, down to the changed words, and **Ignore whitespace** hides reindents.
+
+The versions come from git's index, not from parsing the markers, so the base is always there whatever `merge.conflictStyle` says. Files in other encodings read in that encoding. The **View** menu has the rest: show the base as a fourth pane, put the result between the two sides IntelliJ-style, or switch to per-conflict cards.
+
+![Merge Editor](../assets/screenshots/conflict-merge-editor.png)
 
 ### Interactive rebase with drag-and-drop
 The interactive rebase dialog lists the commits oldest first, the way git's own todo file does, with pick / reword / squash / fixup / drop / edit on each row. Reorder them by dragging a row by its sha and subject, or with the up and down arrows on the row. Reword edits the message inline, and a message you've typed moves with its commit when you reorder. Reordering on its own is enough to run the rebase. If the first commit you're keeping is a squash or fixup, which git would refuse partway in, **Start rebase** is disabled and the dialog says why.
