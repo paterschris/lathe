@@ -169,12 +169,14 @@ async fn session(
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.tick().await;
     let mut last_heard = tokio::time::Instant::now();
-    loop {
+    let mut stats = SessionStats::new(last_heard);
+    let outcome = loop {
         let deadline = tokio::time::sleep_until(last_heard + READ_TIMEOUT);
         futures::select_biased! {
             message = socket.next().fuse() => match message {
                 Some(Ok(Message::Text(text))) => {
                     last_heard = tokio::time::Instant::now();
+                    stats.received(text.len());
                     let Ok(value) = serde_json::from_str::<Value>(&text) else {
                         log::warn!("companion: relay sent invalid JSON");
                         continue;
@@ -186,16 +188,18 @@ async fn session(
                         return Outcome::Closed;
                     }
                 }
-                Some(Ok(Message::Close(frame))) => return close_outcome(frame.map(|frame| (frame.code, frame.reason.to_string()))),
+                Some(Ok(Message::Close(frame))) => break close_outcome(frame.map(|frame| (frame.code, frame.reason.to_string()))),
                 Some(Ok(_)) => last_heard = tokio::time::Instant::now(),
-                Some(Err(error)) => return Outcome::Retry(error.into()),
-                None => return Outcome::Retry(anyhow!("relay closed the connection")),
+                Some(Err(error)) => break Outcome::Retry(error.into()),
+                None => break Outcome::Retry(anyhow!("relay closed the connection")),
             },
             message = outgoing.next().fuse() => match message {
                 Some(text) => {
+                    let len = text.len();
                     if let Err(error) = socket.send(Message::text(text)).await {
-                        return Outcome::Retry(error.into());
+                        break Outcome::Retry(error.into());
                     }
+                    stats.sent(len);
                 }
                 None => {
                     socket.close(None).await.ok();
@@ -204,11 +208,73 @@ async fn session(
             },
             _ = heartbeat.tick().fuse() => {
                 if let Err(error) = socket.send(Message::text(PING)).await {
-                    return Outcome::Retry(error.into());
+                    break Outcome::Retry(error.into());
                 }
+                stats.sent(PING.len());
             },
-            _ = deadline.fuse() => return Outcome::Retry(anyhow!("relay stopped responding")),
+            _ = deadline.fuse() => break Outcome::Retry(anyhow!("relay stopped responding")),
         }
+    };
+    // Why connections end is still unexplained (most are resets with no close
+    // frame, minutes apart), so each says how long it lasted and how busy it was.
+    match outcome {
+        Outcome::Retry(error) => Outcome::Retry(error.context(stats.describe(tokio::time::Instant::now()))),
+        other => other,
+    }
+}
+
+/// Traffic on one relay connection, for the log line when it ends.
+struct SessionStats {
+    connected: tokio::time::Instant,
+    last_received: tokio::time::Instant,
+    last_sent: tokio::time::Instant,
+    messages_received: u64,
+    bytes_received: u64,
+    messages_sent: u64,
+    bytes_sent: u64,
+    largest_sent: usize,
+}
+
+impl SessionStats {
+    fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            connected: now,
+            last_received: now,
+            last_sent: now,
+            messages_received: 0,
+            bytes_received: 0,
+            messages_sent: 0,
+            bytes_sent: 0,
+            largest_sent: 0,
+        }
+    }
+
+    fn received(&mut self, len: usize) {
+        self.last_received = tokio::time::Instant::now();
+        self.messages_received += 1;
+        self.bytes_received += len as u64;
+    }
+
+    fn sent(&mut self, len: usize) {
+        self.last_sent = tokio::time::Instant::now();
+        self.messages_sent += 1;
+        self.bytes_sent += len as u64;
+        self.largest_sent = self.largest_sent.max(len);
+    }
+
+    fn describe(&self, now: tokio::time::Instant) -> String {
+        let seconds = |since: tokio::time::Instant| now.duration_since(since).as_secs_f64();
+        format!(
+            "connected {:.0}s, last received {:.1}s ago, last sent {:.1}s ago, sent {} messages ({} KB, largest {} KB), received {} ({} KB)",
+            seconds(self.connected),
+            seconds(self.last_received),
+            seconds(self.last_sent),
+            self.messages_sent,
+            self.bytes_sent / 1024,
+            self.largest_sent / 1024,
+            self.messages_received,
+            self.bytes_received / 1024,
+        )
     }
 }
 
