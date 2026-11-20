@@ -14,6 +14,11 @@ A real three-way merge editor. Conflicts used to mean picking ours or theirs fro
 - **Skip commit** during a rebase, cherry-pick or revert, next to Continue and Abort.
 - Cmd-S saves from the merge editor, and its tab shows when there are unsaved changes.
 
+### AI accounts
+
+- **Deleting an account no longer quietly switches agents to another one.** If a workspace was bound to an account you deleted, the agent used to fall back to your default account and run with credentials you never picked for that project. Now it won't start, the account chip says "Account unavailable", and deleting an account clears its bindings everywhere and restarts any agent that was using it.
+- Signing in to a new account uses the same environment the agent runs with, so a key already in your shell can't sign it in as someone else.
+
 ### Usage counts
 
 - With metrics on, fetching the default extension registry now counts toward install numbers too. It sends the same anonymous install hash as the update check, and nothing goes to registries you add yourself. See [telemetry](https://github.com/paterschris/lathe/blob/main/docs/src/telemetry.md).
