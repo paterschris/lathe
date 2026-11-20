@@ -258,6 +258,52 @@ Click a button to resolve that conflict. The conflict markers are removed and re
 
 > **Tip:** For complex conflicts that need manual editing, you can edit the file directly. Remove the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) and keep the content you want.
 
+### The Conflicts Tab
+
+When a merge, rebase, cherry-pick, revert, pull, or stash pop stops on conflicts, a notification names the conflicted file, or says how many there are. Click **Resolve** on it, or run {#action git::ResolveConflicts}, to open the Conflicts tab.
+
+The tab lists every file the operation conflicted on, with the merge editor for the selected file next to the list. Click the check mark beside a file to stage it as resolved. **File: all ours** and **File: all theirs** resolve every conflict in the selected file in favor of one side.
+
+The header also controls the operation as a whole:
+
+- **Continue** stages the resolved files and carries on. It's available once every file is resolved.
+- **Abort** undoes the operation and puts the repository back the way it was.
+- **Skip commit** drops the commit being applied, along with its changes, and moves on to the next one. It only appears during a rebase, cherry-pick, or revert, since a merge has no commit to skip.
+
+### The Merge Editor
+
+The merge editor shows every conflict in one file. Open it from the Conflicts tab, or run {#action git::OpenMergeEditor} with a conflicted file open.
+
+It opens in split view: ours and theirs side by side on top, and the file being resolved in an editable **Result** pane across the full width below them. Each side keeps its own color in every pane, so you can see which side a block in the result came from.
+
+To resolve a conflict, check the box above it in the ours or theirs pane. Check both to keep both sides, ours first. Uncheck a box to change your mind; with neither checked, the conflict goes back to its markers. The checkbox in a pane's header takes that side for every conflict in the file, and **Reset** in the Result header puts back everything resolved with the checkboxes. You can also edit the result directly, with the usual language features, or use the buttons above each conflict in it.
+
+The selected conflict is marked with a stripe in each pane's gutter, and the other conflicts are drawn fainter. The arrows in the Result header step through the conflicts, and clicking into a conflict in the result selects it. All the panes scroll together.
+
+The side panes also color what differs from the result outside the conflicts: lines a side has that the result doesn't, lines that replace different lines in the result, and within small changes, the exact words that differ.
+
+The **View** menu holds the other options:
+
+- **Split view** switches to card view, which lists the conflicts one after another, each with ours, theirs, and the base version of the region when there is one, and **Take ours**, **Take theirs**, and **Take both** buttons.
+- **Result below the two sides** switches to three columns, with the result between ours and theirs.
+- **Show base** adds the base version (what the file looked like before either side changed it) as another pane.
+- **Ignore whitespace** stops highlighting changes that only add, remove, or move whitespace.
+
+Ours, theirs, and the base come from the versions Git keeps for the conflicted file, so the base is available whatever your `merge.conflictStyle` setting is. Files in other encodings, such as Latin-1, are read in the file's encoding, including one you picked by hand. On remote projects the side panes are built from the conflict markers instead.
+
+Save from the merge editor's **Save** button or with the usual save shortcut. Saving doesn't mark the file resolved; stage it from the Conflicts tab or the Git Panel when you're done.
+
+### Deleted and Binary Files
+
+Some conflicts don't have any markers to resolve: one side deleted the file and the other changed it, both sides renamed it differently, or the file is binary. For these, the Conflicts tab explains what happened and offers only the choices that apply:
+
+- **Keep ours** or **Keep theirs** keeps that side's version of the whole file.
+- **Delete file** accepts the deletion.
+
+Either choice marks the file resolved.
+
+A `-merge` or `merge=binary` rule in `.gitattributes` also stops Git from writing markers, even for text. For those files the Conflicts tab merges the versions line by line itself and opens the result in the merge editor like any other conflict, with a note saying so. Only the open file changes; nothing is written to disk until you save. **File: all ours** and **File: all theirs** work here too, and taking a side that deleted the file deletes it.
+
 ## Stashing
 
 Git stash allows you to temporarily save your uncommitted changes and revert your working directory to a clean state. This is particularly useful when you need to quickly switch branches or pull updates without committing incomplete work.

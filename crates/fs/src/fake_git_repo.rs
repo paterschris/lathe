@@ -11,11 +11,12 @@ use git::{
     blame::Blame,
     repository::{
         AskPassDelegate, Branch, BranchesScanResult, CommitData, CommitDataReader, CommitDetails,
-        CommitOptions, CommitSummary, ConflictResolutionAction, ConflictingOperation,
-        CreateWorktreeTarget, FetchOptions, FileHistoryChangedFileSets, GRAPH_CHUNK_SIZE,
-        GitRepository, InitialGraphCommitData, LogOrder, LogSource, MergeOptions, PushOptions,
-        RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, RefEdit, ReflogEntry, Remote,
-        RepoPath, ResetMode, SearchCommitArgs, Tag, Worktree, commit_hash_search_query,
+        CommitOptions, CommitSummary, ConflictResolutionAction, ConflictStages,
+        ConflictingOperation, CreateWorktreeTarget, FetchOptions, FileHistoryChangedFileSets,
+        GRAPH_CHUNK_SIZE, GitRepository, InitialGraphCommitData, LogOrder, LogSource, MergeOptions,
+        PushOptions, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, RefEdit, ReflogEntry,
+        Remote, RepoPath, ResetMode, SearchCommitArgs, Tag, WholeFileResolution, Worktree,
+        commit_hash_search_query,
     },
     stash::GitStash,
     status::{
@@ -61,6 +62,9 @@ pub struct FakeGitRepositoryState {
     pub commit_history: Vec<FakeCommitSnapshot>,
     pub event_emitter: smol::channel::Sender<PathBuf>,
     pub unmerged_paths: HashMap<RepoPath, UnmergedStatus>,
+    /// Index stages 1-3 for unmerged paths, as `load_conflict_stages` reports
+    /// them. Set alongside `unmerged_paths` to simulate a conflict.
+    pub conflict_stages: HashMap<RepoPath, ConflictStages>,
     pub head_contents: HashMap<RepoPath, Vec<u8>>,
     pub index_contents: HashMap<RepoPath, Vec<u8>>,
     // everything in commit contents is in oids
@@ -96,6 +100,7 @@ impl FakeGitRepositoryState {
             head_contents: Default::default(),
             index_contents: Default::default(),
             unmerged_paths: Default::default(),
+            conflict_stages: Default::default(),
             blames: Default::default(),
             blames_at_revision: Default::default(),
             current_branch_name: Default::default(),
@@ -1836,6 +1841,73 @@ impl GitRepository for FakeGitRepository {
 
     fn operation_in_progress(&self) -> BoxFuture<'_, Result<Option<ConflictingOperation>>> {
         async { Ok(None) }.boxed()
+    }
+
+    fn load_conflict_stages(&self, path: RepoPath) -> BoxFuture<'_, Result<ConflictStages>> {
+        self.with_state_async(false, move |state| {
+            Ok(state
+                .conflict_stages
+                .get(&path)
+                .cloned()
+                .unwrap_or_default())
+        })
+    }
+
+    fn resolve_whole_file(
+        &self,
+        path: RepoPath,
+        resolution: WholeFileResolution,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let fs = self.fs.clone();
+        let abs_path = self
+            .dot_git_path
+            .parent()
+            .map(|workdir| workdir.join(path.as_std_path()));
+        let kept = self.with_state_async(true, move |state| {
+            let stages = state
+                .conflict_stages
+                .remove(&path)
+                .with_context(|| format!("{} is not unmerged", path.as_unix_str()))?;
+            state.unmerged_paths.remove(&path);
+            let kept = match resolution {
+                WholeFileResolution::KeepOurs => {
+                    Some(stages.ours.context("ours has no version of the file")?)
+                }
+                WholeFileResolution::KeepTheirs => {
+                    Some(stages.theirs.context("theirs has no version of the file")?)
+                }
+                WholeFileResolution::Delete => None,
+            };
+            match &kept {
+                Some(bytes) => {
+                    state.index_contents.insert(path.clone(), bytes.clone());
+                }
+                None => {
+                    state.index_contents.remove(&path);
+                }
+            }
+            Ok(kept)
+        });
+        async move {
+            let kept = kept.await?;
+            let abs_path = abs_path.context("repository has no working directory")?;
+            match kept {
+                Some(bytes) => fs.write_file_internal(abs_path, bytes, false)?,
+                None => {
+                    fs.remove_file(
+                        &abs_path,
+                        RemoveOptions {
+                            recursive: false,
+                            ignore_if_not_exists: true,
+                        },
+                    )
+                    .await?
+                }
+            }
+            Ok(())
+        }
+        .boxed()
     }
 
     fn resolve_operation(

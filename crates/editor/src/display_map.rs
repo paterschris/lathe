@@ -183,6 +183,8 @@ pub enum HighlightKey {
     /// Decorations from Lathe extensions, one key per style and color.
     LatheExtension(usize),
     MatchingBracket,
+    /// Words that differ from the result in a merge editor's side pane.
+    MergeEditorWordChange,
     NavigationOverlay(NavigationOverlayKey),
     PeekPreview,
     PendingInput,

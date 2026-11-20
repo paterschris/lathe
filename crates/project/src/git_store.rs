@@ -41,12 +41,12 @@ use git::{
     parse_git_remote_url,
     repository::{
         Branch, BranchesScanResult, CommitData, CommitDetails, CommitFileStatus, CommitOptions,
-        CommitSummary, ConflictResolutionAction, ConflictingOperation, CreateWorktreeTarget,
-        DiffStatType, DiffType, FetchOptions, GitCommitTemplate, GitProgressEvent, GitRepository,
-        InitialGraphCommitData, LogOrder, LogSource, MergeOptions,
+        CommitSummary, ConflictResolutionAction, ConflictStages, ConflictingOperation,
+        CreateWorktreeTarget, DiffStatType, DiffType, FetchOptions, GitCommitTemplate,
+        GitProgressEvent, GitRepository, InitialGraphCommitData, LogOrder, LogSource, MergeOptions,
         PushOptions, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, ReflogEntry, Remote,
         RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, Tag, UpstreamTrackingStatus,
-        Worktree as GitWorktree, delete_branch_flag, is_binary_content,
+        WholeFileResolution, Worktree as GitWorktree, delete_branch_flag, is_binary_content,
     },
     stash::{GitStash, StashEntry},
     status::{

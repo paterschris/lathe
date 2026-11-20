@@ -211,6 +211,41 @@ impl ConflictResolutionAction {
     }
 }
 
+/// The three versions git keeps in the index for an unmerged path (stages 1,
+/// 2, and 3), as the bytes a checkout would write. They aren't decoded here:
+/// the editor knows the file's encoding, which may have been chosen by hand,
+/// so it decodes them. A stage is `None` when that side has no version of the
+/// file, e.g. no base for an add/add conflict, or no theirs when the other
+/// side deleted the file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConflictStages {
+    pub base: Option<Vec<u8>>,
+    pub ours: Option<Vec<u8>>,
+    pub theirs: Option<Vec<u8>>,
+    /// Set when git considers any version binary, which is when it skips
+    /// writing conflict markers. Each version that exists then holds no
+    /// bytes: there's nothing to merge line by line, so the file can only be
+    /// resolved by keeping one version whole.
+    pub binary: bool,
+}
+
+impl ConflictStages {
+    /// Whether the conflict is over the whole file rather than regions of it:
+    /// one side deleted the file, or it isn't text. Git writes no conflict
+    /// markers for these.
+    pub fn is_whole_file(&self) -> bool {
+        *self != Self::default() && (self.binary || self.ours.is_none() || self.theirs.is_none())
+    }
+}
+
+/// How to settle a conflict over a whole file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WholeFileResolution {
+    KeepOurs,
+    KeepTheirs,
+    Delete,
+}
+
 /// Returned when a git operation fails and leaves unmerged paths behind, so
 /// callers can offer conflict resolution instead of surfacing raw git output.
 /// Travels as an `anyhow::Error` payload; recover it with `downcast_ref`.

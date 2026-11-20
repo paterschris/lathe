@@ -545,6 +545,57 @@ impl super::Repository {
         })
     }
 
+    /// The index's base/ours/theirs versions of an unmerged path.
+    pub fn load_conflict_stages(
+        &mut self,
+        path: RepoPath,
+    ) -> oneshot::Receiver<Result<ConflictStages>> {
+        self.send_job("load_conflict_stages", None, move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.load_conflict_stages(path).await
+                }
+                // Not yet proxied to remote hosts. No stages tells the merge
+                // editor to fall back to the conflict markers.
+                RepositoryState::Remote(_) => Ok(ConflictStages::default()),
+            }
+        })
+    }
+
+    /// Settles a conflict over a whole file by keeping one side's version or
+    /// deleting the file, and marks it resolved.
+    pub fn resolve_whole_file(
+        &mut self,
+        path: RepoPath,
+        resolution: WholeFileResolution,
+    ) -> oneshot::Receiver<Result<()>> {
+        let label: SharedString = match resolution {
+            WholeFileResolution::KeepOurs => "git checkout --ours".into(),
+            WholeFileResolution::KeepTheirs => "git checkout --theirs".into(),
+            WholeFileResolution::Delete => "git rm".into(),
+        };
+        self.send_job(
+            "resolve_whole_file",
+            Some(label),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => {
+                        backend
+                            .resolve_whole_file(path, resolution, environment)
+                            .await
+                    }
+                    RepositoryState::Remote(_) => {
+                        bail!("resolving conflicts is not yet supported on remote projects")
+                    }
+                }
+            },
+        )
+    }
+
     pub fn resolve_operation(
         &mut self,
         operation: ConflictingOperation,

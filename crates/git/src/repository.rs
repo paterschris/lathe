@@ -48,9 +48,9 @@ pub use askpass::{AskPassDelegate, AskPassResult, AskPassSession};
 // module; re-export them here so `git::repository::{...}` import paths (used by
 // git_ui/git_graph/pr_ui) and the trait methods below keep resolving unchanged.
 pub use crate::lathe_repository::{
-    ConflictResolutionAction, ConflictingOperation, ConflictingOperationError, FileHistory,
-    FileHistoryEntry, GitProgressEvent, GitProgressSender, MergeOptions, RebaseAction,
-    RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, ReflogEntry, Tag,
+    ConflictResolutionAction, ConflictStages, ConflictingOperation, ConflictingOperationError,
+    FileHistory, FileHistoryEntry, GitProgressEvent, GitProgressSender, MergeOptions, RebaseAction,
+    RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, ReflogEntry, Tag, WholeFileResolution,
 };
 
 pub const REMOTE_CANCELLED_BY_USER: &str = "Operation cancelled by user";
@@ -1327,6 +1327,20 @@ pub trait GitRepository: Send + Sync {
     /// through, if any. Reported from the sequencer state in the git directory,
     /// so it stays accurate no matter which client started the operation.
     fn operation_in_progress(&self) -> BoxFuture<'_, Result<Option<ConflictingOperation>>>;
+
+    /// The base, ours, and theirs versions of an unmerged path, read from index
+    /// stages 1, 2, and 3 rather than parsed out of the conflict markers, so
+    /// they're complete files regardless of `merge.conflictStyle`.
+    fn load_conflict_stages(&self, path: RepoPath) -> BoxFuture<'_, Result<ConflictStages>>;
+
+    /// Settles an unmerged path by keeping one side's version whole, or by
+    /// deleting it, and marks it resolved in the index.
+    fn resolve_whole_file(
+        &self,
+        path: RepoPath,
+        resolution: WholeFileResolution,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>>;
 
     /// Continue, skip, or abort an operation that stopped on conflicts.
     fn resolve_operation(
@@ -4397,6 +4411,109 @@ impl GitRepository for RealGitRepository {
         .boxed()
     }
 
+    fn load_conflict_stages(&self, path: RepoPath) -> BoxFuture<'_, Result<ConflictStages>> {
+        let git = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let path_str = path.as_unix_str().to_string();
+                let records = git_output(
+                    &git,
+                    &["ls-files", "--unmerged", "-z", "--", &path_str],
+                    None,
+                )
+                .await?;
+
+                let mut stages = ConflictStages::default();
+                for record in records.split(|byte| *byte == 0) {
+                    // Each record is "<mode> <oid> <stage>\t<path>".
+                    let record = String::from_utf8_lossy(record);
+                    let Some((info, record_path)) = record.split_once('\t') else {
+                        continue;
+                    };
+                    // The argument is a pathspec, so glob characters in the
+                    // file name can match other unmerged paths too.
+                    if record_path != path_str {
+                        continue;
+                    }
+                    let mut fields = info.split(' ');
+                    let (Some(mode), Some(oid), Some(stage)) =
+                        (fields.next(), fields.next(), fields.next())
+                    else {
+                        continue;
+                    };
+                    // A submodule stage points at a commit, which has no file
+                    // content to show.
+                    if mode == "160000" {
+                        continue;
+                    }
+                    let slot = match stage {
+                        "1" => &mut stages.base,
+                        "2" => &mut stages.ours,
+                        "3" => &mut stages.theirs,
+                        _ => continue,
+                    };
+                    // Git merges a file line by line, writing conflict
+                    // markers, unless the stored content has a NUL byte in
+                    // its first 8000 bytes. Mirror that on the raw object so
+                    // a version counts as binary exactly when git skipped
+                    // the markers.
+                    let raw = git_output(&git, &["cat-file", "blob", oid], None).await?;
+                    if raw[..raw.len().min(8000)].contains(&0) {
+                        stages.binary = true;
+                        *slot = Some(Vec::new());
+                        continue;
+                    }
+                    // `--filters` applies the conversions a checkout would
+                    // (line endings, LFS smudge, working-tree encoding), so
+                    // the bytes match what the working copy would hold.
+                    let path_argument = format!("--path={path_str}");
+                    let filtered =
+                        git_output(&git, &["cat-file", "--filters", &path_argument, oid], None)
+                            .await?;
+                    *slot = Some(filtered);
+                }
+                if stages.binary {
+                    for bytes in [&mut stages.base, &mut stages.ours, &mut stages.theirs]
+                        .into_iter()
+                        .flatten()
+                    {
+                        bytes.clear();
+                    }
+                }
+                Ok(stages)
+            })
+            .boxed()
+    }
+
+    fn resolve_whole_file(
+        &self,
+        path: RepoPath,
+        resolution: WholeFileResolution,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let path_str = path.as_unix_str().to_string();
+                let commands: &[&[&str]] = match resolution {
+                    WholeFileResolution::KeepOurs => &[
+                        &["checkout", "--ours", "--", &path_str],
+                        &["add", "--", &path_str],
+                    ],
+                    WholeFileResolution::KeepTheirs => &[
+                        &["checkout", "--theirs", "--", &path_str],
+                        &["add", "--", &path_str],
+                    ],
+                    WholeFileResolution::Delete => &[&["rm", "--quiet", "--", &path_str]],
+                };
+                for arguments in commands {
+                    git_output(&git, arguments, Some(&env)).await?;
+                }
+                Ok(())
+            })
+            .boxed()
+    }
+
     fn operation_in_progress(&self) -> BoxFuture<'_, Result<Option<ConflictingOperation>>> {
         let git_directory = self.path();
         self.executor
@@ -4836,6 +4953,29 @@ pub(crate) struct GitBinary {
     index_file_path: Option<PathBuf>,
     envs: HashMap<String, String>,
     is_trusted: bool,
+}
+
+/// Runs a git command and returns its raw stdout, failing with the command's
+/// output when it exits unsuccessfully.
+async fn git_output(
+    git: &GitBinary,
+    arguments: &[&str],
+    env: Option<&HashMap<String, String>>,
+) -> Result<Vec<u8>> {
+    let mut command = git.build_command(arguments);
+    if let Some(env) = env {
+        command.envs(env.iter());
+    }
+    let output = command.output().await?;
+    anyhow::ensure!(
+        output.status.success(),
+        GitBinaryCommandError {
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            status: output.status,
+        }
+    );
+    Ok(output.stdout)
 }
 
 impl GitBinary {
@@ -5776,6 +5916,204 @@ mod tests {
                     TreeDiffStatus::Modified { old: base_oid },
                 )]),
             }
+        );
+    }
+
+    #[gpui::test]
+    async fn test_load_conflict_stages(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        // `[a].txt` is also a glob matching `a.txt`; both conflict, so the
+        // stages must come from the literal path only.
+        let repo_dir = tempfile::tempdir().unwrap();
+        git_init_repo(repo_dir.path());
+        let write_both = |prefix: &str| {
+            fs::write(
+                repo_dir.path().join("[a].txt"),
+                format!("one\n{prefix}\nthree\n"),
+            )
+            .unwrap();
+            fs::write(repo_dir.path().join("a.txt"), format!("other {prefix}\n")).unwrap();
+        };
+        write_both("base");
+        git_command(repo_dir.path(), ["add", "."]);
+        git_command(repo_dir.path(), ["commit", "-m", "base"]);
+        git_command(repo_dir.path(), ["checkout", "-b", "feature"]);
+        write_both("theirs");
+        git_command(repo_dir.path(), ["commit", "-am", "theirs"]);
+        git_command(repo_dir.path(), ["checkout", "main"]);
+        write_both("ours");
+        git_command(repo_dir.path(), ["commit", "-am", "ours"]);
+        // The merge is expected to fail, so it can't go through `git_command`.
+        #[allow(clippy::disallowed_methods)]
+        let merge = std::process::Command::new("git")
+            .current_dir(repo_dir.path())
+            .args(["merge", "feature"])
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the merge should conflict");
+
+        let repository = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+        let path = RepoPath::new("[a].txt").unwrap();
+
+        let stages = repository.load_conflict_stages(path.clone()).await.unwrap();
+        assert_eq!(
+            stages,
+            ConflictStages {
+                base: Some("one\nbase\nthree\n".into()),
+                ours: Some("one\nours\nthree\n".into()),
+                theirs: Some("one\ntheirs\nthree\n".into()),
+                binary: false,
+            }
+        );
+
+        git_command(repo_dir.path(), ["add", "[a].txt"]);
+        let stages = repository.load_conflict_stages(path).await.unwrap();
+        assert_eq!(stages, ConflictStages::default());
+    }
+
+    #[gpui::test]
+    async fn test_load_conflict_stages_keeps_legacy_encodings_as_text(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        // Git has no notion of encodings: without NUL bytes this is text to it
+        // and the working copy gets conflict markers, so the stages must come
+        // back as text too rather than as binary.
+        let latin1 = |line: &str| -> Vec<u8> {
+            format!("Le caf\u{e9} est tr\u{e8}s bon.\n{line}\nFin du fichier.\n")
+                .chars()
+                .map(|character| u8::try_from(u32::from(character)).unwrap())
+                .collect()
+        };
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = repo_dir.path();
+        git_init_repo(repo);
+        let file_path = repo.join("menu.txt");
+        fs::write(&file_path, latin1("base")).unwrap();
+        git_command(repo, ["add", "menu.txt"]);
+        git_command(repo, ["commit", "-m", "base"]);
+        git_command(repo, ["checkout", "-b", "feature"]);
+        fs::write(&file_path, latin1("th\u{e9}ir\u{e9}")).unwrap();
+        git_command(repo, ["commit", "-am", "theirs"]);
+        git_command(repo, ["checkout", "main"]);
+        fs::write(&file_path, latin1("\u{f4}urs")).unwrap();
+        git_command(repo, ["commit", "-am", "ours"]);
+        // The merge is expected to fail, so it can't go through `git_command`.
+        #[allow(clippy::disallowed_methods)]
+        let merge = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(["merge", "feature"])
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the merge should conflict");
+        assert!(
+            fs::read(&file_path)
+                .unwrap()
+                .starts_with(b"Le caf\xe9 est tr\xe8s bon.\n<<<<<<<"),
+            "git should write markers into the Latin-1 file"
+        );
+
+        let repository =
+            RealGitRepository::new(&repo.join(".git"), None, Some("git".into()), cx.executor())
+                .unwrap();
+        let stages = repository
+            .load_conflict_stages(RepoPath::new("menu.txt").unwrap())
+            .await
+            .unwrap();
+        assert!(!stages.binary);
+        assert!(!stages.is_whole_file());
+        assert_eq!(stages.ours, Some(latin1("\u{f4}urs")));
+        assert_eq!(stages.theirs, Some(latin1("th\u{e9}ir\u{e9}")));
+    }
+
+    #[gpui::test]
+    async fn test_resolve_whole_file_conflicts(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = repo_dir.path();
+        git_init_repo(repo);
+        for name in ["kept.txt", "deleted.txt", "theirs.txt"] {
+            fs::write(repo.join(name), "base\n").unwrap();
+        }
+        fs::write(repo.join("image.bin"), b"\0base").unwrap();
+        git_command(repo, ["add", "."]);
+        git_command(repo, ["commit", "-m", "base"]);
+
+        git_command(repo, ["checkout", "-b", "feature"]);
+        git_command(repo, ["rm", "-q", "kept.txt", "deleted.txt"]);
+        fs::write(repo.join("theirs.txt"), "theirs\n").unwrap();
+        fs::write(repo.join("image.bin"), b"\0theirs").unwrap();
+        git_command(repo, ["commit", "-am", "theirs"]);
+
+        git_command(repo, ["checkout", "main"]);
+        fs::write(repo.join("kept.txt"), "ours\n").unwrap();
+        fs::write(repo.join("deleted.txt"), "ours\n").unwrap();
+        git_command(repo, ["rm", "-q", "theirs.txt"]);
+        fs::write(repo.join("image.bin"), b"\0ours").unwrap();
+        git_command(repo, ["commit", "-am", "ours"]);
+        // The merge is expected to fail, so it can't go through `git_command`.
+        #[allow(clippy::disallowed_methods)]
+        let merge = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(["merge", "feature"])
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the merge should conflict");
+
+        let repository =
+            RealGitRepository::new(&repo.join(".git"), None, Some("git".into()), cx.executor())
+                .unwrap();
+        let path = |name: &str| RepoPath::new(name).unwrap();
+
+        let stages = repository
+            .load_conflict_stages(path("kept.txt"))
+            .await
+            .unwrap();
+        assert_eq!(stages.ours.as_deref(), Some(b"ours\n".as_slice()));
+        assert_eq!(stages.theirs, None);
+        assert!(stages.is_whole_file());
+
+        let stages = repository
+            .load_conflict_stages(path("image.bin"))
+            .await
+            .unwrap();
+        assert!(stages.binary);
+        assert_eq!(stages.ours.as_deref(), Some(b"".as_slice()));
+        assert!(stages.is_whole_file());
+
+        for (name, resolution) in [
+            ("kept.txt", WholeFileResolution::KeepOurs),
+            ("deleted.txt", WholeFileResolution::Delete),
+            ("theirs.txt", WholeFileResolution::KeepTheirs),
+            ("image.bin", WholeFileResolution::KeepTheirs),
+        ] {
+            repository
+                .resolve_whole_file(path(name), resolution, Arc::default())
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(git_command_output(repo, ["ls-files", "--unmerged"]), "");
+        assert_eq!(fs::read_to_string(repo.join("kept.txt")).unwrap(), "ours\n");
+        assert!(!repo.join("deleted.txt").exists());
+        assert_eq!(
+            fs::read_to_string(repo.join("theirs.txt")).unwrap(),
+            "theirs\n"
+        );
+        assert_eq!(fs::read(repo.join("image.bin")).unwrap(), b"\0theirs");
+        assert_eq!(
+            git_command_output(repo, ["status", "--porcelain"]),
+            "D  deleted.txt\nM  image.bin\nA  theirs.txt"
         );
     }
 
