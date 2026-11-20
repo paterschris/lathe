@@ -5,11 +5,12 @@ use std::path::PathBuf;
 use ai_accounts::{
     AdvertisedAuthMethods, AiAccountsIndex, AiAccountsSettings, BrandAccent, CatalogEntry,
     InstalledAgent, TranscriptLayout, WorkspaceAccountBindings, build_catalog,
-    carry_conversation_to_account, load_index, mark_account_used,
+    carry_conversation_to_account, load_index, mark_account_used, remove_bindings_to,
 };
+use anyhow::Result;
 use collections::HashMap;
 use db::kvp::KeyValueStore;
-use gpui::{Entity, EntityId, Hsla, Rgba, WeakEntity, WindowAppearance, prelude::*};
+use gpui::{Entity, EntityId, Hsla, Rgba, Task, WeakEntity, WindowAppearance, prelude::*};
 use notifications::status_toast::StatusToast;
 use project::{AgentId, Project};
 use settings::{Settings as _, SettingsContent};
@@ -93,13 +94,16 @@ impl AgentPanel {
         let index = load_index();
         let workspace_binding =
             WorkspaceAccountBindings::binding_for(self.project_entity_id(), &agent_id, cx);
-        let active_account =
+        let resolved_account =
             settings.resolve_account(&agent_id, workspace_binding.as_deref(), &index);
+        let active_account = resolved_account.as_ref().ok().copied().flatten();
 
         let accent = brand_accent_color(descriptor.brand_accent.as_ref(), window);
-        let chip_label: SharedString = active_account
-            .map(|account| account.display_name.clone().into())
-            .unwrap_or_else(|| SharedString::from("Add account…"));
+        let chip_label: SharedString = match resolved_account {
+            Ok(Some(account)) => account.display_name.clone().into(),
+            Ok(None) => SharedString::from("Add account…"),
+            Err(_) => SharedString::from("Account unavailable"),
+        };
 
         // Snapshot data the popover needs into owned values so the menu
         // closure doesn't borrow `self` or the index.
@@ -223,7 +227,7 @@ impl AgentPanel {
     /// subprocess spawn, so a bind or switch that merely rewrites the setting
     /// would silently keep the previous account until the next restart. This
     /// forces that restart so the new binding takes effect.
-    fn restart_ai_agent_connection(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn restart_ai_agent_connection(&mut self, agent_id: &str, cx: &mut Context<Self>) {
         let agent = Agent::Custom {
             id: AgentId::new(agent_id.to_string()),
         };
@@ -243,14 +247,19 @@ impl AgentPanel {
         account_id: &str,
         cx: &mut Context<Self>,
     ) {
-        let workspace_binding =
-            WorkspaceAccountBindings::binding_for(self.project_entity_id(), agent_id, cx);
-        let in_use = AiAccountsSettings::get_global(cx)
-            .resolve_account(agent_id, workspace_binding.as_deref(), &load_index())
-            .is_some_and(|account| account.id == account_id);
-        if in_use {
+        if self.is_account_in_use(agent_id, account_id, cx) {
             self.restart_ai_agent_connection(agent_id, cx);
         }
+    }
+
+    /// Whether `account_id` is the account `agent_id` runs as in this
+    /// workspace.
+    pub(crate) fn is_account_in_use(&self, agent_id: &str, account_id: &str, cx: &App) -> bool {
+        let workspace_binding =
+            WorkspaceAccountBindings::binding_for(self.project_entity_id(), agent_id, cx);
+        AiAccountsSettings::get_global(cx)
+            .resolve_account(agent_id, workspace_binding.as_deref(), &load_index())
+            .is_ok_and(|account| account.is_some_and(|account| account.id == account_id))
     }
 
     /// Binds `account_id` for `agent_id` in this workspace only, then restarts
@@ -296,6 +305,8 @@ impl AgentPanel {
                     .as_deref(),
                 &index,
             )
+            .ok()
+            .flatten()
             .map(|account| account.config_dir.clone());
         let next_account = index.find(&account_id);
         let next_config_dir = next_account.map(|account| account.config_dir.clone());
@@ -510,16 +521,49 @@ pub(crate) fn bind_workspace_account(
     .detach_and_log_err(cx);
 }
 
-/// Drops every binding that points at `account_id`, whichever agent holds it.
-/// Called after an account is deleted: a binding left pointing at a missing
-/// account makes `AiAccountsSettings::resolve_account` fall back to some other
-/// account, which silently runs the agent under credentials the user didn't
-/// pick. Only user-level settings are rewritten, so a stale binding in a
-/// workspace `.zed/settings.json` or in `WorkspaceAccountBindings` survives;
-/// `resolve_account` logs when it hits one.
+/// Drops every user-settings binding that points at `account_id`, whichever
+/// agent holds it. Called after an account is deleted, together with
+/// [`unbind_account_from_workspaces`]: a binding left pointing at a missing
+/// account makes `AiAccountsSettings::resolve_account` fail, which stops the
+/// agent from starting.
 pub(crate) fn unbind_account(settings: &mut SettingsContent, account_id: &str) {
     let Some(map) = settings.ai_accounts.as_mut() else {
         return;
     };
-    map.0.retain(|_, bound_id| bound_id.as_str() != account_id);
+    remove_bindings_to(&mut map.0, account_id);
+}
+
+/// Drops every workspace binding that points at `account_id`: those of open
+/// workspaces, which are held in memory, and those saved for workspaces that
+/// aren't open, which would otherwise come back the next time one is opened.
+pub(crate) fn unbind_account_from_workspaces(account_id: &str, cx: &mut App) -> Task<Result<()>> {
+    // Open workspaces are saved under their database id too, so the sweep
+    // below rewrites their stored copy. Only the in-memory copy needs
+    // updating here.
+    WorkspaceAccountBindings::remove_account(account_id, cx);
+    let kvp = KeyValueStore::global(cx);
+    let account_id = account_id.to_string();
+    cx.background_spawn(async move {
+        let scope = kvp.scoped(WORKSPACE_AI_ACCOUNTS_KEY);
+        for (key, json) in scope.read_all()? {
+            let mut bindings = match serde_json::from_str::<HashMap<String, String>>(&json) {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    log::warn!(
+                        "ai_accounts: skipping unreadable bindings for workspace {key}: {error}"
+                    );
+                    continue;
+                }
+            };
+            if !remove_bindings_to(&mut bindings, &account_id) {
+                continue;
+            }
+            if bindings.is_empty() {
+                scope.delete(key).await?;
+            } else {
+                scope.write(key, serde_json::to_string(&bindings)?).await?;
+            }
+        }
+        Ok(())
+    })
 }

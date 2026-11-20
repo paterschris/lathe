@@ -1,5 +1,5 @@
 use ai_accounts::{
-    AccountState, AgentDescriptor, AiAccount, CLAUDE_CODE_AGENT_ID, LoginFlow,
+    AccountState, AgentDescriptor, AiAccount, CLAUDE_CODE_AGENT_ID, LaunchProfile, LoginFlow,
     api_key_keychain_url, builtin_descriptor, create_account, load_index,
     prepare_profile_for_api_key, save_index,
 };
@@ -189,7 +189,7 @@ impl AddAiAccountModal {
                             account.id.clone(),
                             cx,
                         );
-                        self.trigger_login_flow(&descriptor, &account.config_dir, window, cx);
+                        self.trigger_login_flow(&descriptor, &account, window, cx);
                     }
                 }
 
@@ -288,7 +288,7 @@ impl AddAiAccountModal {
     fn trigger_login_flow(
         &self,
         descriptor: &AgentDescriptor,
-        config_dir: &std::path::Path,
+        account: &AiAccount,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -317,17 +317,19 @@ impl AddAiAccountModal {
                 let Some(terminal_panel) = workspace.read(cx).panel::<TerminalPanel>(cx) else {
                     return;
                 };
-                let mut env: HashMap<String, String> = HashMap::default();
-                env.insert(
-                    descriptor.profile.profile_env_var.to_string(),
-                    config_dir.display().to_string(),
-                );
+                // Sign in under the same environment the agent is launched
+                // with, or an inherited key could make the login land on a
+                // different account than the one being added.
+                let launch_profile = LaunchProfile::new(&descriptor.profile, Some(account));
+                let mut env = launch_profile.terminal_env(|key| std::env::var_os(key).is_some());
+                let argv: Vec<String> = argv.iter().map(|arg| arg.to_string()).collect();
+                let argv = unset_in_login_terminal(&launch_profile.removed_env, argv, &mut env);
                 let task = SpawnInTerminal {
                     id: TaskId(format!("ai-account-login-{}", descriptor.agent_id)),
                     label: format!("Sign in to {}", descriptor.display_name),
                     full_label: format!("Sign in to {}", descriptor.display_name),
-                    command: argv.first().map(|s| s.to_string()),
-                    args: argv.iter().skip(1).map(|s| s.to_string()).collect(),
+                    command: argv.first().cloned(),
+                    args: argv.iter().skip(1).cloned().collect(),
                     env,
                     use_new_terminal: true,
                     reveal: RevealStrategy::Always,
@@ -810,6 +812,34 @@ impl Render for SetAiAccountKeyModal {
     }
 }
 
+/// A terminal task's variables are layered over the shell's environment, so a
+/// removed variable can't be dropped by leaving it out. On Unix the login runs
+/// under `env -u`. Windows has no equivalent, so the variable is set to an
+/// empty value instead, the closest a task can get to removing it.
+fn unset_in_login_terminal(
+    removed_env: &[String],
+    argv: Vec<String>,
+    env: &mut HashMap<String, String>,
+) -> Vec<String> {
+    if removed_env.is_empty() {
+        return argv;
+    }
+    if cfg!(windows) {
+        for key in removed_env {
+            env.insert(key.clone(), String::new());
+        }
+        return argv;
+    }
+    let mut wrapped = vec!["env".to_string()];
+    for key in removed_env {
+        env.remove(key);
+        wrapped.push("-u".to_string());
+        wrapped.push(key.clone());
+    }
+    wrapped.extend(argv);
+    wrapped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,6 +867,31 @@ mod tests {
                 descriptor.agent_id
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_terminal_unsets_removed_env() {
+        let mut env = HashMap::from_iter([
+            ("AGENT_HOME".to_string(), "/accounts/work".to_string()),
+            ("AGENT_KEY".to_string(), "ambient".to_string()),
+        ]);
+        let argv = unset_in_login_terminal(
+            &["AGENT_KEY".to_string()],
+            vec!["agent".to_string(), "login".to_string()],
+            &mut env,
+        );
+        assert_eq!(argv, ["env", "-u", "AGENT_KEY", "agent", "login"]);
+        assert!(!env.contains_key("AGENT_KEY"));
+        assert!(env.contains_key("AGENT_HOME"));
+
+        let mut env = HashMap::default();
+        let argv = unset_in_login_terminal(&[], vec!["agent".to_string()], &mut env);
+        assert_eq!(
+            argv,
+            ["agent"],
+            "nothing to remove leaves the command as is"
+        );
     }
 }
 

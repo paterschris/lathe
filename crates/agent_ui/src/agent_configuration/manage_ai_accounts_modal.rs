@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use ai_accounts::{
     AccountState, AccountSupport, AiAccount, AiAccountsIndex, AiAccountsSettings,
@@ -8,18 +9,22 @@ use ai_accounts::{
     resume_command, save_index, verify_account,
 };
 use fs::RemoveOptions;
+use futures::channel::oneshot;
 use gpui::{
-    AnyElement, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, Task,
-    WeakEntity, prelude::*, px,
+    AnyElement, AsyncApp, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle,
+    Task, WeakEntity, prelude::*, px,
 };
 use notifications::status_toast::StatusToast;
 use project::{AgentId, Project};
-use settings::{Settings as _, update_settings_file};
+use settings::{Settings as _, update_settings_file_with_completion};
 use ui::{ListItem, ListItemSpacing, ListSeparator, Tooltip, WithScrollbar, prelude::*};
 use workspace::{ModalView, Workspace};
 
 use super::add_ai_account_modal::SetAiAccountKeyModal;
-use crate::ai_account_chip::{account_catalog, brand_accent_color, unbind_account};
+use crate::agent_panel::AgentPanel;
+use crate::ai_account_chip::{
+    account_catalog, brand_accent_color, unbind_account, unbind_account_from_workspaces,
+};
 use crate::{AddAiAccount, ManageAiAccounts, NewExternalAgentThread};
 
 pub struct ManageAiAccountsModal {
@@ -142,6 +147,20 @@ impl ManageAiAccountsModal {
             .workspace
             .upgrade()
             .map(|workspace| workspace.read(cx).app_state().fs.clone());
+        // Checked while the account still exists and resolves. A running
+        // agent keeps the credentials it started with, so it has to be
+        // restarted to stop using the deleted account.
+        let panel_using_account = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).panel::<AgentPanel>(cx))
+            .filter(|panel| {
+                panel
+                    .read(cx)
+                    .is_account_in_use(&account.agent_id, &account.id, cx)
+            })
+            .map(|panel| panel.downgrade());
+        let agent_id = account.agent_id;
 
         // An account Lathe created owns its config dir, so removing it is the
         // expected outcome. An imported account only *references* a directory
@@ -236,17 +255,24 @@ impl ManageAiAccountsModal {
                 }
             }
 
-            this.update(cx, |this, cx| {
-                // A binding left pointing at the deleted account makes
-                // `resolve_account` fall back to a different one, so the agent
-                // would quietly run under credentials the user never picked.
-                if success {
-                    if let Some(fs) = fs {
-                        update_settings_file(fs, cx, move |settings, _| {
+            // Done outside the modal's own update so it still happens if the
+            // modal was closed while the delete ran. A binding left pointing at
+            // the deleted account makes `resolve_account` fail, so the agent
+            // wouldn't start until the user picks another account.
+            let unbound = success.then(|| {
+                cx.update(|cx| {
+                    let settings_written = fs.map(|fs| {
+                        let account_id = account_id.clone();
+                        update_settings_file_with_completion(fs, cx, move |settings, _| {
                             unbind_account(settings, &account_id);
-                        });
-                    }
-                }
+                        })
+                    });
+                    let workspaces_unbound = unbind_account_from_workspaces(&account_id, cx);
+                    (settings_written, workspaces_unbound)
+                })
+            });
+
+            this.update(cx, |this, cx| {
                 this.refresh(cx);
                 let message = match (success, trash_files, files_trashed) {
                     (false, _, _) => format!("Couldn't remove \"{display_name}\", see logs"),
@@ -261,6 +287,25 @@ impl ManageAiAccountsModal {
                 this.toast(message, cx);
             })
             .ok();
+            let Some((settings_written, workspaces_unbound)) = unbound else {
+                return;
+            };
+            if let Err(error) = workspaces_unbound.await {
+                log::error!(
+                    "ai_accounts: failed to clear workspace bindings to a deleted account: {error:#}"
+                );
+            }
+            let Some(panel) = panel_using_account else {
+                return;
+            };
+            if let Some(settings_written) = settings_written {
+                wait_for_setting_unbound(settings_written, &account_id, cx).await;
+            }
+            panel
+                .update(cx, |panel, cx| {
+                    panel.restart_ai_agent_connection(&agent_id, cx);
+                })
+                .ok();
         })
         .detach();
     }
@@ -1116,6 +1161,43 @@ impl ManageAiAccountsModal {
             )
     }
 }
+
+/// Waits until the settings store no longer binds anything to `account_id`.
+/// A completed settings file write only means the file is on disk: the store
+/// picks it up later through its file watcher, and restarting an agent before
+/// then would resolve the stale binding and fail to launch.
+async fn wait_for_setting_unbound(
+    settings_written: oneshot::Receiver<anyhow::Result<()>>,
+    account_id: &str,
+    cx: &mut AsyncApp,
+) {
+    match settings_written.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            log::error!("ai_accounts: failed to unbind a deleted account in settings: {error:#}");
+            return;
+        }
+        Err(_canceled) => return,
+    }
+    for _ in 0..SETTINGS_RELOAD_ATTEMPTS {
+        let still_bound = cx.update(|cx| {
+            AiAccountsSettings::get_global(cx)
+                .bindings
+                .values()
+                .any(|bound_id| bound_id == account_id)
+        });
+        if !still_bound {
+            return;
+        }
+        cx.background_executor()
+            .timer(SETTINGS_RELOAD_POLL_INTERVAL)
+            .await;
+    }
+    log::warn!("ai_accounts: settings still bind deleted account {account_id}; restarting anyway");
+}
+
+const SETTINGS_RELOAD_ATTEMPTS: usize = 40;
+const SETTINGS_RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[cfg(test)]
 mod tests {

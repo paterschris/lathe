@@ -540,8 +540,9 @@ impl ProfileOverride {
 
 #[derive(Clone, Debug, Default, RegisterSetting)]
 pub struct AiAccountsSettings {
-    /// Workspace-merged binding map: agent ID → account ID. Workspace `.zed/settings.json`
-    /// overrides win over user-level settings (per `MergeFrom`).
+    /// Binding map from the user settings file: agent ID → account ID. Only
+    /// user settings are read, so a project's `.zed/settings.json` can't hold
+    /// a binding; per-workspace bindings live in `WorkspaceAccountBindings`.
     pub bindings: HashMap<String, String>,
     /// Profile contracts from the `ai_account_profiles` setting, keyed by agent
     /// ID. Entries for built-in agents are ignored: their contract includes
@@ -781,6 +782,20 @@ impl LaunchProfile {
         }
     }
 
+    /// The variables to pass to a login terminal so it signs in under the
+    /// same environment the agent is later launched with. A terminal's
+    /// variables override the shell's rather than filling gaps, so defaults
+    /// the user already has in `is_inherited` are left out. `removed_env` is
+    /// not reflected here and has to be unset by the caller.
+    pub fn terminal_env(&self, is_inherited: impl Fn(&str) -> bool) -> HashMap<String, String> {
+        let mut env = HashMap::default();
+        self.apply(&mut env);
+        env.retain(|key, _| {
+            self.set_env.iter().any(|(set_key, _)| set_key == key) || !is_inherited(key)
+        });
+        env
+    }
+
     pub fn apply(&self, env: &mut HashMap<String, String>) {
         for (key, value) in &self.set_env {
             env.insert(key.clone(), value.clone());
@@ -795,18 +810,20 @@ impl LaunchProfile {
 }
 
 /// Resolves which account an agent launch uses and the environment that
-/// selects it. `None` when the agent has no profile contract: such agents are
-/// launched exactly as configured, with no guessed isolation.
+/// selects it. `Ok(None)` when the agent has no profile contract: such agents
+/// are launched exactly as configured, with no guessed isolation.
 pub fn resolve_launch_profile(
     agent_id: &str,
     workspace_binding: Option<&str>,
     settings: &AiAccountsSettings,
     index: &AiAccountsIndex,
-) -> Option<(AgentDescriptor, LaunchProfile)> {
-    let descriptor = settings.descriptor_for(agent_id)?;
-    let account = settings.resolve_account(agent_id, workspace_binding, index);
+) -> Result<Option<(AgentDescriptor, LaunchProfile)>, UnresolvedAccountBinding> {
+    let Some(descriptor) = settings.descriptor_for(agent_id) else {
+        return Ok(None);
+    };
+    let account = settings.resolve_account(agent_id, workspace_binding, index)?;
     let launch_profile = LaunchProfile::new(&descriptor.profile, account);
-    Some((descriptor, launch_profile))
+    Ok(Some((descriptor, launch_profile)))
 }
 
 /// Spawn-time upkeep for the account a launch resolved to. Failures are logged
@@ -846,6 +863,15 @@ impl WorkspaceAccountBindings {
         cx.default_global::<Self>().0.insert(project, bindings);
     }
 
+    /// Drops every open workspace's binding to `account_id`.
+    pub fn remove_account(account_id: &str, cx: &mut App) {
+        if let Some(this) = cx.has_global::<Self>().then(|| cx.global_mut::<Self>()) {
+            for bindings in this.0.values_mut() {
+                remove_bindings_to(bindings, account_id);
+            }
+        }
+    }
+
     /// Binds (`Some`) or unbinds (`None`) `agent_id` for `project`, returning
     /// the project's full binding map so the caller can persist it.
     pub fn set(
@@ -867,6 +893,37 @@ impl WorkspaceAccountBindings {
     }
 }
 
+/// Drops the entries of an agent → account binding map that point at
+/// `account_id`. Returns whether anything was removed.
+pub fn remove_bindings_to(bindings: &mut HashMap<String, String>, account_id: &str) -> bool {
+    let before = bindings.len();
+    bindings.retain(|_, bound_id| bound_id != account_id);
+    bindings.len() != before
+}
+
+/// An agent is bound to an account the registry no longer has. This is an
+/// error rather than a reason to fall back to the default account, because
+/// running the agent as some other account would use credentials the user
+/// didn't choose for this workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnresolvedAccountBinding {
+    pub agent_id: String,
+    pub account_id: String,
+}
+
+impl std::fmt::Display for UnresolvedAccountBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} is bound to an AI account that no longer exists ({}). \
+             Pick another account from the account chip in the agent panel.",
+            self.agent_id, self.account_id
+        )
+    }
+}
+
+impl std::error::Error for UnresolvedAccountBinding {}
+
 impl AiAccountsSettings {
     /// Resolves the active account for an agent in the current workspace.
     /// Order:
@@ -875,31 +932,29 @@ impl AiAccountsSettings {
     /// 3. Index-level default resolution (`AiAccountsIndex::default_for_agent`).
     /// 4. None.
     ///
-    /// A binding only counts when it points at an account in the registry.
+    /// The first binding present decides: if it points at an account that no
+    /// longer exists, resolution fails instead of moving on to a lower-priority
+    /// binding or the default.
     pub fn resolve_account<'a>(
         &self,
         agent_id: &str,
         workspace_binding: Option<&str>,
         index: &'a AiAccountsIndex,
-    ) -> Option<&'a AiAccount> {
-        let bound_ids = workspace_binding
-            .into_iter()
-            .chain(self.bindings.get(agent_id).map(String::as_str));
-        for bound_id in bound_ids {
-            if let Some(account) = index.find(bound_id) {
-                return Some(account);
+    ) -> Result<Option<&'a AiAccount>, UnresolvedAccountBinding> {
+        let bound_id =
+            workspace_binding.or_else(|| self.bindings.get(agent_id).map(String::as_str));
+        match bound_id {
+            Some(bound_id) => {
+                index
+                    .find(bound_id)
+                    .map(Some)
+                    .ok_or_else(|| UnresolvedAccountBinding {
+                        agent_id: agent_id.to_string(),
+                        account_id: bound_id.to_string(),
+                    })
             }
-            // A binding can outlive its account when the account was deleted
-            // from a different workspace, or when the binding lives in a
-            // workspace `.zed/settings.json` that account deletion doesn't
-            // rewrite. Falling through silently would run the agent against
-            // some other account's credentials, so leave a trail.
-            log::warn!(
-                "ai_accounts: {agent_id} is bound to unknown account {bound_id}; \
-                 falling back to the default account for {agent_id}"
-            );
+            None => Ok(index.default_for_agent(agent_id)),
         }
-        index.default_for_agent(agent_id)
     }
 }
 
@@ -1828,14 +1883,132 @@ mod tests {
         let resolve = |workspace_binding| {
             settings
                 .resolve_account("claude-acp", workspace_binding, &index)
-                .map(|account| account.id.clone())
+                .map(|account| account.map(|account| account.id.clone()))
         };
         assert_eq!(
             resolve(Some(personal_id.as_str())),
-            Some(personal_id.clone())
+            Ok(Some(personal_id.clone()))
         );
-        assert_eq!(resolve(None), Some(work_id.clone()));
-        assert_eq!(resolve(Some("deleted-account")), Some(work_id));
+        assert_eq!(resolve(None), Ok(Some(work_id)));
+        assert_eq!(
+            resolve(Some("deleted-account")),
+            Err(UnresolvedAccountBinding {
+                agent_id: "claude-acp".to_string(),
+                account_id: "deleted-account".to_string(),
+            }),
+            "a missing workspace binding must not fall back to the setting's binding"
+        );
+    }
+
+    #[test]
+    fn resolve_account_never_substitutes_default_for_missing_binding() {
+        let mut index = AiAccountsIndex::default();
+        let only = account("claude-acp", "only");
+        index
+            .global_defaults
+            .insert("claude-acp".to_string(), only.id.clone());
+        index.upsert(only.clone());
+        let settings = AiAccountsSettings {
+            bindings: HashMap::from_iter([(
+                "claude-acp".to_string(),
+                "deleted-account".to_string(),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(
+            settings
+                .resolve_account("claude-acp", None, &index)
+                .is_err()
+        );
+        assert_eq!(
+            settings
+                .resolve_account("claude-acp", Some(&only.id), &index)
+                .map(|account| account.map(|account| account.id.clone())),
+            Ok(Some(only.id.clone())),
+            "a valid workspace binding still wins over a broken setting binding"
+        );
+    }
+
+    #[test]
+    fn remove_bindings_to_drops_only_that_account() {
+        let mut bindings = HashMap::from_iter([
+            ("claude-acp".to_string(), "deleted".to_string()),
+            ("codex-acp".to_string(), "kept".to_string()),
+        ]);
+        assert!(remove_bindings_to(&mut bindings, "deleted"));
+        assert_eq!(
+            bindings,
+            HashMap::from_iter([("codex-acp".to_string(), "kept".to_string())])
+        );
+        assert!(!remove_bindings_to(&mut bindings, "deleted"));
+    }
+
+    #[gpui::test]
+    fn workspace_bindings_drop_deleted_account_everywhere(cx: &mut gpui::App) {
+        let first = EntityId::from(1u64);
+        let second = EntityId::from(2u64);
+        let untouched = EntityId::from(3u64);
+        WorkspaceAccountBindings::set(first, "claude-acp", Some("deleted".into()), cx);
+        WorkspaceAccountBindings::set(second, "claude-acp", Some("deleted".into()), cx);
+        WorkspaceAccountBindings::set(second, "codex-acp", Some("kept".into()), cx);
+        WorkspaceAccountBindings::set(untouched, "claude-acp", Some("other".into()), cx);
+
+        WorkspaceAccountBindings::remove_account("deleted", cx);
+        assert_eq!(
+            WorkspaceAccountBindings::binding_for(second, "codex-acp", cx).as_deref(),
+            Some("kept")
+        );
+        assert_eq!(
+            WorkspaceAccountBindings::binding_for(second, "claude-acp", cx),
+            None
+        );
+        assert_eq!(
+            WorkspaceAccountBindings::binding_for(untouched, "claude-acp", cx).as_deref(),
+            Some("other")
+        );
+        assert_eq!(
+            WorkspaceAccountBindings::binding_for(first, "claude-acp", cx),
+            None
+        );
+    }
+
+    #[test]
+    fn terminal_env_matches_launch_profile() {
+        let settings = settings_with_profiles(serde_json::json!({
+            "custom-agent": {
+                "profile_env_var": "AGENT_HOME",
+                "env": { "AGENT_DEFAULT": "lathe" },
+                "scrub_env": ["AGENT_KEY"],
+            },
+        }));
+        let descriptor = settings
+            .descriptor_for("custom-agent")
+            .expect("custom-agent profile");
+        let work = account("custom-agent", "work");
+        let launch_profile = LaunchProfile::new(&descriptor.profile, Some(&work));
+
+        let fresh_env = launch_profile.terminal_env(|_| false);
+        assert_eq!(
+            fresh_env.get("AGENT_HOME"),
+            Some(&work.config_dir.display().to_string())
+        );
+        assert_eq!(
+            fresh_env.get("AGENT_DEFAULT").map(String::as_str),
+            Some("lathe")
+        );
+
+        let inherited_env =
+            launch_profile.terminal_env(|key| key == "AGENT_DEFAULT" || key == "AGENT_HOME");
+        assert!(
+            !inherited_env.contains_key("AGENT_DEFAULT"),
+            "a default must not override a value the user already has"
+        );
+        assert!(
+            inherited_env.contains_key("AGENT_HOME"),
+            "the account's profile dir always overrides"
+        );
+        assert_eq!(launch_profile.removed_env, vec!["AGENT_KEY".to_string()]);
     }
 
     #[test]
@@ -2446,6 +2619,7 @@ mod tests {
         let profile_dir = |binding: Option<&str>| {
             let (_, launch_profile) =
                 resolve_launch_profile("custom-agent", binding, &settings, &index)
+                    .expect("bindings in this test point at existing accounts")
                     .expect("custom-agent has a profile contract");
             launch_profile.set_env
         };
@@ -2468,7 +2642,10 @@ mod tests {
         assert!(profile_dir(None).is_empty());
 
         assert!(
-            resolve_launch_profile("unknown-agent", None, &settings, &index).is_none(),
+            matches!(
+                resolve_launch_profile("unknown-agent", None, &settings, &index),
+                Ok(None)
+            ),
             "an agent without a contract is launched untouched"
         );
     }

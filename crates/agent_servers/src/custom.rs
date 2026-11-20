@@ -1,9 +1,7 @@
 use crate::{AgentServer, AgentServerDelegate, load_proxy_env};
 use acp_thread::{AgentConnection, AgentModelId};
 use agent_client_protocol::v2::schema as acp_v2;
-use ai_accounts::{
-    AiAccountsSettings, WorkspaceAccountBindings, api_key_keychain_url, load_index,
-};
+use ai_accounts::{AiAccountsSettings, WorkspaceAccountBindings, api_key_keychain_url, load_index};
 use anyhow::{Context as _, Result};
 use collections::HashSet;
 use fs::Fs;
@@ -379,14 +377,21 @@ impl AgentServer for CustomAgentServer {
 /// for accounts that sign in through the CLI's own methods.
 fn api_key_for_gemini_cli(project: EntityId, cx: &mut App) -> Task<Result<Option<String>>> {
     let workspace_binding = WorkspaceAccountBindings::binding_for(project, GEMINI_ID, cx);
-    let account_url = cx
+    let account_url = match cx
         .try_global::<SettingsStore>()
         .map(|store| store.get::<AiAccountsSettings>(None).clone())
-        .and_then(|settings| {
+        .map(|settings| {
             settings
                 .resolve_account(GEMINI_ID, workspace_binding.as_deref(), &load_index())
-                .map(|account| api_key_keychain_url(&account.agent_id, &account.id))
-        });
+                .map(|account| {
+                    account.map(|account| api_key_keychain_url(&account.agent_id, &account.id))
+                })
+        })
+        .transpose()
+    {
+        Ok(account_url) => account_url.flatten(),
+        Err(unresolved) => return Task::ready(Err(unresolved.into())),
+    };
 
     let env_var = EnvVar::new("GEMINI_API_KEY".into()).or(EnvVar::new("GOOGLE_AI_API_KEY".into()));
     let credentials_provider = zed_credentials_provider::global(cx);

@@ -23,7 +23,8 @@ use agent_client_protocol::{
 };
 use ai_accounts::{
     AdvertisedAuthMethods, AgentDescriptor, AiAccountsIndex, AiAccountsSettings, LaunchProfile,
-    WorkspaceAccountBindings, load_index, prepare_account_for_launch, resolve_launch_profile,
+    UnresolvedAccountBinding, WorkspaceAccountBindings, load_index, prepare_account_for_launch,
+    resolve_launch_profile,
 };
 use anyhow::anyhow;
 use async_channel;
@@ -584,7 +585,7 @@ impl AcpConnection {
                 project.entity_id(),
                 command.env.get_or_insert_default(),
                 cx,
-            )
+            )?
         } else {
             Vec::new()
         };
@@ -1878,16 +1879,17 @@ fn apply_ai_account_env(
     project: EntityId,
     env: &mut HashMap<String, String>,
     cx: &AsyncApp,
-) -> Vec<String> {
-    let Some((_, launch_profile)) = ai_account_launch_profile(agent_id, project, &load_index(), cx)
+) -> Result<Vec<String>> {
+    let Some((_, launch_profile)) =
+        ai_account_launch_profile(agent_id, project, &load_index(), cx)?
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     if let Some(account) = &launch_profile.account {
         prepare_account_for_launch(account);
     }
     launch_profile.apply(env);
-    launch_profile.removed_env
+    Ok(launch_profile.removed_env)
 }
 
 fn ai_account_launch_profile(
@@ -1895,14 +1897,15 @@ fn ai_account_launch_profile(
     project: EntityId,
     index: &AiAccountsIndex,
     cx: &AsyncApp,
-) -> Option<(AgentDescriptor, LaunchProfile)> {
+) -> Result<Option<(AgentDescriptor, LaunchProfile)>, UnresolvedAccountBinding> {
     let agent_id = agent_id.0.as_ref();
     cx.try_read_global::<SettingsStore, _>(|store, cx| {
         let settings = store.get::<AiAccountsSettings>(None);
         let workspace_binding = WorkspaceAccountBindings::binding_for(project, agent_id, cx);
         resolve_launch_profile(agent_id, workspace_binding.as_deref(), settings, index)
     })
-    .flatten()
+    .transpose()
+    .map(Option::flatten)
 }
 
 /// How long agent startup waits to learn which git host account each
@@ -5652,6 +5655,7 @@ mod tests {
             };
             let (_, launch_profile) =
                 ai_account_launch_profile(&AgentId::new(AGENT), project_id, &index, &cx.to_async())
+                    .expect("the bound account exists")
                     .expect("the settings entry gives the agent a profile contract");
             launch_profile.apply(command.env.get_or_insert_default());
 

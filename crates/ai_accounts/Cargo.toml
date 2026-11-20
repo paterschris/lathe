@@ -26,6 +26,7 @@ smol.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 lathe_data_import.workspace = true
 paths = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
