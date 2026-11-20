@@ -2,6 +2,22 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.23.0-beta - 2026-11-20
+
+A real three-way merge editor. Conflicts used to mean picking ours or theirs from buttons over the markers; now you get both sides next to an editable result, checkboxes to pick with, and handling for the conflicts git leaves no markers in at all.
+
+### Merge conflicts
+
+- **Three-way merge editor.** Ours and theirs side by side, the file you're resolving in an editable Result pane below. Check the box above a conflict in either side to take it, check both to keep both, uncheck and the markers come back. A header checkbox takes a side for the whole file, and **Reset** undoes the checkbox picks. The selected conflict gets a gutter stripe in every pane, and the side panes color what differs from the result down to the word. The **View** menu puts the result between the two sides instead, adds a base pane, ignores whitespace, or switches to the old per-conflict cards.
+- **The base is always there.** Ours, theirs and the base come from git's index rather than the markers, so you get a base whatever `merge.conflictStyle` says. Files in other encodings, like Latin-1, read in their own encoding.
+- **Conflicts without markers.** A file deleted on one side and changed on the other, renamed differently on both sides, or binary now gets a panel saying what happened, with only the choices that apply: keep ours, keep theirs, or delete. Files git skipped because of a `-merge` rule in `.gitattributes` get merged line by line in the editor instead of looking resolved.
+- **Skip commit** during a rebase, cherry-pick or revert, next to Continue and Abort.
+- Cmd-S saves from the merge editor, and its tab shows when there are unsaved changes.
+
+### Usage counts
+
+- With metrics on, fetching the default extension registry now counts toward install numbers too. It sends the same anonymous install hash as the update check, and nothing goes to registries you add yourself. See [telemetry](https://github.com/paterschris/lathe/blob/main/docs/src/telemetry.md).
+
 ## v1.22.0 - 2026-11-16
 
 Everything from the 1.19, 1.20 and 1.21 betas. The big one is extensions: Lathe has its own extension API now, extensions can draw their own UI, and you can manage extensions properly.
