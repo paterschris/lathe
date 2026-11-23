@@ -45,6 +45,7 @@ Both toolchain sections report their own state, so you hear about a missing JDK 
 Zed extensions run in Lathe exactly as they do in Zed. On top of that, Lathe has its own extension API that lets an extension do things Zed's won't: add commands, read and edit the file you're in, react to files being opened or saved, and run commands in a terminal. It's an extra crate, [`lathe_extension_api`](https://crates.io/crates/lathe_extension_api) on crates.io ([API docs](https://docs.rs/lathe_extension_api)), that sits next to `zed_extension_api` in the same extension, so one extension can use both.
 
 ### What an extension can do
+
 - **Commands.** Registered commands show up in the command palette under the extension's name. Bind one to a key with `["extension::RunCommand", { "extension_id": "...", "command": "..." }]`.
 - **Read and edit the active file.** An extension gets a snapshot of the buffer (text, path, language, selections) and can apply edits as a single undo step or move the cursor. Every snapshot has a version, and an edit made against an older one is rejected, so an extension can't overwrite text it hasn't seen.
 - **File events.** Run something when a file is opened, saved, or changed (after typing pauses). A handler gets two seconds. One that hangs is interrupted and the extension reloaded, and after three timeouts in a row its events pause until you reinstall or rebuild it.
@@ -62,9 +63,11 @@ API 0.2 is in Lathe 1.20 beta and 1.22 stable onward. It's still an alpha that c
 - **Decorations**: highlights, underlines, gutter marks and short end-of-line messages in the editor, anchored to the text so they move with your edits.
 
 ### Permissions
+
 Each of those abilities is a separate capability the extension has to declare in `lathe_capabilities` in its `extension.toml`: `buffer:read`, `buffer:write`, `events:open`, `events:save`, `events:change`, `ui:status`, `ui:prompt`, and `tasks:spawn`, plus `ui:views` and `ui:decorations` for API 0.2. Lathe 1.19 and older won't load an extension that asks for those two. Installing from a registry or a URL asks you to allow them first, and the extension's card lists them with **Allow** and **Revoke** buttons, one at a time. Dev extensions are allowed automatically, since that folder is yours. Grants are kept in `lathe-grants.json`.
 
 ### Where extensions come from
+
 - **More registries.** `extension_registries` lists static `index.json` registries to search next to Zed's. Lathe's own registry is on the list by default. Results are merged by extension id, and if Zed's API is down the list still fills from the others. Indexes are cached, so the Extensions page works offline, and downloads are checked against the sha256 in the index.
 - **Install from a URL.** Paste a `.tar.gz` or a git URL into the Extensions page's search box to install from it.
 - **Lathe-only extensions** declare `requires = ["lathe"]` and get a **Lathe** chip on their card. Registry cards leave out the download count, since static registries don't have one.
@@ -82,6 +85,7 @@ Each of those abilities is a separate capability the extension has to declare in
 ## Merge conflicts and interactive rebase
 
 ### Conflict reporting and resolution
+
 A merge, rebase, cherry-pick, revert, pull, or stash pop that stops on conflicts gets you a notification naming the conflicted files, with a **Resolve** button on it. That opens a tab listing every conflicted file beside the merge editor for whichever one is selected. Resolve a whole file as ours or theirs, stage files as you finish them, abort, continue, or skip the commit being applied, all from the same header. No dropping to a terminal. The same tab is reachable any time from the git panel's Conflicts section, or `git: resolve conflicts`.
 
 Conflicts that have no markers get handled too. One side deleted the file and the other changed it, both sides renamed it differently, or it's binary: you get a panel that says which of those happened and offers only the choices that make sense (keep ours, keep theirs, delete). A `.gitattributes` rule like `-merge` makes git skip the line merge for text files and leave ours in place. Lathe merges those itself so they open like any other conflict, and nothing hits the disk until you save.
@@ -89,6 +93,7 @@ Conflicts that have no markers get handled too. One side deleted the file and th
 ![Deleted File Conflict](../assets/screenshots/conflict-deleted-file.png)
 
 ### Three-way merge editor
+
 Ours and theirs side by side, the file you're actually resolving in an editable **Result** pane across the bottom. Check the box above a conflict in ours or theirs to take it. Check both and you get both, ours first. Uncheck to change your mind, and with neither checked the markers come back. A checkbox in each pane's header takes that side for the whole file, and **Reset** undoes all the checkbox picks at once. Or just type in the result; it's a real editor with the usual language features.
 
 The selected conflict gets a stripe in every pane's gutter, the others fade back in the two sides, and the Result header says which one you're on and where ("Conflict 1 of 2, lines 11-15"). All the panes scroll together. Outside the conflicts, the side panes color whatever differs from the result, down to the changed words, and **Ignore whitespace** hides reindents.
@@ -98,6 +103,7 @@ The versions come from git's index, not from parsing the markers, so the base is
 ![Merge Editor](../assets/screenshots/conflict-merge-editor.png)
 
 ### Interactive rebase with drag-and-drop
+
 The interactive rebase dialog lists the commits oldest first, the way git's own todo file does, with pick / reword / squash / fixup / drop / edit on each row. Reorder them by dragging a row by its sha and subject, or with the up and down arrows on the row. Reword edits the message inline, and a message you've typed moves with its commit when you reorder. Reordering on its own is enough to run the rebase. If the first commit you're keeping is a squash or fixup, which git would refuse partway in, **Start rebase** is disabled and the dialog says why.
 
 Drag a commit or a branch onto another one in the commit graph and you get a confirmation modal previewing what the rebase will do before anything runs. Select a range of commits in the graph and the context menu offers **Squash N commits into one** and **Interactive rebase N commits onto here**, so a history cleanup pass starts from the graph you were already reading. Not from `git rebase -i` and an editor session.
@@ -114,7 +120,12 @@ Past reviewing: request reviewers, merge or squash and merge, flip a PR between 
 
 Picking reviewers is a checklist, not a one-click send: clicking a person ticks them, and the footer's **Request** button sends the whole batch (**Clear** unticks everyone).
 
+![Pull request overview, inline review comments, and draft status in Lathe](../assets/screenshots/pull-request-review.gif)
+
+![Pull request review with inline comments and the terminal closed](../assets/screenshots/pull-request-comments.png)
+
 ### Several accounts per git host
+
 Add a second GitHub, GitLab, or Bitbucket account from the account menu and pick which one each workspace uses. Pull requests, reviews, and the reviewer picker all follow that choice, so a work repo and a personal repo can sit on different identities in side-by-side windows. An existing connection carries over as the first account without signing in again.
 
 ---
@@ -126,6 +137,8 @@ Go to Definition, Declaration, Implementation, Type Definition, and Find All Ref
 The list is virtualized, so a symbol with thousands of references doesn't lay out thousands of rows on every frame. The peek also takes a `menu` key context, which keeps Vim's normal-mode `j` and `k` on the peek list and off the editor behind it.
 
 Want the old behavior back? `lsp_results_location` set to `multi_buffer` or `picker` gets you a tab or a filterable picker instead.
+
+![Definition peek opens inline below the current code](../assets/screenshots/peek-definition.gif)
 
 ---
 
@@ -140,6 +153,7 @@ Up and down in the agent panel's composer walk back through prompts you've alrea
 Archived agent threads show up in Thread History for the current workspace, sorted chronologically. Restoring one puts it back in that workspace's thread list.
 
 ### Agent accounts and approval control
+
 Sign into multiple subscription accounts for the external agents in the Agent Panel (Claude Code, Codex, Gemini) and switch between them from the panel's account chip. Account selection is per-workspace and switching takes effect at runtime, so a work project and a personal project can each sit on their own identity and their own subscription, which keeps plan usage and rate limits from bleeding between them. An approval selector picks each agent's approval / sandbox level; that level is applied when the agent process spawns, so a change lands on the next thread. Agents with their own native approval control keep it and skip the selector.
 
 **Manage AI Accounts** lists every account for each agent alongside its connection status, lets you nominate a default per agent, and can import existing logins from `claude-account-switcher`. A workspace binds its own account per agent through `ai_accounts` in `.zed/settings.json`, though you rarely need to open that file. The account chip's menu covers the same ground: switch to another account, clear the binding for the current workspace, add an account, open the manager.
@@ -147,6 +161,7 @@ Sign into multiple subscription accounts for the external agents in the Agent Pa
 ![Manage AI Accounts](../assets/screenshots/ai-accounts-manager.png)
 
 ### Agent settings in the composer
+
 Each agent's own settings sit inline in the composer, and the row adapts to the agent instead of showing some lowest-common-denominator set. Codex gets sandbox access, model, reasoning effort, and a fast-mode toggle. Claude Agent gets permission mode, model, thinking level, and its own fast-mode toggle.
 
 When approval and sandbox level take effect depends on the agent, because the two paths are genuinely different. Codex and Gemini receive theirs as launch arguments (`-c approval_policy=` and `-c sandbox_mode=` for Codex, `--approval-mode` for Gemini), so **Full access** and its siblings bind when the thread's agent process spawns and a change applies to the next thread. Claude Agent has native mode support and goes over ACP `session/set_mode`, so **Bypass permissions** takes effect on the thread you're already in. Model, thinking level, and fast mode apply as you go, no new thread needed.
@@ -158,18 +173,22 @@ When approval and sandbox level take effect depends on the agent, because the tw
 Lathe Companion is a phone app for keeping an eye on your agents when you're not at your desk. Approve a tool call from the couch, answer a question from the grocery store, get pinged when a long run finishes. It's on the [App Store](https://apps.apple.com/us/app/lathe-companion/id6825627989) and [Google Play](https://play.google.com/store/apps/details?id=com.lathe.companion). 7-day free trial, then $1.99 a month on either.
 
 ### Pairing
+
 It's off until you turn it on. Run **lathe companion: open companion** from the command palette, choose **Turn on**, and scan the QR code with the app. Lathe asks you to **Allow** a phone before it pairs, so someone else scanning your code doesn't get in. **New code** replaces an expired one and kills the old one. **Copy link** gives you something to open on the phone instead of scanning. Once it's on, a phone icon in the title bar opens the same dialog, which also lists your paired phones.
 
 ### What the phone can do
+
 - **Agent threads.** See every thread in your open projects and follow them live. Approve or deny tool calls, answer questions, send messages, start a new thread with any agent the project has, and rename, cancel or close threads. Closing archives, same as Lathe's archive. You can change a thread's model and effort from the phone. Modes stay on the desktop, since some of them skip permission prompts.
 - **Terminals**, including Claude Code, Codex and other CLI agents running in the agent panel. Open one to watch its screen live with scrollback and colors. Typing into them is off until you turn on "Allow typing into terminals from the phone" (or `companion.terminal_input`), since it can run anything.
 - **Pull requests** per workspace, including the ones waiting on your review. Read the diff and comments, reply, leave inline comments and submit a review. It all goes through the git accounts you've connected in Lathe, so no host token ever leaves your computer.
 - **Mute a workspace** to stop its threads and terminals notifying you.
 
 ### Notifications
+
 Pushes go out when a thread needs you or finishes, or a terminal starts waiting for input, titled with the thread or terminal. Not while you're at Lathe, though. Phones only get notified once you've been away 5 minutes, and the title bar says **Idle** once they would. `companion.idle_minutes` changes the wait, 0 means always. Answering a terminal from the phone clears its waiting-for-input marker, same as typing at the desktop.
 
 ### Privacy and power
+
 Everything between Lathe and the phone is end-to-end encrypted. The relay in the middle (`companion.lathe-ide.com`) only sees enough to route messages, not what's in them, and Lathe's pairing identity lives in the system keychain. While an agent writes, Lathe sends just the new text in batches rather than the whole message on every change. Your Mac stays awake while an agent is running and a phone is paired, so a long run doesn't stall with nobody touching the machine; `companion.keep_awake_while_agents_run` turns that off.
 
 ---
@@ -177,16 +196,20 @@ Everything between Lathe and the phone is end-to-end encrypted. The relay in the
 ## Theme and syntax highlighting
 
 ### Custom theme and syntax palette
+
 Lathe ships its own default theme, plus a refined syntax highlighting palette applied across every supported language. It's tuned for long coding sessions: balanced contrast, accent colors for keywords, strings, and types that are distinct without being loud, and deliberate choices for the diagnostic and git-status colors so the editor stays readable when things go wrong.
 
 ![Default Theme](../assets/screenshots/default-theme-code.png)
 
 ### Theme Customizer
+
 A built-in panel for editing all 200+ theme colors, syntax token colors included, with HSLA sliders and live preview. Category filters, Lathe-specific color badges, per-color reset. Open it from the command palette: `theme customizer: open theme customizer`.
 
 ![Command Palette](../assets/screenshots/theme-customizer-command-palette.png)
 
 ![Theme Customizer](../assets/screenshots/theme-customizer.gif)
+
+![Theme Customizer syntax filters and HSLA color controls](../assets/screenshots/theme-syntax-controls.gif)
 
 ---
 
@@ -195,21 +218,33 @@ A built-in panel for editing all 200+ theme colors, syntax token colors included
 Zed already ships the commit graph, the tabbed git panel, worktree support, and the `git: file history` action. Everything below is what Lathe layers on top.
 
 ### Explorer tab and hierarchical branch folder tree
+
 Lathe adds a third **Explorer** tab to the git panel, next to upstream's Changes and History. It lists the repository's branches, worktrees, and stashes in one filterable tree, and renders Local and Remote branches as a collapsible folder tree that splits names on `/`. So `feature/auth/login` and `feature/auth/signup` fold up under a single `feature/auth/` folder. Folders show counts of the branches they contain and remember their open/closed state per section. Local branches that also exist on the remote get an on-remote indicator. Turn on the filter input and the tree flattens, which keeps filter results legible. Clicking a branch opens the commit graph and navigates to that branch, so the tree and the graph stay in step. A multi-repo strip keeps every repository in the workspace one click away, with fetch-all and pull-all actions, plus any external repositories you pin via `repository_dashboard_pinned_repos`.
 
+![Git Explorer with local and remote branches arranged in folders](../assets/screenshots/branch-explorer.png)
+
 ### Branch and commit context menus
+
 Right-click a branch: checkout, **Branch from here**, copy branch name, merge into the current branch, rebase the current branch onto it, delete. Right-click a commit and you additionally get tag creation, cherry-pick onto the current branch, drop, revert, the three reset modes, rebase onto that commit, and copy of the full or short SHA. Menu labels name the branch they're about to act on instead of saying "the current branch", so a reset reads as **Reset main to here (hard, discard changes)** before you click it. Not after.
 
+![Lathe commit context menu with branch, tag, reset, and rebase actions](../assets/screenshots/commit-actions.png)
+
 ### Compare any two commits
+
 In the git graph, Cmd-click a second commit, then right-click and choose **Compare Commits** to see everything that changed between them. They don't have to be adjacent or even on the same branch. The diff has a button to swap which side is old and which is new. The single-commit entry is labeled **View Diff Against Parent** so the two are easy to tell apart.
 
+![Select two commits and open their comparison](../assets/screenshots/compare-commits.gif)
+
 ### Multi-select in the git panel
+
 Shift-click and Cmd-click to mark several files in the Changes list, then stage, unstage, discard, stash, or open them together.
 
 ### Undo for destructive operations
+
 Branch resets, deletes, renames, and tag creation all record an undo entry, and the toast you get afterward has a one-click **Undo** on it. Discards stash defensively first, so those can be restored too. 50 entries kept per repository.
 
 ### Git Flow commands
+
 Start and finish feature, release, and hotfix branches from the command palette. Finishing merges with `--no-ff` into the right target, tags releases and hotfixes, merges back into `develop`, and deletes the local branch. If something fails it surfaces as an error instead of half-completing quietly.
 
 - `git flow: start feature` / `git flow: finish feature`
@@ -217,23 +252,29 @@ Start and finish feature, release, and hotfix branches from the command palette.
 - `git flow: start hotfix` / `git flow: finish hotfix`
 
 ### Branch from commit
+
 Create a new branch off any commit in the history view or the graph without checking it out first. Handy for forking experimental work off a specific point.
 
 ### Detached HEAD checkout from history
+
 Check out any commit SHA from the history view into detached HEAD, for poking at old state without losing your place on the current branch. This works on remote and collab projects now as well as local ones, though the collab path ships without a test, since the fork has no remote-git test harness.
 
 ### Worktrees that start up to date
+
 Creating a worktree from a remote branch fetches the latest origin state first, so the new worktree starts at the current remote tip and not a stale local ref.
 
 ### Git status colors on tabs by default
+
 Upstream colors tab labels by git status behind `tabs.git_status`, off by default. Lathe turns it on, and keeps the label readable once the row is selected: a selected tab or project panel entry falls back to the default label color instead of tinting into its own selection background.
 
 ![Git Tab Styling](../assets/screenshots/git-aware-editor-tabs.png)
 
 ### Inline hunk staging
+
 Expand a file row in the Changes list to get its individual hunks, and stage or unstage them one at a time without opening a diff view.
 
 ### Branch status indicator and git activity panel
+
 The status bar shows the active repository's branch and its push/pull state. A separate git activity panel (docked bottom by default) shows git commands as they run, so a long fetch or clone isn't invisible.
 
 ---
@@ -262,18 +303,36 @@ It's still experimental, and honestly so: none of it has been through a proper v
 
 ![Jupyter Notebook Setting](../assets/screenshots/jupyter-notebook-setting.png)
 
+### Notebook views and outputs
+
+![Switch between notebook cells and the shared source view](../assets/screenshots/notebook-source-view.gif)
+
+![Find a notebook cell by heading and jump to its SVG output](../assets/screenshots/notebook-navigation.gif)
+
+![SVG output rendered inside a notebook cell](../assets/screenshots/notebook-svg.png)
+
+![PNG fallback for script-based HTML output, followed by a rendered table](../assets/screenshots/notebook-html-fallback.png)
 
 ---
 
 ## Docks and panels
 
 ### Two panels per dock
+
 Cmd-click a second panel's button and it opens under the first (or beside it, in the bottom dock), with a divider you can drag. Double-click the divider for 50/50. Clicking the button of a panel that's sharing a dock closes just that panel, and clicking it again puts it back where it was, same divider and all. The split is saved per workspace.
 
+![Two panels share one dock; closing and reopening restores the second panel](../assets/screenshots/shared-dock.gif)
+
 ### Drag panels where you want them
+
 Drag a panel's button off the status bar and drop zones show up for each half of each dock. Right-click a button and **Move to** does the same thing without the drag. Every panel can go in the bottom dock, including Project, Git, Outline, Pull Requests, Collab, and Agent. Mobile Dev is the exception in the other direction: it only goes in the bottom dock, because device logs need the width.
 
+![Drag panels between dock halves using the visible drop targets](../assets/screenshots/panel-drag-and-drop.gif)
+
+![Right-click a panel button and choose its destination from Move to](../assets/screenshots/panel-move-menu.png)
+
 ### Closing a whole dock
+
 Each open dock gets a close button next to its panel buttons, and every panel button's right-click menu has **Close Left Panels** (or Right, or Bottom). Reopening brings back the same panels at the same sizes.
 
 Panels can't go in the editor area as tabs yet.
@@ -283,6 +342,7 @@ Panels can't go in the editor area as tabs yet.
 ## Terminal, windows, and workspaces
 
 ### Additional windows for editors and terminals
+
 Send an editor tab or a terminal into a second window from its tab context menu. With no second window open the entry is flat: **Open in New Window** for editors, **Move to New Window** for terminals. Once one exists, both turn into submenus (**Open in Window** and **Move to Window**) listing every open window on the same project, so a tab can be aimed at a specific one instead of always spawning another.
 
 The two surfaces move differently, on purpose. An editor opens as another view of the same buffer, so both windows stay in sync. A terminal is transferred, not copied: the same view moves, which means the same process, scrollback, and input state. It leaves its source pane before it's added anywhere else, so it's never mounted in two windows at once.
@@ -292,17 +352,21 @@ These windows sit outside workspace persistence deliberately. They claim no data
 A few edge cases worth knowing about. A pane a terminal vacates closes if that empties it, because an empty pane draws no tab bar and would otherwise sit in the surviving window as a blank region with no way to dismiss it. A returning terminal only reveals the terminal panel if it belongs there, and skips a source pane the workspace no longer lays out, so a center terminal can't reopen an empty dock. A new window doesn't raise itself and an existing target might be behind the current one, so the destination gets activated either way. And activating an item no longer takes focus in `TerminalView`, leaving that to the pane, so a terminal finishing startup in the background can't pull you out of an open modal.
 
 ### Awaiting-input indicator
+
 A return icon appears in the terminal tab and title bar when Claude Code or another interactive prompt is waiting on you, with the tooltip distinguishing a general prompt from a confirmation from a multiple-choice selection. The agent panel shows the same indicator when a thread is waiting, so an approval request doesn't sit unnoticed while you're working in another tab.
 
 ![Awaiting Input Indicator](../assets/screenshots/awaiting-input-indicator.gif)
 
 ### Active terminal tab tint
+
 Terminal tabs get a subtle green background when active, which makes them easy to pick out among editor tabs.
 
 ### Terminal focus fix
+
 Switching to a terminal tab with ctrl+tab activates the cursor properly. No click into the terminal needed.
 
 ### Workspace groups with account binding
+
 Save the set of projects you currently have open as a named **workspace group**, then reopen the whole thing in a new window later. A group can be bound to a saved collab account, in which case opening the group switches to that account first. Groups can also be written out to a portable `.lathe-workspace` file that travels with the project.
 
 Commands (via the command palette):
@@ -314,10 +378,16 @@ Commands (via the command palette):
 - `workspace groups: bind workspace group account`
 - `workspace groups: unbind workspace group account`
 
+![Save a named workspace group and find it in the group picker](../assets/screenshots/workspace-groups.gif)
+
 ### Per-window zoom
+
 `Cmd +`, `Cmd -`, and `Cmd 0` zoom every piece of text in the active Lathe window together: editor, terminal, project panel, git panel, git graph, pull requests, agent panel, git commit editor, markdown preview. The zoom is scoped to that window, so two windows side by side can be zoomed independently. "Reset Zoom" in the menu and `Cmd +scroll-wheel` (when mouse-wheel zoom is enabled) behave the same way. Upstream Zed only zooms the editor with these keys and gives the agent panel and markdown preview their own independent zoom; Lathe folds all of that into the single window zoom. The persisted variants (the menu's `… (persisted)` items) still write to `settings.json` and apply globally.
 
+![Zoom changes text throughout the active Lathe window](../assets/screenshots/window-zoom.gif)
+
 ### Multi-account collab switcher
+
 Sign into more than one Zed Cloud account and switch between them from the avatar menu. Saved accounts are listed under **Accounts** by their GitHub username, with **Add Account…** and **Sign Out** actions.
 
 ---
@@ -325,15 +395,23 @@ Sign into more than one Zed Cloud account and switch between them from the avata
 ## Editor additions
 
 ### Color swatches and a color picker
+
 Hex, `0x` hex, `rgb()`, and `hsl()` values get a small swatch in front of them, with or without a language server. Click the swatch (or right-click and choose **Pick Color**) to adjust the color; the new value is written back in the same notation as one undo step. An all-digit `#123` in Markdown or a commit message is left alone, since that's usually an issue number.
 
+![Color swatches open a picker that updates the source color](../assets/screenshots/color-picker.gif)
+
 ### Search Everywhere
+
 `search everywhere: toggle` opens one picker that searches files, symbols, and actions together, so you don't have to remember whether you wanted the file finder, the symbol picker, or the command palette. Results come in sections, a few from each source, with a **Show all** row when there's more; tabs across the top (All, Types, Files, Symbols, Actions) narrow it to one kind, and Tab cycles through them. Types are the classes, structs, interfaces, and enums from the symbol results. Files and actions show up as you type, and symbols fill in as each language server answers, so a slow server doesn't hold up the rest. Picking a result does what its own picker would: files open the way the file finder opens them, symbols jump to their definition, actions run. Press `shift shift` (tap Shift twice) to open it, in every keymap. In the JetBrains keymap that used to open the command palette.
 
+![Search Everywhere opened with Shift Shift](../assets/screenshots/search-everywhere.gif)
+
 ### Open Recent File
+
 **Open Recent File** in the File menu and on the welcome page (`alt-cmd-shift-o` on macOS) reopens files you've had open recently, not just projects.
 
 ### Project panel refresh
+
 **Refresh** in the project panel's right-click menu re-reads the tree from disk, for the times a file watcher misses something.
 
 ---
