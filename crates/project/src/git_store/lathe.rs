@@ -562,6 +562,21 @@ impl super::Repository {
         })
     }
 
+    /// Branch names for the ours and theirs sides of the operation in
+    /// progress, for labeling the merge editor's panes.
+    pub fn conflict_side_names(&mut self) -> oneshot::Receiver<Result<ConflictSideNames>> {
+        self.send_job("conflict_side_names", None, move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.conflict_side_names().await
+                }
+                // Not yet proxied to remote hosts; the panes fall back to the
+                // names in the conflict markers.
+                RepositoryState::Remote(_) => Ok(ConflictSideNames::default()),
+            }
+        })
+    }
+
     /// Settles a conflict over a whole file by keeping one side's version or
     /// deleting the file, and marks it resolved.
     pub fn resolve_whole_file(

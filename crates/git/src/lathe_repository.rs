@@ -238,6 +238,18 @@ impl ConflictStages {
     }
 }
 
+/// What to call each side of a conflict, from the operation in progress
+/// rather than the conflict markers: the markers say `HEAD` for ours, and
+/// they're gone once a file's conflicts are resolved. In a merge, ours is the
+/// current branch and theirs the branch being merged in; in a rebase, ours is
+/// the branch being rebased onto and theirs the branch being replayed. A side
+/// is `None` when there's no operation in progress or no name can be found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConflictSideNames {
+    pub ours: Option<SharedString>,
+    pub theirs: Option<SharedString>,
+}
+
 /// How to settle a conflict over a whole file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WholeFileResolution {

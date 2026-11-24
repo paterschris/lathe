@@ -3,7 +3,7 @@ use editor::{
     display_map::{BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
 };
 use encoding_rs::Encoding;
-use git::repository::ConflictStages;
+use git::repository::{ConflictSideNames, ConflictStages};
 use gpui::{
     AppContext as _, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Hsla, SharedString,
     Subscription, Task, WeakEntity, point,
@@ -78,6 +78,13 @@ pub struct MergeEditorView {
     /// events must not trigger another round of propagation.
     syncing_split_scroll: bool,
     _load_stages: Option<Task<()>>,
+    /// Branch names for the ours and theirs panes, from the operation in
+    /// progress.
+    side_names: ConflictSideNames,
+    /// The branch names from the conflict markers, kept after the markers are
+    /// resolved away, for when the operation's names can't be read.
+    marker_names: ConflictSideNames,
+    _load_side_names: Option<Task<()>>,
     /// Each conflict's base lines, cut from the index's base version, for
     /// conflicts whose markers carry no base section. Keyed by the conflict's
     /// range so a stale entry can't be shown on the wrong card while a refresh
@@ -785,6 +792,9 @@ impl MergeEditorView {
             None => (None, Self::load_stages(&buffer, &project, cx)),
         };
 
+        let load_side_names = Self::load_side_names(&buffer, &project, cx);
+        let marker_names = Self::marker_names(&conflict_set, cx);
+
         let mut this = Self {
             focus_handle,
             buffer,
@@ -803,6 +813,9 @@ impl MergeEditorView {
             ignore_whitespace: false,
             syncing_split_scroll: false,
             _load_stages: load_stages,
+            side_names: ConflictSideNames::default(),
+            marker_names,
+            _load_side_names: load_side_names,
             card_bases: Vec::new(),
             _refresh_side_contents: None,
             _subscriptions: subscriptions,
@@ -851,6 +864,64 @@ impl MergeEditorView {
             })
             .log_err();
         }))
+    }
+
+    fn load_side_names(
+        buffer: &Entity<Buffer>,
+        project: &Entity<Project>,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<()>> {
+        let buffer_id = buffer.read(cx).remote_id();
+        let (repository, _) = project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .repository_and_path_for_buffer_id(buffer_id, cx)?;
+        let receiver = repository.update(cx, |repository, _| repository.conflict_side_names());
+        Some(cx.spawn(async move |this, cx| {
+            let side_names = match receiver.await {
+                Ok(Ok(side_names)) => side_names,
+                Ok(Err(error)) => {
+                    log::warn!("merge editor couldn't read the branch names: {error:#}");
+                    return;
+                }
+                Err(_) => return,
+            };
+            this.update(cx, |this, cx| {
+                this.side_names = side_names;
+                this.refresh_change_highlights(cx);
+                cx.notify();
+            })
+            .log_err();
+        }))
+    }
+
+    fn marker_names(conflict_set: &Entity<ConflictSet>, cx: &App) -> ConflictSideNames {
+        let conflict_set = conflict_set.read(cx);
+        let Some(conflict) = conflict_set.snapshot.conflicts.first() else {
+            return ConflictSideNames::default();
+        };
+        let name = |name: &SharedString| (!name.is_empty()).then(|| name.clone());
+        ConflictSideNames {
+            ours: name(&conflict.ours_branch_name),
+            theirs: name(&conflict.theirs_branch_name),
+        }
+    }
+
+    /// The branch name to show for one side, if any is known.
+    fn side_branch_name(&self, side: ConflictSide) -> Option<SharedString> {
+        match side {
+            ConflictSide::Ours => self
+                .side_names
+                .ours
+                .clone()
+                .or_else(|| self.marker_names.ours.clone()),
+            ConflictSide::Theirs => self
+                .side_names
+                .theirs
+                .clone()
+                .or_else(|| self.marker_names.theirs.clone()),
+        }
     }
 
     /// Resolves every remaining conflict in the file in favor of one side.
@@ -924,8 +995,11 @@ impl MergeEditorView {
         let total = self.conflict_set.read(cx).snapshot.conflicts.len();
         if total == 0 {
             self.selected_index = 0;
-        } else if self.selected_index >= total {
-            self.selected_index = total - 1;
+        } else {
+            self.marker_names = Self::marker_names(&self.conflict_set, cx);
+            if self.selected_index >= total {
+                self.selected_index = total - 1;
+            }
         }
         self.refresh_split_content(cx);
         self.refresh_split_highlights(cx);
@@ -1018,17 +1092,15 @@ impl MergeEditorView {
         }
     }
 
-    fn side_label(&self, kind: SidePaneKind, cx: &App) -> SharedString {
-        let conflict_set = self.conflict_set.read(cx);
-        let first = conflict_set.snapshot.conflicts.first();
-        let mut label = match (kind, first) {
-            (SidePaneKind::Base, _) => "Base".to_string(),
-            (SidePaneKind::Ours, Some(conflict)) => format!("Ours ({})", conflict.ours_branch_name),
-            (SidePaneKind::Ours, None) => "Ours".to_string(),
-            (SidePaneKind::Theirs, Some(conflict)) => {
-                format!("Theirs ({})", conflict.theirs_branch_name)
-            }
-            (SidePaneKind::Theirs, None) => "Theirs".to_string(),
+    fn side_label(&self, kind: SidePaneKind) -> SharedString {
+        let (side, name) = match kind {
+            SidePaneKind::Base => (None, "Base"),
+            SidePaneKind::Ours => (Some(ConflictSide::Ours), "Ours"),
+            SidePaneKind::Theirs => (Some(ConflictSide::Theirs), "Theirs"),
+        };
+        let mut label = match side.and_then(|side| self.side_branch_name(side)) {
+            Some(branch) => format!("{name} ({branch})"),
+            None => name.to_string(),
         };
         if let Some(stages) = &self.stages {
             let stage = match kind {
@@ -1285,13 +1357,7 @@ impl MergeEditorView {
             SidePaneKind::Theirs => ConflictSide::Theirs,
             SidePaneKind::Base => return Vec::new(),
         };
-        let branch = conflicts
-            .first()
-            .map(|conflict| match side {
-                ConflictSide::Ours => conflict.ours_branch_name.clone(),
-                ConflictSide::Theirs => conflict.theirs_branch_name.clone(),
-            })
-            .filter(|name| !name.is_empty());
+        let branch = self.side_branch_name(side);
         let label: SharedString = match (side, branch) {
             (ConflictSide::Ours, Some(branch)) => format!("Take ours ({branch})").into(),
             (ConflictSide::Ours, None) => "Take ours".into(),
@@ -2112,7 +2178,7 @@ impl MergeEditorView {
     /// A side pane's header: its color, its name, and a checkbox that takes
     /// that side for every conflict in the file, or releases it.
     fn render_side_header(&self, kind: SidePaneKind, cx: &Context<Self>) -> AnyElement {
-        let label = Label::new(self.side_label(kind, cx)).size(LabelSize::Small);
+        let label = Label::new(self.side_label(kind)).size(LabelSize::Small);
         let (side, color) = match kind {
             SidePaneKind::Base => return label.color(Color::Muted).into_any_element(),
             SidePaneKind::Ours => (

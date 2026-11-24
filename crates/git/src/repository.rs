@@ -48,9 +48,10 @@ pub use askpass::{AskPassDelegate, AskPassResult, AskPassSession};
 // module; re-export them here so `git::repository::{...}` import paths (used by
 // git_ui/git_graph/pr_ui) and the trait methods below keep resolving unchanged.
 pub use crate::lathe_repository::{
-    ConflictResolutionAction, ConflictStages, ConflictingOperation, ConflictingOperationError,
-    FileHistory, FileHistoryEntry, GitProgressEvent, GitProgressSender, MergeOptions, RebaseAction,
-    RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, ReflogEntry, Tag, WholeFileResolution,
+    ConflictResolutionAction, ConflictSideNames, ConflictStages, ConflictingOperation,
+    ConflictingOperationError, FileHistory, FileHistoryEntry, GitProgressEvent, GitProgressSender,
+    MergeOptions, RebaseAction, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry,
+    ReflogEntry, Tag, WholeFileResolution,
 };
 
 pub const REMOTE_CANCELLED_BY_USER: &str = "Operation cancelled by user";
@@ -1332,6 +1333,10 @@ pub trait GitRepository: Send + Sync {
     /// stages 1, 2, and 3 rather than parsed out of the conflict markers, so
     /// they're complete files regardless of `merge.conflictStyle`.
     fn load_conflict_stages(&self, path: RepoPath) -> BoxFuture<'_, Result<ConflictStages>>;
+
+    /// The branch names for the ours and theirs sides of the operation in
+    /// progress.
+    fn conflict_side_names(&self) -> BoxFuture<'_, Result<ConflictSideNames>>;
 
     /// Settles an unmerged path by keeping one side's version whole, or by
     /// deleting it, and marks it resolved in the index.
@@ -4485,6 +4490,67 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
+    fn conflict_side_names(&self) -> BoxFuture<'_, Result<ConflictSideNames>> {
+        let git = self.git_binary();
+        let git_directory = self.path();
+        self.executor
+            .spawn(async move {
+                let read_trimmed = |name: &str| {
+                    let path = git_directory.join(name);
+                    async move {
+                        smol::fs::read_to_string(path)
+                            .await
+                            .ok()
+                            .and_then(|text| {
+                                text.lines().next().map(|line| line.trim().to_string())
+                            })
+                            .filter(|line| !line.is_empty())
+                    }
+                };
+
+                for rebase_directory in [crate::REBASE_MERGE_DIR, crate::REBASE_APPLY_DIR] {
+                    if smol::fs::metadata(git_directory.join(rebase_directory))
+                        .await
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let ours = match read_trimmed(&format!("{rebase_directory}/onto")).await {
+                        Some(onto) => commit_display_name(&git, &onto).await,
+                        None => None,
+                    };
+                    // `head-name` is the full ref of the branch being rebased,
+                    // or "detached HEAD" when the rebase started detached.
+                    let theirs = read_trimmed(&format!("{rebase_directory}/head-name"))
+                        .await
+                        .and_then(|head_name| {
+                            head_name
+                                .strip_prefix("refs/heads/")
+                                .map(|branch| SharedString::from(branch.to_string()))
+                        });
+                    return Ok(ConflictSideNames { ours, theirs });
+                }
+
+                for head in ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] {
+                    let Some(sha) = read_trimmed(head).await else {
+                        continue;
+                    };
+                    let ours =
+                        git_output(&git, &["symbolic-ref", "--quiet", "--short", "HEAD"], None)
+                            .await
+                            .ok()
+                            .map(|output| String::from_utf8_lossy(&output).trim().to_string())
+                            .filter(|branch| !branch.is_empty())
+                            .map(SharedString::from);
+                    let theirs = commit_display_name(&git, &sha).await;
+                    return Ok(ConflictSideNames { ours, theirs });
+                }
+
+                Ok(ConflictSideNames::default())
+            })
+            .boxed()
+    }
+
     fn resolve_whole_file(
         &self,
         path: RepoPath,
@@ -4953,6 +5019,40 @@ pub(crate) struct GitBinary {
     index_file_path: Option<PathBuf>,
     envs: HashMap<String, String>,
     is_trusted: bool,
+}
+
+/// A branch pointing at `sha`, local before remote, or else its short hash.
+async fn commit_display_name(git: &GitBinary, sha: &str) -> Option<SharedString> {
+    let points_at = format!("--points-at={sha}");
+    let branches = git_output(
+        git,
+        &[
+            "for-each-ref",
+            &points_at,
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+        None,
+    )
+    .await
+    .log_err()
+    .unwrap_or_default();
+    let branches = String::from_utf8_lossy(&branches);
+    if let Some(branch) = branches
+        .lines()
+        .map(str::trim)
+        // `origin/HEAD` is a pointer to the remote's default branch, not a
+        // branch anyone merged.
+        .find(|branch| !branch.is_empty() && !branch.ends_with("/HEAD"))
+    {
+        return Some(branch.to_string().into());
+    }
+    let short = git_output(git, &["rev-parse", "--short", sha], None)
+        .await
+        .log_err()?;
+    let short = String::from_utf8_lossy(&short).trim().to_string();
+    (!short.is_empty()).then(|| short.into())
 }
 
 /// Runs a git command and returns its raw stdout, failing with the command's

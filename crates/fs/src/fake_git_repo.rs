@@ -11,7 +11,7 @@ use git::{
     blame::Blame,
     repository::{
         AskPassDelegate, Branch, BranchesScanResult, CommitData, CommitDataReader, CommitDetails,
-        CommitOptions, CommitSummary, ConflictResolutionAction, ConflictStages,
+        CommitOptions, CommitSummary, ConflictResolutionAction, ConflictSideNames, ConflictStages,
         ConflictingOperation, CreateWorktreeTarget, FetchOptions, FileHistoryChangedFileSets,
         GRAPH_CHUNK_SIZE, GitRepository, InitialGraphCommitData, LogOrder, LogSource, MergeOptions,
         PushOptions, RebaseInProgressAction, RebaseOptions, RebaseTodoEntry, RefEdit, ReflogEntry,
@@ -1851,6 +1851,10 @@ impl GitRepository for FakeGitRepository {
                 .cloned()
                 .unwrap_or_default())
         })
+    }
+
+    fn conflict_side_names(&self) -> BoxFuture<'_, Result<ConflictSideNames>> {
+        async { Ok(ConflictSideNames::default()) }.boxed()
     }
 
     fn resolve_whole_file(
