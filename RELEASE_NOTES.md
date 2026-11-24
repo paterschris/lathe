@@ -2,6 +2,38 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.24.0 - 2026-11-24
+
+Everything from the 1.23 and 1.24 betas. Mostly merge conflicts: a real three-way merge editor, and Lathe can now be the merge tool git calls.
+
+### Merge conflicts
+
+- **Three-way merge editor.** Ours and theirs side by side, the file you're resolving in an editable Result pane below. Check the box above a conflict in either side to take it, check both to keep both, uncheck and the markers come back. A header checkbox takes a side for the whole file, **Reset** undoes the checkbox picks, and the **View** menu has a base pane, result-in-the-middle, ignore whitespace, and the old per-conflict cards.
+- **Branch names on the panes.** They say `Ours (main)` and `Theirs (feature)` now, read from the merge or rebase that's actually happening. They used to fall back to plain "Ours" once the last conflict was gone.
+- **The base is always there.** Ours, theirs and the base come from git's index, so you get a base whatever `merge.conflictStyle` says. Files in other encodings read in their own encoding.
+- **Conflicts without markers.** Deleted on one side and changed on the other, renamed differently on both, or binary: you get a panel that says what happened, with only the choices that apply. Files git skipped because of a `-merge` rule in `.gitattributes` get merged line by line instead of looking resolved.
+- **`lathe --resolve`** opens the Conflicts tab for the repo you're in, every conflicted file in one list. Make it `git resolve` with `git config --global alias.resolve '!lathe --resolve'`. Nothing to resolve? It says so in the terminal and doesn't open anything.
+- **Lathe as git's merge tool.** `lathe --merge "$REMOTE" "$LOCAL" "$BASE" "$MERGED"`, same order as VS Code, so swapping `code` for `lathe` in an existing setup is enough. Each file opens as a tab in the window that has the repo, **Done** saves it and hands it back, and the exit code tells git whether it's resolved. Setup is in [the docs](https://github.com/paterschris/lathe/blob/main/docs/src/git.md#using-lathe-as-your-merge-tool).
+- **Skip commit** during a rebase, cherry-pick or revert, next to Continue and Abort. Cmd-S saves from the merge editor.
+
+### Panels
+
+- **Panel layout belongs to the workspace now.** Moving a panel used to change it in every window, and in Lathe and Lathe Beta both, since they share a settings file. Every panel remembers where you put it per workspace, separately for each channel. **Use Default Position** in a panel's menu puts it back.
+
+### Agents
+
+- **Review a pull request with an agent.** "Review with agent" in the pull request view, or **Review with Agent…** on a row in the PR panel. Pick an agent and it opens a thread with a review prompt. It reads the changes with plain git, so no host login, and it's told to leave your working tree alone.
+- Scrolled up in a running thread? Scrolling back to the bottom locks it there again, or click the arrow that shows up at the bottom. Used to need a new thread.
+- **Deleting an AI account no longer quietly switches agents to another one.** A workspace bound to a deleted account won't start its agent, the chip says "Account unavailable", and any bindings to it are cleared.
+
+### Everything else
+
+- Search in the theme customizer, by color name or by the key from settings.json. Cmd-F gets you there.
+- Projects using pnpm or bun could eat gigabytes of memory when a language server watched `node_modules`, because Lathe followed every symlink into the package store. It doesn't anymore.
+- Opening a terminal in the Companion app clears its needs-input marker, same as clicking it in Lathe.
+- Clicking empty space in the PR panel deselects the pull request, so you can see its review color again.
+- With metrics on, fetching the default extension registry counts toward install numbers. Same anonymous hash as the update check. See [telemetry](https://github.com/paterschris/lathe/blob/main/docs/src/telemetry.md).
+
 ## v1.24.0-beta - 2026-11-24
 
 Lathe can be the merge tool git calls now, and panels stop following you between windows.
