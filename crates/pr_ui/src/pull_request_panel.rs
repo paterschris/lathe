@@ -1684,6 +1684,20 @@ impl PullRequestPanel {
                         .overflow_y_scroll()
                         .track_scroll(&section.scroll_handle)
                         .children(rendered_rows)
+                        // Fills the space below the last row so a click there
+                        // deselects, which uncovers the selected row's review
+                        // tint. It collapses to nothing once the rows overflow.
+                        .child(
+                            div()
+                                .id(("pull-request-panel-empty-space", section_index))
+                                .w_full()
+                                .flex_1()
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    if this.selected.take().is_some() {
+                                        cx.notify();
+                                    }
+                                })),
+                        )
                         .into_any_element()
                 }
             }
