@@ -205,9 +205,13 @@ impl Terminals {
         }));
     }
 
-    /// Starts screens for a terminal, beginning with the current one.
+    /// Starts screens for a terminal, beginning with the current one. A phone
+    /// that opens a terminal has seen it, so its "needs input" marker goes, in
+    /// Lathe and (through the view's notify) in the phone's list, as it does
+    /// when the terminal gets focus in Lathe.
     pub fn watch(&mut self, terminal_id: &str, cx: &mut Context<Self>) -> Result<(), ErrorBody> {
-        self.view(terminal_id, cx).ok_or_else(not_found)?;
+        let view = self.view(terminal_id, cx).ok_or_else(not_found)?;
+        view.update(cx, |view, cx| view.note_remote_view(cx));
         // The new follower's first screen carries the scrollback.
         self.watched
             .entry(terminal_id.to_string())

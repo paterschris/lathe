@@ -554,6 +554,16 @@ impl TerminalView {
         self.has_had_input = true;
     }
 
+    /// Records that someone looked at the terminal somewhere other than this
+    /// view (the companion phone opening it), as `focus_in` does: the
+    /// awaiting-input marker clears, since it was there to get the terminal
+    /// seen. A prompt still on screen doesn't raise it again until there's
+    /// new input and the terminal goes quiet once more, the same as after a
+    /// click on the tab.
+    pub fn note_remote_view(&mut self, cx: &mut Context<Self>) {
+        terminal_awaiting_input::clear(self, cx);
+    }
+
     #[cfg(test)]
     pub(crate) fn awaiting_input(&self) -> Option<InteractivePromptKind> {
         self.awaiting_input
@@ -3289,6 +3299,24 @@ mod tests {
             )
             .unwrap(),
         );
+    }
+
+    #[gpui::test]
+    async fn test_viewing_the_terminal_remotely_clears_awaiting_input(cx: &mut TestAppContext) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        let (_pane, _terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, false, false, cx);
+        terminal_view.update(cx, |view, cx| {
+            view.set_awaiting_input_for_test(Some(InteractivePromptKind::Confirmation));
+            view.note_remote_view(cx);
+        });
+        terminal_view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.awaiting_input(),
+                None,
+                "opening the terminal on the phone should clear the marker, as focusing it in Lathe does"
+            );
+        });
     }
 
     pub(super) fn add_display_only_terminal(
