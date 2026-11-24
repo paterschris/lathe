@@ -49,8 +49,11 @@ if [ "$channel" = "stable" ]; then tag="v${version}"; else tag="v${version}-${ch
 
 notes_body="$(mktemp)"
 trap 'rm -f "$notes_body"' EXIT
-awk -v prefix="## ${tag}" '
-    index($0, prefix) == 1 { found = 1; next }
+# The heading must be this exact tag: `## v1.24.0` is a prefix of
+# `## v1.24.0-beta`, so a prefix match would run a stable release's notes on
+# into the same version's beta.
+awk -v heading="## ${tag}" '
+    !found && ($0 == heading || index($0, heading " ") == 1) { found = 1; next }
     found && /^## / { exit }
     found { print }
 ' RELEASE_NOTES.md > "$notes_body"
