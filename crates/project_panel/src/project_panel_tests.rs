@@ -12436,7 +12436,8 @@ async fn test_project_panel_moves_to_bottom_dock_and_back(cx: &mut gpui::TestApp
         );
     });
 
-    // Back to a side dock: the placement is cleared and the setting applies.
+    // Back to a side dock: still recorded for this workspace only, so the
+    // global setting (shared across windows and channels) is left alone.
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.move_panel_to(
             panel_id,
@@ -12464,7 +12465,7 @@ async fn test_project_panel_moves_to_bottom_dock_and_back(cx: &mut gpui::TestApp
         );
         assert_eq!(
             workspace.panel_dock_position(<ProjectPanel as Panel>::panel_key(), cx),
-            None
+            Some(DockPosition::Left)
         );
     });
 }

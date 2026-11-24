@@ -1597,6 +1597,20 @@ impl AgentPanel {
         };
 
         panel.ensure_native_agent_connection(cx);
+        // Moves go through the workspace's placement rather than
+        // `set_position`, so keep the cached copy in step with it.
+        if let Some(workspace) = panel.workspace.upgrade() {
+            cx.observe(&workspace, |this: &mut Self, workspace, cx| {
+                let position = workspace
+                    .read(cx)
+                    .panel_dock_position(<AgentPanel as Panel>::panel_key(), cx);
+                if this.workspace_dock_position != position {
+                    this.workspace_dock_position = position;
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         panel
     }
 

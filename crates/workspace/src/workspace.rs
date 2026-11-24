@@ -3158,6 +3158,38 @@ impl Workspace {
         dock::Dock::load_persisted_dock_position(self, panel_key, cx)
     }
 
+    /// The dock `panel` lives in for this workspace: its own placement when
+    /// it has one the panel accepts, otherwise wherever the panel's settings
+    /// put it.
+    pub fn resolved_panel_position(
+        &self,
+        panel: &dyn PanelHandle,
+        window: &Window,
+        cx: &App,
+    ) -> DockPosition {
+        self.panel_dock_position(panel.panel_key(), cx)
+            .filter(|position| panel.position_is_valid(*position, cx))
+            .unwrap_or_else(|| panel.position(window, cx))
+    }
+
+    /// Moves `panel` to `position` in this workspace only. Every way of moving
+    /// a panel goes through here rather than `Panel::set_position`, which for
+    /// most panels writes the global dock setting shared by every window and,
+    /// since the config directory ignores the release channel, by Lathe and
+    /// Lathe Beta alike. The placement is stored in the channel's own
+    /// database, keyed by workspace.
+    pub fn move_panel_to_position(
+        &mut self,
+        panel: &dyn PanelHandle,
+        position: DockPosition,
+        cx: &mut Context<Self>,
+    ) {
+        if !panel.position_is_valid(position, cx) {
+            return;
+        }
+        self.set_panel_dock_position(panel.panel_key(), position, cx);
+    }
+
     /// Places `panel_key` in `position` for this workspace only.
     ///
     /// Panels otherwise read their dock from global settings, which is shared
@@ -3224,7 +3256,7 @@ impl Workspace {
             return false;
         };
 
-        let dock = self.dock_at_position(panel.position(window, cx));
+        let dock = self.dock_at_position(self.resolved_panel_position(&panel, window, cx));
         let did_set = dock.update(cx, |dock, cx| {
             dock.set_panel_size_state(&panel, size_state, cx)
         });
@@ -3373,7 +3405,7 @@ impl Workspace {
         cx.on_focus_in(&focus_handle, window, Self::handle_panel_focused)
             .detach();
 
-        let dock_position = panel.position(window, cx);
+        let dock_position = self.resolved_panel_position(&panel, window, cx);
         let dock = self.dock_at_position(dock_position);
         let any_panel = panel.to_any();
         let persisted_size_state =
@@ -4289,7 +4321,18 @@ impl Workspace {
             return;
         };
 
-        panel.move_to_next_position(window, cx);
+        let current = self.resolved_panel_position(panel.as_ref(), window, cx);
+        let next = [
+            DockPosition::Left,
+            DockPosition::Bottom,
+            DockPosition::Right,
+        ]
+        .into_iter()
+        .filter(|position| panel.position_is_valid(*position, cx))
+        .skip_while(|position| *position != current)
+        .nth(1)
+        .unwrap_or(DockPosition::Left);
+        self.move_panel_to_position(panel.as_ref(), next, cx);
     }
 
     pub fn prepare_to_close(
@@ -16954,10 +16997,19 @@ mod tests {
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
         // Open two docks (left and right) with one panel each
-        let (left_panel, right_panel) = workspace.update_in(cx, |workspace, window, cx| {
-            let left_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+        // Placement is keyed by panel type, so the panel that changes docks is
+        // a different type from the one that stays put.
+        let left_panel = workspace.update_in(cx, |workspace, window, cx| {
+            let left_panel = cx.new(|cx| SecondTestPanel {
+                focus_handle: cx.focus_handle(),
+                zoomed: false,
+            });
             workspace.add_panel(left_panel.clone(), window, cx);
-
+            workspace.move_panel_to_position(&left_panel, DockPosition::Left, cx);
+            left_panel
+        });
+        cx.run_until_parked();
+        let (left_panel, right_panel) = workspace.update_in(cx, |workspace, window, cx| {
             let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 101, cx));
             workspace.add_panel(right_panel.clone(), window, cx);
 
@@ -17003,7 +17055,7 @@ mod tests {
 
         // Focus the left panel and move it to the next position (bottom dock)
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.toggle_panel_focus::<TestPanel>(window, cx); // Focus left panel
+            workspace.toggle_panel_focus::<SecondTestPanel>(window, cx); // Focus left panel
             assert!(
                 left_panel.read(cx).focus_handle(cx).is_focused(window),
                 "Left panel should be focused"
@@ -17022,9 +17074,12 @@ mod tests {
                 workspace.bottom_dock().read(cx).is_open(),
                 "Bottom dock should now be open"
             );
-            assert_eq!(
-                left_panel.read(cx).position,
-                DockPosition::Bottom,
+            assert!(
+                workspace
+                    .bottom_dock()
+                    .read(cx)
+                    .panel_for_id(left_panel.entity_id())
+                    .is_some(),
                 "Left panel should now be in the bottom dock"
             );
             assert_eq!(
@@ -17071,14 +17126,20 @@ mod tests {
                 workspace.bottom_dock().read(cx).is_open(),
                 "Bottom dock should remain open"
             );
-            assert_eq!(
-                left_panel.read(cx).position,
-                DockPosition::Bottom,
+            assert!(
+                workspace
+                    .bottom_dock()
+                    .read(cx)
+                    .panel_for_id(left_panel.entity_id())
+                    .is_some(),
                 "Left panel should remain in the bottom dock"
             );
-            assert_eq!(
-                right_panel.read(cx).position,
-                DockPosition::Right,
+            assert!(
+                workspace
+                    .right_dock()
+                    .read(cx)
+                    .panel_for_id(right_panel.entity_id())
+                    .is_some(),
                 "Right panel should remain in the right dock"
             );
             assert_eq!(
@@ -18694,10 +18755,16 @@ mod tests {
             let left_a = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
             let left_b = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
             let right_a = cx.new(|cx| TestPanel::new(DockPosition::Right, 102, cx));
-            let mover = cx.new(|cx| TestPanel::new(DockPosition::Left, 103, cx));
-            for panel in [&left_a, &left_b, &right_a, &mover] {
+            // Placement is keyed by panel type, so the panel that changes docks
+            // must be a different type from the ones that stay put.
+            let mover = cx.new(|cx| SecondTestPanel {
+                focus_handle: cx.focus_handle(),
+                zoomed: false,
+            });
+            for panel in [&left_a, &left_b, &right_a] {
                 workspace.add_panel(panel.clone(), window, cx);
             }
+            workspace.add_panel(mover.clone(), window, cx);
             (left_a, left_b, right_a, mover)
         });
 
@@ -18723,7 +18790,7 @@ mod tests {
             assert_eq!(left.slot_of(left_a.panel_id()), Some(DockSlot::Secondary));
         });
 
-        // "Bottom Right" on a panel from the left dock moves it under the
+        // "Bottom Right" on a panel from the bottom dock moves it under the
         // right dock's panel once the move lands.
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.move_panel_to(right_a.panel_id(), DockPosition::Right, DockSlot::Primary, window, cx);
@@ -19893,17 +19960,15 @@ mod tests {
 
         // Add a new panel to the right dock, opening the dock and setting the
         // focus to the new panel.
-        let panel = workspace.update_in(cx, |workspace, window, cx| {
+        workspace.update_in(cx, |workspace, window, cx| {
             let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
-            workspace.add_panel(panel.clone(), window, cx);
+            workspace.add_panel(panel, window, cx);
 
             workspace
                 .right_dock()
                 .update(cx, |right_dock, cx| right_dock.set_open(true, window, cx));
 
             workspace.toggle_panel_focus::<TestPanel>(window, cx);
-
-            panel
         });
 
         // Dispatch the `MoveFocusedPanelToNextPosition` action, moving the
@@ -19912,7 +19977,7 @@ mod tests {
         cx.dispatch_action(MoveFocusedPanelToNextPosition);
         workspace.update(cx, |workspace, cx| {
             assert!(workspace.left_dock().read(cx).is_open());
-            assert_eq!(panel.read(cx).position, DockPosition::Left);
+            assert_eq!(workspace.panel_dock_position(TestPanel::panel_key(), cx).unwrap_or(DockPosition::Right), DockPosition::Left);
         });
 
         // Dispatch the `MoveFocusedPanelToNextPosition` action, moving the
@@ -19921,7 +19986,7 @@ mod tests {
         cx.dispatch_action(MoveFocusedPanelToNextPosition);
         workspace.update(cx, |workspace, cx| {
             assert!(workspace.bottom_dock().read(cx).is_open());
-            assert_eq!(panel.read(cx).position, DockPosition::Bottom);
+            assert_eq!(workspace.panel_dock_position(TestPanel::panel_key(), cx).unwrap_or(DockPosition::Right), DockPosition::Bottom);
         });
 
         // Dispatch the `MoveFocusedPanelToNextPosition` action again, this time
@@ -19929,7 +19994,7 @@ mod tests {
         cx.dispatch_action(MoveFocusedPanelToNextPosition);
         workspace.update(cx, |workspace, cx| {
             assert!(workspace.right_dock().read(cx).is_open());
-            assert_eq!(panel.read(cx).position, DockPosition::Right);
+            assert_eq!(workspace.panel_dock_position(TestPanel::panel_key(), cx).unwrap_or(DockPosition::Right), DockPosition::Right);
         });
 
         // Remove focus from the panel, ensuring that, if the panel is not
@@ -19942,7 +20007,7 @@ mod tests {
         cx.dispatch_action(MoveFocusedPanelToNextPosition);
         workspace.update(cx, |workspace, cx| {
             assert!(workspace.right_dock().read(cx).is_open());
-            assert_eq!(panel.read(cx).position, DockPosition::Right);
+            assert_eq!(workspace.panel_dock_position(TestPanel::panel_key(), cx).unwrap_or(DockPosition::Right), DockPosition::Right);
         });
     }
 

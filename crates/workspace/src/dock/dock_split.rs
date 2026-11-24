@@ -651,12 +651,7 @@ impl Workspace {
             });
         } else {
             target.update(cx, |dock, _| dock.set_pending_placement(panel_id, slot));
-            // Deferred out of this workspace update: panels that keep a
-            // per-workspace placement (agent, project, outline) record it by
-            // updating the workspace, which can't happen while it is leased.
-            window.defer(cx, move |window, cx| {
-                panel.set_position(position, window, cx)
-            });
+            self.move_panel_to_position(panel.as_ref(), position, cx);
         }
         self.serialize_workspace(window, cx);
     }

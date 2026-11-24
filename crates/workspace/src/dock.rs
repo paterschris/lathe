@@ -152,27 +152,6 @@ pub trait PanelHandle: Send + Sync {
     fn is_awaiting_input(&self, cx: &App) -> bool;
     fn awaiting_input_tooltip(&self, cx: &App) -> &'static str;
     fn hide_button_setting(&self, cx: &App) -> Option<HideStatusItem>;
-    /// The dock this panel would cycle to next, skipping positions it rejects.
-    /// Shared by the keybinding and by any caller that needs the destination
-    /// without applying it.
-    fn next_position(&self, window: &Window, cx: &App) -> DockPosition {
-        let current_position = self.position(window, cx);
-        [
-            DockPosition::Left,
-            DockPosition::Bottom,
-            DockPosition::Right,
-        ]
-        .into_iter()
-        .filter(|position| self.position_is_valid(*position, cx))
-        .skip_while(|valid_position| *valid_position != current_position)
-        .nth(1)
-        .unwrap_or(DockPosition::Left)
-    }
-
-    fn move_to_next_position(&self, window: &mut Window, cx: &mut App) {
-        let next_position = self.next_position(window, cx);
-        self.set_position(next_position, window, cx);
-    }
 }
 
 impl<T> PanelHandle for Entity<T>
@@ -743,7 +722,7 @@ impl Dock {
                             .update(cx, |workspace, cx| {
                                 workspace.zoomed = Some(panel.downgrade().into());
                                 workspace.zoomed_position =
-                                    Some(panel.read(cx).position(window, cx));
+                                    Some(workspace.resolved_panel_position(panel, window, cx));
                                 cx.emit(Event::ZoomChanged);
                             })
                             .ok();
@@ -1346,7 +1325,12 @@ impl Dock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let new_position = panel.read(cx).position(window, cx);
+        let Some(new_position) = workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).resolved_panel_position(panel, window, cx))
+        else {
+            return;
+        };
         if new_position == self.position {
             return;
         }
@@ -1643,15 +1627,25 @@ impl Render for PanelButtons {
                                     if panel.position_is_valid(position, cx) {
                                         let is_current = position == dock_position;
                                         let panel = panel.clone();
+                                        let workspace = workspace_for_menu.clone();
                                         menu = menu.toggleable_entry(
                                             format!("Dock {}", position.label()),
                                             is_current,
                                             IconPosition::Start,
                                             None,
-                                            move |window, cx| {
-                                                if !is_current {
-                                                    panel.set_position(position, window, cx);
+                                            move |_window, cx| {
+                                                if is_current {
+                                                    return;
                                                 }
+                                                workspace
+                                                    .update(cx, |workspace, cx| {
+                                                        workspace.move_panel_to_position(
+                                                            panel.as_ref(),
+                                                            position,
+                                                            cx,
+                                                        )
+                                                    })
+                                                    .ok();
                                             },
                                         );
                                         has_position_entries = true;
