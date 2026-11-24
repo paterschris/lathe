@@ -1346,17 +1346,17 @@ async fn add_changed_file_full(
     let base_text = match base_from_patch(&head_text, &file.hunks) {
         Some(base) => base,
         None => match build_context.base_sha.as_deref() {
-        Some(base_sha) => build_context
-            .provider
-            .get_file_content(
-                &build_context.remote,
-                &file.path,
-                base_sha,
-                build_context.auth.clone(),
-                build_context.http_client.clone(),
-            )
-            .await
-            .ok(),
+            Some(base_sha) => build_context
+                .provider
+                .get_file_content(
+                    &build_context.remote,
+                    &file.path,
+                    base_sha,
+                    build_context.auth.clone(),
+                    build_context.http_client.clone(),
+                )
+                .await
+                .ok(),
             None => None,
         },
     };
@@ -3465,13 +3465,22 @@ mod tests {
 
     #[test]
     fn base_from_patch_handles_added_files_and_mismatches() {
-        let added = parse_unified_diff("diff --git a/n.rs b/n.rs\n--- /dev/null\n+++ b/n.rs\n@@ -0,0 +1,2 @@\n+a\n+b\n");
+        let added = parse_unified_diff(
+            "diff --git a/n.rs b/n.rs\n--- /dev/null\n+++ b/n.rs\n@@ -0,0 +1,2 @@\n+a\n+b\n",
+        );
         assert_eq!(base_from_patch("a\nb\n", &added[0].hunks), Some(None));
         // A patch that no longer matches the head gives up, so the caller can fetch.
-        let stale = parse_unified_diff("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n");
-        assert_eq!(base_from_patch("keep\nsomething else\n", &stale[0].hunks), None);
+        let stale = parse_unified_diff(
+            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n",
+        );
+        assert_eq!(
+            base_from_patch("keep\nsomething else\n", &stale[0].hunks),
+            None
+        );
         // Lines outside the hunks are carried over; a later hunk keeps its offset.
-        let two = parse_unified_diff("diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-a\n+A\n@@ -4,2 +4,3 @@\n d\n+D\n e\n");
+        let two = parse_unified_diff(
+            "diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-a\n+A\n@@ -4,2 +4,3 @@\n d\n+D\n e\n",
+        );
         assert_eq!(
             base_from_patch("A\nb\nc\nd\nD\ne\nf", &two[0].hunks),
             Some(Some("a\nb\nc\nd\ne\nf".to_string()))

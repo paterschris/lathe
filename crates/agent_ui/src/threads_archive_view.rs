@@ -318,7 +318,11 @@ impl ThreadsArchiveView {
         let workspace = workspace.read(cx);
         let workspace_id = workspace.database_id();
         let paths = PathList::new(&workspace.root_paths(cx));
-        let remote_connection = workspace.project().read(cx).remote_connection_options(cx).cloned();
+        let remote_connection = workspace
+            .project()
+            .read(cx)
+            .remote_connection_options(cx)
+            .cloned();
         Some((workspace_id, paths, remote_connection))
     }
 
