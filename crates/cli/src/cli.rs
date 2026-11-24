@@ -74,6 +74,19 @@ pub enum CliRequest {
     },
     /// Print a diagnostic snapshot of the app's GPUI and platform state.
     DebugState,
+    /// Resolve one file's conflicts in the merge editor, for `git mergetool`
+    /// or another version control tool. Paths are absolute. Answered with
+    /// `Exit` once the merge editor closes: status 0 when `merged` has no
+    /// conflict markers left, 1 otherwise.
+    Merge {
+        remote: String,
+        local: String,
+        /// `None` when there is no common ancestor (both sides added the file).
+        base: Option<String>,
+        merged: String,
+        open_behavior: OpenBehavior,
+        env: Option<HashMap<String, String>>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

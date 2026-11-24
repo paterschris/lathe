@@ -293,6 +293,22 @@ Ours, theirs, and the base come from the versions Git keeps for the conflicted f
 
 Save from the merge editor's **Save** button or with the usual save shortcut. Saving doesn't mark the file resolved; stage it from the Conflicts tab or the Git Panel when you're done.
 
+### Using Lathe as Your Merge Tool
+
+`lathe --merge` opens the merge editor for `git mergetool`, or any version control tool that calls a merge tool with separate files. To make it Git's merge tool:
+
+```sh
+git config --global merge.tool lathe
+git config --global mergetool.lathe.cmd 'lathe --merge "$REMOTE" "$LOCAL" "$BASE" "$MERGED"'
+git config --global mergetool.lathe.trustExitCode true
+```
+
+The arguments are the incoming version, your version, their common ancestor, and the file to write, in the same order as VS Code's `--merge`, so a VS Code setup only needs the program name changed.
+
+Each conflicted file opens as a tab in the window that already has the repository open, or in a new window for the repository if none does. Add `--new` to always use a new window. Lathe waits while you work, so resolve the conflicts and click **Done**: it saves the file and closes the tab, and `git mergetool` moves on to the next file. Closing the tab without resolving everything leaves the file unresolved, and Git reports the merge as not done. Lathe doesn't stage anything itself in this mode, since `git mergetool` does that.
+
+Binary files can't be merged this way; `lathe --merge` reports the error and Git leaves the file for you to resolve another way.
+
 ### Deleted and Binary Files
 
 Some conflicts don't have any markers to resolve: one side deleted the file and the other changed it, both sides renamed it differently, or the file is binary. For these, the Conflicts tab explains what happened and offers only the choices that apply:

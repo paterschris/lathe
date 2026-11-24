@@ -4,6 +4,9 @@ use text::{Anchor, BufferId, OffsetRangeExt as _};
 
 pub struct ConflictSet {
     pub has_conflict: bool,
+    /// Set for a file opened as a merge tool's output, which has conflict
+    /// markers to resolve whether or not the repository reports it unmerged.
+    forced: bool,
     pub snapshot: ConflictSetSnapshot,
 }
 
@@ -144,6 +147,7 @@ impl ConflictSet {
     pub fn new(buffer_id: BufferId, has_conflict: bool, _: &mut Context<Self>) -> Self {
         Self {
             has_conflict,
+            forced: false,
             snapshot: ConflictSetSnapshot {
                 buffer_id,
                 conflicts: Default::default(),
@@ -151,7 +155,16 @@ impl ConflictSet {
         }
     }
 
+    /// Parses conflict markers from now on regardless of git status, since a
+    /// merge tool can be handed a file git doesn't consider unmerged (another
+    /// VCS, or a merge driven outside the repository).
+    pub fn force_has_conflict(&mut self, cx: &mut Context<Self>) -> bool {
+        self.forced = true;
+        self.set_has_conflict(true, cx)
+    }
+
     pub fn set_has_conflict(&mut self, has_conflict: bool, cx: &mut Context<Self>) -> bool {
+        let has_conflict = has_conflict || self.forced;
         if has_conflict != self.has_conflict {
             self.has_conflict = has_conflict;
             if !self.has_conflict {

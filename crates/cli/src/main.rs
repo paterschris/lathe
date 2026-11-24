@@ -142,6 +142,26 @@ struct Args {
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.
     #[arg(long, action = clap::ArgAction::Append, num_args = 2, value_names = ["OLD_PATH", "NEW_PATH"], value_hint = clap::ValueHint::AnyPath)]
     diff: Vec<String>,
+    /// Resolve a merge conflict in the merge editor, as a merge tool. Takes the
+    /// incoming version, the current version, their common ancestor and the
+    /// file to write the result to, in the same order as VS Code's `--merge`.
+    /// Waits until the merge editor is closed, then exits with 0 if the file has
+    /// no conflicts left. For git:
+    ///
+    ///   git config --global merge.tool lathe
+    ///
+    ///   git config --global mergetool.lathe.cmd 'lathe --merge "$REMOTE" "$LOCAL" "$BASE" "$MERGED"'
+    ///
+    ///   git config --global mergetool.lathe.trustExitCode true
+    #[arg(
+        long,
+        num_args = 4,
+        value_names = ["REMOTE", "LOCAL", "BASE", "MERGED"],
+        value_hint = clap::ValueHint::FilePath,
+        conflicts_with_all = ["diff", "paths_with_position"],
+        verbatim_doc_comment
+    )]
+    merge: Vec<String>,
     /// Generate shell completions for Zed
     #[arg(long, value_names = ["SHELL"])]
     completions: Option<Shell>,
@@ -157,6 +177,52 @@ struct Args {
     /// by having Zed act like netcat communicating over a Unix socket.
     #[arg(long, hide = true)]
     askpass: Option<String>,
+}
+
+/// Builds the request for `--merge REMOTE LOCAL BASE MERGED`. The paths are
+/// made absolute here because the app's working directory isn't the CLI's.
+fn merge_request(
+    arguments: &[String],
+    open_behavior: cli::OpenBehavior,
+    env: Option<collections::HashMap<String, String>>,
+) -> Result<CliRequest> {
+    let [remote, local, base, merged] = arguments else {
+        anyhow::bail!("--merge takes four paths: REMOTE LOCAL BASE MERGED");
+    };
+    let absolute = |label: &str, path: &str| -> Result<PathBuf> {
+        let path = std::path::absolute(path)
+            .with_context(|| format!("--merge {label} path is invalid: {path}"))?;
+        Ok(path)
+    };
+    let existing = |label: &str, path: &str| -> Result<String> {
+        let path = absolute(label, path)?;
+        anyhow::ensure!(
+            path.is_file(),
+            "--merge {label} file does not exist: {}",
+            path.display()
+        );
+        Ok(path.to_string_lossy().into_owned())
+    };
+    let remote = existing("REMOTE", remote)?;
+    let local = existing("LOCAL", local)?;
+    let merged = existing("MERGED", merged)?;
+    // Git passes a BASE path even when the file has no common ancestor (both
+    // sides added it), and may not create it. That's a merge without a base,
+    // not an error.
+    let base = if base.is_empty() {
+        None
+    } else {
+        let base = absolute("BASE", base)?;
+        base.is_file().then(|| base.to_string_lossy().into_owned())
+    };
+    Ok(CliRequest::Merge {
+        remote,
+        local,
+        base,
+        merged,
+        open_behavior,
+        env,
+    })
 }
 
 /// Returns whether a `--diff` argument refers to an existing path, allowing a
@@ -279,6 +345,48 @@ mod tests {
                 SanitizedPath::new(Path::new(&$right))
             )
         };
+    }
+
+    #[test]
+    fn test_merge_request_paths() {
+        let dir = TempTree::new(json!({
+            "remote": "theirs",
+            "local": "ours",
+            "base": "base",
+            "merged": "merged",
+        }));
+        let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        let arguments = [path("remote"), path("local"), path("base"), path("merged")];
+
+        let CliRequest::Merge {
+            remote,
+            local,
+            base,
+            merged,
+            ..
+        } = merge_request(&arguments, cli::OpenBehavior::Default, None).unwrap()
+        else {
+            panic!("expected a merge request");
+        };
+        assert_path_eq!(remote, arguments[0]);
+        assert_path_eq!(local, arguments[1]);
+        assert_path_eq!(base.unwrap(), arguments[2]);
+        assert_path_eq!(merged, arguments[3]);
+
+        // Git passes a BASE path even when there's no common ancestor.
+        let no_base = [path("remote"), path("local"), path("missing"), path("merged")];
+        let CliRequest::Merge { base, .. } =
+            merge_request(&no_base, cli::OpenBehavior::Default, None).unwrap()
+        else {
+            panic!("expected a merge request");
+        };
+        assert_eq!(base, None);
+
+        let missing_merged = [path("remote"), path("local"), path("base"), path("missing")];
+        let error = merge_request(&missing_merged, cli::OpenBehavior::Default, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MERGED"), "{error}");
     }
 
     fn cwd() -> PathBuf {
@@ -588,6 +696,13 @@ fn run() -> Result<()> {
         }
     };
 
+    // `--merge` sends its own request in place of `Open`.
+    let tool_request = if args.merge.is_empty() {
+        None
+    } else {
+        Some(merge_request(&args.merge, open_behavior, env.clone())?)
+    };
+
     let exit_status = Arc::new(Mutex::new(None));
     let mut paths = vec![];
     let mut urls = vec![];
@@ -690,6 +805,8 @@ fn run() -> Result<()> {
 
                 tx.send(if args.debug_state {
                     CliRequest::DebugState
+                } else if let Some(tool_request) = tool_request {
+                    tool_request
                 } else {
                     open_request
                 })?;

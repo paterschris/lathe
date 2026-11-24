@@ -2210,6 +2210,35 @@ impl GitStore {
         })
     }
 
+    /// Like [`Self::open_conflict_set`], but parses the buffer's conflict
+    /// markers even when the repository doesn't report the file unmerged, for
+    /// a file opened as a merge tool's output.
+    pub fn open_merge_tool_conflict_set(
+        &mut self,
+        buffer: Entity<Buffer>,
+        cx: &mut Context<Self>,
+    ) -> Task<Entity<ConflictSet>> {
+        let open = self.open_conflict_set(buffer.clone(), cx);
+        cx.spawn(async move |this, cx| {
+            let conflict_set = open.await;
+            let reparse = this.update(cx, |this, cx| {
+                let forced_now =
+                    conflict_set.update(cx, |conflict_set, cx| conflict_set.force_has_conflict(cx));
+                if !forced_now {
+                    return None;
+                }
+                let buffer_id = buffer.read(cx).remote_id();
+                let snapshot = buffer.read(cx).text_snapshot();
+                let state = this.diffs.get(&buffer_id)?.clone();
+                Some(state.update(cx, |state, cx| state.reparse_conflict_markers(snapshot, cx)))
+            });
+            if let Ok(Some(reparse)) = reparse {
+                reparse.await.ok();
+            }
+            conflict_set
+        })
+    }
+
     pub fn project_path_git_status(
         &self,
         project_path: &ProjectPath,

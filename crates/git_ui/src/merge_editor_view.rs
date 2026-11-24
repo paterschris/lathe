@@ -69,6 +69,10 @@ pub struct MergeEditorView {
     /// The index says this file's conflict is over the whole file (a deletion,
     /// or binary content), which has no markers for this view to resolve.
     whole_file_conflict: bool,
+    /// Opened by `lathe --merge` on behalf of `git mergetool` (or another
+    /// VCS), which drives the merge itself: the view offers "Done" to save
+    /// and hand the file back, and never stages anything.
+    merge_tool: bool,
     show_base: bool,
     /// Compare the side panes with the result ignoring whitespace, so changes
     /// that only reindent or reflow aren't highlighted.
@@ -809,6 +813,7 @@ impl MergeEditorView {
             split: None,
             stages,
             whole_file_conflict,
+            merge_tool: false,
             show_base: false,
             ignore_whitespace: false,
             syncing_split_scroll: false,
@@ -1014,6 +1019,20 @@ impl MergeEditorView {
     ) {
         conflict.resolve(self.buffer.clone(), &ranges, cx);
         cx.notify();
+    }
+
+    /// Saves the result and closes this tab, which is what tells a waiting
+    /// `lathe --merge` that the merge is finished.
+    fn finish_merge_tool(&mut self, cx: &mut Context<Self>) {
+        let buffer = self.buffer.clone();
+        let save = self
+            .project
+            .update(cx, |project, cx| project.save_buffer(buffer, cx));
+        cx.spawn(async move |this, cx| {
+            save.await?;
+            this.update(cx, |_, cx| cx.emit(MergeEditorViewEvent::Close))
+        })
+        .detach_and_log_err(cx);
     }
 
     fn save_buffer(&self, cx: &mut Context<Self>) {
@@ -1933,6 +1952,7 @@ impl Focusable for MergeEditorView {
 
 pub enum MergeEditorViewEvent {
     UpdateTab,
+    Close,
 }
 
 impl EventEmitter<MergeEditorViewEvent> for MergeEditorView {}
@@ -1973,7 +1993,9 @@ impl Render for MergeEditorView {
                 .items_center()
                 .justify_center()
                 .child(
-                    Label::new(if self.whole_file_conflict {
+                    Label::new(if self.whole_file_conflict && self.merge_tool {
+                        "This file can't be merged line by line. Close this tab and resolve it with your version control tool."
+                    } else if self.whole_file_conflict {
                         "This conflict is over the whole file. Resolve it from the Conflicts tab."
                     } else {
                         "No conflicts remaining"
@@ -2093,13 +2115,34 @@ impl MergeEditorView {
             )
             .child(
                 Button::new("save-buffer", if is_dirty { "Save" } else { "Saved" })
-                    .style(ButtonStyle::Filled)
+                    .style(if self.merge_tool {
+                        ButtonStyle::Subtle
+                    } else {
+                        ButtonStyle::Filled
+                    })
                     .label_size(LabelSize::Small)
                     .disabled(!is_dirty)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.save_buffer(cx);
                     })),
             )
+            .when(self.merge_tool, |header| {
+                let can_finish = total == 0 && !self.whole_file_conflict;
+                header.child(
+                    Button::new("merge-tool-done", "Done")
+                        .style(ButtonStyle::Filled)
+                        .label_size(LabelSize::Small)
+                        .disabled(!can_finish)
+                        .tooltip(Tooltip::text(if can_finish {
+                            "Save the merged file and hand it back to git"
+                        } else {
+                            "Resolve every conflict first. Closing this tab instead leaves the file unresolved."
+                        }))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.finish_merge_tool(cx);
+                        })),
+                )
+            })
             .into_any_element()
     }
 }
@@ -2383,6 +2426,7 @@ impl Item for MergeEditorView {
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
         match event {
             MergeEditorViewEvent::UpdateTab => f(ItemEvent::UpdateTab),
+            MergeEditorViewEvent::Close => f(ItemEvent::CloseItem),
         }
     }
 
@@ -2443,6 +2487,35 @@ pub fn open_merge_editor_for_active_item(
     .detach();
 }
 
+/// Opens the merge editor for `lathe --merge`, with the three versions read
+/// from the files the merge tool was given rather than from the git index.
+pub fn open_merge_tool_editor(
+    workspace: &mut Workspace,
+    buffer: Entity<Buffer>,
+    conflict_set: Entity<ConflictSet>,
+    stages: ConflictStages,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Entity<MergeEditorView> {
+    let project = workspace.project().clone();
+    let workspace_weak = workspace.weak_handle();
+    let view = cx.new(|cx| {
+        let mut view = MergeEditorView::new(
+            buffer,
+            conflict_set,
+            project,
+            workspace_weak,
+            Some(stages),
+            window,
+            cx,
+        );
+        view.merge_tool = true;
+        view
+    });
+    workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+    view
+}
+
 /// Open the merge editor as a workspace item for the given buffer. The buffer
 /// must already have its conflicts populated (which happens automatically the
 /// first time an `Editor` displays it).
@@ -2486,7 +2559,7 @@ mod tests {
     use project::FakeFs;
     use serde_json::json;
     use settings::SettingsStore;
-    use std::path::Path;
+    use std::{cell::Cell, path::Path, rc::Rc};
     use theme::LoadThemes;
     use util::path;
     use workspace::MultiWorkspace;
@@ -2541,6 +2614,85 @@ fn main() {
         // The conflict spans the marker lines, rows 1 through 6.
         let rows = map_rows_outward(&hunks, 1..7);
         assert_eq!(text_for_rows(BASE, rows), "    let x = 0;\n");
+    }
+
+    /// `lathe --merge` can be handed a file outside any git repository, or
+    /// one git doesn't report unmerged. The markers must still be parsed, and
+    /// "Done" saves the result and closes the tab, which ends the wait.
+    #[gpui::test]
+    async fn test_merge_tool_mode_outside_a_repository(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/scratch"), json!({ "main.rs": RESULT }))
+            .await;
+        let project = Project::test(fs.clone(), [Path::new(path!("/scratch"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        cx.run_until_parked();
+
+        let buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer(path!("/scratch/main.rs"), cx)
+            })
+            .await
+            .unwrap();
+        let git_store = project.read_with(cx, |project, _| project.git_store().clone());
+        let conflict_set = git_store
+            .update(cx, |git_store, cx| {
+                git_store.open_merge_tool_conflict_set(buffer.clone(), cx)
+            })
+            .await;
+        assert_eq!(
+            conflict_set.read_with(cx, |set, _| set.snapshot.conflicts.len()),
+            1,
+            "markers are parsed even though no repository reports a conflict"
+        );
+
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            open_merge_tool_editor(
+                workspace,
+                buffer.clone(),
+                conflict_set,
+                ConflictStages {
+                    base: Some(BASE.into()),
+                    ours: Some(OURS.into()),
+                    theirs: Some(THEIRS.into()),
+                    binary: false,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let split = view.split.as_ref().expect("split view should be built");
+            assert_eq!(split.ours.buffer.read(cx).text(), OURS);
+            assert_eq!(split.theirs.buffer.read(cx).text(), THEIRS);
+            assert_eq!(split.base.buffer.read(cx).text(), BASE);
+        });
+
+        let released = Rc::new(Cell::new(false));
+        let _subscription = cx.update(|_, cx| {
+            let released = released.clone();
+            cx.observe_release(&view, move |_, _| released.set(true))
+        });
+        view.update(cx, |view, cx| {
+            view.resolve_all(ConflictSide::Theirs, cx);
+            view.finish_merge_tool(cx);
+        });
+        drop(view);
+        cx.run_until_parked();
+
+        assert_eq!(
+            fs.load(Path::new(path!("/scratch/main.rs"))).await.unwrap(),
+            THEIRS,
+            "Done saves the resolved file"
+        );
+        assert!(released.get(), "Done closes the merge editor's tab");
     }
 
     #[gpui::test]

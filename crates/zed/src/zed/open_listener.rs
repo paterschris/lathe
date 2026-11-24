@@ -737,6 +737,43 @@ pub async fn handle_cli_request(
             // resolve_open_behavior
             debug_panic!("unexpected SetOpenBehavior message");
         }
+        CliRequest::Merge {
+            remote,
+            local,
+            base,
+            merged,
+            open_behavior,
+            env,
+        } => {
+            cx.update(|cx| cx.activate(true));
+            let status = match open_merge_tool(
+                MergeToolPaths {
+                    remote: PathBuf::from(remote),
+                    local: PathBuf::from(local),
+                    base: base.map(PathBuf::from),
+                    merged: PathBuf::from(merged),
+                },
+                open_behavior,
+                env,
+                responses.as_ref(),
+                &app_state,
+                cx,
+            )
+            .await
+            {
+                Ok(status) => status,
+                Err(error) => {
+                    log::error!("lathe --merge failed: {error:#}");
+                    responses
+                        .send(CliResponse::Stderr {
+                            message: format!("{error:#}"),
+                        })
+                        .log_err();
+                    1
+                }
+            };
+            responses.send(CliResponse::Exit { status }).log_err();
+        }
         CliRequest::DebugState => {
             // Deliberately does not activate the app: activation redraws
             // windows and would disturb the state being inspected.
@@ -755,6 +792,173 @@ pub async fn handle_cli_request(
             responses.send(CliResponse::Exit { status }).log_err();
         }
     }
+}
+
+struct MergeToolPaths {
+    remote: PathBuf,
+    local: PathBuf,
+    base: Option<PathBuf>,
+    merged: PathBuf,
+}
+
+/// Git writes no conflict markers into a file it considers binary, which it
+/// decides by a NUL byte in the first 8000 bytes.
+fn looks_binary(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(8000)].contains(&0)
+}
+
+/// Whether `text` still has a conflict for a merge tool's caller to see: a
+/// line opening a conflict and a later line closing it.
+fn has_conflict_markers(text: &str) -> bool {
+    let mut lines = text.lines();
+    lines.any(|line| line.starts_with("<<<<<<<"))
+        && lines.any(|line| line.starts_with(">>>>>>>"))
+}
+
+/// The directory to open alongside a merge: the repository holding `path`,
+/// so the merge has its project around it (and the branch names come from
+/// the repository), or else the file's own folder.
+async fn merge_tool_project_root(fs: &dyn Fs, path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or(path);
+    for ancestor in parent.ancestors() {
+        if fs.metadata(&ancestor.join(".git")).await.ok().flatten().is_some() {
+            return ancestor.to_path_buf();
+        }
+    }
+    parent.to_path_buf()
+}
+
+/// Backs `lathe --merge`: opens the merge editor for `paths.merged` with the
+/// other three files as its ours, theirs and base, waits for the editor to
+/// close, and reports whether the file still has conflicts.
+async fn open_merge_tool(
+    paths: MergeToolPaths,
+    open_behavior: cli::OpenBehavior,
+    env: Option<collections::HashMap<String, String>>,
+    responses: &dyn CliResponseSink,
+    app_state: &Arc<AppState>,
+    cx: &mut AsyncApp,
+) -> Result<i32> {
+    let fs = app_state.fs.clone();
+    let merged = fs
+        .canonicalize(&paths.merged)
+        .await
+        .with_context(|| format!("opening {}", paths.merged.display()))?;
+    let read = async |path: &Path| {
+        fs.load_bytes(path)
+            .await
+            .with_context(|| format!("reading {}", path.display()))
+    };
+    let ours = read(&paths.local).await?;
+    let theirs = read(&paths.remote).await?;
+    let base = match &paths.base {
+        Some(base) => Some(read(base).await?),
+        None => None,
+    };
+    if [Some(&ours), Some(&theirs), base.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|bytes| looks_binary(bytes))
+    {
+        anyhow::bail!(
+            "{} is a binary file, which Lathe can't merge line by line",
+            merged.display()
+        );
+    }
+    let stages = git::repository::ConflictStages {
+        base,
+        ours: Some(ours),
+        theirs: Some(theirs),
+        binary: false,
+    };
+
+    // The merge opens inside the repository's project, reusing a window that
+    // already has it open, unless a new window was asked for.
+    let root = merge_tool_project_root(fs.as_ref(), &merged).await;
+    let open_options = OpenOptions {
+        workspace_matching: if open_behavior == cli::OpenBehavior::AlwaysNew {
+            workspace::WorkspaceMatching::None
+        } else {
+            workspace::WorkspaceMatching::MatchSubdirectory
+        },
+        env,
+        ..Default::default()
+    };
+    let OpenResult {
+        window, workspace, ..
+    } = cx
+        .update(|cx| workspace::open_paths(&[root], app_state.clone(), open_options, cx))
+        .await?;
+
+    let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+    let buffer = project
+        .update(cx, |project, cx| project.open_local_buffer(&merged, cx))
+        .await?;
+    let conflict_set = project
+        .read_with(cx, |project, _| project.git_store().clone())
+        .update(cx, |git_store, cx| {
+            git_store.open_merge_tool_conflict_set(buffer.clone(), cx)
+        })
+        .await;
+
+    let (release_tx, release_rx) = oneshot::channel();
+    let subscription = window.update(cx, |multi_workspace, window, cx| {
+        window.activate_window();
+        multi_workspace.activate(workspace.clone(), None, window, cx);
+        workspace.update(cx, |workspace, cx| {
+            let view = git_ui::merge_editor_view::open_merge_tool_editor(
+                workspace,
+                buffer,
+                conflict_set,
+                stages,
+                window,
+                cx,
+            );
+            cx.observe_release(&view, move |_, _, _| {
+                release_tx.send(()).ok();
+            })
+        })
+    })?;
+
+    // Holding only the subscription: a strong handle to the view would keep
+    // it alive after its tab closes, and the wait would never end.
+    let closed = async move {
+        let _subscription = subscription;
+        release_rx.await.ok();
+    }
+    .fuse();
+    futures::pin_mut!(closed);
+    let background = cx.background_executor().clone();
+    loop {
+        let mut timer = background.timer(Duration::from_secs(1)).fuse();
+        futures::select_biased! {
+            _ = closed => break,
+            _ = timer => {
+                // The caller gave up (Ctrl-C, or git was killed), so there's
+                // no one left to report to.
+                if responses.send(CliResponse::Ping).is_err() {
+                    return Ok(1);
+                }
+            }
+        }
+    }
+
+    let text = fs
+        .load(&merged)
+        .await
+        .with_context(|| format!("reading {}", merged.display()))?;
+    if has_conflict_markers(&text) {
+        responses
+            .send(CliResponse::Stderr {
+                message: format!(
+                    "{} still has conflicts, so it was left unresolved",
+                    merged.display()
+                ),
+            })
+            .log_err();
+        return Ok(1);
+    }
+    Ok(0)
 }
 
 /// Resolves the CLI open behavior when no explicit open behavior flag was given.
@@ -1220,6 +1424,26 @@ mod tests {
     use std::{path::Path, sync::Arc, task::Poll};
     use util::path;
     use workspace::{AppState, MultiWorkspace, Workspace};
+
+    #[test]
+    fn test_merge_tool_conflict_marker_check() {
+        assert!(has_conflict_markers(
+            "a\n<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> feature\nd\n"
+        ));
+        assert!(!has_conflict_markers("a\nb\n"));
+        // Half a marker pair is ordinary text, e.g. a git tutorial.
+        assert!(!has_conflict_markers("Look for a line like <<<<<<< HEAD\n"));
+        assert!(!has_conflict_markers(">>>>>>> feature\n<<<<<<< HEAD\n"));
+    }
+
+    #[test]
+    fn test_merge_tool_binary_check() {
+        assert!(looks_binary(b"PNG\0\x01"));
+        assert!(!looks_binary(b"fn main() {}\n"));
+        let mut late_nul = vec![b'a'; 9000];
+        late_nul.push(0);
+        assert!(!looks_binary(&late_nul), "git only looks at the first 8000 bytes");
+    }
 
     struct DiscardResponseSink;
 

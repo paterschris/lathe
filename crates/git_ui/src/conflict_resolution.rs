@@ -496,6 +496,9 @@ impl ConflictResolutionView {
                         cx.emit(ConflictResolutionViewEvent::UpdateTab);
                         cx.notify();
                     }
+                    // Only merge-tool mode closes itself, and it is never
+                    // embedded here.
+                    MergeEditorViewEvent::Close => {}
                 }));
             this.merge_editor = Some((path, merge_editor));
             this.merge_note = merged_here.then(|| {
