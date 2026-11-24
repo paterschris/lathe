@@ -784,6 +784,10 @@ impl MergeEditorView {
                     cx.emit(MergeEditorViewEvent::UpdateTab);
                     cx.notify();
                 }
+                // In a window that was just opened (`lathe --resolve`, `--merge`),
+                // the file's language is often still loading when the panes are
+                // built, so they take it when it arrives.
+                language::BufferEvent::LanguageChanged(_) => this.sync_side_pane_language(cx),
                 _ => {}
             }),
         ];
@@ -1136,6 +1140,20 @@ impl MergeEditorView {
             }
         }
         label.into()
+    }
+
+    fn sync_side_pane_language(&mut self, cx: &mut Context<Self>) {
+        let Some(split) = &self.split else {
+            return;
+        };
+        let language = self.buffer.read(cx).language().cloned();
+        for pane in split.side_panes() {
+            pane.buffer.update(cx, |buffer, cx| {
+                if buffer.language() != language.as_ref() {
+                    buffer.set_language(language.clone(), cx);
+                }
+            });
+        }
     }
 
     fn build_split_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2693,6 +2711,72 @@ fn main() {
             "Done saves the resolved file"
         );
         assert!(released.get(), "Done closes the merge editor's tab");
+    }
+
+    /// In a freshly opened window the file's language can still be loading
+    /// when the side panes are built; they must take it once it arrives.
+    #[gpui::test]
+    async fn test_side_panes_take_language_set_later(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/scratch"), json!({ "main.rs": RESULT }))
+            .await;
+        let project = Project::test(fs.clone(), [Path::new(path!("/scratch"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        cx.run_until_parked();
+
+        let buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer(path!("/scratch/main.rs"), cx)
+            })
+            .await
+            .unwrap();
+        buffer.update(cx, |buffer, cx| buffer.set_language(None, cx));
+        let git_store = project.read_with(cx, |project, _| project.git_store().clone());
+        let conflict_set = git_store
+            .update(cx, |git_store, cx| {
+                git_store.open_merge_tool_conflict_set(buffer.clone(), cx)
+            })
+            .await;
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            open_merge_tool_editor(
+                workspace,
+                buffer.clone(),
+                conflict_set,
+                ConflictStages {
+                    base: Some(BASE.into()),
+                    ours: Some(OURS.into()),
+                    theirs: Some(THEIRS.into()),
+                    binary: false,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let split = view.split.as_ref().expect("split view should be built");
+            assert!(split.ours.buffer.read(cx).language().is_none());
+        });
+
+        let rust = language::rust_lang();
+        buffer.update(cx, |buffer, cx| buffer.set_language(Some(rust.clone()), cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let split = view.split.as_ref().expect("split view should be built");
+            for pane in split.side_panes() {
+                assert_eq!(
+                    pane.buffer.read(cx).language().map(|language| language.name()),
+                    Some(rust.name()),
+                    "every side pane should take the file's language"
+                );
+            }
+        });
     }
 
     #[gpui::test]
