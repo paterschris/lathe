@@ -10,11 +10,15 @@ use gpui::{
 };
 use settings::Settings as _;
 use strum::IntoEnumIterator;
-use theme::{ActiveTheme, ColorCategory, CustomizableColor, GlobalTheme, Theme, ThemeRegistry};
+use theme::{
+    ActiveTheme, ColorCategory, CustomizableColor, GlobalTheme, Theme, ThemeRegistry, ThemeStyles,
+};
 use theme_settings::{ThemeSettings, ThemeStyleContent};
 use ui::prelude::*;
 use ui::{Label, LabelCommon, LabelSize};
+use ui_input::{ErasedEditorEvent, InputField};
 use util::ResultExt as _;
+use zed_actions::search::FocusSearch;
 
 use crate::{Item, Workspace};
 
@@ -54,12 +58,33 @@ struct ThemeCustomizer {
     selected_field: Option<CustomizableColor>,
     active_category: Option<ColorCategory>,
     show_lathe_only: bool,
+    search_input: Entity<InputField>,
+    search_query: String,
     _theme_subscription: Subscription,
+    _search_subscription: Subscription,
 }
 
 impl ThemeCustomizer {
-    fn new(fs: Arc<dyn Fs>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(fs: Arc<dyn Fs>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.on_release(|this, cx| this.save(cx)).detach();
+        let search_input = cx.new(|cx| {
+            InputField::new(window, cx, "Search colors by name or key")
+                .start_icon(IconName::MagnifyingGlass)
+        });
+        let search_subscription = {
+            let this = cx.weak_entity();
+            let editor = search_input.read(cx).editor().clone();
+            editor.subscribe(
+                Box::new(move |event, _window, cx| {
+                    if matches!(event, ErasedEditorEvent::BufferEdited) {
+                        this.update(cx, |this, cx| this.search_query_changed(cx))
+                            .log_err();
+                    }
+                }),
+                window,
+                cx,
+            )
+        };
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             fs,
@@ -70,7 +95,10 @@ impl ThemeCustomizer {
             selected_field: None,
             active_category: None,
             show_lathe_only: false,
+            search_input,
+            search_query: String::new(),
             _theme_subscription: cx.observe_global::<GlobalTheme>(Self::sync_with_theme),
+            _search_subscription: search_subscription,
         };
         this.load_saved_overrides(cx);
         this
@@ -177,22 +205,56 @@ impl ThemeCustomizer {
         });
     }
 
+    fn search_query_changed(&mut self, cx: &mut Context<Self>) {
+        self.search_query = self.search_input.read(cx).text(cx);
+        // Search spans every category, so a highlighted category pill would
+        // misdescribe the list.
+        if !self.search_query.trim().is_empty() {
+            self.active_category = None;
+        }
+        cx.notify();
+    }
+
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.search_query.is_empty() {
+            let editor = self.search_input.read(cx).editor().clone();
+            editor.clear(window, cx);
+        }
+    }
+
+    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.search_input.read(cx).editor().clone();
+        editor.focus_handle(cx).focus(window, cx);
+        editor.select_all(window, cx);
+    }
+
+    /// Escape clears the query first, then leaves the search field.
+    fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.search_query.is_empty() {
+            self.clear_search(window, cx);
+        } else if self
+            .search_input
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx)
+        {
+            self.focus_handle.focus(window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
     fn filtered_fields(&self) -> Vec<CustomizableColor> {
-        self.base_theme
-            .styles
+        let filter = ColorFilter {
+            lathe_only: self.show_lathe_only,
+            category: self.active_category,
+            query: &self.search_query,
+        };
+        let styles = &self.base_theme.styles;
+        styles
             .all_customizable_colors()
             .into_iter()
-            .filter(|field| {
-                if self.show_lathe_only {
-                    return field.is_lathe_custom();
-                }
-                if let Some(category) = self.active_category {
-                    if field.category() != category {
-                        return false;
-                    }
-                }
-                true
-            })
+            .filter(|field| filter.matches(*field, styles))
             .collect()
     }
 
@@ -252,10 +314,13 @@ impl ThemeCustomizer {
                 is_active,
                 false,
                 cx,
-                move |this: &mut Self, _: &ClickEvent, _window, cx: &mut Context<Self>| {
+                move |this: &mut Self, _: &ClickEvent, window, cx: &mut Context<Self>| {
                     if this.active_category == Some(category) {
                         this.active_category = None;
                     } else {
+                        // A category only describes the list without a
+                        // query, so picking one ends the search.
+                        this.clear_search(window, cx);
                         this.active_category = Some(category);
                         this.show_lathe_only = false;
                     }
@@ -301,8 +366,28 @@ impl ThemeCustomizer {
             )
     }
 
-    fn render_color_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(cx.theme().colors().border)
+            .child(div().flex_1().child(self.search_input.clone()))
+    }
+
+    fn render_color_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let fields = self.filtered_fields();
+        if fields.is_empty() {
+            return v_flex()
+                .flex_grow(1.0)
+                .p_3()
+                .child(
+                    Label::new("No colors match")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .into_any_element();
+        }
 
         let mut list = v_flex()
             .id("color-list")
@@ -382,7 +467,7 @@ impl ThemeCustomizer {
             );
         }
 
-        list
+        list.into_any_element()
     }
 
     fn render_color_editor(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -701,6 +786,37 @@ impl SliderChannel {
     }
 }
 
+/// What the color list shows. Each part narrows it further: Lathe-only and the
+/// query combine, and a category is only set when there is no query.
+struct ColorFilter<'a> {
+    lathe_only: bool,
+    category: Option<ColorCategory>,
+    query: &'a str,
+}
+
+impl ColorFilter<'_> {
+    fn matches(&self, field: CustomizableColor, styles: &ThemeStyles) -> bool {
+        if self.lathe_only && !field.is_lathe_custom() {
+            return false;
+        }
+        if self
+            .category
+            .is_some_and(|category| field.category() != category)
+        {
+            return false;
+        }
+        let query = self.query.trim();
+        if query.is_empty() {
+            return true;
+        }
+        // Keys are matched too, so a key copied out of settings.json finds
+        // its color.
+        let query = query.to_lowercase();
+        field.display_name(styles).to_lowercase().contains(&query)
+            || field.key(styles).to_lowercase().contains(&query)
+    }
+}
+
 fn registered_theme(cx: &App) -> Arc<Theme> {
     let active_theme = cx.theme().clone();
     ThemeRegistry::global(cx)
@@ -799,7 +915,10 @@ impl Render for ThemeCustomizer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .size_full()
+            .key_context("ThemeCustomizer")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::focus_search))
+            .on_action(cx.listener(Self::cancel))
             .bg(cx.theme().colors().editor_background)
             .text_color(cx.theme().colors().text)
             .child(
@@ -818,6 +937,7 @@ impl Render for ThemeCustomizer {
                             .border_color(cx.theme().colors().border)
                             .child(Label::new("Theme Colors").size(LabelSize::Default)),
                     )
+                    .child(self.render_search(cx))
                     .child(self.render_category_tabs(cx))
                     .child(self.render_color_list(cx)),
             )
@@ -850,5 +970,145 @@ impl Render for ThemeCustomizer {
                     )
                     .child(self.render_color_editor(cx)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use theme::StatusColorField;
+
+    fn default_styles() -> ThemeStyles {
+        let registry = ThemeRegistry::new(Box::new(()));
+        let name = registry
+            .list_names()
+            .into_iter()
+            .next()
+            .expect("the registry always holds the fallback theme");
+        let theme = registry.get(&name).expect("listed theme exists");
+        theme.styles.clone()
+    }
+
+    fn matching(styles: &ThemeStyles, filter: &ColorFilter) -> Vec<CustomizableColor> {
+        styles
+            .all_customizable_colors()
+            .into_iter()
+            .filter(|field| filter.matches(*field, styles))
+            .collect()
+    }
+
+    #[test]
+    fn query_matches_keys_and_names_without_case() {
+        let styles = default_styles();
+        let by_key = matching(
+            &styles,
+            &ColorFilter {
+                lathe_only: false,
+                category: None,
+                query: "status.error",
+            },
+        );
+        assert!(by_key.contains(&CustomizableColor::Status(StatusColorField::Error)));
+        assert!(by_key.iter().all(|field| {
+            field.key(&styles).contains("status.error")
+                || field
+                    .display_name(&styles)
+                    .to_lowercase()
+                    .contains("status.error")
+        }));
+
+        let shouted = matching(
+            &styles,
+            &ColorFilter {
+                lathe_only: false,
+                category: None,
+                query: "  STATUS.ERROR ",
+            },
+        );
+        assert_eq!(shouted, by_key);
+
+        let error_field = CustomizableColor::Status(StatusColorField::Error);
+        let name = error_field.display_name(&styles);
+        let by_name = matching(
+            &styles,
+            &ColorFilter {
+                lathe_only: false,
+                category: None,
+                query: &name.to_uppercase(),
+            },
+        );
+        assert!(by_name.contains(&error_field));
+    }
+
+    #[test]
+    fn empty_query_filters_nothing_and_unknown_query_matches_nothing() {
+        let styles = default_styles();
+        let everything = styles.all_customizable_colors();
+        let blank = matching(
+            &styles,
+            &ColorFilter {
+                lathe_only: false,
+                category: None,
+                query: "   ",
+            },
+        );
+        assert_eq!(blank, everything);
+
+        let nothing = matching(
+            &styles,
+            &ColorFilter {
+                lathe_only: false,
+                category: None,
+                query: "no color is called this",
+            },
+        );
+        assert!(nothing.is_empty());
+    }
+
+    #[test]
+    fn lathe_only_composes_with_query() {
+        let styles = default_styles();
+        let all_tab = matching(
+            &styles,
+            &ColorFilter {
+                lathe_only: false,
+                category: None,
+                query: "tab",
+            },
+        );
+        let lathe_tab = matching(
+            &styles,
+            &ColorFilter {
+                lathe_only: true,
+                category: None,
+                query: "tab",
+            },
+        );
+        assert!(!lathe_tab.is_empty());
+        assert!(lathe_tab.iter().all(CustomizableColor::is_lathe_custom));
+        assert!(lathe_tab.iter().all(|field| all_tab.contains(field)));
+        assert!(
+            lathe_tab.len() < all_tab.len(),
+            "non-Lathe tab colors are left out"
+        );
+    }
+
+    #[test]
+    fn category_narrows_without_query() {
+        let styles = default_styles();
+        let status = matching(
+            &styles,
+            &ColorFilter {
+                lathe_only: false,
+                category: Some(ColorCategory::Status),
+                query: "",
+            },
+        );
+        assert!(!status.is_empty());
+        assert!(
+            status
+                .iter()
+                .all(|field| field.category() == ColorCategory::Status)
+        );
     }
 }
