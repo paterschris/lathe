@@ -737,7 +737,11 @@ jobs:
               gh release edit "$tag" --draft=false
             fi
           else
+            # Pinned to the commit this run built. Without a target, GitHub
+            # tags the default branch's tip when this step runs, hours after
+            # dispatch, which can already be a later release commit.
             gh release create "$tag" release-files/* \
+              --target "$GITHUB_SHA" \
               --title "Lathe ${tag}" \
               "${notes_args[@]}" \
               $prerelease_flag
