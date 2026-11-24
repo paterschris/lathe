@@ -104,7 +104,7 @@ pub fn open_conflict_resolution(
     repository: Entity<Repository>,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> Entity<ConflictResolutionView> {
     workspace.update(cx, |workspace, cx| {
         let repository_id = repository.read(cx).id;
         let existing = workspace
@@ -113,7 +113,7 @@ pub fn open_conflict_resolution(
         if let Some(existing) = existing {
             workspace.activate_item(&existing, true, true, window, cx);
             existing.update(cx, |view, cx| view.refresh(cx));
-            return;
+            return existing;
         }
 
         let project = workspace.project().clone();
@@ -121,8 +121,9 @@ pub fn open_conflict_resolution(
         let view = cx.new(|cx| {
             ConflictResolutionView::new(project, repository, workspace_handle, window, cx)
         });
-        workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
-    });
+        workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+        view
+    })
 }
 
 /// A selected file whose conflict is over the whole file (one side deleted
@@ -301,6 +302,13 @@ impl ConflictResolutionView {
             })
             .log_err();
         }));
+    }
+
+    /// Whether the repository has no conflicted files left and no operation
+    /// stopped waiting to be continued, which is when a caller waiting on this
+    /// tab (`lathe --resolve --wait`) is done.
+    pub fn is_settled(&self) -> bool {
+        self.unresolved_count() == 0 && self.operation.is_none()
     }
 
     fn unresolved_count(&self) -> usize {

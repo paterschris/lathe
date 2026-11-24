@@ -293,6 +293,18 @@ Ours, theirs, and the base come from the versions Git keeps for the conflicted f
 
 Save from the merge editor's **Save** button or with the usual save shortcut. Saving doesn't mark the file resolved; stage it from the Conflicts tab or the Git Panel when you're done.
 
+### Opening the Conflicts Tab from the Terminal
+
+`lathe --resolve` opens the Conflicts tab for the repository in the current folder, listing every conflicted file, the same as the Git Panel's **Resolve** button. Pass a path to use another repository: `lathe --resolve ~/code/app`. It uses the window that already has the repository open, or opens one. If nothing is conflicted and no merge or rebase is stopped, it says so in the terminal and doesn't open anything.
+
+To run it as `git resolve`:
+
+```sh
+git config --global alias.resolve '!lathe --resolve'
+```
+
+Add `--wait` to keep the terminal waiting until the merge is continued or aborted, or the tab is closed. It exits with 0 when nothing is left to resolve.
+
 ### Using Lathe as Your Merge Tool
 
 `lathe --merge` opens the merge editor for `git mergetool`, or any version control tool that calls a merge tool with separate files. To make it Git's merge tool:

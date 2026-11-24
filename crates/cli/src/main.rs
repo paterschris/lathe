@@ -153,6 +153,22 @@ struct Args {
     ///   git config --global mergetool.lathe.cmd 'lathe --merge "$REMOTE" "$LOCAL" "$BASE" "$MERGED"'
     ///
     ///   git config --global mergetool.lathe.trustExitCode true
+    /// Open the Conflicts tab for a repository with a merge, rebase, cherry-pick
+    /// or revert in progress, listing every conflicted file. Defaults to the
+    /// repository in the current directory. Add `--wait` to return once the
+    /// tab is closed or nothing is left to resolve. As a git alias:
+    ///
+    ///   git config --global alias.resolve '!lathe --resolve'
+    #[arg(
+        long,
+        value_name = "REPO",
+        num_args = 0..=1,
+        default_missing_value = ".",
+        value_hint = clap::ValueHint::DirPath,
+        conflicts_with_all = ["diff", "paths_with_position", "merge"],
+        verbatim_doc_comment
+    )]
+    resolve: Option<String>,
     #[arg(
         long,
         num_args = 4,
@@ -177,6 +193,82 @@ struct Args {
     /// by having Zed act like netcat communicating over a Unix socket.
     #[arg(long, hide = true)]
     askpass: Option<String>,
+}
+
+/// What `git` says about the repository holding `directory`.
+struct RepositoryState {
+    root: PathBuf,
+    has_conflicts: bool,
+    operation_in_progress: bool,
+}
+
+/// Asks git directly, so `--resolve` can answer "nothing to resolve" in the
+/// terminal without opening a window. `None` when git can't be run, in which
+/// case the app is left to decide.
+fn repository_state(directory: &Path) -> Result<Option<RepositoryState>> {
+    let git = |arguments: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(arguments)
+            .output()
+    };
+    let Ok(toplevel) = git(&["rev-parse", "--show-toplevel", "--absolute-git-dir"]) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        toplevel.status.success(),
+        "not a git repository: {}",
+        directory.display()
+    );
+    let output = String::from_utf8_lossy(&toplevel.stdout);
+    let mut lines = output.lines();
+    let (Some(root), Some(git_dir)) = (lines.next(), lines.next()) else {
+        return Ok(None);
+    };
+    let git_dir = Path::new(git_dir);
+    let operation_in_progress = [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+    ]
+    .iter()
+    .any(|entry| git_dir.join(entry).exists());
+    let Ok(unmerged) = git(&["ls-files", "--unmerged", "-z"]) else {
+        return Ok(None);
+    };
+    Ok(Some(RepositoryState {
+        root: PathBuf::from(root),
+        has_conflicts: unmerged.status.success() && !unmerged.stdout.is_empty(),
+        operation_in_progress,
+    }))
+}
+
+/// The repository root for `--resolve [REPO]`, or `None` after printing that
+/// there's nothing to resolve.
+fn resolve_repository(repository: &str) -> Result<Option<PathBuf>> {
+    let directory = std::path::absolute(repository)
+        .with_context(|| format!("--resolve path is invalid: {repository}"))?;
+    anyhow::ensure!(
+        directory.is_dir(),
+        "--resolve path is not a directory: {}",
+        directory.display()
+    );
+    let root = match repository_state(&directory)? {
+        Some(state) => {
+            // A stopped merge or rebase with every file already resolved still
+            // needs the tab, for its Continue and Abort buttons.
+            if !state.has_conflicts && !state.operation_in_progress {
+                println!("No conflicts to resolve in {}", state.root.display());
+                return Ok(None);
+            }
+            state.root
+        }
+        None => directory,
+    };
+    Ok(Some(root))
 }
 
 /// Builds the request for `--merge REMOTE LOCAL BASE MERGED`. The paths are
@@ -345,6 +437,52 @@ mod tests {
                 SanitizedPath::new(Path::new(&$right))
             )
         };
+    }
+
+    #[test]
+    fn test_resolve_repository() {
+        let dir = TempTree::new(json!({ "file.txt": "base\n" }));
+        let git = |arguments: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["-c", "user.email=test@example.invalid", "-c", "user.name=test"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(arguments)
+                .output()
+                .unwrap();
+            output.status.success()
+        };
+        let directory = dir.path().to_string_lossy().into_owned();
+
+        let error = resolve_repository(&directory).unwrap_err().to_string();
+        assert!(error.contains("not a git repository"), "{error}");
+
+        assert!(git(&["init", "-q", "-b", "main"]));
+        assert!(git(&["add", "."]));
+        assert!(git(&["commit", "-qm", "base"]));
+        assert_eq!(
+            resolve_repository(&directory).unwrap(),
+            None,
+            "a clean repository has nothing to resolve"
+        );
+
+        assert!(git(&["checkout", "-qb", "feature"]));
+        std::fs::write(dir.path().join("file.txt"), "feature\n").unwrap();
+        assert!(git(&["commit", "-qam", "feature"]));
+        assert!(git(&["checkout", "-q", "main"]));
+        std::fs::write(dir.path().join("file.txt"), "main\n").unwrap();
+        assert!(git(&["commit", "-qam", "main"]));
+        assert!(!git(&["merge", "-q", "feature"]), "the merge should conflict");
+
+        let root = resolve_repository(&directory)
+            .unwrap()
+            .expect("a conflicted merge has something to resolve");
+        assert_path_eq!(root.canonicalize().unwrap(), dir.path().canonicalize().unwrap());
+
+        // Resolved but not yet continued: the tab is still needed for Continue.
+        assert!(git(&["add", "file.txt"]));
+        assert!(resolve_repository(&directory).unwrap().is_some());
     }
 
     #[test]
@@ -592,6 +730,16 @@ fn run() -> Result<()> {
     #[cfg(target_os = "linux")]
     let args = flatpak::set_bin_if_no_escape(args);
 
+    // Checked before finding the app, so "nothing to resolve" is answered from
+    // the terminal without launching anything.
+    let resolve_repository = match &args.resolve {
+        Some(repository) => match resolve_repository(repository)? {
+            Some(root) => Some(root),
+            None => return Ok(()),
+        },
+        None => None,
+    };
+
     let app = Detect::detect(args.zed.as_deref()).context("Bundle detection")?;
 
     if let Some(shell) = &args.completions {
@@ -696,8 +844,15 @@ fn run() -> Result<()> {
         }
     };
 
-    // `--merge` sends its own request in place of `Open`.
-    let tool_request = if args.merge.is_empty() {
+    // `--resolve` and `--merge` send their own request in place of `Open`.
+    let tool_request = if let Some(repository) = resolve_repository {
+        Some(CliRequest::Resolve {
+            repository: repository.to_string_lossy().into_owned(),
+            wait: args.wait,
+            open_behavior,
+            env: env.clone(),
+        })
+    } else if args.merge.is_empty() {
         None
     } else {
         Some(merge_request(&args.merge, open_behavior, env.clone())?)

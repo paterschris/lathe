@@ -74,6 +74,16 @@ pub enum CliRequest {
     },
     /// Print a diagnostic snapshot of the app's GPUI and platform state.
     DebugState,
+    /// Open the Conflicts tab for the repository at `repository`, listing
+    /// every conflicted file, as the git panel's Resolve button does. With
+    /// `wait`, answered with `Exit` once the tab closes or no conflicted files
+    /// are left: status 0 when none are, 1 otherwise.
+    Resolve {
+        repository: String,
+        wait: bool,
+        open_behavior: OpenBehavior,
+        env: Option<HashMap<String, String>>,
+    },
     /// Resolve one file's conflicts in the merge editor, for `git mergetool`
     /// or another version control tool. Paths are absolute. Answered with
     /// `Exit` once the merge editor closes: status 0 when `merged` has no

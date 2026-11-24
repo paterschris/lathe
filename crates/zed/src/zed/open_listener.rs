@@ -737,6 +737,37 @@ pub async fn handle_cli_request(
             // resolve_open_behavior
             debug_panic!("unexpected SetOpenBehavior message");
         }
+        CliRequest::Resolve {
+            repository,
+            wait,
+            open_behavior,
+            env,
+        } => {
+            cx.update(|cx| cx.activate(true));
+            let status = match open_conflicts_tab(
+                PathBuf::from(repository),
+                wait,
+                open_behavior,
+                env,
+                responses.as_ref(),
+                &app_state,
+                cx,
+            )
+            .await
+            {
+                Ok(status) => status,
+                Err(error) => {
+                    log::error!("lathe --resolve failed: {error:#}");
+                    responses
+                        .send(CliResponse::Stderr {
+                            message: format!("{error:#}"),
+                        })
+                        .log_err();
+                    1
+                }
+            };
+            responses.send(CliResponse::Exit { status }).log_err();
+        }
         CliRequest::Merge {
             remote,
             local,
@@ -790,6 +821,136 @@ pub async fn handle_cli_request(
             };
             responses.send(response).log_err();
             responses.send(CliResponse::Exit { status }).log_err();
+        }
+    }
+}
+
+/// How long `lathe --resolve` waits for a freshly opened project to find its
+/// repository before giving up.
+const REPOSITORY_SCAN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Backs `lathe --resolve`: opens the repository's project, reusing a window
+/// that already has it, and shows its Conflicts tab. With `wait`, returns once
+/// the tab closes or nothing is left to resolve.
+async fn open_conflicts_tab(
+    repository_root: PathBuf,
+    wait: bool,
+    open_behavior: cli::OpenBehavior,
+    env: Option<collections::HashMap<String, String>>,
+    responses: &dyn CliResponseSink,
+    app_state: &Arc<AppState>,
+    cx: &mut AsyncApp,
+) -> Result<i32> {
+    let repository_root = app_state
+        .fs
+        .canonicalize(&repository_root)
+        .await
+        .with_context(|| format!("opening {}", repository_root.display()))?;
+    let open_options = OpenOptions {
+        workspace_matching: if open_behavior == cli::OpenBehavior::AlwaysNew {
+            workspace::WorkspaceMatching::None
+        } else {
+            workspace::WorkspaceMatching::MatchSubdirectory
+        },
+        env,
+        ..Default::default()
+    };
+    let OpenResult {
+        window, workspace, ..
+    } = cx
+        .update(|cx| {
+            workspace::open_paths(
+                std::slice::from_ref(&repository_root),
+                app_state.clone(),
+                open_options,
+                cx,
+            )
+        })
+        .await?;
+
+    // A project that was just opened finds its repositories in the background.
+    let git_store = workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).git_store().clone()
+    });
+    let find_repository = |cx: &mut AsyncApp| {
+        git_store.read_with(cx, |git_store, cx| {
+            git_store
+                .repositories()
+                .values()
+                .find(|repository| {
+                    *repository.read(cx).work_directory_abs_path == *repository_root
+                })
+                .cloned()
+        })
+    };
+    let background = cx.background_executor().clone();
+    let started = std::time::Instant::now();
+    let repository = loop {
+        if let Some(repository) = find_repository(cx) {
+            break repository;
+        }
+        anyhow::ensure!(
+            started.elapsed() < REPOSITORY_SCAN_TIMEOUT,
+            "Lathe didn't find a git repository at {}",
+            repository_root.display()
+        );
+        background.timer(Duration::from_millis(100)).await;
+    };
+
+    let view = window.update(cx, |multi_workspace, window, cx| {
+        window.activate_window();
+        multi_workspace.activate(workspace.clone(), None, window, cx);
+        git_ui::conflict_resolution::open_conflict_resolution(
+            workspace.clone(),
+            repository,
+            window,
+            cx,
+        )
+    })?;
+    if !wait {
+        return Ok(0);
+    }
+
+    // Settled is only trusted after the tab has seen a conflict or a stopped
+    // operation, since it reads as settled before its first refresh lands.
+    let (done_tx, done_rx) = oneshot::channel::<bool>();
+    let done_tx = std::rc::Rc::new(std::cell::RefCell::new(Some(done_tx)));
+    let subscriptions = cx.update(|cx| {
+        let mut was_unsettled = !view.read(cx).is_settled();
+        let observe = cx.observe(&view, {
+            let done_tx = done_tx.clone();
+            move |view, cx| {
+                if !view.read(cx).is_settled() {
+                    was_unsettled = true;
+                } else if was_unsettled && let Some(done_tx) = done_tx.borrow_mut().take() {
+                    done_tx.send(true).ok();
+                }
+            }
+        });
+        let release = cx.observe_release(&view, move |view, _| {
+            if let Some(done_tx) = done_tx.borrow_mut().take() {
+                done_tx.send(view.is_settled()).ok();
+            }
+        });
+        (observe, release)
+    });
+    drop(view);
+
+    let done = async move {
+        let _subscriptions = subscriptions;
+        done_rx.await.unwrap_or(false)
+    }
+    .fuse();
+    futures::pin_mut!(done);
+    loop {
+        let mut timer = background.timer(Duration::from_secs(1)).fuse();
+        futures::select_biased! {
+            settled = done => return Ok(if settled { 0 } else { 1 }),
+            _ = timer => {
+                if responses.send(CliResponse::Ping).is_err() {
+                    return Ok(1);
+                }
+            }
         }
     }
 }
