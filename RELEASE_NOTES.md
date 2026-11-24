@@ -2,6 +2,49 @@
 
 Most recent releases first. Beta releases (`-beta` suffix) ship as GitHub pre-releases and typically batch new features ahead of a stable cut.
 
+## v1.24.0-beta - 2026-11-24
+
+Lathe can be the merge tool git calls now, and panels stop following you between windows.
+
+### Merge conflicts
+
+- **`lathe --resolve`** opens the Conflicts tab for the repo you're in, every conflicted file in one list, same as the Resolve button in the Git Panel. Make it `git resolve`:
+
+  ```sh
+  git config --global alias.resolve '!lathe --resolve'
+  ```
+
+  Nothing conflicted and no merge or rebase stopped? It says so in the terminal and doesn't open a window. `--wait` keeps the terminal waiting until you continue or abort.
+- **`lathe --merge` for `git mergetool`.** Same argument order as VS Code's `--merge`, so an existing VS Code setup only needs `code` swapped for `lathe`:
+
+  ```sh
+  git config --global merge.tool lathe
+  git config --global mergetool.lathe.cmd 'lathe --merge "$REMOTE" "$LOCAL" "$BASE" "$MERGED"'
+  git config --global mergetool.lathe.trustExitCode true
+  ```
+
+  Each file opens as a tab in the window that already has the repo, not a new window per file. Resolve it, click **Done**, and git moves to the next one. Close the tab with conflicts left and git counts it as unresolved.
+- **The panes say which branch is which.** `Ours (main)`, `Theirs (feature)`, from the merge or rebase in progress. In a rebase that's flipped, which is exactly when you want it spelled out.
+- The side panes lost syntax colors when the merge editor opened in a brand-new window. Fixed.
+
+Until `lathe` (the command) points at a build with these, use the beta's own: `"/Applications/Lathe Beta.app/Contents/MacOS/cli"`.
+
+### Panels
+
+- **Panel layout is per workspace, and per channel.** Moving any panel used to rewrite a setting every window shares, and Lathe and Lathe Beta share settings too. Now each workspace keeps its own layout, stable and beta separately. **Use Default Position** in a panel's menu hands it back to the setting.
+
+### Agents
+
+- **Review a pull request with an agent.** From the pull request view or a row's menu in the PR panel. Pick an agent, get a thread with a review prompt. Plain git, so it works on any host without logging in, and the agent's told not to touch your working tree.
+- Scrolling back to the bottom of a running thread locks it there again. There's also an arrow button at the bottom while it isn't following.
+
+### Everything else
+
+- Theme customizer has search now. Name or settings key, across every category. Cmd-F focuses it.
+- Memory: pnpm and bun projects with a language server watching `node_modules` were reading the package store once per symlink. Several GB in a big monorepo. Fixed.
+- Opening a terminal on the phone clears its needs-input marker.
+- Click empty space in the PR panel to deselect.
+
 ## v1.23.0-beta - 2026-11-20
 
 A real three-way merge editor. Conflicts used to mean picking ours or theirs from buttons over the markers; now you get both sides next to an editable result, checkboxes to pick with, and handling for the conflicts git leaves no markers in at all.
