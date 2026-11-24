@@ -8,6 +8,7 @@ pub mod pull_request_panel;
 pub mod pull_request_panel_settings;
 pub mod pull_request_picker;
 pub mod pull_request_view;
+pub mod review_with_agent;
 pub mod reviewer_picker;
 
 pub use pull_request_panel::PullRequestPanel;

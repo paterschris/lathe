@@ -26,7 +26,7 @@ use zed_actions::{
     agent::{
         AddSelectionToThread, ConflictContent, LogoutAgent, OpenSettings, ReauthenticateAgent,
         ResetAgentZoom, ResetOnboarding, ResolveConflictedFilesWithAgent,
-        ResolveConflictsWithAgent, ReviewBranchDiff, SelectAgent,
+        ResolveConflictsWithAgent, ReviewBranchDiff, ReviewPullRequestWithAgent, SelectAgent,
     },
     assistant::{
         FocusAgent, ManageSkills, OpenGlobalAgentsMdRules, OpenProjectAgentsMdRules, Toggle,
@@ -573,6 +573,39 @@ pub fn init(cx: &mut App) {
                         );
                     });
                 })
+                .register_action(
+                    |workspace, action: &ReviewPullRequestWithAgent, window, cx| {
+                        let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+                            return;
+                        };
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        let agent = match &action.agent {
+                            Some(agent_id) => Agent::from(AgentId::new(agent_id.clone())),
+                            None => Agent::NativeAgent,
+                        };
+                        let prompt = action.prompt.clone();
+                        let title = action.title.clone();
+                        panel.update(cx, |panel, cx| {
+                            // Unlike picking an agent in the panel, a one-off review
+                            // leaves the panel's selected agent alone.
+                            let thread_id = panel.create_thread_with_options(
+                                CreateThreadOptions {
+                                    title: Some(title),
+                                    agent: Some(agent),
+                                    initial_content: Some(AgentInitialContent::ContentBlock {
+                                        blocks: vec![prompt.into()],
+                                        auto_submit: true,
+                                    }),
+                                    ..CreateThreadOptions::default()
+                                },
+                                AgentThreadSource::GitPanel,
+                                window,
+                                cx,
+                            );
+                            panel.activate_retained_thread(thread_id, true, window, cx);
+                        });
+                    },
+                )
                 .register_action(
                     |workspace, action: &ResolveConflictsWithAgent, window, cx| {
                         let Some(panel) = workspace.panel::<AgentPanel>(cx) else {

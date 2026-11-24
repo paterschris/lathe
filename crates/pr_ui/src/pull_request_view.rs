@@ -2932,6 +2932,12 @@ impl PullRequestView {
                                 this.start_add_reviewer(window, cx);
                             })),
                     )
+                    .child(
+                        Button::new("pr-review-with-agent", "Review with agent")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_review_with_agent(window, cx);
+                            })),
+                    )
                     // Merging, closing and flipping draft state belong to whoever
                     // opened the pull request. A reviewer can still reach them,
                     // but from behind a menu, so that landing or declining
@@ -3133,6 +3139,27 @@ impl PullRequestView {
                         cx,
                     )
                 });
+            })
+            .ok();
+    }
+
+    fn start_review_with_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else {
+            return;
+        };
+        let pull_request = crate::review_with_agent::PullRequestToReview {
+            number: detail.number,
+            title: detail.title.clone(),
+            url: detail.url.to_string(),
+            source_branch: detail.source_branch.clone(),
+            target_branch: detail.target_branch.clone(),
+            head_sha: (!detail.head_sha.is_empty()).then(|| detail.head_sha.clone()),
+            repository_name: self.remote.repo.as_ref().into(),
+            host_name: self.provider.name().into(),
+        };
+        self.workspace
+            .update(cx, |workspace, cx| {
+                crate::review_with_agent::open(workspace, pull_request, window, cx);
             })
             .ok();
     }

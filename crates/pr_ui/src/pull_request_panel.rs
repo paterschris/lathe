@@ -5,6 +5,7 @@ use crate::pull_request_loader::{
 };
 use crate::pull_request_panel_settings::PullRequestPanelSettings;
 use crate::pull_request_view::PullRequestView;
+use crate::review_with_agent;
 use anyhow::Result;
 use fs::Fs;
 use git::{
@@ -1164,6 +1165,37 @@ impl PullRequestPanel {
         }
     }
 
+    fn review_with_agent(
+        &mut self,
+        section_index: usize,
+        summary: &PullRequestSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(section) = self.sections.get(section_index) else {
+            return;
+        };
+        let (repository_name, host_name) = match &section.host_context {
+            Some((provider, remote)) => (remote.repo.as_ref().into(), provider.name().into()),
+            None => (section.display_name.clone(), "the host".into()),
+        };
+        let pull_request = review_with_agent::PullRequestToReview {
+            number: summary.number,
+            title: summary.title.clone(),
+            url: summary.url.to_string(),
+            source_branch: summary.source_branch.clone(),
+            target_branch: summary.target_branch.clone(),
+            head_sha: None,
+            repository_name,
+            host_name,
+        };
+        self.workspace
+            .update(cx, |workspace, cx| {
+                review_with_agent::open(workspace, pull_request, window, cx);
+            })
+            .ok();
+    }
+
     /// Checks out the pull request's source branch in the repository the row
     /// belongs to.
     ///
@@ -1302,7 +1334,10 @@ fn row_context_menu(
     let branch = summary.source_branch.clone();
     let number = summary.number;
     let title = summary.title.clone();
+    let summary = summary.clone();
     ContextMenu::build(window, cx, move |menu, _window, _cx| {
+        let summary = summary.clone();
+        let panel_for_review = panel.clone();
         let open_url = url.clone();
         let copy_url = url.clone();
         let copy_branch = branch.clone();
@@ -1312,6 +1347,13 @@ fn row_context_menu(
         let panel_for_mark_read = panel;
         menu.entry("Open on Host Website", None, move |_window, cx| {
             cx.open_url(&open_url);
+        })
+        .entry("Review with Agent…", None, move |window, cx| {
+            panel_for_review
+                .update(cx, |panel, cx| {
+                    panel.review_with_agent(section_index, &summary, window, cx);
+                })
+                .ok();
         })
         .separator()
         .entry("Copy Link", None, move |_window, cx| {

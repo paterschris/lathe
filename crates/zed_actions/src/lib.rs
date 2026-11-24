@@ -659,6 +659,22 @@ pub mod agent {
         pub base_ref: SharedString,
     }
 
+    /// Opens a new agent thread, with the chosen agent, that reviews a pull
+    /// request from the given prompt.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct ReviewPullRequestWithAgent {
+        /// The id of the external agent to run the review, or `None` for
+        /// Lathe's built-in agent.
+        #[serde(default)]
+        pub agent: Option<String>,
+        /// The thread's title.
+        pub title: SharedString,
+        /// The first message of the thread.
+        pub prompt: String,
+    }
+
     /// A single merge conflict region extracted from a file.
     #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
     pub struct ConflictContent {
