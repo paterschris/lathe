@@ -869,6 +869,20 @@ impl StateInner {
         scroll_top.item_ix..cursor.start().count + 1
     }
 
+    /// Whether any item from the one at `scroll_top` to the end has no height
+    /// at all, measured or provisional.
+    fn has_unknown_height_from(&self, scroll_top: Pixels) -> bool {
+        let mut cursor = self.items.cursor::<ListItemSummary>(());
+        cursor.seek(&Height(scroll_top), Bias::Right);
+        if cursor.item().is_none() {
+            return false;
+        }
+        let start = cursor.start().count;
+        let mut cursor = self.items.cursor::<Count>(());
+        cursor.seek(&Count(start), Bias::Right);
+        cursor.suffix().summary().has_unknown_height
+    }
+
     fn scroll(
         &mut self,
         scroll_top: &ListOffset,
@@ -904,9 +918,24 @@ impl StateInner {
             self.set_scroll_anchor(Some(scroll_top));
         }
 
+        let reaches_known_bottom = delta.y < px(0.)
+            && new_scroll_top >= scroll_max - px(1.0)
+            && !self.has_unknown_height_from(new_scroll_top);
         if let FollowState::Tail { is_following } = &mut self.follow_state {
             if delta.y > px(0.) {
                 *is_following = false;
+            } else if !*is_following && reaches_known_bottom {
+                // Scrolling down onto the bottom resumes following here rather
+                // than waiting for layout, which skips that check while the last
+                // item's height is provisional, as it is for most of a stream.
+                // Provisional heights keep their last measurement, so they still
+                // place the bottom; an item never measured at all could put it
+                // anywhere, so that case is left to layout.
+                *is_following = true;
+                self.set_scroll_anchor(Some(ListOffset {
+                    item_ix: self.items.summary().count,
+                    offset_in_item: px(0.),
+                }));
             }
         }
 
@@ -3416,6 +3445,69 @@ mod test {
             state.is_following_tail(),
             "follow_tail should re-engage after scrolling back to the bottom"
         );
+    }
+
+    /// Layout skips its re-engagement check while an item's height is
+    /// provisional, which during streaming is nearly always. Scrolling down
+    /// onto the bottom has to re-engage on its own.
+    #[gpui::test]
+    fn test_follow_tail_reengages_on_scroll_to_bottom_while_provisional(
+        cx: &mut TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let state = ListState::new(10, crate::ListAlignment::Top, px(0.));
+        let last_ready = Rc::new(Cell::new(true));
+        state.set_item_measurement_readiness({
+            let last_ready = last_ready.clone();
+            move |index, _| index != 9 || last_ready.get()
+        });
+
+        struct TestView(ListState);
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.0.clone(), |_, _, _| {
+                    div().h(px(50.)).w_full().into_any()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+
+        let view = cx.update(|_, cx| cx.new(|_| TestView(state.clone())));
+        state.set_follow_mode(FollowMode::Tail);
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, _| {
+            view.clone().into_any_element()
+        });
+        assert!(state.is_following_tail());
+
+        cx.simulate_event(ScrollEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(100.))),
+            ..Default::default()
+        });
+        assert!(!state.is_following_tail());
+
+        // The last item streams: it's remeasured and never reports ready.
+        last_ready.set(false);
+        state.remeasure_items(9..10);
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, _| {
+            view.clone().into_any_element()
+        });
+        assert!(!state.is_following_tail());
+
+        cx.simulate_event(ScrollEvent {
+            position: point(px(50.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-10000.))),
+            ..Default::default()
+        });
+        assert!(
+            state.is_following_tail(),
+            "scrolling onto the bottom should re-engage despite a provisional height"
+        );
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, _| {
+            view.clone().into_any_element()
+        });
+        assert!(state.is_following_tail());
     }
 
     /// When an item is spliced to unmeasured (0px) while follow_tail

@@ -780,6 +780,9 @@ pub struct ThreadView {
     pub is_loading_contents: bool,
     pub new_server_version_available: Option<SharedString>,
     pub resumed_without_history: bool,
+    /// Whether the list was following the bottom when the last scroll event
+    /// was handled, so a change can re-render the jump-to-bottom button.
+    was_following_tail: bool,
     elicitation_form_states: HashMap<ElicitationEntryId, ElicitationFormState>,
     pub _cancel_task: Option<Task<()>>,
     _save_task: Option<Task<()>>,
@@ -1290,6 +1293,7 @@ impl ThreadView {
             list_state,
             session_capabilities,
             resumed_without_history,
+            was_following_tail: true,
             _subscriptions: subscriptions,
             permission_dropdown_handle: PopoverMenuHandle::default(),
             thread_retry_status: None,
@@ -1358,7 +1362,12 @@ impl ThreadView {
                 // directly would panic from a double borrow.
                 cx.defer(move |cx| {
                     let scroll_top = list_state.logical_scroll_top();
+                    let is_following_tail = list_state.is_following_tail();
                     let _ = thread_view.update(cx, |this, cx| {
+                        if this.was_following_tail != is_following_tail {
+                            this.was_following_tail = is_following_tail;
+                            cx.notify();
+                        }
                         if let Some(thread) = this.as_native_thread(cx) {
                             thread.update(cx, |thread, _cx| {
                                 thread.set_ui_scroll_position(Some(scroll_top));
@@ -8414,6 +8423,32 @@ impl ThreadView {
         }
     }
 
+    /// Floats over the bottom of the thread while it isn't following new
+    /// output. Clicking it scrolls to the end and locks the thread there again.
+    fn render_jump_to_bottom_button(&self, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .absolute()
+            .bottom_2()
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                IconButton::new("jump-to-bottom", IconName::ArrowDown)
+                    .shape(ui::IconButtonShape::Square)
+                    .style(ButtonStyle::Filled)
+                    .layer(ui::ElevationIndex::ModalSurface)
+                    .tooltip(Tooltip::text("Scroll to Bottom"))
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        // Tail mode anchors at the end and marks the list as
+                        // following right away, so it stays put as output streams.
+                        this.list_state.set_follow_mode(gpui::FollowMode::Tail);
+                        this.was_following_tail = true;
+                        cx.notify();
+                    })),
+            )
+    }
+
     pub fn scroll_to_end(&mut self, cx: &mut Context<Self>) {
         self.list_state.scroll_to_end();
         cx.notify();
@@ -14210,8 +14245,12 @@ impl Render for ThreadView {
                 if has_messages {
                     this.flex_1()
                         .size_full()
+                        .relative()
                         .child(self.render_entries(cx))
                         .vertical_scrollbar_for(&list_state, window, cx)
+                        .when(!list_state.is_following_tail(), |this| {
+                            this.child(self.render_jump_to_bottom_button(cx))
+                        })
                         .into_any()
                 } else {
                     this.into_any()
