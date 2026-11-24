@@ -3232,6 +3232,108 @@ async fn test_reporting_fs_changes_to_language_servers(cx: &mut gpui::TestAppCon
 }
 
 #[gpui::test]
+async fn test_language_server_watcher_does_not_follow_symlinks_in_ignored_dir(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/the-root"),
+        json!({
+            ".gitignore": "node_modules\n",
+            "src": {
+                "main.rs": "",
+            },
+            "node_modules": {
+                ".store": {
+                    "dep@1.0.0": {
+                        "node_modules": {
+                            "dep": {
+                                "lib.rs": "",
+                            },
+                        },
+                    },
+                },
+            },
+        }),
+    )
+    .await;
+    fs.insert_symlink(
+        path!("/the-root/node_modules/dep"),
+        path!("/the-root/node_modules/.store/dep@1.0.0/node_modules/dep").into(),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/the-root").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp(
+        "Rust",
+        FakeLspAdapter {
+            name: "the-language-server",
+            ..Default::default()
+        },
+    );
+    cx.executor().run_until_parked();
+
+    project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/the-root/src/main.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let fake_server = fake_servers.next().await.unwrap();
+    cx.executor().run_until_parked();
+
+    fake_server
+        .request::<lsp::request::RegisterCapability>(
+            lsp::RegistrationParams {
+                registrations: vec![lsp::Registration {
+                    id: Default::default(),
+                    method: "workspace/didChangeWatchedFiles".to_string(),
+                    register_options: serde_json::to_value(
+                        lsp::DidChangeWatchedFilesRegistrationOptions {
+                            watchers: vec![lsp::FileSystemWatcher {
+                                glob_pattern: lsp::GlobPattern::String(
+                                    path!("/the-root/node_modules/**/*").to_string(),
+                                ),
+                                kind: None,
+                            }],
+                        },
+                    )
+                    .ok(),
+                }],
+            },
+            DEFAULT_LSP_REQUEST_TIMEOUT,
+        )
+        .await
+        .into_response()
+        .unwrap();
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        let worktree = project.worktrees(cx).next().unwrap();
+        let snapshot = worktree.read(cx).snapshot();
+        let store_file = rel_path("node_modules/.store/dep@1.0.0/node_modules/dep/lib.rs");
+        assert!(
+            snapshot.entry_for_path(store_file).is_some(),
+            "the real store path should be loaded for the watcher"
+        );
+        let symlink = snapshot
+            .entry_for_path(rel_path("node_modules/dep"))
+            .expect("symlink entry should exist");
+        assert!(symlink.kind.is_unloaded());
+        assert!(
+            snapshot
+                .entry_for_path(rel_path("node_modules/dep/lib.rs"))
+                .is_none(),
+            "symlinked directories should not be expanded by a watcher-driven load"
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_single_file_worktrees_diagnostics(cx: &mut gpui::TestAppContext) {
     init_test(cx);
 

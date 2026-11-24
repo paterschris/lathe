@@ -6380,10 +6380,17 @@ impl BackgroundScanner {
                 .paths_to_scan
                 .iter()
                 .any(|p| p.starts_with(&entry.path))
-            || state
-                .path_prefixes_to_scan
-                .iter()
-                .any(|p| entry.path.starts_with(p))
+            || state.path_prefixes_to_scan.iter().any(|prefix| {
+                // Prefixes come from language server file watchers (e.g. tsgo watching
+                // `node_modules/**/*`) and bypass the ignore, depth and symlink checks
+                // above. pnpm and bun lay `node_modules` out as symlinks into a store
+                // that lives under the same prefix, so following those links during a
+                // watcher-driven load re-reads the store once per link (roughly 9x the
+                // entries, gigabytes of memory in large monorepos) without exposing any
+                // file the watcher can't already see through its real path.
+                entry.path.starts_with(prefix)
+                    && (entry.canonical_path.is_none() || entry.path.as_ref() == prefix.as_ref())
+            })
     }
 
     async fn next_scan_request(&self) -> Result<ScanRequest> {
